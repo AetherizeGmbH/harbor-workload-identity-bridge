@@ -20,7 +20,7 @@ The bridge validates SA tokens with `github.com/coreos/go-oidc/v3` against the c
 - Issuer is configured via Helm value (default `https://kubernetes.default.svc`).
 - JWKS discovery uses the `system:service-account-issuer-discovery` ClusterRole. The Helm chart binds this role to the bridge ServiceAccount.
 - Audience is configured per `HarborAccess.spec.trustPolicy.audience` and must match the kubelet credential-provider config's `serviceAccountTokenAudience` for the registry.
-- Subject claim must match `HarborAccess.spec.trustPolicy.subjectMatch` exactly. Wildcards and claim matchers are forward-compatible additions, not in v1alpha1.
+- Subject is **derived** from `HarborAccess.spec.serviceAccountRef.{namespace,name}` in the canonical Kubernetes form: `system:serviceaccount:<namespace>:<name>`. v1alpha1 supports only this exact-match shape; wildcards and claim matchers are forward-compatible additions for a future API version (see [ADR-0010](0010-service-account-ref-as-identity.md) for why we removed the duplicated `trustPolicy.subjectMatch` field).
 
 The kubelet credential-provider config (installed by the Helm chart) sets `cacheType: ServiceAccount` (new KEP-4412 beta field, required in 1.34+). Rationale: docker tokens are issued per-SA (one robot per `HarborAccess`, one CR per SA-subject) and are not bound to the SA-token's specific lifetime, so caching by SA identity is correct. `Token` cache type would discard valid docker tokens every time the kubelet re-projects the SA token.
 

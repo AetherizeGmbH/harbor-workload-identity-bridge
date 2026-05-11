@@ -19,8 +19,12 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.trustPolicy.subjectMatch
-      name: Subject
+    - jsonPath: .spec.serviceAccountRef.name
+      name: SA
+      type: string
+    - jsonPath: .spec.serviceAccountRef.namespace
+      name: SA-Namespace
+      priority: 1
       type: string
     - jsonPath: .status.robot.name
       name: Robot
@@ -88,6 +92,28 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+              serviceAccountRef:
+                description: |-
+                  ServiceAccountRef identifies the Kubernetes ServiceAccount this CR grants
+                  access for. The reconciler uses this for robot naming; the data plane
+                  uses it to validate that incoming tokens match the intended workload.
+                properties:
+                  name:
+                    description: Name is the name of the ServiceAccount.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the ServiceAccount.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
               tokenTTL:
                 default: 1h
                 description: |-
@@ -116,21 +142,13 @@ spec:
                     minLength: 1
                     pattern: ^https?://.+
                     type: string
-                  subjectMatch:
-                    description: |-
-                      SubjectMatch is the exact sub claim required on incoming SA tokens.
-                      For Kubernetes SA tokens this looks like system:serviceaccount:<ns>:<sa>.
-                      v1alpha1 supports exact match only; wildcards and claim matchers are
-                      reserved for future versions (see docs/adr/0006-oidc-validation-and-audience.md).
-                    minLength: 1
-                    type: string
                 required:
                 - audience
                 - issuer
-                - subjectMatch
                 type: object
             required:
             - permissions
+            - serviceAccountRef
             - trustPolicy
             type: object
           status:

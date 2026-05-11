@@ -15,7 +15,7 @@ We had to decide whether `trustPolicy`:
 
 ## Decision
 
-`trustPolicy` is a first-class field on `HarborAccess.spec`. It is present from day one and has the same shape we expect Harbor's eventual API to require: `issuer`, `audience`, `subjectMatch`, with room for `claimMatchers` later.
+`trustPolicy` is a first-class field on `HarborAccess.spec`. It is present from day one and has the same shape we expect Harbor's eventual API to require: `issuer`, `audience`, with room for `claimMatchers` and similar additive policy fields later. (The subject under policy is derived from `spec.serviceAccountRef` — see [ADR-0010](0010-service-account-ref-as-identity.md). Earlier drafts of this ADR named a `subjectMatch` field inside `trustPolicy`; that field was removed in favour of `serviceAccountRef` as the single source of truth for workload identity.)
 
 `HarborAccess.status` carries `trustPolicyEnforcedBy: bridge | harbor` so operators can see which component is currently enforcing.
 
@@ -23,7 +23,7 @@ We had to decide whether `trustPolicy`:
 
 - The CRD does not change shape at migration time. Operators do not rewrite their `HarborAccess` manifests; the migration is a reconciler-internal change plus a Helm value flip.
 - Day-one users write a `trustPolicy` block even though no Harbor feature backs it — this is correct, because the bridge enforces it, not Harbor.
-- Validation of `trustPolicy.issuer` and `trustPolicy.subjectMatch` happens via kubebuilder markers on the CRD; bad input is rejected by the apiserver.
+- Validation of `trustPolicy.issuer` and `trustPolicy.audience` happens via kubebuilder markers on the CRD; bad input is rejected by the apiserver.
 - `claimMatchers` is reserved as a forward-compatible empty slot. Future fields are additive (no breaking version bumps for additions).
 
 ## Alternatives considered

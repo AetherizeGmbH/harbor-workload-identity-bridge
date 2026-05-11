@@ -56,6 +56,8 @@ A bridge **must never list, modify, or delete a robot whose name does not begin 
 
 This is a safety invariant, not an optimisation. A bridge bug in one cluster must not be able to delete or modify robots produced by another cluster's bridge against the same Harbor.
 
+**Operator-side caveat: cluster names must not be hyphen-prefixes of each other.** The prefix check `strings.HasPrefix(robotName, "bridge-"+cluster+"-")` returns true for cluster `prod` against any robot named `bridge-prod-…`, including robots a separate bridge for cluster `prod-eu` created (`bridge-prod-eu-flux-…` does begin with `bridge-prod-`). The bridge cannot disambiguate from the name alone. This is operator responsibility: choose cluster names so that none is a hyphen-prefix of any other connected cluster. A future v1alpha2 could close the class entirely by using `.` as the cluster/identity separator (Harbor's robot-name regex permits `.`), but that requires a CRD bump and is deferred. The behaviour is pinned by the test `TestOwnsRobot_DocumentsPrefixCollisionLimitation` so any change to the prefix logic must also update this ADR.
+
 ### 4. The CRD does not carry cluster identity
 
 `HarborAccess` is namespaced and cluster-local by definition; carrying `clusterName` inside the CR would either be redundant (when it matches the bridge's config) or contradictory (when it doesn't), with no useful resolution rule for the contradiction case. The bridge is the only authority on its own cluster's identity.

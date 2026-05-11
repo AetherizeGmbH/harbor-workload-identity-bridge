@@ -20,12 +20,12 @@ Goal: Reconciler that turns a `HarborAccess` CR into a persistent Harbor robot, 
 ### ADR
 - **ADR-0009: Multi-Cluster Topology** — written before any Phase-2 code. Covers bridge-per-cluster, ownership-filter as safety invariant, explicit-not-magic `clusterName`, alternatives rejected (central bridge, distributed coordination, cluster-id in CRD).
 
-### CRD bump (v1alpha1, additive)
+### CRD bump (v1alpha1)
 - Add required `spec.serviceAccountRef.namespace` (MinLength 1, DNS-1123 pattern).
 - Add required `spec.serviceAccountRef.name` (MinLength 1, DNS-1123 pattern).
-- XValidation rule on `spec`: `trustPolicy.subjectMatch == "system:serviceaccount:" + serviceAccountRef.namespace + ":" + serviceAccountRef.name`.
+- Remove `trustPolicy.subjectMatch` — the data plane derives the expected `sub` from `serviceAccountRef` (single source of truth).
 - Regenerate manifests + sample.
-- Update ADR-0004 with an addendum noting the new field (or supersede with a small ADR-0010 if cleaner).
+- ADR-0010 covers the field; ADR-0006 updated to derive subject from `serviceAccountRef`.
 
 ### Bridge runtime config (read once at startup, no hot-reload)
 | Env var                    | Required | Notes                                                                          |
@@ -70,7 +70,7 @@ Log every value except admin credentials at startup.
 - Reconcile refuses to adopt a robot with our name but missing the `harbor.aetherize.io/managed-by=bridge` label (ADR-0003 adoption discipline).
 - Janitor preserves foreign robots even when no CR exists for them.
 - Janitor deletes only orphan owned-prefix robots.
-- XValidation rule rejects `subjectMatch` not matching `serviceAccountRef` (CRD-level test via envtest or by feeding a raw apply to a kind apiserver).
+- CRD pattern/length markers on `serviceAccountRef.namespace` and `.name` reject malformed values (envtest or kind apiserver round-trip).
 
 ### Verification
 - `make verify-package-isolation`: confirms `controlplane` does not import `dataplane` (the latter doesn't exist yet, but the check should still run).

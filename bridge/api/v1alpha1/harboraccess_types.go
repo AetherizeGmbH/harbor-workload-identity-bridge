@@ -7,9 +7,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TrustPolicy describes which service-account tokens may receive credentials
-// via this HarborAccess. Enforced today by the bridge Data Plane; will be
-// enforced by Harbor itself once goharbor/harbor#17520 lands
+// TrustPolicy describes the OIDC trust this HarborAccess places in incoming
+// service-account tokens. The expected sub claim is derived from
+// HarborAccessSpec.ServiceAccountRef (canonical Kubernetes SA subject form:
+// "system:serviceaccount:<namespace>:<name>"), so the policy carries only
+// issuer + audience here. Wildcards and claim matchers are reserved for
+// future versions; see docs/adr/0006-oidc-validation-and-audience.md.
+//
+// Enforced today by the bridge Data Plane; will be enforced by Harbor
+// itself once goharbor/harbor#17520 lands
 // (see docs/adr/0004-trust-policy-as-crd-field.md).
 type TrustPolicy struct {
 	// Issuer is the OIDC issuer expected on incoming service-account tokens.
@@ -23,13 +29,6 @@ type TrustPolicy struct {
 	// registry hostname being authenticated.
 	// +kubebuilder:validation:MinLength=1
 	Audience string `json:"audience"`
-
-	// SubjectMatch is the exact sub claim required on incoming SA tokens.
-	// For Kubernetes SA tokens this looks like system:serviceaccount:<ns>:<sa>.
-	// v1alpha1 supports exact match only; wildcards and claim matchers are
-	// reserved for future versions (see docs/adr/0006-oidc-validation-and-audience.md).
-	// +kubebuilder:validation:MinLength=1
-	SubjectMatch string `json:"subjectMatch"`
 }
 
 // HarborAction is the permission granted on a Harbor project.
@@ -55,8 +54,34 @@ type ProjectPermission struct {
 	Action HarborAction `json:"action"`
 }
 
+// ServiceAccountRef identifies the Kubernetes ServiceAccount this HarborAccess
+// grants credentials for. It is the canonical workload identity for the CR:
+// the control plane uses it to name the Harbor robot
+// (bridge-<cluster>-<namespace>-<name>) and the data plane uses it to
+// construct the expected sub claim on incoming SA tokens
+// ("system:serviceaccount:<namespace>:<name>").
+// See docs/adr/0010-service-account-ref-as-identity.md.
+type ServiceAccountRef struct {
+	// Namespace is the namespace of the ServiceAccount.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Namespace string `json:"namespace"`
+
+	// Name is the name of the ServiceAccount.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+}
+
 // HarborAccessSpec describes the desired state of a HarborAccess.
 type HarborAccessSpec struct {
+	// ServiceAccountRef identifies the Kubernetes ServiceAccount this CR grants
+	// access for. The reconciler uses this for robot naming; the data plane
+	// uses it to validate that incoming tokens match the intended workload.
+	ServiceAccountRef ServiceAccountRef `json:"serviceAccountRef"`
+
 	// TrustPolicy declares which SA tokens may receive credentials via this CR.
 	TrustPolicy TrustPolicy `json:"trustPolicy"`
 
@@ -138,7 +163,8 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ha,categories={harbor}
-// +kubebuilder:printcolumn:name="Subject",type="string",JSONPath=".spec.trustPolicy.subjectMatch"
+// +kubebuilder:printcolumn:name="SA",type="string",JSONPath=".spec.serviceAccountRef.name"
+// +kubebuilder:printcolumn:name="SA-Namespace",type="string",JSONPath=".spec.serviceAccountRef.namespace",priority=1
 // +kubebuilder:printcolumn:name="Robot",type="string",JSONPath=".status.robot.name"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Enforced-By",type="string",JSONPath=".status.trustPolicyEnforcedBy"

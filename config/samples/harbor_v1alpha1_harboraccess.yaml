@@ -9,10 +9,12 @@ metadata:
   name: source-controller-access
   namespace: harbor-bridge-system
 spec:
+  serviceAccountRef:
+    namespace: flux-system
+    name: source-controller
   trustPolicy:
     issuer: https://kubernetes.default.svc
     audience: harbor.example.com
-    subjectMatch: system:serviceaccount:flux-system:source-controller
   permissions:
     - project: production
       action: pull
