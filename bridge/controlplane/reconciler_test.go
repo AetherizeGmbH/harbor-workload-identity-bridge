@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -560,6 +561,89 @@ func TestReconcile_DeleteWithFinalizer_RemovesRobotAndSecret(t *testing.T) {
 	// The CR must be gone (finalizer removed → fake client garbage-collects it).
 	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, &harborv1alpha1.HarborAccess{}); !apierrors.IsNotFound(err) {
 		t.Errorf("HarborAccess still exists after finalizer release: %v", err)
+	}
+}
+
+func TestReconcile_HarborErrorTriggersRetry(t *testing.T) {
+	// A 5xx (or any non-NotFound error) from Harbor must:
+	//   - set Ready=False with reason HarborError
+	//   - return a non-nil error from Reconcile so controller-runtime
+	//     requeues with exponential backoff (otherwise transient failures
+	//     leave the CR Ready=False until the controller's resync, default 10h)
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	mh.errOnGetByName = map[string]error{
+		"bridge-prod-eu-west-flux-system-source-controller": fmt.Errorf("simulated harbor 503"),
+	}
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+
+	_, err := r.Reconcile(context.Background(), reqFor(ha))
+	if err == nil {
+		t.Fatal("expected non-nil error so controller-runtime retries with backoff")
+	}
+	if !strings.Contains(err.Error(), "simulated harbor 503") {
+		t.Errorf("returned error did not wrap the underlying cause: %v", err)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonHarborError)
+
+	// No Harbor-modifying calls should have happened.
+	if len(mh.createCalls)+len(mh.updateCalls)+len(mh.deleteCalls)+len(mh.refreshCalls) != 0 {
+		t.Errorf("unexpected Harbor writes during error path: create=%d update=%d delete=%d refresh=%d",
+			len(mh.createCalls), len(mh.updateCalls), len(mh.deleteCalls), len(mh.refreshCalls))
+	}
+}
+
+func TestReconcile_RebuildsMissingSecret(t *testing.T) {
+	// Scenario: bridge created robot+Secret successfully on a previous run;
+	// then an operator (or a misbehaving controller) deleted the Secret.
+	// On the next reconcile the reconciler must detect the missing Secret
+	// and force a rotation (RefreshSecret + writeRobotSecret) — otherwise
+	// Status would falsely report Ready while the data plane has no creds.
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	t0 := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	r := newReconciler(t, mh, fixedClock{t0}, ha)
+
+	// First reconcile: creates robot, writes Secret.
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.createCalls) != 1 {
+		t.Fatalf("setup: expected 1 create, got %d", len(mh.createCalls))
+	}
+
+	// Operator deletes the Secret out of band.
+	secretName := SecretNamePrefix + testHANamespace + "-" + testHAName
+	if err := r.Delete(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: secretName},
+	}); err != nil {
+		t.Fatalf("setup: deleting Secret: %v", err)
+	}
+
+	// Tick forward a short time (well below rotation interval, so the
+	// trigger must be the missing-Secret check, not the staleness check).
+	r.Clock = fixedClock{t0.Add(5 * time.Minute)}
+
+	// Second reconcile: should detect missing Secret, refresh, and write.
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.refreshCalls) != 1 {
+		t.Errorf("expected exactly one RefreshSecret call to rebuild Secret; got %d", len(mh.refreshCalls))
+	}
+	// Secret must exist again, with a non-empty password.
+	secret := &corev1.Secret{}
+	if err := r.Get(context.Background(),
+		client.ObjectKey{Namespace: testNS, Name: secretName},
+		secret); err != nil {
+		t.Fatalf("Secret was not rebuilt: %v", err)
+	}
+	if len(secret.Data["password"]) == 0 {
+		t.Errorf("rebuilt Secret has empty password")
 	}
 }
 

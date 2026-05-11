@@ -134,7 +134,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	case errors.Is(err, harbor.ErrRobotNotFound):
 		return r.createAndStatus(ctx, ha, robotName, desiredDescription, desiredPerms)
 	case err != nil:
-		return r.markNotReady(ctx, ha, ReasonHarborError, err.Error())
+		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("lookup robot: %w", err))
 	}
 
 	// 5. Adoption discipline: refuse to manage a robot whose description does
@@ -147,22 +147,40 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		))
 	}
 
-	// 6. Permission update on generation change.
+	// 6. Check whether the password Secret is missing in k8s. If so we must
+	// rotate to obtain a fresh password; the in-Harbor password is opaque
+	// and cannot be recovered. This covers two real scenarios:
+	//   (a) the bridge crashed between Harbor.Create and writeRobotSecret on
+	//       a previous run, leaving the robot but no Secret;
+	//   (b) an operator (or a misbehaving controller) deleted the Secret.
+	// Without this check, the reconciler would happily mark Ready=True while
+	// the data plane has no credentials to authenticate with.
+	secretMissing, err := r.secretMissing(ctx, ha)
+	if err != nil {
+		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("check robot Secret: %w", err))
+	}
+
+	// 7. Permission update on generation change.
 	generationChanged := ha.Status.ObservedGeneration != ha.Generation
 	if generationChanged {
 		logger.Info("updating Harbor robot permissions", "robot", robotName, "generation", ha.Generation)
 		if err := r.Harbor.UpdatePermissions(ctx, existing.ID, desiredDescription, desiredPerms); err != nil {
-			return r.markNotReady(ctx, ha, ReasonHarborError, err.Error())
+			return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("update permissions: %w", err))
 		}
 	}
 
-	// 7. Password rotation: on generation change (permissions might bring new
-	// repo access) or when the stored password exceeds the rotation interval.
-	if generationChanged || r.passwordIsStale(ha) {
-		logger.Info("rotating Harbor robot secret", "robot", robotName)
+	// 8. Password rotation: on generation change, when the stored password
+	// exceeds the rotation interval, or when the k8s Secret is missing
+	// (force-rebuild path).
+	if generationChanged || r.passwordIsStale(ha) || secretMissing {
+		if secretMissing {
+			logger.Info("password Secret missing; forcing rotation to rebuild it", "robot", robotName)
+		} else {
+			logger.Info("rotating Harbor robot secret", "robot", robotName)
+		}
 		newSecret, err := r.Harbor.RefreshSecret(ctx, existing.ID)
 		if err != nil {
-			return r.markNotReady(ctx, ha, ReasonHarborError, err.Error())
+			return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("refresh secret: %w", err))
 		}
 		existing.Secret = newSecret
 		if err := r.writeRobotSecret(ctx, ha, existing); err != nil {
@@ -181,12 +199,29 @@ func (r *Reconciler) createAndStatus(
 	logger.Info("creating Harbor robot", "name", name)
 	robot, err := r.Harbor.Create(ctx, name, description, perms)
 	if err != nil {
-		return r.markNotReady(ctx, ha, ReasonHarborError, err.Error())
+		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("create robot: %w", err))
 	}
 	if err := r.writeRobotSecret(ctx, ha, robot); err != nil {
 		return ctrl.Result{}, err
 	}
 	return r.markReady(ctx, ha, robot)
+}
+
+// secretMissing reports whether the per-CR robot-password Secret is absent
+// from the bridge namespace. Returns an error only on non-NotFound API
+// failures so the caller can surface them.
+func (r *Reconciler) secretMissing(ctx context.Context, ha *harborv1alpha1.HarborAccess) (bool, error) {
+	err := r.Get(ctx,
+		client.ObjectKey{Namespace: r.Config.Namespace, Name: r.secretNameFor(ha)},
+		&corev1.Secret{},
+	)
+	switch {
+	case apierrors.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return false, nil
 }
 
 func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.HarborAccess) (ctrl.Result, error) {
@@ -349,19 +384,49 @@ func (r *Reconciler) markReady(ctx context.Context, ha *harborv1alpha1.HarborAcc
 	return ctrl.Result{}, nil
 }
 
+// markNotReady writes Ready=False for terminal (operator-error) failures
+// that retrying cannot fix: issuer mismatch, invalid spec, foreign robot
+// conflict. Returns nil so controller-runtime treats the reconcile as
+// successful and waits for the next CR event.
 func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
+	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, reason, message); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// markTransientError writes Ready=False AND returns the cause as the
+// reconcile error so controller-runtime retries with exponential backoff.
+// Use for Harbor API failures, network errors, and any condition where a
+// later attempt could plausibly succeed without operator intervention.
+func (r *Reconciler) markTransientError(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason string, cause error) (ctrl.Result, error) {
+	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, reason, cause.Error()); err != nil {
+		// Status update itself failed; surface that error instead of cause
+		// so the controller manager logs the real blocker.
+		return ctrl.Result{}, fmt.Errorf("update status while reporting transient error %q: %w", cause.Error(), err)
+	}
+	return ctrl.Result{}, cause
+}
+
+// updateReadyCondition is the shared helper for setting the Ready condition
+// without returning a reconcile result. Used by both markNotReady (terminal)
+// and markTransientError (retryable) so the status-update logic stays in
+// one place.
+func (r *Reconciler) updateReadyCondition(
+	ctx context.Context,
+	ha *harborv1alpha1.HarborAccess,
+	status metav1.ConditionStatus,
+	reason, message string,
+) error {
 	meta.SetStatusCondition(&ha.Status.Conditions, metav1.Condition{
 		Type:               harborv1alpha1.ConditionReady,
-		Status:             metav1.ConditionFalse,
+		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: ha.Generation,
 	})
 	ha.Status.ObservedGeneration = ha.Generation
-	if err := r.Status().Update(ctx, ha); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
-	}
-	return ctrl.Result{}, nil
+	return r.Status().Update(ctx, ha)
 }
 
 // toHarborPerms converts the CRD permission shape to the Harbor wrapper's
