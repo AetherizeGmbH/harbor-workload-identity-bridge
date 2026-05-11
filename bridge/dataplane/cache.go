@@ -57,8 +57,17 @@ type DockerTokenCache interface {
 // NewDockerTokenCache constructs a cache with the given LRU capacity.
 // When capacity is reached, ttlcache evicts the least-recently-used
 // entry. capacity == 0 disables the cap (library default).
+//
+// We disable ttlcache's default touch-on-hit behaviour: an entry's
+// expiration is set once at Set time and never extended on Get. This is
+// load-bearing for correctness — the cache TTL is derived from the
+// docker JWT's own exp claim (`token.ExpiresIn`), and extending it on
+// hit would let us serve JWTs past their actual exp, after which
+// containerd would receive expired tokens from the registry handshake.
 func NewDockerTokenCache(capacity uint64) DockerTokenCache {
-	var opts []ttlcache.Option[string, *DockerToken]
+	opts := []ttlcache.Option[string, *DockerToken]{
+		ttlcache.WithDisableTouchOnHit[string, *DockerToken](),
+	}
 	if capacity > 0 {
 		opts = append(opts, ttlcache.WithCapacity[string, *DockerToken](capacity))
 	}

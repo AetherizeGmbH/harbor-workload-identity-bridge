@@ -81,6 +81,35 @@ func TestCache_SubjectIsPartOfKey(t *testing.T) {
 	}
 }
 
+func TestCache_TTL_IsNotExtendedByGet(t *testing.T) {
+	// ttlcache's default behaviour is to extend an entry's expiration on
+	// every Get ("touch on hit"). For our use case this would be a
+	// correctness bug: cache TTL is derived from the docker JWT's exp
+	// claim, and touching it on Get would let the cache hold a token
+	// past its actual JWT exp. We explicitly disable touch-on-hit in
+	// NewDockerTokenCache; this test pins that behaviour so a future
+	// library upgrade can't silently re-enable it.
+	c := NewDockerTokenCache(0)
+	t.Cleanup(c.Stop)
+
+	key := sampleKey()
+	c.Set(key, sampleToken("stable"), 80*time.Millisecond)
+
+	// Hit at T+40ms (well within TTL).
+	time.Sleep(40 * time.Millisecond)
+	if _, ok := c.Get(key); !ok {
+		t.Fatal("expected hit at T+40ms")
+	}
+
+	// Past the original Set TTL of 80ms. If touch-on-hit were active,
+	// the preceding Get would have reset the expiration; here we must
+	// see a miss.
+	time.Sleep(60 * time.Millisecond)
+	if _, ok := c.Get(key); ok {
+		t.Errorf("entry must be expired at T+100ms; touch-on-hit appears to be active")
+	}
+}
+
 func TestCache_TTLEviction(t *testing.T) {
 	c := NewDockerTokenCache(0)
 	t.Cleanup(c.Stop)
