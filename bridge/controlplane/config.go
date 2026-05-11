@@ -21,6 +21,7 @@ import (
 // template, tests) has a single source of truth.
 const (
 	EnvClusterName          = "BRIDGE_CLUSTER_NAME"
+	EnvNamespace            = "BRIDGE_NAMESPACE"
 	EnvOIDCIssuer           = "BRIDGE_OIDC_ISSUER"
 	EnvHarborURL            = "BRIDGE_HARBOR_URL"
 	EnvHarborAdminDir       = "BRIDGE_HARBOR_ADMIN_DIR"
@@ -51,6 +52,11 @@ type Config struct {
 	// (bridge-<ClusterName>-<saNs>-<saName>) and as the basis of the
 	// ownership-prefix safety invariant.
 	ClusterName string
+
+	// Namespace is the namespace this bridge runs in. Required, DNS-label
+	// validated. Robot-password Secrets live here, not in the HarborAccess
+	// CR's namespace, so workload SAs cannot read them.
+	Namespace string
 
 	// OIDCIssuer is the cluster's service-account token issuer. The data
 	// plane validates inbound SA tokens against this issuer; the control
@@ -96,6 +102,16 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q exceeds %d-char DNS-label limit", EnvClusterName, cfg.ClusterName, clusterNameMaxLen))
 	case !clusterNameRegex.MatchString(cfg.ClusterName):
 		errs = append(errs, fmt.Errorf("%s %q must match %s", EnvClusterName, cfg.ClusterName, clusterNamePattern))
+	}
+
+	cfg.Namespace = strings.TrimSpace(os.Getenv(EnvNamespace))
+	switch {
+	case cfg.Namespace == "":
+		errs = append(errs, fmt.Errorf("%s is required", EnvNamespace))
+	case len(cfg.Namespace) > clusterNameMaxLen:
+		errs = append(errs, fmt.Errorf("%s %q exceeds %d-char DNS-label limit", EnvNamespace, cfg.Namespace, clusterNameMaxLen))
+	case !clusterNameRegex.MatchString(cfg.Namespace):
+		errs = append(errs, fmt.Errorf("%s %q must match %s", EnvNamespace, cfg.Namespace, clusterNamePattern))
 	}
 
 	if v, err := requireURL(os.Getenv(EnvOIDCIssuer), EnvOIDCIssuer); err != nil {
@@ -162,6 +178,7 @@ func requireURL(raw, name string) (*url.URL, error) {
 func (c *Config) Sanitized() map[string]string {
 	return map[string]string{
 		EnvClusterName:          c.ClusterName,
+		EnvNamespace:            c.Namespace,
 		EnvOIDCIssuer:           c.OIDCIssuer.String(),
 		EnvHarborURL:            c.HarborURL.String(),
 		EnvHarborAdminDir:       c.HarborAdminDir,

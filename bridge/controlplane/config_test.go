@@ -25,7 +25,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 func clearAllEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		EnvClusterName, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
+		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
 		EnvForceLocalValidation, EnvLogLevel,
 	} {
 		t.Setenv(k, "")
@@ -39,6 +39,7 @@ func TestLoadFromEnv_HappyPath(t *testing.T) {
 	clearAllEnv(t)
 	setEnv(t, map[string]string{
 		EnvClusterName:          "prod-eu-west",
+		EnvNamespace:            "harbor-bridge-system",
 		EnvOIDCIssuer:           "https://kubernetes.default.svc",
 		EnvHarborURL:            "https://harbor.example.com",
 		EnvHarborAdminDir:       "/var/run/secrets/harbor-admin",
@@ -52,6 +53,9 @@ func TestLoadFromEnv_HappyPath(t *testing.T) {
 	}
 	if cfg.ClusterName != "prod-eu-west" {
 		t.Errorf("ClusterName = %q", cfg.ClusterName)
+	}
+	if cfg.Namespace != "harbor-bridge-system" {
+		t.Errorf("Namespace = %q", cfg.Namespace)
 	}
 	if cfg.OIDCIssuer.String() != "https://kubernetes.default.svc" {
 		t.Errorf("OIDCIssuer = %s", cfg.OIDCIssuer)
@@ -68,6 +72,7 @@ func TestLoadFromEnv_AppliesDefaults(t *testing.T) {
 	clearAllEnv(t)
 	setEnv(t, map[string]string{
 		EnvClusterName:    "prod",
+		EnvNamespace:      "harbor-bridge-system",
 		EnvOIDCIssuer:     "https://kubernetes.default.svc",
 		EnvHarborURL:      "https://harbor.example.com",
 		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
@@ -121,6 +126,7 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 			name: "issuer with no scheme",
 			env: map[string]string{
 				EnvClusterName: "prod",
+				EnvNamespace:   "ns",
 				EnvOIDCIssuer:  "kubernetes.default.svc",
 			},
 			mustHave: EnvOIDCIssuer,
@@ -129,6 +135,7 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 			name: "issuer with wrong scheme",
 			env: map[string]string{
 				EnvClusterName: "prod",
+				EnvNamespace:   "ns",
 				EnvOIDCIssuer:  "ftp://kubernetes.default.svc",
 			},
 			mustHave: "must use http or https",
@@ -137,6 +144,7 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 			name: "invalid bool for forceLocalValidation",
 			env: map[string]string{
 				EnvClusterName:          "prod",
+				EnvNamespace:            "ns",
 				EnvOIDCIssuer:           "https://k",
 				EnvHarborURL:            "https://h",
 				EnvHarborAdminDir:       "/d",
@@ -148,6 +156,7 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 			name: "unknown log level",
 			env: map[string]string{
 				EnvClusterName:    "prod",
+				EnvNamespace:      "ns",
 				EnvOIDCIssuer:     "https://k",
 				EnvHarborURL:      "https://h",
 				EnvHarborAdminDir: "/d",
@@ -178,6 +187,7 @@ func TestLoadFromEnv_ReportsAllErrorsAtOnce(t *testing.T) {
 	// reported in one error (errors.Join + %w).
 	setEnv(t, map[string]string{
 		EnvClusterName:          "INVALID",
+		EnvNamespace:            "INVALID",
 		EnvOIDCIssuer:           "not-a-url",
 		EnvHarborURL:            "",
 		EnvHarborAdminDir:       "",
@@ -191,7 +201,7 @@ func TestLoadFromEnv_ReportsAllErrorsAtOnce(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, fragment := range []string{
-		EnvClusterName, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
+		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
 		EnvForceLocalValidation, EnvLogLevel,
 	} {
 		if !strings.Contains(msg, fragment) {
@@ -204,6 +214,7 @@ func TestSanitized_DoesNotIncludeCredentials(t *testing.T) {
 	clearAllEnv(t)
 	setEnv(t, map[string]string{
 		EnvClusterName:    "prod",
+		EnvNamespace:      "harbor-bridge-system",
 		EnvOIDCIssuer:     "https://kubernetes.default.svc",
 		EnvHarborURL:      "https://harbor.example.com",
 		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
