@@ -1,0 +1,1 @@
+# harbor-workload-identity-bridge
