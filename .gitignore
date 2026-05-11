@@ -1,0 +1,10 @@
+bin/
+dist/
+cover.out
+*.test
+*.out
+
+.idea/
+.vscode/
+*.swp
+.DS_Store

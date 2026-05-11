@@ -1,0 +1,21 @@
+# Sample HarborAccess granting the flux-system source-controller ServiceAccount
+# pull access to the "production" and "shared-base-images" Harbor projects.
+#
+# The audience must match the kubelet credential-provider config's
+# serviceAccountTokenAudience for the registry host this HarborAccess fronts.
+apiVersion: harbor.aetherize.io/v1alpha1
+kind: HarborAccess
+metadata:
+  name: source-controller-access
+  namespace: harbor-bridge-system
+spec:
+  trustPolicy:
+    issuer: https://kubernetes.default.svc
+    audience: harbor.example.com
+    subjectMatch: system:serviceaccount:flux-system:source-controller
+  permissions:
+    - project: production
+      action: pull
+    - project: shared-base-images
+      action: pull
+  tokenTTL: 1h
