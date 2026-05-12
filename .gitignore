@@ -3,7 +3,7 @@ dist/
 cover.out
 *.test
 *.out
-
+.claude
 .idea/
 .vscode/
 *.swp

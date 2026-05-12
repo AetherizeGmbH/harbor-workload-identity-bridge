@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(go test *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(go mod *)",
+      "Bash(go vet *)",
+      "Bash(go build *)",
+      "Bash(gofmt -l .)",
+      "Bash(echo \"vet: $\\(go vet ./... 2>&1)",
+      "Bash(make verify-package-isolation *)",
+      "Bash(go list *)",
+      "Bash(find ~/go/pkg/mod/github.com/jellydator -name 'cache.go' 2>/dev/null | head -3)",
+      "Read(//Users/karstensiemer/go/pkg/mod/github.com/jellydator/**)"
     ]
   }
 }
