@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 480" width="920" height="480" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="920" height="480" fill="#ffffff"/>
+  <style>
+    .lbl    { fill: #0f172a; font-weight: 600; }
+    .sub    { fill: #475569; font-size: 11px; }
+    .mono   { font-family: 'SF Mono', ui-monospace, Menlo, monospace; fill: #0f172a; font-size: 11px; }
+    .pfxA   { fill: #1d4ed8; font-weight: 700; }
+    .pfxB   { fill: #be123c; font-weight: 700; }
+    .clusterA { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 1.5; }
+    .clusterB { fill: #fff1f2; stroke: #be123c; stroke-width: 1.5; }
+    .harbor   { fill: #f8fafc; stroke: #334155; stroke-width: 1.8; }
+    .arrowA  { stroke: #1d4ed8; stroke-width: 1.6; fill: none; }
+    .arrowB  { stroke: #be123c; stroke-width: 1.6; fill: none; }
+    .note     { fill: #334155; font-size: 11px; font-style: italic; }
+  </style>
+
+  <defs>
+    <marker id="headA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="headB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#be123c"/>
+    </marker>
+  </defs>
+
+  <text x="460" y="28" text-anchor="middle" class="lbl" font-size="15">Multi-cluster: N bridges, one Harbor, prefix-scoped ownership</text>
+
+  <!-- Cluster A -->
+  <rect class="clusterA" x="30" y="60" width="280" height="170" rx="8"/>
+  <text x="170" y="84" text-anchor="middle" class="lbl">Cluster A</text>
+  <text x="170" y="100" text-anchor="middle" class="sub">BRIDGE_CLUSTER_NAME=prod-eu-west</text>
+  <rect class="clusterA" x="55" y="120" width="100" height="50" rx="6"/>
+  <text x="105" y="140" text-anchor="middle" class="lbl">Bridge</text>
+  <text x="105" y="156" text-anchor="middle" class="sub">controller + HTTPS</text>
+  <rect class="clusterA" x="180" y="120" width="100" height="50" rx="6"/>
+  <text x="230" y="140" text-anchor="middle" class="lbl">Plugin DS</text>
+  <text x="230" y="156" text-anchor="middle" class="sub">on each node</text>
+  <text x="170" y="200" text-anchor="middle" class="sub">HarborAccess CRs apply only here</text>
+  <text x="170" y="216" text-anchor="middle" class="sub">robot Secrets live in bridge ns</text>
+
+  <!-- Cluster B -->
+  <rect class="clusterB" x="30" y="250" width="280" height="170" rx="8"/>
+  <text x="170" y="274" text-anchor="middle" class="lbl">Cluster B</text>
+  <text x="170" y="290" text-anchor="middle" class="sub">BRIDGE_CLUSTER_NAME=staging-us-east</text>
+  <rect class="clusterB" x="55" y="310" width="100" height="50" rx="6"/>
+  <text x="105" y="330" text-anchor="middle" class="lbl">Bridge</text>
+  <text x="105" y="346" text-anchor="middle" class="sub">controller + HTTPS</text>
+  <rect class="clusterB" x="180" y="310" width="100" height="50" rx="6"/>
+  <text x="230" y="330" text-anchor="middle" class="lbl">Plugin DS</text>
+  <text x="230" y="346" text-anchor="middle" class="sub">on each node</text>
+  <text x="170" y="390" text-anchor="middle" class="sub">independent reconciler;</text>
+  <text x="170" y="406" text-anchor="middle" class="sub">no central coordinator</text>
+
+  <!-- Harbor -->
+  <rect class="harbor" x="540" y="100" width="360" height="280" rx="8"/>
+  <text x="720" y="124" text-anchor="middle" class="lbl">Harbor (shared)</text>
+  <text x="720" y="142" text-anchor="middle" class="sub">one instance, robot accounts namespaced by prefix</text>
+
+  <!-- Robot list -->
+  <rect x="560" y="160" width="320" height="100" rx="4" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="572" y="178" class="sub">Cluster A robots</text>
+  <text x="572" y="198" class="mono"><tspan class="pfxA">bridge-prod-eu-west-</tspan>flux-source-controller</text>
+  <text x="572" y="216" class="mono"><tspan class="pfxA">bridge-prod-eu-west-</tspan>argo-image-updater</text>
+  <text x="572" y="234" class="mono"><tspan class="pfxA">bridge-prod-eu-west-</tspan>default-builder</text>
+  <text x="572" y="254" class="sub">↑ description: managed-by=…  cluster=prod-eu-west  …</text>
+
+  <rect x="560" y="270" width="320" height="80" rx="4" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="572" y="288" class="sub">Cluster B robots</text>
+  <text x="572" y="308" class="mono"><tspan class="pfxB">bridge-staging-us-east-</tspan>tekton-builder</text>
+  <text x="572" y="326" class="mono"><tspan class="pfxB">bridge-staging-us-east-</tspan>jenkins-runner</text>
+  <text x="572" y="346" class="sub">↑ description: managed-by=…  cluster=staging-us-east  …</text>
+
+  <!-- Arrows -->
+  <path class="arrowA" d="M 310 150 C 420 150, 460 180, 540 180" marker-end="url(#headA)"/>
+  <text x="425" y="140" text-anchor="middle" class="sub">manages own robots only</text>
+  <path class="arrowB" d="M 310 335 C 420 335, 460 320, 540 320" marker-end="url(#headB)"/>
+
+  <!-- Safety annotation -->
+  <text x="460" y="455" text-anchor="middle" class="note">Two-layer ownership (ADR-0009): each bridge filters by name prefix AND verifies cluster= tag in description</text>
+</svg>

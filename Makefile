@@ -37,8 +37,23 @@ build-all: ## Compile-check every package
 	go build ./...
 
 .PHONY: test
-test: ## Run unit tests
+test: ## Run unit tests (envtest tests skip cleanly when KUBEBUILDER_ASSETS is unset)
 	go test ./...
+
+ENVTEST_K8S_VERSION ?= 1.30.x
+SETUP_ENVTEST ?= $(shell go env GOPATH)/bin/setup-envtest
+
+$(SETUP_ENVTEST):
+	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21
+
+.PHONY: envtest-setup
+envtest-setup: $(SETUP_ENVTEST) ## Fetch kube-apiserver + etcd binaries for envtest
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path
+
+.PHONY: envtest
+envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
+	@KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+		go test ./bridge/controlplane/... -run TestEnvtest -count=1 -v -timeout 120s
 
 .PHONY: run-local
 run-local: ## Run the bridge against $KUBECONFIG with a self-signed cert in /tmp/bridge-tls
