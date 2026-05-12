@@ -13,8 +13,8 @@ This document is written to survive context compaction. The detail sections belo
 - Phase 3 Slice A (OIDC validator): COMPLETE
 - Phase 3 Slice B (Harbor token client + cache): **REMOVED in ADR-0013 pivot** — see "Architecture snapshot" below
 - Phase 3 Slice C (handler): COMPLETE (rewritten by ADR-0013 pivot)
-- Phase 3 Slice D (server + metrics + cmd/main.go): **NEXT**
-- Phase 4 (plugin binary): pending
+- Phase 3 Slice D (server + metrics + cmd/main.go): COMPLETE
+- Phase 4 (plugin binary): **NEXT**
 - Phase 5 (Helm chart): pending
 - Phase 6 (e2e + docs): pending
 
@@ -158,7 +158,13 @@ This is preserved here so a future read of PHASES.md after compaction doesn't re
 
 [bridge/dataplane/handler.go](../bridge/dataplane/handler.go). Post-pivot: validate → match → read Secret → return Basic Auth credentials. ~200 LOC handler, 14 tests pinning every status-code path.
 
-### Slice D — Server + metrics + cmd/main.go — NEXT
+### Slice D — Server + metrics + cmd/main.go — COMPLETE
+
+Delivered: [bridge/dataplane/server.go](../bridge/dataplane/server.go) (manager.Runnable HTTPS server with TLS-from-disk reloaded on every handshake, graceful shutdown bounded by 10s, optional mTLS via ClientCAFile), [bridge/dataplane/metrics.go](../bridge/dataplane/metrics.go) (Prometheus counters + histogram registered onto controller-runtime's `metrics.Registry` so /metrics serves both data-plane and reconciler metrics from one endpoint; OIDC error classifier with explicit `other` bucket for unknown go-oidc messages), handler.go wired with optional `*Metrics` (nil-safe for slim test fixtures), [bridge/cmd/main.go](../bridge/cmd/main.go) implementing the 9-step wiring. Integration-layer env vars (`BRIDGE_TLS_CERT_FILE`, `BRIDGE_TLS_KEY_FILE`, `BRIDGE_TLS_CLIENT_CA_FILE`, `BRIDGE_LISTEN_ADDR`, `BRIDGE_HEALTH_ADDR`, `BRIDGE_ENABLE_LEADER_ELECTION`) are read in main.go with sensible defaults; the controlplane-config layer is unchanged so its fail-fast joined-errors contract holds. `make build` produces `bin/bridge`; `make run-local` regenerates a 1-day self-signed cert and runs against `$KUBECONFIG`.
+
+Tests: [server_test.go](../bridge/dataplane/server_test.go) covers happy-path serve + shutdown, busy-port bind error, mTLS rejecting clients without certificates, malformed CA bundle. [metrics_test.go](../bridge/dataplane/metrics_test.go) covers every label value of `bridge_credential_issuances_total`, the OIDC error classifier on all five reason buckets, double-increment when 503 fires (both `robot_secret_missing_total` and `issuances{result=unavailable}`), the nil-Metrics-still-works branch, and the Prometheus exposition format end-to-end.
+
+Originally-planned section (kept for archaeology):
 
 **Goal:** ship a runnable bridge binary. End-state: `BRIDGE_CLUSTER_NAME=… BRIDGE_HARBOR_URL=… … go run ./bridge/cmd` brings up the manager (reconciler + janitor) plus the HTTPS server (validator + handler) in one process.
 

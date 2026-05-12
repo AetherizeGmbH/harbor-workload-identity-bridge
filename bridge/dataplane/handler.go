@@ -72,10 +72,16 @@ type Handler struct {
 	K8sClient client.Client
 	Validator Validator
 	Config    HandlerConfig
+
+	// Metrics is optional. When nil, the handler operates without
+	// instrumenting requests — tests that do not care about metrics
+	// keep their fixtures slim. main.go always sets this.
+	Metrics *Metrics
 }
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	ctx := r.Context()
 	logger := log.FromContext(ctx).WithName("dataplane")
 
@@ -88,18 +94,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every return below this point is one request from a metrics
+	// perspective; observe duration on exit.
+	defer func() {
+		if h.Metrics != nil {
+			h.Metrics.IssuanceDuration.Observe(time.Since(start).Seconds())
+		}
+	}()
+
 	if !h.Config.ForceLocalValidation {
 		// Plumbed but not implemented (PHASES.md / ADR-0009). The
 		// alternative path is "Harbor validates OIDC itself" — only
 		// available once goharbor/harbor#17520 lands.
 		http.Error(w, "alternative validation path not yet implemented; set forceLocalValidation=true",
 			http.StatusNotImplemented)
+		h.recordResult(ResultServerError)
 		return
 	}
 
 	rawToken, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || rawToken == "" {
 		http.Error(w, "missing Bearer credential", http.StatusUnauthorized)
+		h.recordResult(ResultUnauthorized)
 		return
 	}
 
@@ -110,6 +126,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Body is optional but if present must parse — otherwise the
 			// audit log loses the image and we shouldn't pretend.
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			h.recordResult(ResultBadRequest)
 			return
 		}
 	}
@@ -119,6 +136,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logger.V(1).Info("token validation failed", "err", err.Error(), "image", req.Image)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
+		h.recordOIDCFailure(err)
+		h.recordResult(ResultUnauthorized)
 		return
 	}
 
@@ -129,6 +148,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logger.Error(err, "list HarborAccess", "subject", claims.Subject)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		if h.Metrics != nil {
+			h.Metrics.HarborAccessLookupFailures.Inc()
+		}
+		h.recordResult(ResultServerError)
 		return
 	}
 	if matched == nil {
@@ -136,6 +159,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"subject", claims.Subject, "audiences", claims.Audience, "image", req.Image)
 		http.Error(w, "no matching HarborAccess for the requesting service account and audience",
 			http.StatusForbidden)
+		h.recordResult(ResultForbidden)
 		return
 	}
 
@@ -153,11 +177,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"harboraccess", matched.Namespace+"/"+matched.Name,
 				"image", req.Image)
 			http.Error(w, "credentials not yet available; retry", http.StatusServiceUnavailable)
+			if h.Metrics != nil {
+				h.Metrics.RobotSecretMissing.Inc()
+			}
+			h.recordResult(ResultUnavailable)
 			return
 		}
 		logger.Error(err, "read robot Secret",
 			"harboraccess", matched.Namespace+"/"+matched.Name)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.recordResult(ResultServerError)
 		return
 	}
 
@@ -173,6 +202,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.writeResponse(w, creds, ttl)
 	auditIssuance(logger, claims, matched, audMatched, &req, creds.username, ttl)
+	h.recordResult(ResultOK)
+}
+
+// recordResult is the single metrics-increment helper for the Issuances
+// counter. Centralised so the label-value contract is enforced in one
+// place; new return sites must add a recordResult call.
+func (h *Handler) recordResult(result string) {
+	if h.Metrics == nil {
+		return
+	}
+	h.Metrics.Issuances.WithLabelValues(result).Inc()
+}
+
+func (h *Handler) recordOIDCFailure(err error) {
+	if h.Metrics == nil {
+		return
+	}
+	h.Metrics.OIDCValidationFailures.WithLabelValues(classifyOIDCError(err)).Inc()
 }
 
 // findHarborAccess returns the HarborAccess CR whose serviceAccountRef
