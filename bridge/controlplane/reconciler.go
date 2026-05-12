@@ -35,7 +35,10 @@ const (
 )
 
 // Reconciler reconciles HarborAccess CRs into persistent Harbor robots
-// scoped to this bridge's cluster (ADRs 0003, 0005, 0009).
+// scoped to this bridge's cluster (ADRs 0003, 0009). The robot's password
+// is consumed by the data plane as Basic Auth (ADR-0013), not as a bearer
+// token, but that contract is the data plane's concern — the reconciler
+// just keeps the per-CR Secret in sync.
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme

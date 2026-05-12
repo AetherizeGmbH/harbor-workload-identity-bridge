@@ -20,9 +20,9 @@ Responsibility 2 disappears entirely when upstream Harbor lands #17520. Responsi
 The bridge is split into two Go packages inside one binary:
 
 - `bridge/controlplane` — controller-runtime Reconciler for `HarborAccess`. Survives the upstream migration.
-- `bridge/dataplane` — HTTPS server that validates SA tokens and mints docker bearer tokens. Will be deleted entirely after the upstream migration.
+- `bridge/dataplane` — HTTPS server that validates SA tokens and returns robot Basic Auth credentials. Will be deleted entirely after the upstream migration. (*Note 2026-05-12: originally specified as "mints docker bearer tokens"; superseded by [ADR-0013](0013-return-robot-basic-auth-credentials.md). The split decision below is unaffected.*)
 
-Both packages compile into a single binary (`bridge/cmd/main.go`). The split is logical, not deployment-level: running them as one process lets the data plane share controller-runtime's informer cache, which simplifies cache invalidation (see [ADR-0007](0007-cache-invalidation-on-cr-change.md)).
+Both packages compile into a single binary (`bridge/cmd/main.go`). The split is logical, not deployment-level: running them as one process lets the data plane share controller-runtime's informer cache, which simplified cache invalidation when the data plane still cached minted JWTs (see [ADR-0007](0007-cache-invalidation-on-cr-change.md), now inert after ADR-0013 removed the cache). The shared-cache property is still useful: the data plane reads `HarborAccess` lists through the informer.
 
 Package-import discipline: `controlplane` MUST NOT import `dataplane`. A lint rule (or a `go list -deps` check in CI) enforces this so the delete-at-migration is a single-PR change.
 

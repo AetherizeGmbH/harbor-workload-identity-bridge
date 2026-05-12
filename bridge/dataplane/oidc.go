@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package dataplane implements the bridge's HTTPS server that validates SA
-// tokens from the kubelet credential-provider plugin and mints Harbor
-// docker bearer tokens. See docs/adr/0002-bridge-control-plane-data-plane-split.md
-// — this entire package is retired once upstream Harbor implements OIDC
-// trust policies (goharbor/harbor#17520).
+// tokens from the kubelet credential-provider plugin, matches each request
+// to a HarborAccess CR, and returns the per-CR robot's Basic Auth
+// credentials so containerd can complete the Harbor registry handshake
+// itself. See docs/adr/0002-bridge-control-plane-data-plane-split.md for
+// the split, and docs/adr/0013-return-robot-basic-auth-credentials.md for
+// why this package does not pre-mint Docker JWTs. The entire package is
+// retired once upstream Harbor implements OIDC trust policies
+// (goharbor/harbor#17520).
 package dataplane
 
 import (

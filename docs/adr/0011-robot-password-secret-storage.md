@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Each persistent Harbor robot ([ADR-0003](0003-persistent-robots-per-harboraccess.md)) has a password that Harbor only returns on Create and RefreshSec. The bridge must store this password somewhere durable, accessible to the data plane (which needs it to call `/service/token` per [ADR-0005](0005-docker-token-via-service-token.md)), and **not** accessible to the workloads themselves (which would otherwise bypass the entire bearer-token pipeline).
+Each persistent Harbor robot ([ADR-0003](0003-persistent-robots-per-harboraccess.md)) has a password that Harbor only returns on Create and RefreshSec. The bridge must store this password somewhere durable, accessible to the data plane (originally to call `/service/token` per ADR-0005; post-pivot, to return as Basic Auth per [ADR-0013](0013-return-robot-basic-auth-credentials.md) — same Secret-access requirement, different downstream use), and **not** accessible to the workloads themselves (which would otherwise bypass the bridge entirely and pull images directly with the robot's credentials).
 
 Three orthogonal questions:
 
