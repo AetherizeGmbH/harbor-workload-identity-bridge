@@ -6,7 +6,6 @@ package dataplane
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -24,36 +23,26 @@ import (
 // CredentialsPath is the HTTP path the plugin POSTs to.
 const CredentialsPath = "/v1/credentials"
 
-// bridgeBearerUsername is the username we put in the credential-provider
-// response. Per ADR-0005 the password is a docker registry v2 bearer JWT
-// (not the robot's actual password); the username is the docker convention
-// for "the password is a bearer token, not a basic-auth password".
-//
-// Note for Phase 6 e2e: containerd's actual auth flow Basic-Auths the
-// credentials to the registry's /service/token endpoint as input to the
-// auth handshake. We commit to ADR-0005's intent here and validate end-to-
-// end behaviour against a real Harbor in e2e; if containerd rejects this
-// shape, ADR-0005 gets superseded by a follow-up that returns the robot's
-// basic-auth credentials instead.
-const bridgeBearerUsername = "<token>"
-
 // cacheKeyTypeServiceAccount mirrors KEP-4412's CredentialProviderCacheKeyType.
 // We always emit this value; see ADR-0006 for why the kubelet credential-
 // provider config sets cacheType: ServiceAccount.
 const cacheKeyTypeServiceAccount = "ServiceAccount"
 
-// Request is the HTTP API the kubelet plugin POSTs to the bridge.
-// The SA token is in the Authorization: Bearer header; the body carries
-// only audit information about the image being pulled.
+// Request is the HTTP API the kubelet plugin POSTs to the bridge. The SA
+// token rides in the Authorization: Bearer header; the body carries only
+// audit information about the image being pulled.
 type Request struct {
 	// Image is the image reference the kubelet wants to pull. Used only
 	// for audit logging — credential decisions are made from the SA
-	// token's aud/sub claims, not the image (see ADR-0007).
+	// token's aud/sub claims (no per-image cache key, no per-image
+	// permission decision).
 	Image string `json:"image"`
 }
 
 // Response is the HTTP API response. The plugin translates this to the
-// kubelet's CredentialProviderResponse shape on the plugin side.
+// kubelet's CredentialProviderResponse shape on the plugin side. Per
+// ADR-0013 the credentials are the robot's Basic Auth credentials —
+// containerd does the registry auth handshake itself.
 type Response struct {
 	Username      string `json:"username"`
 	Password      string `json:"password"`
@@ -68,12 +57,6 @@ type HandlerConfig struct {
 	// BridgeNamespace is where robot-credential Secrets live (ADR-0011).
 	BridgeNamespace string
 
-	// HarborService is the value of the "service" query parameter passed
-	// to Harbor's /service/token endpoint. Harbor's canonical value is
-	// "harbor-registry"; the Helm chart can override for non-default
-	// deployments.
-	HarborService string
-
 	// ForceLocalValidation gates whether the data plane performs full
 	// local OIDC validation. Always effectively true today; the false
 	// path is reserved for after upstream Harbor implements OIDC trust
@@ -82,13 +65,12 @@ type HandlerConfig struct {
 }
 
 // Handler is the HTTP handler that validates an SA token, looks up the
-// matching HarborAccess CR, and either serves a cached docker bearer JWT
-// or mints a fresh one via Harbor's /service/token.
+// matching HarborAccess CR, and returns the robot's Basic Auth
+// credentials. See ADR-0013 for why we return Basic Auth rather than
+// pre-minted JWTs.
 type Handler struct {
 	K8sClient client.Client
 	Validator Validator
-	Cache     DockerTokenCache
-	Tokens    HarborTokenClient
 	Config    HandlerConfig
 }
 
@@ -115,7 +97,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization: Bearer <SA-token>
 	rawToken, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || rawToken == "" {
 		http.Error(w, "missing Bearer credential", http.StatusUnauthorized)
@@ -141,7 +122,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Find the matching HarborAccess.
+	// 2. Find the HarborAccess whose serviceAccountRef-derived subject
+	// matches claims.sub AND whose trustPolicy.audience appears in
+	// claims.aud.
 	matched, audMatched, err := h.findHarborAccess(ctx, claims)
 	if err != nil {
 		logger.Error(err, "list HarborAccess", "subject", claims.Subject)
@@ -156,20 +139,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Cache lookup. ADR-0007: lazy invalidation via generation in the key.
-	key := CacheKey{
-		HarborAccessNamespace: matched.Namespace,
-		HarborAccessName:      matched.Name,
-		Generation:            matched.Generation,
-		Subject:               claims.Subject,
-	}
-	if tok, hit := h.Cache.Get(key); hit {
-		h.writeResponse(w, tok)
-		auditIssuance(ctx, logger, claims, matched, audMatched, &req, "", tok, true)
-		return
-	}
-
-	// 4. Cache miss — read the robot's credentials and mint a fresh token.
+	// 3. Read the robot's Basic Auth credentials from the bridge-namespace
+	// Secret (ADR-0011) and hand them to the plugin. Containerd will do
+	// the registry auth handshake itself (ADR-0013).
 	creds, err := h.readRobotSecret(ctx, matched)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -189,46 +161,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopes := buildScopes(matched.Spec.Permissions)
-	tok, err := h.Tokens.Mint(ctx, creds.username, creds.password, h.Config.HarborService, scopes)
-	if errors.Is(err, ErrTokenAuth) {
-		// ADR-0007 one-shot 401 retry: the password we read may have
-		// been rotated since the reconciler wrote it. Re-read and try
-		// once more.
-		logger.V(1).Info("/service/token returned 401; re-reading Secret and retrying once",
-			"harboraccess", matched.Namespace+"/"+matched.Name)
-		creds, rerr := h.readRobotSecret(ctx, matched)
-		if rerr == nil {
-			tok, err = h.Tokens.Mint(ctx, creds.username, creds.password, h.Config.HarborService, scopes)
-		}
-	}
-	if err != nil {
-		logger.Error(err, "mint docker token",
-			"harboraccess", matched.Namespace+"/"+matched.Name)
-		http.Error(w, "credential issuance failed", http.StatusBadGateway)
-		return
+	// 4. Tell kubelet how long it may cache these credentials. We use the
+	// CR's spec.tokenTTL: if shorter than the reconciler's 24h rotation
+	// interval, this bounds the staleness window after a rotation. If
+	// longer, a rotation can render kubelet's cached creds stale until
+	// the cache expires (the operator chose this tolerance via the spec).
+	ttl := matched.Spec.TokenTTL.Duration
+	if ttl <= 0 {
+		ttl = time.Hour
 	}
 
-	// 5. Cache TTL bounded by spec.tokenTTL: the CR can ask for shorter
-	// TTL than Harbor would otherwise grant (e.g. for sensitive workloads).
-	ttl := tok.ExpiresIn
-	if specTTL := matched.Spec.TokenTTL.Duration; specTTL > 0 && specTTL < ttl {
-		ttl = specTTL
-	}
-	h.Cache.Set(key, tok, ttl)
-
-	h.writeResponse(w, tok)
-	auditIssuance(ctx, logger, claims, matched, audMatched, &req, creds.username, tok, false)
+	h.writeResponse(w, creds, ttl)
+	auditIssuance(logger, claims, matched, audMatched, &req, creds.username, ttl)
 }
 
 // findHarborAccess returns the HarborAccess CR whose serviceAccountRef
 // matches the token's sub AND whose trustPolicy.audience appears in the
 // token's aud claim. Returns (nil, "", nil) when nothing matches.
 //
-// For each match we also return which audience string matched, so the
-// audit log records the exact aud value the kubelet projected the token
-// with (helpful when a CR's audience and a token's audience use slightly
-// different forms).
+// The audience value that matched is also returned so the audit log
+// records the exact aud string the kubelet projected the token with.
 func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harborv1alpha1.HarborAccess, string, error) {
 	var list harborv1alpha1.HarborAccessList
 	if err := h.K8sClient.List(ctx, &list); err != nil {
@@ -283,34 +235,12 @@ func robotSecretName(ha *harborv1alpha1.HarborAccess) string {
 	return "robot-" + ha.Namespace + "-" + ha.Name
 }
 
-// buildScopes converts the CR's permissions into the docker registry v2
-// scope shape. The "pull,push" form on a permission expands to two
-// actions in one Scope entry.
-func buildScopes(perms []harborv1alpha1.ProjectPermission) []Scope {
-	out := make([]Scope, 0, len(perms))
-	for _, p := range perms {
-		actions := []string{}
-		for _, a := range strings.Split(string(p.Action), ",") {
-			a = strings.TrimSpace(a)
-			if a != "" {
-				actions = append(actions, a)
-			}
-		}
-		out = append(out, Scope{
-			Type:     "repository",
-			Resource: p.Project,
-			Actions:  actions,
-		})
-	}
-	return out
-}
-
-func (h *Handler) writeResponse(w http.ResponseWriter, tok *DockerToken) {
+func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl time.Duration) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(Response{
-		Username:      bridgeBearerUsername,
-		Password:      tok.Token,
-		ExpiresInSecs: int(tok.ExpiresIn / time.Second),
+		Username:      creds.username,
+		Password:      creds.password,
+		ExpiresInSecs: int(ttl / time.Second),
 		CacheKeyType:  cacheKeyTypeServiceAccount,
 	})
 }
@@ -318,10 +248,9 @@ func (h *Handler) writeResponse(w http.ResponseWriter, tok *DockerToken) {
 // auditIssuance writes the per-request audit log line. Required by
 // SECURITY.md (Phase 6 doc) and PHASES.md: one structured line per
 // credential issuance, including subject, matched HarborAccess, robot
-// name, scopes, TTL, cache outcome, and image. logr's WithValues keeps
-// the line greppable by any single field.
+// name, TTL, and image. logr's WithValues keeps the line greppable by
+// any single field.
 func auditIssuance(
-	_ context.Context,
 	logger interface {
 		Info(msg string, kv ...any)
 	},
@@ -330,8 +259,7 @@ func auditIssuance(
 	audienceMatched string,
 	req *Request,
 	robotName string,
-	tok *DockerToken,
-	cached bool,
+	ttl time.Duration,
 ) {
 	logger.Info("credential issued",
 		"subject", claims.Subject,
@@ -339,8 +267,7 @@ func auditIssuance(
 		"harboraccess", matched.Namespace+"/"+matched.Name,
 		"generation", matched.Generation,
 		"robot", robotName,
-		"ttl_seconds", int(tok.ExpiresIn/time.Second),
-		"cached", cached,
+		"ttl_seconds", int(ttl/time.Second),
 		"image", req.Image,
 	)
 }

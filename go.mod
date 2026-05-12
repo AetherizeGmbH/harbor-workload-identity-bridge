@@ -7,7 +7,6 @@ require (
 	github.com/go-openapi/runtime v0.29.5
 	github.com/goharbor/go-client v0.213.1
 	github.com/golang-jwt/jwt/v5 v5.3.0
-	github.com/jellydator/ttlcache/v3 v3.4.0
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
 	k8s.io/client-go v0.36.0

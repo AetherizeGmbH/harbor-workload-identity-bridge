@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+**Superseded by [ADR-0013](0013-return-robot-basic-auth-credentials.md).** The pre-mint-JWT approach this ADR proposed is incompatible with kubelet's credential-provider protocol + containerd's auth flow: the response `Password` field is consumed as HTTP Basic Auth by containerd, not as a bearer JWT. ADR-0013 commits to returning the robot's Basic Auth credentials directly. The contents below describe the originally-accepted but never-shipped design and are kept for project archaeology.
+
+---
+
+(Originally Accepted)
 
 ## Context
 

@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+**Superseded by [ADR-0013](0013-return-robot-basic-auth-credentials.md).** This ADR governed the data-plane docker-token cache that ADR-0005 introduced. ADR-0013 removed the cache (the data plane no longer mints JWTs), so there is nothing left to invalidate. The principles below (generation-keyed lazy invalidation, lazy over active eviction, single-process shared informer) remain applicable to any future cache the bridge adds.
+
+---
+
+(Originally Accepted)
 
 ## Context
 
