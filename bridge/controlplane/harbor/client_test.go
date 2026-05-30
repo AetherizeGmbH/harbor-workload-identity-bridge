@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-openapi/runtime"
+	sdkrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
 	"github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 )
 
@@ -472,5 +474,85 @@ func TestFilterOwned_EmptyClusterReturnsNothing(t *testing.T) {
 	got := FilterOwned(robots, "")
 	if len(got) != 0 {
 		t.Errorf("empty cluster name should match nothing; got %d", len(got))
+	}
+}
+
+// TestFormatHarborMessage_TypedPayload exercises the decoder against the
+// exact SDK response type the user hit during the first manual e2e: a
+// CreateRobotNotFound carrying a models.Errors payload. Before this
+// change the user saw "&{Errors:[0x71c4c2a8cfe0]}" — a pointer string —
+// because fmt's default rendering doesn't dereference the slice. The
+// decoder must lift Code+Message out.
+func TestFormatHarborMessage_TypedPayload(t *testing.T) {
+	sdkErr := sdkrobot.NewCreateRobotNotFound()
+	sdkErr.Payload = &models.Errors{
+		Errors: []*models.Error{
+			{Code: "NOT_FOUND", Message: `project "your-project" not found`},
+		},
+	}
+	got := formatHarborMessage(sdkErr)
+	if !strings.Contains(got, "NOT_FOUND") {
+		t.Errorf("missing code: %q", got)
+	}
+	if !strings.Contains(got, `project "your-project" not found`) {
+		t.Errorf("missing message: %q", got)
+	}
+	if strings.Contains(got, "0x") {
+		t.Errorf("formatted message still contains a raw pointer: %q", got)
+	}
+}
+
+// TestFormatHarborMessage_MultipleErrorsAreJoined covers Harbor responses
+// that return a non-trivial Errors slice (rare but possible: e.g. a
+// validation pass that surfaces multiple defects).
+func TestFormatHarborMessage_MultipleErrorsAreJoined(t *testing.T) {
+	sdkErr := sdkrobot.NewCreateRobotBadRequest()
+	sdkErr.Payload = &models.Errors{
+		Errors: []*models.Error{
+			{Code: "BAD_REQUEST", Message: "name required"},
+			{Code: "BAD_REQUEST", Message: "level required"},
+		},
+	}
+	got := formatHarborMessage(sdkErr)
+	if !strings.Contains(got, "name required") || !strings.Contains(got, "level required") {
+		t.Errorf("missing one of the two messages: %q", got)
+	}
+	if !strings.Contains(got, ";") {
+		t.Errorf("expected '; '-joined output, got %q", got)
+	}
+}
+
+// TestFormatHarborMessage_FallbackOnUntyped covers the swagger-undeclared
+// path: Harbor returns 409 on POST /robots but the SDK doesn't enumerate
+// that status code in the response handler, so the wrapper sees a
+// runtime.APIError. The decoder must not crash and must surface
+// something better than a Go pointer.
+func TestFormatHarborMessage_FallbackOnUntyped(t *testing.T) {
+	apiErr := runtime.NewAPIError("create robot", "{}", 409)
+	got := formatHarborMessage(apiErr)
+	if !strings.Contains(got, "409") {
+		t.Errorf("expected status 409 in fallback message, got %q", got)
+	}
+	if strings.Contains(got, "0x") {
+		t.Errorf("fallback message contains a raw pointer: %q", got)
+	}
+}
+
+// TestWrapHarborOp_409TaggedAsAlreadyExists ensures the reconciler's
+// errors.Is(err, ErrRobotAlreadyExists) branch fires on the same untyped
+// runtime.APIError the SDK returns for the 409 case. If this regresses,
+// the reconciler will fall through to markTransientError and loop on
+// the 409 forever instead of recovering.
+func TestWrapHarborOp_409TaggedAsAlreadyExists(t *testing.T) {
+	apiErr := runtime.NewAPIError("create robot", "{}", 409)
+	wrapped := wrapHarborOp("create robot \"bridge-x\"", apiErr)
+	if !errors.Is(wrapped, ErrRobotAlreadyExists) {
+		t.Fatalf("errors.Is should match ErrRobotAlreadyExists: %v", wrapped)
+	}
+	// The wrapped error must still expose the SDK error for code-based
+	// branching downstream.
+	var hse harborStatusErr
+	if !errors.As(wrapped, &hse) || !hse.IsCode(409) {
+		t.Errorf("errors.As to harborStatusErr lost the underlying code")
 	}
 }

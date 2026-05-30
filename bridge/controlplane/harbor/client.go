@@ -68,6 +68,13 @@ type Robot struct {
 // robot exists. Callers use errors.Is to distinguish from transport errors.
 var ErrRobotNotFound = errors.New("robot not found")
 
+// ErrRobotAlreadyExists is returned by Create when Harbor responds 409
+// because a robot with the same name is already present. The reconciler
+// recovers from this by re-fetching the existing robot and rotating its
+// password so the per-CR Secret in the bridge namespace stays in sync.
+// See ADR-0003 for the persistent-robot lifecycle.
+var ErrRobotAlreadyExists = errors.New("robot already exists")
+
 // Client is the small surface the reconciler and janitor need against
 // Harbor. The bridge's ownership-prefix safety invariant (ADR-0009) is the
 // caller's responsibility; Client is intentionally cluster-agnostic so its
@@ -125,7 +132,7 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 	params := sdkrobot.NewCreateRobotParamsWithContext(ctx).WithRobot(body)
 	resp, err := c.api.Robot.CreateRobot(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("create robot %q: %w", name, err)
+		return nil, wrapHarborOp(fmt.Sprintf("create robot %q", name), err)
 	}
 	return &Robot{
 		ID:          resp.Payload.ID,
@@ -142,7 +149,7 @@ func (c *goClient) Delete(ctx context.Context, id int64) error {
 			// Delete is idempotent at the bridge level.
 			return nil
 		}
-		return fmt.Errorf("delete robot %d: %w", id, err)
+		return wrapHarborOp(fmt.Sprintf("delete robot %d", id), err)
 	}
 	return nil
 }
@@ -157,7 +164,7 @@ func (c *goClient) List(ctx context.Context) ([]Robot, error) {
 			WithPageSize(&size)
 		resp, err := c.api.Robot.ListRobot(ctx, params)
 		if err != nil {
-			return nil, fmt.Errorf("list robots (page %d): %w", page, err)
+			return nil, wrapHarborOp(fmt.Sprintf("list robots (page %d)", page), err)
 		}
 		for _, r := range resp.Payload {
 			out = append(out, fromHarborRobot(r))
@@ -176,7 +183,7 @@ func (c *goClient) GetByID(ctx context.Context, id int64) (*Robot, error) {
 		if isNotFound(err) {
 			return nil, ErrRobotNotFound
 		}
-		return nil, fmt.Errorf("get robot %d: %w", id, err)
+		return nil, wrapHarborOp(fmt.Sprintf("get robot %d", id), err)
 	}
 	r := fromHarborRobot(resp.Payload)
 	return &r, nil
@@ -201,7 +208,7 @@ func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) 
 		WithRobotSec(&models.RobotSec{})
 	resp, err := c.api.Robot.RefreshSec(ctx, params)
 	if err != nil {
-		return "", fmt.Errorf("refresh secret for robot %d: %w", id, err)
+		return "", wrapHarborOp(fmt.Sprintf("refresh secret for robot %d", id), err)
 	}
 	return resp.Payload.Secret, nil
 }
@@ -220,7 +227,7 @@ func (c *goClient) UpdatePermissions(ctx context.Context, id int64, description 
 		WithRobotID(id).
 		WithRobot(body)
 	if _, err := c.api.Robot.UpdateRobot(ctx, params); err != nil {
-		return fmt.Errorf("update robot %d: %w", id, err)
+		return wrapHarborOp(fmt.Sprintf("update robot %d", id), err)
 	}
 	return nil
 }
@@ -282,6 +289,9 @@ func fromHarborRobot(r *models.Robot) Robot {
 // harborStatusErr is the interface every generated go-client error response
 // implements (IsCode, IsClientError, IsServerError). We use it via errors.As
 // to detect 404s without depending on the specific operation's error type.
+// runtime.APIError (returned by the SDK for status codes not enumerated in
+// the swagger spec — Harbor's 409 on POST /robots, for example) implements
+// IsCode too, so the same interface covers both typed and fallback errors.
 type harborStatusErr interface {
 	error
 	IsCode(int) bool
@@ -293,4 +303,102 @@ func isNotFound(err error) bool {
 		return hse.IsCode(http.StatusNotFound)
 	}
 	return false
+}
+
+func isConflict(err error) bool {
+	var hse harborStatusErr
+	if errors.As(err, &hse) {
+		return hse.IsCode(http.StatusConflict)
+	}
+	return false
+}
+
+// harborPayloadErr is the interface every generated typed error response
+// implements via its GetPayload() method. We use it to lift Harbor's
+// structured error payload (codes + messages) out of an SDK error so the
+// status condition message tells the operator what's actually wrong
+// instead of "&{Errors:[0x71c4c2a8cfe0]}".
+type harborPayloadErr interface {
+	error
+	GetPayload() *models.Errors
+}
+
+// formatHarborMessage returns a human-readable rendering of err. When the
+// underlying SDK error carries a models.Errors payload (typed 4xx
+// responses) it formats as "CODE: message; CODE: message"; otherwise it
+// falls through to err.Error(), which for runtime.APIError (untyped
+// fallback) already includes the status code and raw body.
+func formatHarborMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	var hpe harborPayloadErr
+	if errors.As(err, &hpe) {
+		payload := hpe.GetPayload()
+		if payload != nil && len(payload.Errors) > 0 {
+			parts := make([]string, 0, len(payload.Errors))
+			for _, e := range payload.Errors {
+				code := e.Code
+				if code == "" {
+					code = "UNKNOWN"
+				}
+				if e.Message != "" {
+					parts = append(parts, code+": "+e.Message)
+				} else {
+					parts = append(parts, code)
+				}
+			}
+			return strings.Join(parts, "; ")
+		}
+	}
+	return err.Error()
+}
+
+// hbErr wraps an SDK error so .Error() renders a clean message while
+// preserving the original chain for errors.Is/errors.As (callers can
+// still pattern-match against ErrRobotAlreadyExists, ErrRobotNotFound,
+// or the typed harborStatusErr interface). aliases is the slice of
+// sentinel errors hbErr should report a match for from errors.Is, so
+// the reconciler can branch on harbor.ErrRobotAlreadyExists without
+// knowing about the SDK's status-code-to-type mapping.
+type hbErr struct {
+	msg     string
+	cause   error
+	aliases []error
+}
+
+func (e *hbErr) Error() string { return e.msg }
+func (e *hbErr) Unwrap() error { return e.cause }
+func (e *hbErr) Is(target error) bool {
+	for _, a := range e.aliases {
+		if a == target {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapHarborOp wraps an SDK error returned by op. Returns nil when err is
+// nil so the call site stays a single line. Detects 404/409 to attach
+// the relevant sentinel; the reconciler keys off those via errors.Is.
+func wrapHarborOp(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	out := &hbErr{
+		msg:   op + ": " + formatHarborMessage(err),
+		cause: err,
+	}
+	if isConflict(err) {
+		out.aliases = append(out.aliases, ErrRobotAlreadyExists)
+	}
+	if isNotFound(err) {
+		// We intentionally do NOT alias to ErrRobotNotFound here: a 404
+		// from POST /robots means "referenced project not found", not
+		// "this robot does not exist". ErrRobotNotFound stays scoped
+		// to the GetByID/GetByName semantics. The reconciler's only
+		// branch on 404 from Create is "operator action required",
+		// which it can derive from the readable message above.
+	}
+	return out
 }

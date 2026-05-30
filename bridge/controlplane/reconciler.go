@@ -201,13 +201,62 @@ func (r *Reconciler) createAndStatus(
 	logger := log.FromContext(ctx)
 	logger.Info("creating Harbor robot", "name", name)
 	robot, err := r.Harbor.Create(ctx, name, description, perms)
-	if err != nil {
+	switch {
+	case err == nil:
+		// happy path
+	case errors.Is(err, harbor.ErrRobotAlreadyExists):
+		// Harbor returned 409: the robot already exists, but GetByName
+		// just told us it didn't. Possible causes: (a) a previous
+		// reconcile pass created the robot and crashed before we
+		// observed success, leaving a Secret-less robot; (b) operator
+		// hand-created a robot with our deterministic name; (c) Harbor
+		// listing was briefly inconsistent. The recovery is the same
+		// for all three: re-fetch, run the adoption discipline checks,
+		// rotate its password to get fresh credentials, and write the
+		// per-CR Secret. This converges Ready=True instead of looping
+		// on 409.
+		logger.Info("Harbor returned 409 on create; recovering existing robot", "name", name)
+		return r.recoverExistingRobot(ctx, ha, name)
+	default:
 		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("create robot: %w", err))
 	}
 	if err := r.writeRobotSecret(ctx, ha, robot); err != nil {
 		return ctrl.Result{}, err
 	}
 	return r.markReady(ctx, ha, robot)
+}
+
+// recoverExistingRobot is the 409-on-create recovery path. It re-fetches
+// the robot by name, enforces the same ADR-0009 adoption discipline the
+// happy path enforces, rotates the password so we obtain a value we can
+// store (Harbor's RefreshSec is the only way to get a usable password
+// for an existing robot — the original Create's password is not
+// retrievable), and writes the per-CR Secret.
+func (r *Reconciler) recoverExistingRobot(ctx context.Context, ha *harborv1alpha1.HarborAccess, name string) (ctrl.Result, error) {
+	existing, err := r.Harbor.GetByName(ctx, name)
+	if err != nil {
+		// Including the "after 409" prefix so a future operator reading
+		// the status condition sees the causal chain: create said
+		// conflict, lookup said something else, we couldn't recover.
+		return r.markTransientError(ctx, ha, ReasonHarborError,
+			fmt.Errorf("recover after create 409: lookup robot: %w", err))
+	}
+	if !RobotBelongsToCluster(existing.Description, r.Config.ClusterName) {
+		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+			"Harbor robot %q exists but its description does not mark it as belonging to cluster %q; refusing to adopt",
+			name, r.Config.ClusterName,
+		))
+	}
+	newSecret, err := r.Harbor.RefreshSecret(ctx, existing.ID)
+	if err != nil {
+		return r.markTransientError(ctx, ha, ReasonHarborError,
+			fmt.Errorf("recover after create 409: refresh secret: %w", err))
+	}
+	existing.Secret = newSecret
+	if err := r.writeRobotSecret(ctx, ha, existing); err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.markReady(ctx, ha, existing)
 }
 
 // secretMissing reports whether the per-CR robot-password Secret is absent

@@ -138,6 +138,13 @@ type mockHarbor struct {
 	errOnGetByName map[string]error
 	// errOnRefresh, if non-nil, is returned from RefreshSecret.
 	errOnRefresh error
+	// hideFromGetByName, if non-empty, is the set of robot names
+	// GetByName must report as ErrRobotNotFound on the NEXT lookup
+	// only. The flag clears after that one miss so the recovery
+	// path's re-fetch observes the robot normally — mirroring the
+	// real "Harbor list was briefly inconsistent" scenario the
+	// reconciler's 409 recovery is designed for.
+	hideFromGetByName map[string]bool
 }
 
 type mockCreateCall struct {
@@ -177,6 +184,14 @@ func (m *mockHarbor) Create(_ context.Context, name, description string, perms [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createCalls = append(m.createCalls, mockCreateCall{Name: name, Description: description, Perms: perms})
+	// Mirror real Harbor: a name collision returns 409, surfaced as
+	// ErrRobotAlreadyExists. The reconciler's 409 recovery path keys
+	// off this exact sentinel.
+	for _, r := range m.robots {
+		if r.Name == name {
+			return nil, harbor.ErrRobotAlreadyExists
+		}
+	}
 	id := m.nextID
 	m.nextID++
 	r := &harbor.Robot{
@@ -224,6 +239,12 @@ func (m *mockHarbor) GetByName(_ context.Context, name string) (*harbor.Robot, e
 	defer m.mu.Unlock()
 	if err, ok := m.errOnGetByName[name]; ok && err != nil {
 		return nil, err
+	}
+	if m.hideFromGetByName[name] {
+		// One-shot: clears after the first miss so the recovery-path
+		// GetByName observes the robot normally.
+		delete(m.hideFromGetByName, name)
+		return nil, harbor.ErrRobotNotFound
 	}
 	for _, r := range m.robots {
 		if r.Name == name {
@@ -644,6 +665,100 @@ func TestReconcile_RebuildsMissingSecret(t *testing.T) {
 	}
 	if len(secret.Data["password"]) == 0 {
 		t.Errorf("rebuilt Secret has empty password")
+	}
+}
+
+func TestReconcile_409OnCreate_RecoversByAdoptingExistingRobot(t *testing.T) {
+	// Scenario reproduces what happened during the first manual e2e:
+	// Harbor returned 409 from POST /robots ("already exists") while our
+	// GetByName was reporting NotFound. The robot was real (left over
+	// from a previous reconcile's partial success); the reconciler must
+	// adopt it, rotate its password, write the Secret, and mark Ready —
+	// not loop on 409 indefinitely.
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	t0 := time.Date(2026, 5, 30, 22, 28, 0, 0, time.UTC)
+	r := newReconciler(t, mh, fixedClock{t0}, ha)
+
+	// Pre-existing robot in Harbor with our cluster's description tag,
+	// matching what a stranded prior reconcile would have created.
+	robotName := "bridge-" + testCluster + "-" + testSANamespace + "-" + testSAName
+	desc := RobotDescription(testCluster, testHANamespace, testHAName)
+	mh.preexisting(robotName, desc)
+
+	// Make GetByName miss it so we hit the create branch and Harbor
+	// returns 409. mockHarbor.Create returns ErrRobotAlreadyExists when
+	// the name is already taken — same shape as the real client.
+	mh.hideFromGetByName = map[string]bool{robotName: true}
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if len(mh.createCalls) != 1 {
+		t.Errorf("expected exactly one Create attempt before recovery, got %d", len(mh.createCalls))
+	}
+	if len(mh.refreshCalls) != 1 {
+		t.Errorf("expected RefreshSecret on the recovered robot, got %d call(s)", len(mh.refreshCalls))
+	}
+
+	// Secret must now exist with the rotated password.
+	got := &corev1.Secret{}
+	secretName := SecretNamePrefix + testHANamespace + "-" + testHAName
+	if err := r.Get(context.Background(),
+		client.ObjectKey{Namespace: testNS, Name: secretName},
+		got); err != nil {
+		t.Fatalf("recovered Secret missing: %v", err)
+	}
+	if len(got.Data["password"]) == 0 {
+		t.Errorf("recovered Secret has empty password")
+	}
+	if string(got.Data["username"]) != robotName {
+		t.Errorf("recovered Secret username = %q, want %q", got.Data["username"], robotName)
+	}
+
+	// CR status must be Ready=True after recovery.
+	final := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(),
+		client.ObjectKey{Namespace: ha.Namespace, Name: ha.Name},
+		final); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(final.Status.Conditions, harborv1alpha1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Errorf("Ready condition after recovery = %#v, want True", cond)
+	}
+}
+
+func TestReconcile_409OnCreate_RefusesToAdoptForeignRobot(t *testing.T) {
+	// Defense-in-depth (ADR-0009): the recovery path must NOT adopt a
+	// robot whose description does not mark it as belonging to this
+	// cluster, even when names collide. This protects against the
+	// hyphen-prefix class of operator-misconfigurations.
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+
+	robotName := "bridge-" + testCluster + "-" + testSANamespace + "-" + testSAName
+	foreignDesc := RobotDescription("some-other-cluster", testHANamespace, testHAName)
+	mh.preexisting(robotName, foreignDesc)
+	mh.hideFromGetByName = map[string]bool{robotName: true}
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(mh.refreshCalls) != 0 {
+		t.Errorf("recovery rotated the secret of a robot we don't own; got %d RefreshSecret call(s)", len(mh.refreshCalls))
+	}
+	final := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(),
+		client.ObjectKey{Namespace: ha.Namespace, Name: ha.Name},
+		final); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(final.Status.Conditions, harborv1alpha1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRobotConflict {
+		t.Errorf("Ready condition = %#v, want False/RobotConflict", cond)
 	}
 }
 
