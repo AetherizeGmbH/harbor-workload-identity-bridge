@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 620" width="1040" height="620" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="1040" height="620" fill="#ffffff"/>
+  <style>
+    .lbl    { fill: #0f172a; font-weight: 600; }
+    .sub    { fill: #475569; font-size: 11px; }
+    .note   { fill: #334155; font-size: 11px; font-style: italic; }
+    .step   { fill: #2563eb; font-weight: 700; font-size: 11px; }
+    .stepR  { fill: #be123c; font-weight: 700; font-size: 11px; }
+    .stepM  { fill: #047857; font-weight: 700; font-size: 11px; }
+    .mono   { font-family: 'SF Mono', ui-monospace, Menlo, monospace; fill: #0f172a; font-size: 11px; }
+
+    .laptop  { fill: #f8fafc; stroke: #475569; stroke-width: 1.8; stroke-dasharray: 6 4; }
+    .kind    { fill: #f8fafc; stroke: #047857; stroke-width: 1.8; stroke-dasharray: 6 4; }
+    .harbor  { fill: #f8fafc; stroke: #be123c; stroke-width: 1.8; stroke-dasharray: 6 4; }
+    .box     { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+    .ours    { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; }
+
+    .arrow      { stroke: #475569; stroke-width: 1.6; fill: none; }
+    .arrow-emph { stroke: #2563eb; stroke-width: 1.8; fill: none; }
+    .arrow-kind { stroke: #047857; stroke-width: 1.6; fill: none; }
+    .arrow-harb { stroke: #be123c; stroke-width: 1.6; fill: none; }
+  </style>
+
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#475569"/>
+    </marker>
+    <marker id="head-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="head-kind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#047857"/>
+    </marker>
+    <marker id="head-harb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#be123c"/>
+    </marker>
+  </defs>
+
+  <text x="520" y="28" text-anchor="middle" class="lbl" font-size="15">Local-dev test topology</text>
+  <text x="520" y="48" text-anchor="middle" class="sub">For Phase 6 e2e the bridge will run inside the cluster as a Deployment; for this test it runs on your laptop pointed at kind via kubeconfig.</text>
+
+  <!-- Laptop boundary -->
+  <rect class="laptop" x="20" y="80" width="500" height="490" rx="10"/>
+  <text x="270" y="106" text-anchor="middle" class="lbl">Your laptop</text>
+  <text x="270" y="122" text-anchor="middle" class="sub">processes you start manually; nothing magical here</text>
+
+  <!-- Terminal/you -->
+  <rect class="box" x="40" y="150" width="160" height="70" rx="6"/>
+  <text x="120" y="174" text-anchor="middle" class="lbl">Your terminal</text>
+  <text x="120" y="190" text-anchor="middle" class="sub">kubectl, curl, crane,</text>
+  <text x="120" y="206" text-anchor="middle" class="sub">make targets</text>
+
+  <!-- kubeconfig -->
+  <rect class="box" x="40" y="240" width="160" height="60" rx="6"/>
+  <text x="120" y="262" text-anchor="middle" class="lbl">~/.kube/config</text>
+  <text x="120" y="278" text-anchor="middle" class="sub">creds for kind apiserver</text>
+
+  <!-- kubectl proxy -->
+  <rect class="box" x="220" y="240" width="170" height="60" rx="6"/>
+  <text x="305" y="262" text-anchor="middle" class="lbl">kubectl proxy</text>
+  <text x="305" y="278" text-anchor="middle" class="sub">listens on :8001 (HTTP)</text>
+
+  <!-- bridge process -->
+  <rect class="ours" x="40" y="350" width="350" height="120" rx="6"/>
+  <text x="215" y="376" text-anchor="middle" class="lbl">bridge (this project) — `make run-local`</text>
+  <text x="215" y="394" text-anchor="middle" class="sub">listens on :8443 (HTTPS, self-signed in /tmp/bridge-tls)</text>
+  <text x="215" y="412" text-anchor="middle" class="mono">BRIDGE_OIDC_ISSUER=https://kubernetes.default.svc.cluster.local</text>
+  <text x="215" y="428" text-anchor="middle" class="mono">BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks</text>
+  <text x="215" y="444" text-anchor="middle" class="mono">BRIDGE_HARBOR_URL=https://harbor.dev.127.0.0.1.nip.io:8443</text>
+  <text x="215" y="460" text-anchor="middle" class="mono">BRIDGE_HARBOR_ADMIN_DIR=/tmp/harbor-admin</text>
+
+  <!-- Notes inside laptop -->
+  <text x="40"  y="500" class="note">controller-runtime Manager: uses ~/.kube/config the same way</text>
+  <text x="40"  y="516" class="note">kubectl does, so HarborAccess watches and Secret R/W go direct to the</text>
+  <text x="40"  y="532" class="note">kind apiserver — no proxy needed for that path. The proxy is only</text>
+  <text x="40"  y="548" class="note">there because go-oidc fetches JWKS over plain HTTPS without our</text>
+  <text x="40"  y="564" class="note">in-cluster DNS resolver.</text>
+
+  <!-- kind cluster boundary -->
+  <rect class="kind" x="550" y="80" width="300" height="370" rx="10"/>
+  <text x="700" y="106" text-anchor="middle" class="lbl">kind cluster</text>
+  <text x="700" y="122" text-anchor="middle" class="sub">runs in a Docker container on your laptop</text>
+
+  <!-- kube-apiserver -->
+  <rect class="box" x="580" y="160" width="240" height="70" rx="6"/>
+  <text x="700" y="184" text-anchor="middle" class="lbl">kube-apiserver</text>
+  <text x="700" y="200" text-anchor="middle" class="sub">issues SA tokens; serves CRD storage,</text>
+  <text x="700" y="216" text-anchor="middle" class="sub">Secrets, and /openid/v1/jwks</text>
+
+  <!-- HarborAccess CR + Secret cluster-side -->
+  <rect class="box" x="580" y="250" width="240" height="70" rx="6"/>
+  <text x="700" y="274" text-anchor="middle" class="lbl">HarborAccess CR + robot Secret</text>
+  <text x="700" y="290" text-anchor="middle" class="sub">created by you; reconciled by bridge;</text>
+  <text x="700" y="306" text-anchor="middle" class="sub">live in harbor-bridge-system ns</text>
+
+  <!-- Test SA / workload -->
+  <rect class="box" x="580" y="340" width="240" height="60" rx="6"/>
+  <text x="700" y="364" text-anchor="middle" class="lbl">test ServiceAccount</text>
+  <text x="700" y="380" text-anchor="middle" class="sub">test-pull/image-puller — `kubectl create token`</text>
+
+  <!-- Harbor boundary -->
+  <rect class="harbor" x="880" y="80" width="140" height="370" rx="10"/>
+  <text x="950" y="106" text-anchor="middle" class="lbl">Harbor</text>
+  <text x="950" y="122" text-anchor="middle" class="sub">your existing</text>
+  <text x="950" y="138" text-anchor="middle" class="sub">install</text>
+
+  <rect class="box" x="895" y="170" width="110" height="60" rx="6"/>
+  <text x="950" y="192" text-anchor="middle" class="lbl">API + robots</text>
+  <text x="950" y="208" text-anchor="middle" class="sub">admin auth</text>
+
+  <rect class="box" x="895" y="250" width="110" height="60" rx="6"/>
+  <text x="950" y="272" text-anchor="middle" class="lbl">registry v2</text>
+  <text x="950" y="288" text-anchor="middle" class="sub">/v2/, /service/token</text>
+
+  <!-- Arrows -->
+
+  <!-- 1: bridge -> proxy (JWKS) -->
+  <path class="arrow-emph" d="M 215 350 L 250 320 L 280 300" marker-end="url(#head-blue)"/>
+  <text x="245" y="338" class="step">1</text>
+  <text x="195" y="328" class="sub">JWKS via proxy</text>
+
+  <!-- 2: proxy -> apiserver -->
+  <path class="arrow-kind" d="M 390 270 L 580 195" marker-end="url(#head-kind)"/>
+  <text x="500" y="220" text-anchor="middle" class="stepM">2</text>
+  <text x="488" y="240" text-anchor="middle" class="sub">proxy forwards using</text>
+  <text x="488" y="254" text-anchor="middle" class="sub">your kubeconfig creds</text>
+
+  <!-- 3: bridge -> apiserver direct via kubeconfig -->
+  <path class="arrow-kind" d="M 200 270 C 250 200, 450 160, 580 175" marker-end="url(#head-kind)"/>
+  <text x="380" y="158" text-anchor="middle" class="stepM">3</text>
+  <text x="385" y="174" text-anchor="middle" class="sub">controller-runtime watch + Secret R/W</text>
+
+  <!-- 4: bridge -> Harbor (admin) -->
+  <path class="arrow-harb" d="M 390 400 C 600 420, 800 250, 895 195" marker-end="url(#head-harb)"/>
+  <text x="610" y="395" text-anchor="middle" class="stepR">4</text>
+  <text x="615" y="410" text-anchor="middle" class="sub">robot CRUD with admin Basic Auth</text>
+
+  <!-- 5: you -> apiserver (kubectl create token) -->
+  <path class="arrow-kind" d="M 200 185 L 580 178" marker-end="url(#head-kind)"/>
+  <text x="350" y="178" text-anchor="middle" class="stepM">5</text>
+  <text x="345" y="195" text-anchor="middle" class="sub">kubectl create token --audience=…</text>
+
+  <!-- 6: you -> bridge (curl) -->
+  <path class="arrow-emph" d="M 120 220 L 120 350" marker-end="url(#head-blue)"/>
+  <text x="135" y="280" class="step">6</text>
+  <text x="135" y="296" class="sub">POST /v1/credentials</text>
+  <text x="135" y="310" class="sub">Bearer SA token</text>
+
+  <!-- 7: crane -> Harbor -->
+  <path class="arrow-harb" d="M 200 178 C 350 90, 800 70, 950 165" marker-end="url(#head-harb)"/>
+  <text x="600" y="64" text-anchor="middle" class="stepR">7</text>
+  <text x="600" y="80" text-anchor="middle" class="sub">crane/skopeo pull with returned user+pass — the ADR-0013 acid test</text>
+
+  <!-- Legend -->
+  <rect class="ours" x="40"  y="585" width="14" height="14" rx="2"/>
+  <text x="62"  y="597" class="sub">our component</text>
+  <text x="62"  y="610" class="sub">(bridge process)</text>
+
+  <rect class="box" x="200" y="585" width="14" height="14" rx="2"/>
+  <text x="222" y="597" class="sub">existing components</text>
+
+  <line x1="380" y1="592" x2="430" y2="592" class="arrow-emph"/>
+  <text x="440" y="597" class="sub">data-plane flow</text>
+
+  <line x1="560" y1="592" x2="610" y2="592" class="arrow-kind"/>
+  <text x="620" y="597" class="sub">kind apiserver flow</text>
+
+  <line x1="760" y1="592" x2="810" y2="592" class="arrow-harb"/>
+  <text x="820" y="597" class="sub">Harbor flow</text>
+</svg>
