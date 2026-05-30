@@ -55,6 +55,12 @@ envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
 	@KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test ./bridge/controlplane/... -run TestEnvtest -count=1 -v -timeout 120s
 
+.PHONY: proxy
+proxy: ## Expose the cluster's apiserver at http://localhost:8001 so the bridge can fetch the JWKS off-cluster
+	@echo "Run this in a separate terminal; leave it running while \`make run-local\` is active."
+	@echo "Then set BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks when invoking run-local."
+	kubectl proxy --port=8001
+
 .PHONY: run-local
 run-local: ## Run the bridge against $KUBECONFIG with a self-signed cert in /tmp/bridge-tls
 	@test -n "$$BRIDGE_CLUSTER_NAME" || (echo "set BRIDGE_CLUSTER_NAME" && exit 1)
@@ -62,6 +68,15 @@ run-local: ## Run the bridge against $KUBECONFIG with a self-signed cert in /tmp
 	@test -n "$$BRIDGE_OIDC_ISSUER" || (echo "set BRIDGE_OIDC_ISSUER" && exit 1)
 	@test -n "$$BRIDGE_HARBOR_URL" || (echo "set BRIDGE_HARBOR_URL" && exit 1)
 	@test -n "$$BRIDGE_HARBOR_ADMIN_DIR" || (echo "set BRIDGE_HARBOR_ADMIN_DIR" && exit 1)
+	@if echo "$$BRIDGE_OIDC_ISSUER" | grep -q cluster.local && [ -z "$$BRIDGE_OIDC_JWKS_URL" ]; then \
+		echo ""; \
+		echo "BRIDGE_OIDC_ISSUER looks like a cluster-internal URL but BRIDGE_OIDC_JWKS_URL is unset."; \
+		echo "When running off-cluster the bridge cannot resolve cluster.local hostnames."; \
+		echo "Start \`make proxy\` in another terminal and set:"; \
+		echo "  export BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks"; \
+		echo ""; \
+		exit 1; \
+	fi
 	@mkdir -p /tmp/bridge-tls
 	@test -f /tmp/bridge-tls/tls.crt || \
 		openssl req -x509 -newkey rsa:2048 -nodes -days 1 \

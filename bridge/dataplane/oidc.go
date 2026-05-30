@@ -71,8 +71,19 @@ type Config struct {
 	// iss claim of incoming tokens — go-oidc strict-matches. For a
 	// Kubernetes cluster this is typically the value returned by
 	// `kubectl get --raw /.well-known/openid-configuration`, often
-	// "https://kubernetes.default.svc".
+	// "https://kubernetes.default.svc.cluster.local".
 	Issuer string
+
+	// JWKSURL is the URL to fetch the JSON Web Key Set from. When empty
+	// (the in-cluster default), the validator runs OIDC discovery
+	// against Issuer and uses whichever jwks_uri the discovery response
+	// reports. When set, the validator skips discovery entirely and
+	// fetches JWKS directly from this URL. The Issuer field is still
+	// the expected iss claim of incoming tokens; only the *transport*
+	// is overridden. Use this when the bridge runs outside the cluster
+	// (local dev via `kubectl proxy`) or behind a network topology
+	// where the cluster-internal URLs do not resolve.
+	JWKSURL string
 
 	// HTTPClient is used for OIDC discovery and JWKS fetching. Pass a
 	// client with a custom transport for httptest, mTLS, or audit
@@ -81,9 +92,11 @@ type Config struct {
 }
 
 // NewValidator constructs a Validator that verifies tokens issued by
-// cfg.Issuer. The constructor performs OIDC discovery synchronously so a
-// misconfigured issuer fails at bridge startup, not on the first
-// kubelet request.
+// cfg.Issuer. When cfg.JWKSURL is empty, the constructor performs OIDC
+// discovery synchronously so a misconfigured issuer fails at bridge
+// startup, not on the first kubelet request. When cfg.JWKSURL is set,
+// discovery is skipped and the validator goes straight to the supplied
+// JWKS endpoint with cfg.Issuer as the expected iss claim.
 func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	if cfg.Issuer == "" {
 		return nil, errors.New("oidc: issuer is required")
@@ -97,9 +110,24 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	// the ability to inject a fixture transport in tests.
 	ctx = oidc.ClientContext(ctx, httpClient)
 
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: discovery for issuer %q: %w", cfg.Issuer, err)
+	var provider *oidc.Provider
+	if cfg.JWKSURL != "" {
+		// Operator-supplied JWKS endpoint — bypass discovery. We still
+		// require the iss claim to match cfg.Issuer; only the *fetch*
+		// URL changes. This handles the local-dev case (kubectl proxy
+		// terminates outside the cluster but tokens still claim the
+		// cluster-internal issuer) and the production case where the
+		// bridge sits behind an internal LB.
+		provider = (&oidc.ProviderConfig{
+			IssuerURL: cfg.Issuer,
+			JWKSURL:   cfg.JWKSURL,
+		}).NewProvider(ctx)
+	} else {
+		p, err := oidc.NewProvider(ctx, cfg.Issuer)
+		if err != nil {
+			return nil, fmt.Errorf("oidc: discovery for issuer %q: %w", cfg.Issuer, err)
+		}
+		provider = p
 	}
 
 	verifier := provider.Verifier(&oidc.Config{

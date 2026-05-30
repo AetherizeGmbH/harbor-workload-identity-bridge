@@ -138,11 +138,16 @@ spec:
   tokenTTL: 1h
 YAML
 
-# 4. Run the bridge locally (one-time self-signed cert is auto-generated
-#    in /tmp/bridge-tls). The Helm chart will replace this step.
+# 4. Expose the cluster's apiserver locally so the bridge can fetch the
+#    JWKS off-cluster. Leave this running in a second terminal.
+make proxy   # = kubectl proxy --port=8001
+
+# 5. Run the bridge locally (one-time self-signed cert is auto-generated
+#    in /tmp/bridge-tls). The Helm chart will replace steps 4–5.
 BRIDGE_CLUSTER_NAME=dev \
 BRIDGE_NAMESPACE=harbor-bridge-system \
 BRIDGE_OIDC_ISSUER=$(kubectl get --raw /.well-known/openid-configuration | jq -r .issuer) \
+BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks \
 BRIDGE_HARBOR_URL=https://your-harbor.example.com \
 BRIDGE_HARBOR_ADMIN_DIR=/path/to/admin-creds-dir \
 make run-local

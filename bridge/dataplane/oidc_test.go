@@ -282,6 +282,83 @@ func TestNewValidator_RequiresIssuer(t *testing.T) {
 	}
 }
 
+// TestNewValidator_JWKSURL_SkipsDiscoveryAndValidatesCustomIssuer simulates
+// the off-cluster topology (local dev via `kubectl proxy`, prod with the
+// bridge behind an internal LB) where the issuer string tokens advertise
+// is not reachable but a separate JWKS URL is. The constructor must skip
+// discovery, fetch JWKS directly, and still verify tokens against the
+// configured Issuer string.
+func TestNewValidator_JWKSURL_SkipsDiscoveryAndValidatesCustomIssuer(t *testing.T) {
+	fi := newFixtureIssuer(t)
+	const declaredIssuer = "https://kubernetes.default.svc.cluster.local"
+
+	// Sanity-check: discovery is NOT reached. Wire a fail-loud transport
+	// to expose any accidental discovery fetch.
+	disallowDiscovery := func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "openid-configuration") {
+			t.Fatalf("discovery was hit at %s when JWKSURL is set", req.URL)
+		}
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	client := &http.Client{Transport: roundTripperFunc(disallowDiscovery)}
+
+	v, err := NewValidator(context.Background(), Config{
+		Issuer:     declaredIssuer,
+		JWKSURL:    fi.URL() + "/keys",
+		HTTPClient: client,
+	})
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+
+	tok := fi.signToken(t, jwt.MapClaims{
+		"iss": declaredIssuer, // matches Config.Issuer, NOT the fixture's URL
+		"sub": "system:serviceaccount:flux-system:source-controller",
+		"aud": "harbor-bridge",
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	})
+
+	claims, err := v.Validate(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.Issuer != declaredIssuer {
+		t.Errorf("Issuer = %q, want %q", claims.Issuer, declaredIssuer)
+	}
+}
+
+// TestNewValidator_JWKSURL_RejectsTokensWithWrongIssuer confirms the
+// discovery-skip path does NOT weaken issuer verification: a token whose
+// iss claim does not match Config.Issuer must still be rejected even
+// when JWKS is fetched from elsewhere.
+func TestNewValidator_JWKSURL_RejectsTokensWithWrongIssuer(t *testing.T) {
+	fi := newFixtureIssuer(t)
+	const declaredIssuer = "https://kubernetes.default.svc.cluster.local"
+
+	v, err := NewValidator(context.Background(), Config{
+		Issuer:  declaredIssuer,
+		JWKSURL: fi.URL() + "/keys",
+	})
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+
+	tok := fi.signToken(t, jwt.MapClaims{
+		"iss": "https://somewhere-else.example.com", // does not match declaredIssuer
+		"sub": "system:serviceaccount:x:y",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+
+	if _, err := v.Validate(context.Background(), tok); err == nil {
+		t.Fatal("expected Validate to reject token with mismatched issuer")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // TestJsonAudience_Unmarshal exercises the OIDC aud-as-string-or-array
 // normalisation in isolation, so a regression in the normalisation is
 // flagged without needing the full validator round-trip.

@@ -23,6 +23,7 @@ const (
 	EnvClusterName          = "BRIDGE_CLUSTER_NAME"
 	EnvNamespace            = "BRIDGE_NAMESPACE"
 	EnvOIDCIssuer           = "BRIDGE_OIDC_ISSUER"
+	EnvOIDCJWKSURL          = "BRIDGE_OIDC_JWKS_URL"
 	EnvHarborURL            = "BRIDGE_HARBOR_URL"
 	EnvHarborAdminDir       = "BRIDGE_HARBOR_ADMIN_DIR"
 	EnvForceLocalValidation = "BRIDGE_FORCE_LOCAL_VALIDATION"
@@ -63,6 +64,15 @@ type Config struct {
 	// plane uses it to detect HarborAccess CRs whose trustPolicy.issuer
 	// disagrees with the cluster the bridge is running in.
 	OIDCIssuer *url.URL
+
+	// OIDCJWKSURL, when non-nil, overrides where the data plane fetches
+	// the JSON Web Key Set used to verify SA token signatures. The
+	// expected iss claim of incoming tokens remains OIDCIssuer; only
+	// the fetch URL changes. Use when the bridge runs outside the
+	// cluster (local dev via `kubectl proxy`) or behind a network
+	// topology where the cluster-internal URLs do not resolve. Leave
+	// unset for the standard in-cluster deployment.
+	OIDCJWKSURL *url.URL
 
 	// HarborURL is the base URL of the Harbor instance this bridge manages
 	// robots in.
@@ -118,6 +128,16 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, err)
 	} else {
 		cfg.OIDCIssuer = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(EnvOIDCJWKSURL)); raw != "" {
+		// Optional — when set, must still parse as a URL with a scheme
+		// and host. Same shape as the other URL knobs.
+		if v, err := requireURL(raw, EnvOIDCJWKSURL); err != nil {
+			errs = append(errs, err)
+		} else {
+			cfg.OIDCJWKSURL = v
+		}
 	}
 
 	if v, err := requireURL(os.Getenv(EnvHarborURL), EnvHarborURL); err != nil {
@@ -176,7 +196,7 @@ func requireURL(raw, name string) (*url.URL, error) {
 // logging. Admin credentials are deliberately excluded; only the path to the
 // secret mount is included.
 func (c *Config) Sanitized() map[string]string {
-	return map[string]string{
+	out := map[string]string{
 		EnvClusterName:          c.ClusterName,
 		EnvNamespace:            c.Namespace,
 		EnvOIDCIssuer:           c.OIDCIssuer.String(),
@@ -185,6 +205,10 @@ func (c *Config) Sanitized() map[string]string {
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
 		EnvLogLevel:             c.LogLevel,
 	}
+	if c.OIDCJWKSURL != nil {
+		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.String()
+	}
+	return out
 }
 
 // AdminCreds is the loaded Harbor admin / system-robot credentials.

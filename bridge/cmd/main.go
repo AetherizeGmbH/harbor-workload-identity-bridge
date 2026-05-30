@@ -152,11 +152,17 @@ func run() error {
 
 	// Step 7: OIDC Validator. Discovery runs synchronously here so a
 	// misconfigured BRIDGE_OIDC_ISSUER fails at startup, not on the
-	// first kubelet request.
+	// first kubelet request. When BRIDGE_OIDC_JWKS_URL is set, discovery
+	// is skipped in favour of that URL — see config.go for the local-dev
+	// rationale.
 	startupCtx := ctrl.SetupSignalHandler()
-	validator, err := dataplane.NewValidator(startupCtx, dataplane.Config{
+	validatorCfg := dataplane.Config{
 		Issuer: cfg.OIDCIssuer.String(),
-	})
+	}
+	if cfg.OIDCJWKSURL != nil {
+		validatorCfg.JWKSURL = cfg.OIDCJWKSURL.String()
+	}
+	validator, err := dataplane.NewValidator(startupCtx, validatorCfg)
 	if err != nil {
 		return fmt.Errorf("build oidc validator: %w", err)
 	}
