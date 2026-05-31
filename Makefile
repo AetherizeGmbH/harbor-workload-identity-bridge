@@ -5,7 +5,7 @@ CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
 PROJECT_DIR := $(shell pwd)
 
 .PHONY: all
-all: generate manifests vet build-all
+all: generate manifests vet build build-plugin
 
 .PHONY: generate
 generate: ## Generate deepcopy methods for API types
@@ -31,6 +31,11 @@ vet: ## Run go vet
 build: ## Build the bridge binary into bin/bridge
 	mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/bridge ./bridge/cmd
+
+.PHONY: build-plugin
+build-plugin: ## Build the kubelet credential-provider plugin into bin/harbor-bridge-plugin
+	mkdir -p bin
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-plugin ./plugin
 
 .PHONY: build-all
 build-all: ## Compile-check every package

@@ -314,6 +314,156 @@ bridge_credential_issuances_total{result="ok"} 1
 bridge_credential_issuance_duration_seconds_count 1
 ```
 
+## Phase 5 — Drive the kubelet plugin binary
+
+The plugin is what kubelet actually fork+exec's per image pull
+([ADR-0015](docs/adr/0015-plugin-duplicates-wire-types.md)). Until the
+Helm chart (Phase 5 of the project) installs it onto a node, we can't
+test it under real kubelet — but we can drive it by hand. The plugin is
+a pure stdin→stdout transform, so a hand-crafted
+`CredentialProviderRequest` reaches the bridge identically to one
+emitted by kubelet.
+
+### Binary hygiene
+
+```bash
+make build-plugin
+
+file bin/harbor-bridge-plugin                    # static Mach-O / ELF
+nm bin/harbor-bridge-plugin | grep -ic cgo       # 0
+go list -deps ./plugin/... | grep -cE '^(k8s\.io|sigs\.k8s\.io)'  # 0 — ADR-0015
+go version -m bin/harbor-bridge-plugin | grep -E 'CGO_ENABLED|vcs\.revision'
+```
+
+ADR-0015 is the standing check: the plugin's dep closure must contain
+**zero** `k8s.io` / `sigs.k8s.io` packages. The bridge binary, by
+comparison, carries 400+. Adding any such import to the plugin is a
+breaking change to that ADR.
+
+### Misconfig paths
+
+Every error exits 1 with a clear stderr message. Spot-check a few:
+
+```bash
+echo '{}' | bin/harbor-bridge-plugin                                # HARBOR_BRIDGE_ENDPOINT is required
+echo '{}' | HARBOR_BRIDGE_ENDPOINT=http://x.example bin/harbor-bridge-plugin   # must use https
+echo '' | HARBOR_BRIDGE_ENDPOINT=https://localhost:8443 bin/harbor-bridge-plugin  # EOF on stdin
+```
+
+### Happy path — byte-equal Basic Auth
+
+```bash
+TOKEN=$(kubectl create token image-puller -n test-pull \
+  --audience=harbor-bridge --duration=10m)
+
+# Baseline: curl the bridge directly.
+CURL_RESP=$(curl -sk -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"image":"your-harbor/your-project/whatever:tag"}' \
+  https://localhost:8443/v1/credentials)
+
+# Same token, same image, through the plugin.
+PLUGIN_RESP=$(jq -n --arg tok "$TOKEN" --arg img "your-harbor/your-project/whatever:tag" \
+  '{apiVersion:"credentialprovider.kubelet.k8s.io/v1",
+    kind:"CredentialProviderRequest",
+    image:$img,
+    serviceAccountToken:$tok}' \
+  | HARBOR_BRIDGE_ENDPOINT=https://localhost:8443 \
+    HARBOR_BRIDGE_CA_BUNDLE=/tmp/bridge-tls/tls.crt \
+    bin/harbor-bridge-plugin)
+
+# Auth pairs must be byte-equal.
+diff <(jq '{u:.username,p:.password}' <<<"$CURL_RESP") \
+     <(jq '.auth | to_entries[0].value | {u:.username,p:.password}' <<<"$PLUGIN_RESP")
+```
+
+**Validation checkpoint 5 — the load-bearing one for the plugin.** The
+diff is empty, meaning the plugin's `auth.<host>.{username,password}`
+pair is identical to the one curl received from the bridge directly. By
+transitivity with Phase 4 (crane proved containerd accepts those exact
+credentials), the kubelet → plugin → bridge → containerd → Harbor chain
+is now end-to-end proven — short of running a real kubelet.
+
+The plugin's response shape should look like:
+
+```json
+{
+  "apiVersion": "credentialprovider.kubelet.k8s.io/v1",
+  "kind": "CredentialProviderResponse",
+  "cacheKeyType": "ServiceAccount",
+  "cacheDuration": "1h0m0s",
+  "auth": {
+    "harbor.dev.aetherize.com": {
+      "username": "robot$bridge-dev-test-pull-image-puller",
+      "password": "<long opaque string>"
+    }
+  }
+}
+```
+
+Notice:
+- `cacheDuration` is the Go duration form — matches `metav1.Duration`'s
+  `MarshalJSON` output, so kubelet's strict decoder accepts it.
+- The `auth` map's key is the image's host portion (preserving any
+  `:port`) — kubelet uses that to match this credential set to the
+  image being pulled.
+
+### Refusal paths — empty auth, exit 0, refusal logged to stderr
+
+```bash
+# 401: garbage token.
+jq -n '{apiVersion:"credentialprovider.kubelet.k8s.io/v1",
+        kind:"CredentialProviderRequest",
+        image:"your-harbor/your-project/whatever:tag",
+        serviceAccountToken:"not-a-real-token"}' \
+| HARBOR_BRIDGE_ENDPOINT=https://localhost:8443 \
+  HARBOR_BRIDGE_CA_BUNDLE=/tmp/bridge-tls/tls.crt \
+  bin/harbor-bridge-plugin
+
+# 403: valid token but audience the HarborAccess doesn't accept.
+WRONG=$(kubectl create token image-puller -n test-pull \
+  --audience=wrong-audience --duration=10m)
+jq -n --arg tok "$WRONG" \
+  '{apiVersion:"credentialprovider.kubelet.k8s.io/v1",
+    kind:"CredentialProviderRequest",
+    image:"your-harbor/your-project/whatever:tag",
+    serviceAccountToken:$tok}' \
+| HARBOR_BRIDGE_ENDPOINT=https://localhost:8443 \
+  HARBOR_BRIDGE_CA_BUNDLE=/tmp/bridge-tls/tls.crt \
+  bin/harbor-bridge-plugin
+```
+
+Both should emit:
+
+```json
+{
+  "apiVersion": "credentialprovider.kubelet.k8s.io/v1",
+  "kind": "CredentialProviderResponse",
+  "cacheKeyType": "Image",
+  "cacheDuration": "0s",
+  "auth": {}
+}
+```
+
+…with `exit 0` and a `bridge refused credentials for …; returning empty
+auth (no cache)` line on stderr. The empty auth map plus
+`cacheKeyType=Image` + `cacheDuration=0s` tells kubelet *"I have no
+credentials for this image and don't cache that fact"* — so the next
+pull re-invokes the plugin, giving an operator a fast feedback loop
+while fixing a HarborAccess CR. The bridge's metrics should show
+`issuances{result=unauthorized}` for the 401 case and
+`issuances{result=forbidden}` for the 403 case.
+
+### Reference: validation run on 2026-05-31
+
+Plugin happy path emitted exactly the response shape above; the auth
+pair was byte-equal to the curl baseline. Both refusal paths produced
+the empty-auth response with exit 0 and stderr message. Bridge metrics
+recorded the corresponding counter increments
+(`issuances{result=ok}`, `unauthorized`, `forbidden`) and OIDC failure
+classification (`oidc_validation_failures{reason=malformed}` for the
+garbage token).
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -331,14 +481,17 @@ bridge_credential_issuance_duration_seconds_count 1
 
 ## What this doc explicitly doesn't cover
 
-- **The kubelet plugin** (Phase 4 of the project). Not built yet; this
-  test sidesteps it entirely by curl'ing the bridge directly.
-- **The Helm chart** (Phase 5). Not built yet; this test replaces it
-  with `make run-local` plus manual `kubectl apply`s.
+- **The Helm chart** (Phase 5 of the project). Not built yet; this test
+  replaces it with `make run-local` plus manual `kubectl apply`s and a
+  hand-driven plugin invocation.
+- **Real kubelet fork+exec of the plugin**. Phase 5 covers driving the
+  plugin binary by hand; full kubelet integration requires the chart to
+  install the credential-provider-config and binary onto a node, which
+  is a Phase 6 deliverable.
 - **Real containerd via the credential-provider hook**. The closest
-  equivalent here is Phase 4 (crane/skopeo), which exercises the same
-  Harbor handshake containerd uses. Full containerd validation is part
-  of Phase 6's e2e suite against two kind clusters.
+  equivalents here are Phase 4 (crane/skopeo, same Harbor handshake)
+  and Phase 5 (plugin byte-equal Basic Auth). Full containerd
+  validation is part of Phase 6's e2e suite against two kind clusters.
 - **Multi-cluster collision tests**. Single cluster only. ADR-0009's
   multi-cluster claims will be validated in Phase 6.
 - **Harbor TLS with a private CA**. Currently the bridge's Harbor

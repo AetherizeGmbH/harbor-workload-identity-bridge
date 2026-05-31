@@ -4,7 +4,7 @@ Source of truth for what is done, what is next, and what is intentionally out of
 
 This document is written to survive context compaction. The detail sections below carry the load-bearing constraints, conventions, and constants — read them before resuming work in a phase.
 
-## Current status (as of 2026-05-12)
+## Current status (as of 2026-05-31)
 
 - Phase 1: COMPLETE
 - Phase 2 Slice A (CRD bump + control-plane foundations): COMPLETE
@@ -14,8 +14,8 @@ This document is written to survive context compaction. The detail sections belo
 - Phase 3 Slice B (Harbor token client + cache): **REMOVED in ADR-0013 pivot** — see "Architecture snapshot" below
 - Phase 3 Slice C (handler): COMPLETE (rewritten by ADR-0013 pivot)
 - Phase 3 Slice D (server + metrics + cmd/main.go): COMPLETE
-- Phase 4 (plugin binary): **NEXT**
-- Phase 5 (Helm chart): pending
+- Phase 4 (plugin binary): COMPLETE
+- Phase 5 (Helm chart): **NEXT**
 - Phase 6 (e2e + docs): pending
 
 ## Architecture snapshot (post-ADR-0013)
@@ -221,7 +221,22 @@ Originally-planned section (kept for archaeology):
 - `/metrics` reports the expected metric families.
 - SIGTERM cleanly shuts down both the reconciler and the HTTP server.
 
-## Phase 4 — Plugin binary
+## Phase 4 — Plugin binary — COMPLETE
+
+### Delivered
+
+- [plugin/main.go](../plugin/main.go) — entrypoint, env-loading (`HARBOR_BRIDGE_ENDPOINT`, `_CA_BUNDLE`, `_CLIENT_CERT`, `_CLIENT_KEY`), stdin/stdout protocol (`credentialprovider.kubelet.k8s.io/v1`), translation of bridge response → `CredentialProviderResponse`. Image-host derivation preserves the port (e.g. `harbor.example.com:8443`) so the auth-map key matches kubelet's image-to-auth lookup exactly. Wire types are defined locally instead of imported from `k8s.io/kubelet/pkg/apis/credentialprovider/v1` — keeps the binary's transitive dep graph free of `k8s.io/api`/controller-runtime and dodges the upstream `PluginCacheKeyType` enum mismatch around the bridge's `cache_key_type="ServiceAccount"` value.
+- [plugin/bridge_client.go](../plugin/bridge_client.go) — HTTPS-only client (`https://` scheme enforced in config validation). 5s connect timeout, 15s total. TLS verification via `HARBOR_BRIDGE_CA_BUNDLE` (path *or* inline PEM, detected by `-----BEGIN` armor). Optional mTLS via `_CLIENT_CERT`/`_CLIENT_KEY` (both-or-neither, validated). 503 → one retry after 1s; second 503 surfaces as `errBridgeUnavailable` (non-zero exit). 401/403 → `errBridgeRefused` sentinel that the main loop translates into an empty-auth response (no kubelet caching).
+- Exit-code contract: 0 on success or on a successful empty-auth refusal write; non-zero on any other error with the cause on stderr (kubelet surfaces stderr in node events).
+- Plugin does **not** import `bridge/dataplane` — the `/v1/credentials` path and `bridgeResponse` shape are duplicated with "must match" comments. Verified by `go list -deps ./plugin/...` showing zero `k8s.io` / `sigs.k8s.io` packages in the closure.
+- Build: `make build-plugin` → `bin/harbor-bridge-plugin` (~6 MB static, `CGO_ENABLED=0`, `-trimpath -ldflags='-s -w'`). Phase 5 distroless image is `gcr.io/distroless/static:nonroot`.
+
+### Tests
+
+- [plugin/main_test.go](../plugin/main_test.go) — `run()` end-to-end through a `bridgeFetcher` fake (happy path, host-with-port retention, refused→empty auth, unavailable→error propagation, JSON decode failure, missing fields), plus `imageHost` table and `loadConfig` matrix (missing endpoint, http rejected, mTLS partial set).
+- [plugin/bridge_client_test.go](../plugin/bridge_client_test.go) — every status-code path against `httptest.NewTLSServer`: 200 (with request-header/body assertions), 401, 403, 503→200 retry (with elapsed-time check), 503→503 mapping, 500 not retried, 200-with-empty-creds, 200-with-garbage-body, unreachable-server.
+
+### Originally-planned section (kept for archaeology)
 
 **Goal:** static Go binary the kubelet executes per KEP-4412.
 
