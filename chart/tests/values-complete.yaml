@@ -1,0 +1,20 @@
+# Minimal complete values for golden-file render testing. All required
+# values are set; defaults handle everything else.
+clusterName: prod-eu-west
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+
+plugin:
+  matchImages:
+    - "harbor.example.com/*"
+    - "*.harbor.example.com/*"
+  audience: harbor-bridge-prod-eu-west
+
+tls:
+  enabled: true
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer

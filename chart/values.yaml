@@ -1,0 +1,164 @@
+# ====================================================================
+# REQUIRED VALUES
+# These have no default. Install fails if they are unset or empty.
+# ====================================================================
+
+# Logical name for this cluster, used as the Harbor robot-name prefix
+# (ADR-0009). Must be a DNS label and MUST NOT be a hyphen-prefix of
+# any other cluster's name sharing the same Harbor (operator
+# responsibility — there is no central coordinator to enforce this).
+clusterName: ""
+
+harbor:
+  # Base URL of the Harbor instance the bridge manages robots in.
+  url: ""
+
+  # Reference to an *existing* Secret in the release namespace holding
+  # Harbor admin credentials. Two keys: `username`, `password`.
+  # The chart does NOT create this Secret — the operator does, so the
+  # password never lives in values.yaml or a git-committed manifest.
+  adminCredsSecret:
+    name: ""
+    # Override key names if the operator's existing Secret uses
+    # different conventions (e.g. `harbor-username`).
+    keys:
+      username: username
+      password: password
+
+plugin:
+  # Image patterns (kubelet glob format) for which kubelet should call
+  # this plugin. REQUIRED — an empty list means kubelet never invokes
+  # the plugin and image pulls silently fall back to anonymous.
+  # Example: ["harbor.example.com/*", "*.harbor.example.com/*"]
+  matchImages: []
+
+  # Audience the kubelet projects the SA token with. Must match
+  # spec.trustPolicy.audience on every HarborAccess CR served by this
+  # bridge. Pick one string per cluster; embedding the cluster name is
+  # a defensible default ("harbor-bridge-<cluster>").
+  audience: ""
+
+tls:
+  # Set to false ONLY if you are terminating TLS upstream (e.g. service
+  # mesh sidecar). Direct kubelet→plugin→bridge with TLS off is unsafe.
+  enabled: true
+
+  # cert-manager issuer that signs the bridge's serving cert. The CA
+  # from the same chain is plumbed to the plugin DaemonSet so kubelet
+  # nodes trust the bridge's cert.
+  issuerRef:
+    name: ""
+    kind: ClusterIssuer  # ClusterIssuer | Issuer
+
+# ====================================================================
+# DEFAULTED VALUES — override as needed
+# ====================================================================
+
+bridge:
+  replicas: 2
+
+  # Leader election is auto-enabled when replicas > 1; explicit override.
+  leaderElection: null  # null = auto from replicas; true | false to force.
+
+  image:
+    repository: ghcr.io/aetherize/harbor-workload-identity-bridge
+    # Defaults to .Chart.AppVersion when empty.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Service-account-token issuer the bridge validates incoming SA
+  # tokens against. Match the cluster's actual issuer (find it with
+  # `kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`).
+  oidcIssuer: https://kubernetes.default.svc.cluster.local
+
+  # Reserved for after upstream Harbor implements native OIDC trust
+  # policies (goharbor/harbor#17520). Keep true today.
+  forceLocalValidation: true
+
+  logLevel: info  # debug | info | warn | error
+
+  # mTLS between plugin and bridge — optional defense-in-depth on top
+  # of SA-token validation (ADR-0008). When enabled, the plugin
+  # presents a chart-issued client cert; the bridge rejects connections
+  # without one.
+  mTLS:
+    enabled: false
+    # cert-manager Issuer used to sign client certs for plugin pods.
+    clientIssuerRef:
+      name: ""
+      kind: ClusterIssuer
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Override only if you need to plumb additional env vars (e.g.
+  # HTTP_PROXY). Both static envs and envFrom are supported.
+  extraEnv: []
+  extraEnvFrom: []
+
+plugin:
+  # Image carrying the plugin binary. The DaemonSet copies the binary
+  # out of this image onto each node's filesystem; the kubelet exec's
+  # the on-node binary, not anything in the pod.
+  image:
+    repository: ghcr.io/aetherize/harbor-workload-identity-bridge-plugin
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Where on each node the plugin binary and config are written. These
+  # MUST match the kubelet's --image-credential-provider-bin-dir and
+  # --image-credential-provider-config flags. The chart can't change
+  # those flags — the operator does that at node provisioning time.
+  hostBinaryDir: /etc/kubernetes/credential-provider
+  hostConfigDir: /etc/kubernetes/credential-provider-config
+
+  # How long kubelet may cache credentials returned by the plugin.
+  # Bounded above by the HarborAccess CR's spec.tokenTTL; this is just
+  # kubelet's view, not a contract with Harbor.
+  defaultCacheDuration: 1h
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations:
+    # Plugin must land on control-plane nodes too — kubelet on every
+    # node needs to exec it for image pulls.
+    - operator: Exists
+
+# Service shape. ADR-0008: NodePort by default so plugin pods can reach
+# the bridge via node-local routing (plugin → 127.0.0.1:<nodePort>).
+service:
+  type: NodePort
+  port: 8443
+  nodePort: 31443
+
+# Prometheus scrape config — chart serves /metrics on the same TLS
+# endpoint as /v1/credentials.
+metrics:
+  enabled: true
+  # When the Prometheus Operator is present, set this to true to ship
+  # a ServiceMonitor that scrapes the bridge over the same TLS.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}

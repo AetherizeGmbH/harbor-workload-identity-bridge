@@ -101,3 +101,51 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 		echo "ERROR: bridge/controlplane imports bridge/dataplane (violates ADR-0002)"; \
 		exit 1; \
 	fi
+
+.PHONY: verify-plugin-isolation
+verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sigs.k8s.io packages
+	@count=$$(go list -deps ./plugin/... 2>/dev/null | grep -cE '^(k8s\.io|sigs\.k8s\.io)' || true); \
+	if [ "$$count" != "0" ]; then \
+		echo "ERROR: plugin imports k8s.io / sigs.k8s.io packages (violates ADR-0015):"; \
+		go list -deps ./plugin/... | grep -E '^(k8s\.io|sigs\.k8s\.io)'; \
+		exit 1; \
+	fi
+
+# ====================================================================
+# Helm chart targets (Phase 5)
+# ====================================================================
+
+CHART_DIR ?= chart
+CHART_TESTS_DIR ?= $(CHART_DIR)/tests
+GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
+
+.PHONY: chart-lint
+chart-lint: ## helm lint the chart against every test values file
+	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml || exit 1
+	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml || exit 1
+
+.PHONY: chart-render
+chart-render: ## Render the chart with the complete-values test file to stdout
+	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system
+
+.PHONY: chart-golden
+chart-golden: ## Diff current render against the checked-in golden files
+	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > /tmp/render-complete.yaml
+	@diff -u $(GOLDEN_DIR)/default.yaml /tmp/render-complete.yaml || { echo "golden mismatch for values-complete.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
+	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > /tmp/render-mtls.yaml
+	@diff -u $(GOLDEN_DIR)/mtls.yaml /tmp/render-mtls.yaml || { echo "golden mismatch for values-mtls.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
+	@echo "golden render unchanged"
+
+.PHONY: chart-golden-update
+chart-golden-update: ## Re-capture golden files after intentional template changes
+	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/default.yaml
+	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/mtls.yaml
+	@echo "golden files refreshed; commit them after review"
+
+.PHONY: chart-test-required
+chart-test-required: ## Verify each required value gates install
+	@$(CHART_TESTS_DIR)/test-required-values.sh
+
+.PHONY: chart-test
+chart-test: chart-lint chart-test-required chart-golden ## Full chart test suite (lint + required-value + golden)
+	@echo "chart-test passed"

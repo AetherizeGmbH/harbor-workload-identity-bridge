@@ -1,0 +1,166 @@
+{{/*
+DaemonSet that installs the plugin binary, the kubelet credential-
+provider-config, and the bridge's CA cert onto every node. After
+copying, the container sleeps so the DaemonSet stays "running" —
+this lets the operator inspect the install on a per-node basis with
+`kubectl logs`.
+
+The install step is idempotent: it runs on every container start
+(reboot, eviction, image bump). cp is destination-replace, so
+upgrades pick up automatically.
+
+This DaemonSet does NOT change kubelet's flags. The operator must
+already have set:
+  --image-credential-provider-bin-dir=<plugin.hostBinaryDir>
+  --image-credential-provider-config=<plugin.hostConfigDir>/credential-provider-config.yaml
+on each node's kubelet, or kubelet will never exec the plugin.
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "harbor-bridge.plugin.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "harbor-bridge.plugin.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        {{- include "harbor-bridge.plugin.labels" . | nindent 8 }}
+        {{- with .Values.plugin.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force re-roll on config or CA rotation so the on-disk copies
+        # are refreshed across the fleet.
+        plugin.harbor.aetherize.io/config-checksum: {{ include (print $.Template.BasePath "/plugin-configmap.yaml") . | sha256sum }}
+        plugin.harbor.aetherize.io/tls-checksum: {{ printf "%s|%v|%v" (include "harbor-bridge.tlsSecretName" .) .Values.tls.enabled .Values.bridge.mTLS.enabled | sha256sum }}
+        {{- with .Values.plugin.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "harbor-bridge.plugin.serviceAccountName" . }}
+      hostNetwork: false
+      priorityClassName: system-node-critical
+      securityContext:
+        runAsNonRoot: false  # need root to write into /etc/kubernetes
+        runAsUser: 0
+      {{- with .Values.plugin.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.plugin.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: install
+          image: {{ include "harbor-bridge.plugin.image" . }}
+          imagePullPolicy: {{ .Values.plugin.image.pullPolicy }}
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -eu
+              echo "installing plugin binary → ${HOST_BIN_DIR}"
+              mkdir -p "${HOST_BIN_DIR}"
+              cp -f /plugin/harbor-bridge-plugin "${HOST_BIN_DIR}/harbor-bridge-plugin"
+              chmod 0755 "${HOST_BIN_DIR}/harbor-bridge-plugin"
+
+              echo "installing kubelet credential-provider-config → ${HOST_CONFIG_DIR}"
+              mkdir -p "${HOST_CONFIG_DIR}"
+              cp -f /config/credential-provider-config.yaml "${HOST_CONFIG_DIR}/credential-provider-config.yaml"
+              chmod 0644 "${HOST_CONFIG_DIR}/credential-provider-config.yaml"
+
+              echo "installing bridge CA → ${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
+              cp -f /tls/ca.crt "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
+              chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
+              {{- if .Values.bridge.mTLS.enabled }}
+
+              echo "installing mTLS client cert → ${HOST_CONFIG_DIR}/harbor-bridge-client.{crt,key}"
+              cp -f /mtls/tls.crt "${HOST_CONFIG_DIR}/harbor-bridge-client.crt"
+              cp -f /mtls/tls.key "${HOST_CONFIG_DIR}/harbor-bridge-client.key"
+              chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-client.crt"
+              chmod 0600 "${HOST_CONFIG_DIR}/harbor-bridge-client.key"
+              {{- end }}
+
+              echo "install complete"
+          env:
+            - name: HOST_BIN_DIR
+              value: /host{{ .Values.plugin.hostBinaryDir }}
+            - name: HOST_CONFIG_DIR
+              value: /host{{ .Values.plugin.hostConfigDir }}
+          volumeMounts:
+            - name: host-bin
+              mountPath: /host{{ .Values.plugin.hostBinaryDir }}
+            - name: host-config
+              mountPath: /host{{ .Values.plugin.hostConfigDir }}
+            - name: kubelet-config
+              mountPath: /config
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- if .Values.bridge.mTLS.enabled }}
+            - name: mtls
+              mountPath: /mtls
+              readOnly: true
+            {{- end }}
+          securityContext:
+            # The install container must write into /etc/kubernetes on
+            # the host; that requires privileges the main container
+            # doesn't need.
+            privileged: true
+          resources:
+            {{- toYaml .Values.plugin.resources | nindent 12 }}
+      containers:
+        - name: pause
+          # Keep the DaemonSet "running" after install so `kubectl get
+          # ds` shows healthy and `kubectl logs` on this pod surfaces
+          # the install output.
+          image: registry.k8s.io/pause:3.10
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+      volumes:
+        - name: host-bin
+          hostPath:
+            path: {{ .Values.plugin.hostBinaryDir }}
+            type: DirectoryOrCreate
+        - name: host-config
+          hostPath:
+            path: {{ .Values.plugin.hostConfigDir }}
+            type: DirectoryOrCreate
+        - name: kubelet-config
+          configMap:
+            name: {{ include "harbor-bridge.plugin.fullname" . }}
+            defaultMode: 0644
+        - name: tls
+          secret:
+            secretName: {{ include "harbor-bridge.tlsSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- if .Values.bridge.mTLS.enabled }}
+        - name: mtls
+          secret:
+            secretName: {{ include "harbor-bridge.mTLSClientSecretName" . }}
+            defaultMode: 0400
+        {{- end }}

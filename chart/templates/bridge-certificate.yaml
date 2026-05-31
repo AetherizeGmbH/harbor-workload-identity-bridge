@@ -1,0 +1,77 @@
+{{- if .Values.tls.enabled }}
+{{/*
+cert-manager Certificate for the bridge's serving cert. The CA from
+the same chain is plumbed to plugin pods via the same Secret (ca.crt
+key) so kubelet nodes can verify the bridge's cert.
+
+The bridge pod restarts on cert rotation via the checksum annotation
+in bridge-deployment.yaml.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "harbor-bridge.tlsSecretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "harbor-bridge.tlsSecretName" . }}
+  # The plugin reads ca.crt from this Secret via the DaemonSet's
+  # volume mount. cert-manager writes it by default.
+  duration: 2160h     # 90d
+  renewBefore: 360h   # 15d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  subject:
+    organizations: [aetherize.harbor-workload-identity-bridge]
+  commonName: {{ include "harbor-bridge.bridge.fullname" . }}
+  dnsNames:
+    - {{ include "harbor-bridge.bridge.fullname" . }}
+    - {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  usages:
+    - server auth
+    {{- if .Values.bridge.mTLS.enabled }}
+    - client auth
+    {{- end }}
+  issuerRef:
+    name: {{ .Values.tls.issuerRef.name }}
+    kind: {{ .Values.tls.issuerRef.kind }}
+    group: cert-manager.io
+{{- if .Values.bridge.mTLS.enabled }}
+---
+{{/*
+Client cert plugin pods present to the bridge. Same CA chain via the
+configured client issuer (which the operator may have point at the
+same root as tls.issuerRef).
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "harbor-bridge.mTLSClientSecretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "harbor-bridge.mTLSClientSecretName" . }}
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  commonName: {{ include "harbor-bridge.plugin.fullname" . }}
+  usages:
+    - client auth
+  issuerRef:
+    name: {{ .Values.bridge.mTLS.clientIssuerRef.name }}
+    kind: {{ .Values.bridge.mTLS.clientIssuerRef.kind }}
+    group: cert-manager.io
+{{- end }}
+{{- end }}

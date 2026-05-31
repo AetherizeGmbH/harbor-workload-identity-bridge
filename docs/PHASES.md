@@ -15,8 +15,8 @@ This document is written to survive context compaction. The detail sections belo
 - Phase 3 Slice C (handler): COMPLETE (rewritten by ADR-0013 pivot)
 - Phase 3 Slice D (server + metrics + cmd/main.go): COMPLETE
 - Phase 4 (plugin binary): COMPLETE
-- Phase 5 (Helm chart): **NEXT**
-- Phase 6 (e2e + docs): pending
+- Phase 5 (Helm chart): COMPLETE
+- Phase 6 (e2e + docs): **NEXT**
 
 ## Architecture snapshot (post-ADR-0013)
 
@@ -269,7 +269,34 @@ Originally-planned section (kept for archaeology):
 - Distroless `gcr.io/distroless/static:nonroot` image, single layer with the binary.
 - Helm chart (Phase 5) deploys as a DaemonSet whose only job is to copy the binary onto the node's `/etc/kubernetes/credential-provider/` directory plus the kubelet credential-provider config to `/etc/kubernetes/credential-provider-config/`.
 
-## Phase 5 — Helm chart
+## Phase 5 — Helm chart — COMPLETE
+
+### Delivered
+
+- [chart/Chart.yaml](../chart/Chart.yaml) (`harbor-workload-identity-bridge` v0.1.0, kubeVersion `>=1.34.0-0` for KEP-4412 beta).
+- [chart/values.yaml](../chart/values.yaml) — 7 REQUIRED fields gated at template time (`clusterName`, `harbor.url`, `harbor.adminCredsSecret.name`, `plugin.matchImages`, `plugin.audience`, `tls.issuerRef.name` when `tls.enabled`, `bridge.mTLS.clientIssuerRef.name` when mTLS enabled); everything else defaulted with comments explaining each knob.
+- [chart/templates/_helpers.tpl](../chart/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide, leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
+- Bridge templates: `bridge-serviceaccount.yaml`, `bridge-rbac.yaml` (ClusterRole for HarborAccess cluster-wide, Role for Secrets + Lease in release namespace — tightened from the over-broad kubebuilder markers), `bridge-deployment.yaml` (2 replicas with pod-anti-affinity, distroless `nonroot` security context, projected admin-creds and TLS volumes, TLS-cert-checksum annotation for cert-rotation reload), `bridge-service.yaml` (NodePort 31443 per ADR-0008), `bridge-certificate.yaml` (cert-manager Certificate with optional client-cert when mTLS enabled), `bridge-servicemonitor.yaml` (optional, only when `metrics.serviceMonitor.enabled`).
+- Plugin templates: `plugin-serviceaccount.yaml` (`automountServiceAccountToken: false` — plugin pods don't talk to the K8s API), `plugin-configmap.yaml` (kubelet `CredentialProviderConfig` with `cacheType: ServiceAccount`, `defaultCacheDuration`, `matchImages` from values, `HARBOR_BRIDGE_*` env including CA path), `plugin-daemonset.yaml` (privileged init container that copies binary + config + CA + optional mTLS client cert into `/etc/kubernetes/credential-provider*` hostPaths, then a `registry.k8s.io/pause:3.10` main container so the DaemonSet stays "running" and `kubectl logs` surfaces the install output; `priorityClassName: system-node-critical`, `tolerations: [{operator: Exists}]` so the plugin lands on control-plane nodes).
+- [chart/crds/harbor.aetherize.io_harboraccesses.yaml](../chart/crds/harbor.aetherize.io_harboraccesses.yaml) — CRD copied from `config/crd/bases`. Helm's `crds/` directory installs it but does not upgrade it; CRD changes are an explicit operator step.
+- [chart/templates/NOTES.txt](../chart/templates/NOTES.txt) — prints `clusterName`, the unique prefix, the audience the operator must set on every CR, and the kubelet flags the chart cannot set (`--image-credential-provider-{bin-dir,config}` must already be on the node).
+
+### Validation
+
+- `make chart-lint` — `helm lint` clean on both test values files (`values-complete.yaml`, `values-mtls.yaml`).
+- `make chart-test-required` — [chart/tests/test-required-values.sh](../chart/tests/test-required-values.sh) verifies all 7 required-value gates fire with the expected error substring. `plugin.matchImages` (an empty list, not a missing key) is tested via a values overlay because `--set foo=[]` doesn't reproduce the empty-list path.
+- `make chart-golden` — diff current render against `chart/tests/golden/{default,mtls}.yaml`. CI fails on unintended template drift; `make chart-golden-update` re-captures after intentional changes.
+- `make chart-test` — full suite (lint + required-value + golden), used as the chart's gate.
+- Server-side dry-run against the 2026-05-31 kind cluster accepted all 11 resources for the default variant and all 12 for the mTLS variant (the ServiceMonitor's CRD wasn't installed; YAML structurally fine).
+- [Makefile](../Makefile) gains `verify-plugin-isolation` which fails the build if `go list -deps ./plugin/...` returns any `k8s.io` / `sigs.k8s.io` package — mechanises ADR-0015's consequence.
+
+### Operator-facing notes
+
+- `tls.issuerRef` points at any cert-manager Issuer/ClusterIssuer the operator has. The Certificate writes `ca.crt` into the bridge-tls Secret; the plugin DaemonSet mounts that Secret and copies the CA onto each node, so kubelet's plugin process can verify the bridge's TLS cert.
+- mTLS adds a second Certificate (`<release>-plugin-mtls-client`) and threads `HARBOR_BRIDGE_CLIENT_CERT` / `_KEY` into the kubelet config. Bridge's `BRIDGE_TLS_CLIENT_CA_FILE` is enabled at the same time, rejecting plugin connections without a client cert.
+- The plugin DaemonSet **cannot** set kubelet's `--image-credential-provider-*` flags. The chart's NOTES.txt prints the required values; operators set them at node provisioning.
+
+### Originally-planned section (kept for archaeology)
 
 **Goal:** one chart deploys the whole system; install fails clearly when misconfigured.
 

@@ -1,0 +1,62 @@
+{{- include "harbor-bridge.validateRequiredValues" . -}}
+
+================================================================
+  Harbor Workload Identity Bridge installed.
+================================================================
+
+  Cluster name : {{ .Values.clusterName }}
+  Harbor URL   : {{ .Values.harbor.url }}
+  Audience     : {{ .Values.plugin.audience }}
+  Namespace    : {{ .Release.Namespace }}
+  Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
+  Plugin image : {{ include "harbor-bridge.plugin.image" . }}
+
+WARNING — cluster-name uniqueness (ADR-0009):
+  Bridges that share one Harbor must each have a distinct
+  `clusterName` that is NOT a hyphen-prefix of any other cluster's
+  name. Robots in Harbor are namespaced by name prefix; two clusters
+  whose names share a prefix can adopt each other's robots.
+
+  This cluster's prefix is: `bridge-{{ .Values.clusterName }}-`
+
+NEXT STEPS
+
+  1. Verify the bridge came up:
+
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "harbor-bridge.bridge.fullname" . }}
+       kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "harbor-bridge.bridge.fullname" . }} -c bridge
+
+  2. Verify the plugin landed on every node:
+
+       kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "harbor-bridge.plugin.fullname" . }}
+
+  3. Apply a HarborAccess CR (see docs/examples/ in the repo). The
+     CR's spec.trustPolicy.audience must equal:
+
+       {{ .Values.plugin.audience }}
+
+  4. Confirm kubelet on each node has these flags set:
+
+       --image-credential-provider-bin-dir={{ .Values.plugin.hostBinaryDir }}
+       --image-credential-provider-config={{ .Values.plugin.hostConfigDir }}/credential-provider-config.yaml
+
+     The chart installs the binary and config onto each node, but
+     it CANNOT change kubelet's flags. Without them the plugin is
+     installed but never invoked.
+
+{{- if not .Values.tls.enabled }}
+
+WARNING — TLS is disabled for this release. Plugin → bridge traffic
+carries the SA token in cleartext. Only safe if a sidecar (service
+mesh) is terminating TLS for you.
+{{- end }}
+
+{{- if .Values.bridge.mTLS.enabled }}
+
+mTLS enabled — the bridge will reject plugin connections without a
+chart-issued client cert. Verify cert-manager issued both certs:
+
+  kubectl -n {{ .Release.Namespace }} get certificate
+{{- end }}
+
+Docs: https://github.com/aetherize/harbor-workload-identity-bridge

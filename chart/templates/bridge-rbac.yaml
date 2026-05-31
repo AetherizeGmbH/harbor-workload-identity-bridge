@@ -1,0 +1,76 @@
+{{/*
+HarborAccess CRs can live in any namespace, so the bridge needs
+cluster-scoped list/watch on them. Secrets and the leader-election
+Lease are namespace-scoped (release namespace only) — the bridge
+never reads Secrets outside its own namespace (ADR-0011).
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "harbor-bridge.bridge.clusterScopedName" . }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+rules:
+  # Reconciler + data plane both list HarborAccess cluster-wide.
+  - apiGroups: [harbor.aetherize.io]
+    resources: [harboraccesses]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [harbor.aetherize.io]
+    resources: [harboraccesses/status]
+    verbs: [update, patch]
+  - apiGroups: [harbor.aetherize.io]
+    resources: [harboraccesses/finalizers]
+    verbs: [update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "harbor-bridge.bridge.clusterScopedName" . }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "harbor-bridge.bridge.clusterScopedName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "harbor-bridge.bridge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "harbor-bridge.bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+rules:
+  # Robot-credential Secrets and the admin-creds Secret the bridge reads.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Leader-election Lease, only created when bridge.replicas > 1.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Events for status surfacing (not strictly required today but cheap).
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "harbor-bridge.bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "harbor-bridge.bridge.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "harbor-bridge.bridge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

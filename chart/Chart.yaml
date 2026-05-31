@@ -1,0 +1,28 @@
+apiVersion: v2
+name: harbor-workload-identity-bridge
+description: |
+  Translate Kubernetes Service Account tokens into Harbor robot credentials
+  so workloads can pull from Harbor without long-lived imagePullSecrets.
+  Installs the bridge (controller + HTTPS server) plus the kubelet
+  image-credential-provider plugin (KEP-4412) onto every node.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.34.0-0"
+keywords:
+  - harbor
+  - registry
+  - credentials
+  - kep-4412
+  - workload-identity
+home: https://github.com/aetherize/harbor-workload-identity-bridge
+sources:
+  - https://github.com/aetherize/harbor-workload-identity-bridge
+maintainers:
+  - name: Aetherize
+    url: https://github.com/aetherize
+annotations:
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial chart for Phase 5
+  artifacthub.io/prerelease: "true"

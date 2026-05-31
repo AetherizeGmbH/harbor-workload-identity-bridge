@@ -1,0 +1,48 @@
+{{/*
+The kubelet credential-provider config the chart installs onto each
+node. Mirrors the KEP-4412 v1 schema. Kubelet reads this from the
+path `<plugin.hostConfigDir>/credential-provider-config.yaml` after
+the DaemonSet copies it there.
+
+`cacheType: ServiceAccount` is the KEP-4412 beta (k8s 1.34) field
+that tells kubelet to project an SA-bound token per pod rather than
+caching one credential per image.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harbor-bridge.plugin.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
+data:
+  credential-provider-config.yaml: |
+    apiVersion: kubelet.config.k8s.io/v1
+    kind: CredentialProviderConfig
+    providers:
+      - name: harbor-bridge-plugin
+        apiVersion: credentialprovider.kubelet.k8s.io/v1
+        matchImages:
+          {{- range .Values.plugin.matchImages }}
+          - {{ . | quote }}
+          {{- end }}
+        defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
+        env:
+          - name: HARBOR_BRIDGE_ENDPOINT
+            # Plugin runs on the node; reach the bridge via the
+            # NodePort on the node's own loopback. ADR-0008.
+            value: "https://127.0.0.1:{{ .Values.service.nodePort }}"
+          - name: HARBOR_BRIDGE_CA_BUNDLE
+            value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-ca.crt"
+          {{- if .Values.bridge.mTLS.enabled }}
+          - name: HARBOR_BRIDGE_CLIENT_CERT
+            value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-client.crt"
+          - name: HARBOR_BRIDGE_CLIENT_KEY
+            value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-client.key"
+          {{- end }}
+        tokenAttributes:
+          serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
+          requireServiceAccount: true
+          # See KEP-4412: this makes the SA token + UID part of the
+          # cache key so each pod gets its own credential.
+          cacheType: ServiceAccount

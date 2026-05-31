@@ -1,0 +1,31 @@
+# Variant that exercises every conditional template branch:
+#   - mTLS between plugin and bridge
+#   - Prometheus Operator ServiceMonitor
+clusterName: prod-eu-west
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+
+plugin:
+  matchImages:
+    - "harbor.example.com/*"
+  audience: harbor-bridge-prod-eu-west
+
+tls:
+  enabled: true
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer
+
+bridge:
+  mTLS:
+    enabled: true
+    clientIssuerRef:
+      name: harbor-bridge-ca
+      kind: ClusterIssuer
+
+metrics:
+  serviceMonitor:
+    enabled: true

@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "harbor-bridge.bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.bridge.replicas }}
+  selector:
+    matchLabels:
+      {{- include "harbor-bridge.bridge.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "harbor-bridge.bridge.labels" . | nindent 8 }}
+        {{- with .Values.bridge.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force pod restart on TLS Secret rotation. cert-manager renews
+        # the Secret in place; without this annotation the deployment
+        # keeps serving the cached cert until the pod is restarted.
+        bridge.harbor.aetherize.io/tls-cert-checksum: {{ printf "%s|%s" (include "harbor-bridge.tlsSecretName" .) .Values.tls.enabled | sha256sum }}
+        {{- with .Values.bridge.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "harbor-bridge.bridge.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Soft anti-affinity: prefer spreading replicas across nodes so
+      # losing one node doesn't take both bridge pods down.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "harbor-bridge.bridge.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+        {{- with .Values.bridge.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.bridge.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridge.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bridge
+          image: {{ include "harbor-bridge.bridge.image" . }}
+          imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
+          args: []
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          env:
+            - name: BRIDGE_CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            - name: BRIDGE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: BRIDGE_OIDC_ISSUER
+              value: {{ .Values.bridge.oidcIssuer | quote }}
+            - name: BRIDGE_HARBOR_URL
+              value: {{ .Values.harbor.url | quote }}
+            - name: BRIDGE_HARBOR_ADMIN_DIR
+              value: /etc/bridge/harbor-admin
+            - name: BRIDGE_FORCE_LOCAL_VALIDATION
+              value: {{ .Values.bridge.forceLocalValidation | quote }}
+            - name: BRIDGE_LOG_LEVEL
+              value: {{ .Values.bridge.logLevel | quote }}
+            - name: BRIDGE_TLS_CERT_FILE
+              value: /etc/bridge/tls/tls.crt
+            - name: BRIDGE_TLS_KEY_FILE
+              value: /etc/bridge/tls/tls.key
+            {{- if .Values.bridge.mTLS.enabled }}
+            - name: BRIDGE_TLS_CLIENT_CA_FILE
+              value: /etc/bridge/tls/ca.crt
+            {{- end }}
+            - name: BRIDGE_LISTEN_ADDR
+              value: ":8443"
+            - name: BRIDGE_HEALTH_ADDR
+              value: ":8081"
+            - name: BRIDGE_ENABLE_LEADER_ELECTION
+              value: {{ include "harbor-bridge.bridge.leaderElection" . | quote }}
+            {{- with .Values.bridge.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.bridge.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: harbor-admin
+              mountPath: /etc/bridge/harbor-admin
+              readOnly: true
+            - name: tls
+              mountPath: /etc/bridge/tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.bridge.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: harbor-admin
+          secret:
+            secretName: {{ .Values.harbor.adminCredsSecret.name }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.harbor.adminCredsSecret.keys.username }}
+                path: username
+              - key: {{ .Values.harbor.adminCredsSecret.keys.password }}
+                path: password
+        - name: tls
+          secret:
+            secretName: {{ include "harbor-bridge.tlsSecretName" . }}
+            defaultMode: 0400
