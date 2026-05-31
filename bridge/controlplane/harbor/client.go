@@ -194,8 +194,14 @@ func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Harbor reads back system-level robot names with the literal
+	// "robot$" prefix even though POST /robots accepts (and we send)
+	// the un-prefixed name. Callers pass us the un-prefixed form; we
+	// match either form so a future Harbor version that drops the
+	// asymmetry (or a project-scope robot path that may not add the
+	// prefix) doesn't silently break.
 	for i := range robots {
-		if robots[i].Name == name {
+		if robots[i].Name == name || robots[i].Name == HarborRobotPrefix+name {
 			return &robots[i], nil
 		}
 	}
@@ -235,15 +241,12 @@ func (c *goClient) UpdatePermissions(ctx context.Context, id int64, description 
 // FilterOwned returns the subset of robots whose names start with the
 // cluster's ownership prefix. The ADR-0009 safety invariant lives at the
 // reconciler and janitor call sites; this helper centralises the filter
-// so all callers use one implementation.
+// so all callers use one implementation. Delegates to OwnsRobot so the
+// "robot$" normalization happens in exactly one place.
 func FilterOwned(robots []Robot, cluster string) []Robot {
-	if cluster == "" {
-		return nil
-	}
-	prefix := ClusterPrefix(cluster)
 	out := make([]Robot, 0, len(robots))
 	for _, r := range robots {
-		if strings.HasPrefix(r.Name, prefix) {
+		if OwnsRobot(cluster, r.Name) {
 			out = append(out, r)
 		}
 	}

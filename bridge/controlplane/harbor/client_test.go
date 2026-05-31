@@ -35,6 +35,13 @@ type fakeHarbor struct {
 	// credentials. If empty, the check is skipped.
 	expectedUser string
 	expectedPass string
+
+	// addRobotDollarPrefix mimics real Harbor's behaviour of prepending
+	// "robot$" to system-level robot names on GET paths even though POST
+	// /robots accepts (and we send) the un-prefixed form. Off by default
+	// to keep older tests untouched; the prefix-asymmetry regression
+	// test below toggles it on.
+	addRobotDollarPrefix bool
 }
 
 type fakeHarborState struct {
@@ -131,7 +138,18 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			if int64(i) >= end {
 				break
 			}
-			out = append(out, f.mu.robots[id])
+			r := f.mu.robots[id]
+			if f.addRobotDollarPrefix && !strings.HasPrefix(r.Name, "robot$") {
+				// Mimic Harbor: render names on read paths with the
+				// "robot$" prefix. Construct a fresh value to avoid
+				// mutating the canonical store (Create + GetByID still
+				// use the un-prefixed form).
+				display := *r
+				display.Name = "robot$" + r.Name
+				out = append(out, &display)
+			} else {
+				out = append(out, r)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
@@ -326,6 +344,35 @@ func TestClient_GetByName_FilteringWorks(t *testing.T) {
 
 	if _, err := c.GetByName(context.Background(), "does-not-exist"); !errors.Is(err, ErrRobotNotFound) {
 		t.Errorf("expected ErrRobotNotFound, got %v", err)
+	}
+}
+
+// TestClient_GetByName_ToleratesHarborRobotDollarPrefix locks in the
+// regression discovered during the first manual e2e: Harbor's
+// GET /robots renders system-level robot names as "robot$<name>" even
+// though POST /robots stores them under the un-prefixed name we sent.
+// Before the fix, GetByName looked for "bridge-..." in a List that
+// reported "robot$bridge-...", missed it on every reconcile, and
+// looped on the 409-on-create path. This test fails (NotFound) without
+// the matcher tolerating the prefix.
+func TestClient_GetByName_ToleratesHarborRobotDollarPrefix(t *testing.T) {
+	fake := newFakeHarbor(t)
+	fake.addRobotDollarPrefix = true
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+
+	const internalName = "bridge-dev-test-pull-image-puller"
+	if _, err := c.Create(context.Background(), internalName, "", nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := c.GetByName(context.Background(), internalName)
+	if err != nil {
+		t.Fatalf("GetByName: %v (expected match against the robot$-prefixed entry)", err)
+	}
+	if got.Name != "robot$"+internalName {
+		t.Errorf("Robot.Name = %q, want the on-wire form %q", got.Name, "robot$"+internalName)
 	}
 }
 

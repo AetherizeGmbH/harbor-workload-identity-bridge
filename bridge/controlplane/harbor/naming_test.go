@@ -133,6 +133,16 @@ func TestOwnsRobot_PositiveCases(t *testing.T) {
 		{"prod", "bridge-prod-flux-system-source-controller"},
 		{"prod-eu-west", "bridge-prod-eu-west-flux-system-source-controller"},
 		{"a", "bridge-a-b"}, // minimum-length both sides
+
+		// Harbor adds "robot$" to system-level robot names on read paths
+		// (GET /robots and GET /robots/{id}). POST /robots accepts the
+		// un-prefixed form we send. So both forms must match — this is
+		// the bug discovered in the first manual e2e: GetByName was
+		// looking for "bridge-..." but Harbor returned "robot$bridge-...",
+		// and every subsequent reconcile re-took the create branch and
+		// got 409.
+		{"prod", "robot$bridge-prod-flux-system-source-controller"},
+		{"prod-eu-west", "robot$bridge-prod-eu-west-flux"},
 	}
 	for _, c := range cases {
 		if !OwnsRobot(c.cluster, c.robot) {
@@ -146,13 +156,14 @@ func TestOwnsRobot_NegativeCases(t *testing.T) {
 		cluster string
 		robot   string
 	}{
-		{"prod", "robot$bridge-prod-flux"}, // Harbor's display prefix
-		{"prod", "bridge-staging-flux"},    // different cluster
-		{"prod", "bridgeXprod-flux"},       // different separator
-		{"prod", "bridge-production-flux"}, // longer cluster name, no hyphen boundary
-		{"prod", "bridge-prod"},            // missing trailing "-"
-		{"prod", ""},                       // empty robot name
-		{"", "bridge-prod-flux"},           // empty cluster — must refuse to claim anything
+		{"prod", "bridge-staging-flux"},          // different cluster
+		{"prod", "robot$bridge-staging-flux"},    // ditto, with Harbor's prefix
+		{"prod", "bridgeXprod-flux"},             // different separator
+		{"prod", "bridge-production-flux"},       // longer cluster name, no hyphen boundary
+		{"prod", "robot$bridge-production-flux"}, // ditto with prefix
+		{"prod", "bridge-prod"},                  // missing trailing "-"
+		{"prod", ""},                             // empty robot name
+		{"", "bridge-prod-flux"},                 // empty cluster — must refuse to claim anything
 	}
 	for _, c := range cases {
 		if OwnsRobot(c.cluster, c.robot) {

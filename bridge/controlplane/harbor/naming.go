@@ -34,6 +34,16 @@ const (
 	// it owns. Combined with the cluster name (and a trailing dash) it
 	// forms the ownership prefix that gates every Harbor write call.
 	robotNamePrefix = "bridge-"
+
+	// HarborRobotPrefix is the literal Harbor prepends server-side to
+	// every system-level robot name on read paths (GET /robots,
+	// GET /robots/{id}). POST /robots accepts the un-prefixed name and
+	// Harbor adds the prefix on store. So the bridge sends
+	// "bridge-<cluster>-<ns>-<sa>" to Create but reads back
+	// "robot$bridge-<cluster>-<ns>-<sa>". Every comparison between an
+	// internally-constructed name and a name from Harbor must reckon
+	// with this asymmetry — see OwnsRobot and GetByName.
+	HarborRobotPrefix = "robot$"
 )
 
 // robotNameRegex mirrors Harbor's server-side validateName check:
@@ -100,6 +110,11 @@ func ClusterPrefix(cluster string) string {
 // the given cluster. A bridge MUST NOT list, modify, or delete a robot for
 // which OwnsRobot returns false; this is enforced at every Harbor write site.
 //
+// Accepts both the internal name (what RobotName returns, what we send to
+// POST /robots) and the Harbor-on-wire name (what List/Get return,
+// "robot$<internal>"). Callers should not have to know which form they
+// hold — this is the single normalization point.
+//
 // Caveat: prefix matching has a known false-positive class when cluster
 // names are hyphen-prefixes of each other (e.g. cluster "prod" would see
 // cluster "prod-eu"'s robots as its own). This is documented in ADR-0009
@@ -109,7 +124,8 @@ func OwnsRobot(cluster, robotName string) bool {
 	if cluster == "" {
 		return false
 	}
-	return strings.HasPrefix(robotName, ClusterPrefix(cluster))
+	n := strings.TrimPrefix(robotName, HarborRobotPrefix)
+	return strings.HasPrefix(n, ClusterPrefix(cluster))
 }
 
 // IsValidHarborRobotName reports whether the given name would be accepted
