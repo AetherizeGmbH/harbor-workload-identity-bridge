@@ -24,6 +24,8 @@ const (
 	EnvNamespace            = "BRIDGE_NAMESPACE"
 	EnvOIDCIssuer           = "BRIDGE_OIDC_ISSUER"
 	EnvOIDCJWKSURL          = "BRIDGE_OIDC_JWKS_URL"
+	EnvOIDCCAFile           = "BRIDGE_OIDC_CA_FILE"
+	EnvOIDCTokenFile        = "BRIDGE_OIDC_TOKEN_FILE"
 	EnvHarborURL            = "BRIDGE_HARBOR_URL"
 	EnvHarborAdminDir       = "BRIDGE_HARBOR_ADMIN_DIR"
 	EnvForceLocalValidation = "BRIDGE_FORCE_LOCAL_VALIDATION"
@@ -73,6 +75,27 @@ type Config struct {
 	// topology where the cluster-internal URLs do not resolve. Leave
 	// unset for the standard in-cluster deployment.
 	OIDCJWKSURL *url.URL
+
+	// OIDCCAFile, when non-empty, is the path to a PEM-encoded CA bundle
+	// the OIDC validator's HTTP client uses to verify the OIDC issuer's
+	// TLS certificate. For an in-cluster bridge the issuer is the
+	// apiserver itself, whose cert is signed by the cluster CA — the
+	// chart points this at the projected SA volume's ca.crt
+	// (/var/run/secrets/kubernetes.io/serviceaccount/ca.crt) by default
+	// so OIDC discovery succeeds without trusting the cluster CA at the
+	// OS level. Empty means use the OS root store (the laptop / public-
+	// issuer case).
+	OIDCCAFile string
+
+	// OIDCTokenFile, when non-empty, is the path to a Bearer token the
+	// OIDC validator's HTTP client sends on every request to the issuer.
+	// Required when the issuer is the in-cluster apiserver, whose
+	// /.well-known/openid-configuration endpoint refuses anonymous
+	// access by default. The chart points this at the projected SA
+	// volume (/var/run/secrets/kubernetes.io/serviceaccount/token); the
+	// transport re-reads the file on each request so token rotation
+	// (kubelet refreshes the projected token every ~hour) is automatic.
+	OIDCTokenFile string
 
 	// HarborURL is the base URL of the Harbor instance this bridge manages
 	// robots in.
@@ -138,6 +161,17 @@ func LoadFromEnv() (*Config, error) {
 		} else {
 			cfg.OIDCJWKSURL = v
 		}
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(EnvOIDCCAFile)); raw != "" {
+		// Optional. We don't read the file here — main.go does, and
+		// surfaces the read error there so a missing/unreadable bundle
+		// fails at startup with a clear message.
+		cfg.OIDCCAFile = raw
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(EnvOIDCTokenFile)); raw != "" {
+		cfg.OIDCTokenFile = raw
 	}
 
 	if v, err := requireURL(os.Getenv(EnvHarborURL), EnvHarborURL); err != nil {
@@ -207,6 +241,12 @@ func (c *Config) Sanitized() map[string]string {
 	}
 	if c.OIDCJWKSURL != nil {
 		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.String()
+	}
+	if c.OIDCCAFile != "" {
+		out[EnvOIDCCAFile] = c.OIDCCAFile
+	}
+	if c.OIDCTokenFile != "" {
+		out[EnvOIDCTokenFile] = c.OIDCTokenFile
 	}
 	return out
 }

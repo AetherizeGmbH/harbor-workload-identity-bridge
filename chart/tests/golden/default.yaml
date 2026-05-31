@@ -427,6 +427,19 @@ spec:
               value: "harbor-bridge-system"
             - name: BRIDGE_OIDC_ISSUER
               value: "https://kubernetes.default.svc.cluster.local"
+            - name: BRIDGE_OIDC_CA_FILE
+              # In-cluster: the OIDC issuer is the apiserver and its
+              # cert is signed by the cluster CA. The projected SA
+              # volume always carries the cluster CA at this path.
+              # Override via .Values.bridge.oidcCAFile to point at a
+              # custom CA bundle (e.g. mTLS apiserver topologies).
+              value: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+            - name: BRIDGE_OIDC_TOKEN_FILE
+              # The apiserver gates /.well-known/openid-configuration
+              # behind system:authenticated; the bridge sends its own
+              # SA token as Bearer. Token rotates every ~hour; the
+              # transport re-reads on every request.
+              value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
             - name: BRIDGE_HARBOR_URL
               value: "https://harbor.example.com"
             - name: BRIDGE_HARBOR_ADMIN_DIR

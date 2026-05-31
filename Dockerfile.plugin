@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+# Plugin image. Used ONLY by the chart's init container, which copies
+# the binary onto the node's filesystem and exits. The image needs
+# sh + cp for that copy step, so we use alpine rather than distroless.
+# The plugin binary itself runs on the node, not inside this container.
+
+FROM golang:1.26-alpine AS builder
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY plugin ./plugin
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/harbor-bridge-plugin ./plugin
+
+FROM alpine:3.20
+COPY --from=builder /out/harbor-bridge-plugin /plugin/harbor-bridge-plugin

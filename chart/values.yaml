@@ -71,6 +71,20 @@ bridge:
   # `kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`).
   oidcIssuer: https://kubernetes.default.svc.cluster.local
 
+  # CA bundle used to verify the OIDC issuer's TLS cert. For the
+  # default in-cluster issuer (the apiserver), the projected SA volume
+  # is the canonical path. Override only for unusual apiserver TLS
+  # topologies (e.g. when discovery goes through an external IdP).
+  oidcCAFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+  # Bearer token sent on every OIDC discovery / JWKS request. The
+  # apiserver's /.well-known/openid-configuration endpoint requires
+  # an authenticated caller. The bridge's RoundTripper re-reads this
+  # file each request so kubelet's hourly SA-token rotation is
+  # transparent. Set to empty string when the OIDC issuer is anonymous
+  # (external IdP without auth).
+  oidcTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+
   # Reserved for after upstream Harbor implements native OIDC trust
   # policies (goharbor/harbor#17520). Keep true today.
   forceLocalValidation: true

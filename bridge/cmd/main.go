@@ -15,15 +15,22 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -107,6 +114,22 @@ func run() error {
 		LeaderElectionNamespace: cfg.Namespace,
 
 		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
+
+		// Cache scoping — minimum-privilege RBAC. HarborAccess CRs are
+		// cluster-scoped (operators put them in any namespace), so the
+		// default cluster-wide watch is correct for those. Secrets, by
+		// contrast, are only read from BRIDGE_NAMESPACE (ADR-0011);
+		// without this ByObject override the cache would list/watch
+		// secrets cluster-wide and require cluster-scoped Secret RBAC.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {
+					Namespaces: map[string]cache.Config{
+						cfg.Namespace: {},
+					},
+				},
+			},
+		},
 	}
 	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
 	if err != nil {
@@ -161,6 +184,19 @@ func run() error {
 	}
 	if cfg.OIDCJWKSURL != nil {
 		validatorCfg.JWKSURL = cfg.OIDCJWKSURL.String()
+	}
+	if cfg.OIDCCAFile != "" || cfg.OIDCTokenFile != "" {
+		// In-cluster the OIDC issuer is the apiserver: discovery and
+		// JWKS fetch need the cluster CA in trust AND an authenticated
+		// caller (the apiserver gates /.well-known/openid-configuration
+		// behind system:authenticated by default). The token file is
+		// re-read on every request inside the RoundTripper so kubelet's
+		// SA-token rotation is automatic.
+		httpClient, err := oidcHTTPClient(cfg.OIDCCAFile, cfg.OIDCTokenFile)
+		if err != nil {
+			return fmt.Errorf("build oidc http client: %w", err)
+		}
+		validatorCfg.HTTPClient = httpClient
 	}
 	validator, err := dataplane.NewValidator(startupCtx, validatorCfg)
 	if err != nil {
@@ -236,6 +272,64 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// oidcHTTPClient builds an *http.Client for the OIDC validator. When
+// caFile is set, its transport trusts that PEM bundle (the cluster CA
+// for the in-cluster apiserver case). When tokenFile is set, the
+// transport injects `Authorization: Bearer <file contents>` on every
+// request, re-reading the file each call so projected SA-token
+// rotation is transparent.
+func oidcHTTPClient(caFile, tokenFile string) (*http.Client, error) {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA file %s: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("CA file %s contained no PEM blocks", caFile)
+		}
+		transport.TLSClientConfig.RootCAs = pool
+	}
+
+	var rt http.RoundTripper = transport
+	if tokenFile != "" {
+		// Sanity-check the file is readable at startup so a typo or
+		// missing volume mount fails fast.
+		if _, err := os.ReadFile(tokenFile); err != nil {
+			return nil, fmt.Errorf("read token file %s: %w", tokenFile, err)
+		}
+		rt = &bearerTokenTransport{base: transport, tokenFile: tokenFile}
+	}
+
+	return &http.Client{
+		Transport: rt,
+		Timeout:   30 * time.Second,
+	}, nil
+}
+
+// bearerTokenTransport injects Authorization: Bearer on every request
+// by re-reading the token file each call. The re-read is the point —
+// kubelet rotates the projected SA token roughly every hour; caching
+// it in memory would mean discovery and JWKS refreshes fail silently
+// after the first rotation.
+type bearerTokenTransport struct {
+	base      http.RoundTripper
+	tokenFile string
+}
+
+func (t *bearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	raw, err := os.ReadFile(t.tokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read SA token: %w", err)
+	}
+	req2 := req.Clone(req.Context())
+	req2.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(raw)))
+	return t.base.RoundTrip(req2)
 }
 
 // envBool returns the env var parsed as bool. Falls back to def when
