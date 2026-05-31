@@ -4,11 +4,16 @@
 imagePullSecrets, no long-lived credentials in workload namespaces, no
 per-namespace token-distribution chores.**
 
-> Status: **alpha**. The control plane is feature-complete and unit-tested.
-> The end-to-end claim (ADR-0013) — that containerd accepts the credentials
-> the bridge returns and completes the Harbor handshake itself — is being
-> validated. See [`docs/PHASES.md`](docs/PHASES.md) for what's live and
-> what's next.
+> Status: **alpha**. Bridge, plugin, and Helm chart are feature-complete
+> and verified end-to-end on a single kind cluster against a real Harbor:
+> `crane pull` succeeded using the credentials the bridge returned
+> ([ADR-0013](docs/adr/0013-return-robot-basic-auth-credentials.md)), and
+> the plugin's `CredentialProviderResponse` carries a Basic Auth pair
+> byte-equal to what `curl` receives from the bridge directly. What's
+> left for v0.1.0 is the kubelet-driven fork+exec path (Phase 6 e2e
+> against a kind cluster recreated with `--image-credential-provider-*`
+> flags) and the SECURITY.md threat model polish. See
+> [`docs/PHASES.md`](docs/PHASES.md) for the full state.
 
 ---
 
@@ -43,8 +48,13 @@ is the bridge in between.**
   is deleted.
 - A small HTTPS server that the kubelet plugin asks for credentials per
   pull. SA token in, robot Basic Auth credentials out.
-- A plugin binary the kubelet runs per node (Phase 4, in progress).
-- A Helm chart that installs all of it (Phase 5, in progress).
+- A KEP-4412 credential-provider plugin binary, a stateless adapter
+  between kubelet's stdin/stdout protocol and the bridge's HTTPS API
+  ([ADR-0015](docs/adr/0015-plugin-duplicates-wire-types.md)).
+- A Helm chart that installs both: bridge as a Deployment in the release
+  namespace, plugin as a DaemonSet that copies the binary + kubelet
+  config + bridge CA onto every node's filesystem. Required values
+  fail-fast with action-oriented errors at template time.
 
 When upstream Harbor lands #17520, you delete the HTTPS server and the
 plugin; the CRD and reconciler survive as a thin declarative layer. This
@@ -100,25 +110,42 @@ the bridge does *not* defend against, is in [SECURITY.md](SECURITY.md).
 
 ## Quickstart
 
-> The Helm chart (Phase 5) is not yet shipped. The commands below assume
-> you have built the bridge binary from source and are running it
-> locally against a kind cluster + a Harbor instance. The chart will
-> collapse most of this.
+Prerequisites: a Kubernetes cluster (v1.34+ for KEP-4412 beta), a Harbor
+instance with admin credentials, cert-manager installed, Helm 3+.
 
 ```bash
-# 1. Install the CRD.
-kubectl apply -f config/crd/bases/harbor.aetherize.io_harboraccesses.yaml
-
-# 2. Create the bridge namespace and the admin-credentials Secret
-#    (must hold username + password keys; the bridge mounts this).
+# 1. Pre-create the admin-creds Secret (the chart does not — your
+#    Harbor admin password should never live in values.yaml).
 kubectl create namespace harbor-bridge-system
-kubectl create secret generic harbor-admin \
+kubectl create secret generic harbor-admin -n harbor-bridge-system \
   --from-literal=username=admin \
-  --from-literal=password=Harbor12345 \
-  -n harbor-bridge-system
+  --from-literal=password=YOUR_HARBOR_ADMIN_PASSWORD
 
-# 3. Apply a HarborAccess CR. (Substitute your own SA name, audience,
-#    projects.)
+# 2. Point cert-manager at an Issuer that signs the bridge's TLS cert.
+#    Self-signed is fine for evaluation:
+cat <<'YAML' | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: { name: harbor-bridge-ca }
+spec: { selfSigned: {} }
+YAML
+
+# 3. Install the chart.
+helm install harbor-bridge ./chart -n harbor-bridge-system \
+  --set clusterName=prod-eu-west \
+  --set harbor.url=https://harbor.example.com \
+  --set harbor.adminCredsSecret.name=harbor-admin \
+  --set plugin.audience=harbor-bridge-prod-eu-west \
+  --set 'plugin.matchImages={harbor.example.com/*}' \
+  --set tls.issuerRef.name=harbor-bridge-ca
+
+# 4. Configure each node's kubelet to use the plugin. The chart can't
+#    set these flags for you; do it at node provisioning:
+#      --image-credential-provider-bin-dir=/etc/kubernetes/credential-provider
+#      --image-credential-provider-config=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml
+#    For kind, see https://kind.sigs.k8s.io/docs/user/configuration/#kubelet-extra-args.
+
+# 5. Apply a HarborAccess CR. The audience MUST match plugin.audience above.
 cat <<'YAML' | kubectl apply -f -
 apiVersion: harbor.aetherize.io/v1alpha1
 kind: HarborAccess
@@ -130,39 +157,32 @@ spec:
     namespace: flux-system
     name: source-controller
   trustPolicy:
-    issuer: https://kubernetes.default.svc
-    audience: harbor.example.com
+    issuer: https://kubernetes.default.svc.cluster.local
+    audience: harbor-bridge-prod-eu-west
   permissions:
     - project: production
       action: pull
   tokenTTL: 1h
 YAML
-
-# 4. Expose the cluster's apiserver locally so the bridge can fetch the
-#    JWKS off-cluster. Leave this running in a second terminal.
-make proxy   # = kubectl proxy --port=8001
-
-# 5. Run the bridge locally (one-time self-signed cert is auto-generated
-#    in /tmp/bridge-tls). The Helm chart will replace steps 4–5.
-BRIDGE_CLUSTER_NAME=dev \
-BRIDGE_NAMESPACE=harbor-bridge-system \
-BRIDGE_OIDC_ISSUER=$(kubectl get --raw /.well-known/openid-configuration | jq -r .issuer) \
-BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks \
-BRIDGE_HARBOR_URL=https://your-harbor.example.com \
-BRIDGE_HARBOR_ADMIN_DIR=/path/to/admin-creds-dir \
-make run-local
 ```
 
-Within a few seconds you should see a Harbor robot named
-`bridge-dev-flux-system-source-controller` appear in your Harbor admin
-UI, and a `robot-harbor-bridge-system-flux-access` Secret in the bridge
-namespace.
+Within a few seconds a `bridge-prod-eu-west-flux-system-source-controller`
+robot appears in Harbor's admin UI, the bridge namespace gets a
+`robot-harbor-bridge-system-flux-access` Secret, and pods running as
+`flux-system/source-controller` can pull from `harbor.example.com/production/*`.
+
+**Local development** (no chart, run the bridge against your kubeconfig
+via `kubectl proxy`) is documented in [HOW-TO-TEST.md](HOW-TO-TEST.md)
+along with the manual plugin-driver procedure that proves the chain
+end-to-end without a kubelet-config change.
 
 ## Architecture and decisions
 
 - [`docs/PHASES.md`](docs/PHASES.md) — what is done, what is next, what
   is intentionally out of scope. Written to survive context compaction;
   read this first when resuming work.
+- [`HOW-TO-TEST.md`](HOW-TO-TEST.md) — reproducible end-to-end procedure
+  with local bridge, kubectl proxy, and a manual plugin-driver round-trip.
 - [`docs/adr/`](docs/adr/) — every load-bearing design decision has an
   ADR. The ones most likely to surprise you:
   - [ADR-0002](docs/adr/0002-bridge-control-plane-data-plane-split.md) —
@@ -177,6 +197,12 @@ namespace.
   - [ADR-0013](docs/adr/0013-return-robot-basic-auth-credentials.md) —
     why we return Basic Auth credentials instead of pre-minting Docker
     bearer JWTs.
+  - [ADR-0014](docs/adr/0014-harbor-robot-dollar-prefix-handling.md) —
+    Harbor's `robot$` prefix asymmetry between POST and GET.
+  - [ADR-0015](docs/adr/0015-plugin-duplicates-wire-types.md) — why
+    the plugin defines its own wire types instead of importing
+    `k8s.io/kubelet` or `bridge/dataplane`. (Mechanised via
+    `make verify-plugin-isolation`.)
 
 ## Status and roadmap
 
@@ -185,9 +211,9 @@ namespace.
 | 1 | Scaffolding, CRD types, ADRs 0001–0008 | ✅ Complete |
 | 2 | Control plane: config, Harbor client, reconciler, janitor, ADRs 0009–0012 | ✅ Complete |
 | 3 | Data plane: OIDC validator, HTTP handler, HTTPS server, metrics, cmd/main.go, ADR-0013 pivot | ✅ Complete |
-| 4 | Plugin binary (KEP-4412 stdin/stdout protocol) | ⏳ Next |
-| 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ⏳ Pending |
-| 6 | End-to-end tests across two clusters + one Harbor, full docs, v0.1.0 tag | ⏳ Pending |
+| 4 | Plugin binary (KEP-4412 stdin/stdout protocol), ADR-0015 | ✅ Complete |
+| 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
+| 6 | Kubelet-driven e2e (kind cluster with `--image-credential-provider-*` flags) + SECURITY.md polish + v0.1.0 tag | ⏳ Next |
 
 ## Contributing
 
