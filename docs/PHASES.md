@@ -346,7 +346,7 @@ Originally-planned section (kept for archaeology):
 
 | Topic | Resolution path |
 | --- | --- |
-| Does containerd's auth flow accept our Basic Auth credentials end-to-end? | Phase 6 e2e. ADR-0013 commits to this; if e2e disproves it, the architecture has to change again. |
+| Does containerd's auth flow accept our Basic Auth credentials end-to-end? | **Resolved 2026-05-31.** `crane pull` (uses the same Bearer-token handshake as containerd) succeeded against Harbor 2.x with credentials returned by the bridge; full procedure and captured output in [HOW-TO-TEST.md](../HOW-TO-TEST.md). Phase 6 e2e will re-validate against real containerd in kind. |
 | Should the data plane gate on CR `Ready=True` before returning credentials? | Phase 6 polish. Trade-off: stronger guarantee vs more code in the hot path. |
 | Should `forceLocalValidation: false` ever default `true`? | Reassess when Harbor #17520 lands. Air-gapped clusters keep `true` indefinitely. |
 | Should the chart split metrics onto a separate port? | Phase 5 design call. Currently planned: same port, same TLS. |

@@ -5,12 +5,20 @@ cluster and a real Harbor, without the Helm chart (which doesn't exist
 yet). It's also the closest thing we have to a contributor onboarding
 guide.
 
-> The single most important step here is **Phase 4**: pulling an image
-> from Harbor with the credentials the bridge returns, using a real
-> registry client. That step is the empirical proof of ADR-0013 — that
-> containerd-like clients accept the bridge's response and complete
-> Harbor's bearer-token handshake themselves. Until Phase 4 has been
-> run successfully at least once, ADR-0013 is theory.
+> **Status as of 2026-05-31:** ADR-0013 is validated. All four phases
+> below were run against kind + Harbor 2.x: `Ready=True` reached, the
+> bridge returned credentials, `crane pull` produced a 4MB OCI tarball
+> from Harbor with those credentials. The run also uncovered and fixed
+> [a latent `robot$`-prefix bug](docs/adr/0014-harbor-robot-dollar-prefix-handling.md)
+> in the reconciler; if you're testing against a Harbor instance where
+> system-level robots were created by earlier bridge builds, the
+> existing 409-recovery path will adopt them on the first reconcile
+> with the current code.
+>
+> Re-run the full sequence whenever you change anything in the
+> credential path (validator, handler, harbor client). The unit tests
+> can't tell you whether containerd-equivalent clients still accept
+> what the bridge returns.
 
 ## Topology
 
@@ -274,6 +282,38 @@ skopeo inspect \
 If any of these happen, **stop**. The architecture has to be
 re-examined before we sink more time into the plugin and chart.
 
+### Reference: what the first successful run looked like
+
+Run on 2026-05-31 against kind + Harbor 2.x:
+
+```
+$ crane pull --insecure harbor.dev.…/your-project/alpine:test3 /tmp/pulled.tar
+$ tar tf /tmp/pulled.tar
+sha256:2ffb2ff4aab36d06b7f3266bbb10e8232769cd2360613131d37abd19430cf6f1
+d17f077ada118cc762df373ff803592abf2dfa3ddafaa7381e364dd27a88fca7.tar.gz
+manifest.json
+$ ls -lh /tmp/pulled.tar
+-rw-r--r-- 1 user wheel 4.0M /tmp/pulled.tar
+```
+
+Bridge audit log:
+
+```
+"msg":"credential issued"
+"subject":"system:serviceaccount:test-pull:image-puller"
+"audience":"harbor-bridge"
+"harboraccess":"harbor-bridge-system/test-access"
+"robot":"robot$bridge-dev-test-pull-image-puller"
+"ttl_seconds":3600
+```
+
+Bridge metrics:
+
+```
+bridge_credential_issuances_total{result="ok"} 1
+bridge_credential_issuance_duration_seconds_count 1
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -308,6 +348,14 @@ re-examined before we sink more time into the plugin and chart.
 
 ## When you've run this successfully
 
-If Phases 1–4 all pass, please save the test output (`make run-local`
-log + the `crane pull` output) and ping the maintainer. That's the
-green light to start Phase 4 (the plugin binary) with confidence.
+If Phases 1–4 all pass on a Harbor version or kind topology that's not
+yet documented here, add a line to the *Reference: what the first
+successful run looked like* section above (Harbor version, k8s version,
+crane vs skopeo) so future contributors know the matrix the bridge has
+been seen working on.
+
+If a step fails on a setup that worked before, treat it as a
+regression — open an issue or ping the maintainer rather than working
+around it locally. The whole point of this doc is to surface
+architectural breakage early; silently patching a local install
+defeats it.
