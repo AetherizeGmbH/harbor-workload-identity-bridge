@@ -48,7 +48,7 @@ bridge:
   leaderElection: null  # null = auto from replicas; true | false to force.
 
   image:
-    repository: ghcr.io/aetherize/harbor-workload-identity-bridge
+    repository: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge
     # Defaults to .Chart.AppVersion when empty.
     tag: ""
     pullPolicy: IfNotPresent
@@ -127,7 +127,7 @@ plugin:
   # out of this image onto each node's filesystem; the kubelet exec's
   # the on-node binary, not anything in the pod.
   image:
-    repository: ghcr.io/aetherize/harbor-workload-identity-bridge-plugin
+    repository: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin
     tag: ""
     pullPolicy: IfNotPresent
 

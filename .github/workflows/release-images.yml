@@ -37,13 +37,23 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Matrix carries (component, image) per row. The bridge image is
+      # the project's primary artifact and gets the bare project name;
+      # the plugin gets the `-plugin` suffix. Previously this template
+      # was `harbor-workload-identity-bridge-${component}` which
+      # produced the silly `harbor-workload-identity-bridge-bridge`
+      # for the bridge image — fixed here.
       matrix:
-        component: [bridge, plugin]
+        include:
+          - component: bridge
+            image: harbor-workload-identity-bridge
+          - component: plugin
+            image: harbor-workload-identity-bridge-plugin
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Resolve tag
+      - name: Resolve tag + lowercase owner
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -52,16 +62,19 @@ jobs:
             # Strip leading 'v' from refs/tags/vX.Y.Z
             echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           fi
+          # OCI namespaces must be lowercase per spec; org name "AetherizeGmbH"
+          # would 404 on `docker pull` for case-sensitive clients.
+          echo "owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/harbor-workload-identity-bridge-${{ matrix.component }}
+          images: ghcr.io/${{ steps.tag.outputs.owner_lc }}/${{ matrix.image }}
           tags: |
             type=raw,value=${{ steps.tag.outputs.tag }}
-            type=raw,value=latest,enable=${{ matrix.component == 'bridge' || matrix.component == 'plugin' }}
+            type=raw,value=latest
           labels: |
-            org.opencontainers.image.title=harbor-workload-identity-bridge-${{ matrix.component }}
+            org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.source=${{ github.event.repository.html_url }}
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.revision=${{ github.sha }}

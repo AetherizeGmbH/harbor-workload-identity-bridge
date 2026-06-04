@@ -261,7 +261,7 @@ spec:
         - operator: Exists
       initContainers:
         - name: install
-          image: ghcr.io/aetherize/harbor-workload-identity-bridge-plugin:0.1.0
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.1.0
           imagePullPolicy: IfNotPresent
           command: [/bin/sh, -c]
           args:
@@ -444,7 +444,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: bridge
-          image: ghcr.io/aetherize/harbor-workload-identity-bridge:0.1.0
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge:0.1.0
           imagePullPolicy: IfNotPresent
           args: []
           ports:
