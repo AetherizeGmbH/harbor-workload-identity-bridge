@@ -1,3 +1,9 @@
+## [0.0.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.3...v0.0.4) (2026-06-04)
+
+### Bug Fixes
+
+* **release:** dispatch images on semantic-release + cross-compile Dockerfiles ([05a64bd](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/05a64bd731bd5ff2aac515186b3af804d677da74))
+
 ## [0.0.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.2...v0.0.3) (2026-06-04)
 
 ### Bug Fixes
