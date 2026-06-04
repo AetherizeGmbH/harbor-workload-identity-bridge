@@ -43,11 +43,16 @@ jobs:
         id: semrel
         with:
           semantic_version: 24
+          # Unpinned — old majors (notably conventionalcommits@7) ship
+          # the `Date.prototype.toString called on incompatible receiver`
+          # crash in conventional-changelog-writer. Let npm resolve to
+          # the latest compatible majors; Renovate's npm manager keeps
+          # them current.
           extra_plugins: |
-            @semantic-release/changelog@6
-            @semantic-release/git@10
-            @semantic-release/exec@6
-            conventional-changelog-conventionalcommits@7
+            @semantic-release/changelog
+            @semantic-release/git
+            @semantic-release/exec
+            conventional-changelog-conventionalcommits
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
