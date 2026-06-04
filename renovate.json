@@ -1,0 +1,84 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticCommitScope(deps)",
+    ":dependencyDashboard",
+    "schedule:nonOfficeHours",
+    ":separateMajorReleases",
+    ":disableRateLimiting"
+  ],
+  "timezone": "Europe/Berlin",
+  "platformAutomerge": true,
+  "automergeStrategy": "squash",
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 0,
+  "rebaseWhen": "behind-base-branch",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "automergeType": "branch"
+  },
+  "packageRules": [
+    {
+      "description": "Automerge non-major + patch updates if CI passes",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Major updates: open PR, no automerge — human review",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "addLabels": ["major-bump"]
+    },
+    {
+      "description": "Group Go module bumps so we don’t spam",
+      "matchManagers": ["gomod"],
+      "groupName": "Go modules",
+      "groupSlug": "gomod",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Group GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "groupSlug": "github-actions",
+      "automerge": true
+    },
+    {
+      "description": "Group Helm chart deps + values defaults",
+      "matchManagers": ["helmv3", "helm-values"],
+      "groupName": "Helm",
+      "groupSlug": "helm"
+    },
+    {
+      "description": "Group OpenTofu / Terraform deps under one PR",
+      "matchManagers": ["terraform", "terraform-version"],
+      "groupName": "OpenTofu",
+      "groupSlug": "tofu"
+    },
+    {
+      "description": "Pin Docker base images to digest — ADR-0015 supply-chain hygiene",
+      "matchManagers": ["dockerfile", "github-actions"],
+      "pinDigests": true
+    },
+    {
+      "description": "kubernetes 1.x dependencies in go.mod — keep on minor channel",
+      "matchPackageNames": ["/^k8s\\.io//", "/^sigs\\.k8s\\.io//"],
+      "groupName": "Kubernetes Go modules",
+      "groupSlug": "k8s-gomod"
+    }
+  ],
+  "gomod": {
+    "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "addLabels": ["security"],
+    "automerge": true
+  }
+}

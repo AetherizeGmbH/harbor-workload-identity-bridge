@@ -1,0 +1,47 @@
+name: release-chart
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Chart + appVersion (from semantic-release). Without leading v.
+        required: true
+        type: string
+
+permissions:
+  contents: write  # write to gh-pages branch
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release-chart  # only one chart release at a time, ever
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: chart-releaser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # chart-releaser needs full history
+      - name: Set chart version + appVersion
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          sed -i "s/^version: .*/version: ${VERSION}/" charts/harbor-bridge/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/harbor-bridge/Chart.yaml
+          head charts/harbor-bridge/Chart.yaml
+      - uses: azure/setup-helm@v4
+        with: { version: v3.16.1 }
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: charts
+          skip_existing: true
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
