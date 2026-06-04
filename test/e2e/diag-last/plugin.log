@@ -1,0 +1,8 @@
+Found 3 pods, using pod/harbor-bridge-plugin-cmpmf
+installing plugin binary → /host/etc/kubernetes/credential-provider
+installing kubelet credential-provider-config → /host/etc/kubernetes/credential-provider-config
+installing bridge CA → /host/etc/kubernetes/credential-provider-config/harbor-bridge-ca.crt
+checking kubelet credential-provider wiring
+writing /etc/default/kubelet and restarting kubelet.service
+install complete
+Warning: pause should be the first process

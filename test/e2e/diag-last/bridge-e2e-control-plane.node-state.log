@@ -1,0 +1,34 @@
+=== /etc/default/kubelet ===
+KUBELET_EXTRA_ARGS="--image-credential-provider-bin-dir=/etc/kubernetes/credential-provider --image-credential-provider-config=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml"
+
+=== /etc/kubernetes/credential-provider ===
+total 5776
+drwxr-xr-x 2 root root    4096 Jun  4 10:09 .
+drwxr-xr-x 1 root root    4096 Jun  4 10:09 ..
+-rwxr-xr-x 1 root root 5898402 Jun  4 10:09 harbor-bridge-plugin
+
+=== credential-provider-config.yaml ===
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+providers:
+  - name: harbor-bridge-plugin
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+    matchImages:
+      - "127.0.0.1:30843/*"
+    defaultCacheDuration: "1h"
+    env:
+      - name: HARBOR_BRIDGE_ENDPOINT
+        # Plugin runs on the node; reach the bridge via the
+        # NodePort on the node's own loopback. ADR-0008.
+        value: "https://127.0.0.1:31443"
+      - name: HARBOR_BRIDGE_CA_BUNDLE
+        value: "/etc/kubernetes/credential-provider-config/harbor-bridge-ca.crt"
+    tokenAttributes:
+      serviceAccountTokenAudience: "harbor-bridge"
+      requireServiceAccount: true
+      # See KEP-4412: this makes the SA token + UID part of the
+      # cache key so each pod gets its own credential.
+      cacheType: ServiceAccount
+
+=== containerd hosts.toml ===
+--- /etc/containerd/certs.d/127.0.0.1:30843/hosts.toml ---

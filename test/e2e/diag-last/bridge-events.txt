@@ -1,0 +1,42 @@
+LAST SEEN   TYPE     REASON               OBJECT                                   MESSAGE
+14s         Normal   Scheduled            pod/harbor-bridge-plugin-f598z           Successfully assigned harbor-bridge-system/harbor-bridge-plugin-f598z to bridge-e2e-worker
+14s         Normal   WaitingForApproval   certificaterequest/harbor-bridge-tls-1   Not signing CertificateRequest until it is Approved
+14s         Normal   Created              pod/harbor-bridge-7d54cc8d6c-26bb9       Container created
+14s         Normal   Started              pod/harbor-bridge-7d54cc8d6c-26bb9       Container started
+14s         Normal   SuccessfulCreate     replicaset/harbor-bridge-7d54cc8d6c      Created pod: harbor-bridge-7d54cc8d6c-26bb9
+14s         Normal   Scheduled            pod/harbor-bridge-plugin-cmpmf           Successfully assigned harbor-bridge-system/harbor-bridge-plugin-cmpmf to bridge-e2e-worker2
+14s         Normal   Pulled               pod/harbor-bridge-plugin-cmpmf           Container image "harbor-bridge-plugin:e2e" already present on machine and can be accessed by the pod
+14s         Normal   Created              pod/harbor-bridge-plugin-cmpmf           Container created
+14s         Normal   ScalingReplicaSet    deployment/harbor-bridge                 Scaled up replica set harbor-bridge-7d54cc8d6c from 0 to 1
+14s         Normal   Issuing              certificate/harbor-bridge-tls            The certificate has been successfully issued
+14s         Normal   Requested            certificate/harbor-bridge-tls            Created new CertificateRequest resource "harbor-bridge-tls-1"
+14s         Normal   Created              pod/harbor-bridge-plugin-f598z           Container created
+14s         Normal   Pulled               pod/harbor-bridge-7d54cc8d6c-26bb9       Container image "harbor-bridge:e2e" already present on machine and can be accessed by the pod
+14s         Normal   SuccessfulCreate     daemonset/harbor-bridge-plugin           Created pod: harbor-bridge-plugin-cmpmf
+14s         Normal   Generated            certificate/harbor-bridge-tls            Stored new private key in temporary Secret resource "harbor-bridge-tls-brtlv"
+14s         Normal   Issuing              certificate/harbor-bridge-tls            Issuing certificate as Secret does not exist
+14s         Normal   CertificateIssued    certificaterequest/harbor-bridge-tls-1   Certificate fetched from issuer successfully
+14s         Normal   cert-manager.io      certificaterequest/harbor-bridge-tls-1   Certificate request has been approved by cert-manager.io
+14s         Normal   WaitingForApproval   certificaterequest/harbor-bridge-tls-1   Not signing CertificateRequest until it is Approved
+14s         Normal   Scheduled            pod/harbor-bridge-plugin-zd8fr           Successfully assigned harbor-bridge-system/harbor-bridge-plugin-zd8fr to bridge-e2e-control-plane
+14s         Normal   Scheduled            pod/harbor-bridge-7d54cc8d6c-26bb9       Successfully assigned harbor-bridge-system/harbor-bridge-7d54cc8d6c-26bb9 to bridge-e2e-worker
+14s         Normal   WaitingForApproval   certificaterequest/harbor-bridge-tls-1   Not signing CertificateRequest until it is Approved
+14s         Normal   WaitingForApproval   certificaterequest/harbor-bridge-tls-1   Not signing CertificateRequest until it is Approved
+14s         Normal   WaitingForApproval   certificaterequest/harbor-bridge-tls-1   Not signing CertificateRequest until it is Approved
+14s         Normal   Pulled               pod/harbor-bridge-plugin-f598z           Container image "harbor-bridge-plugin:e2e" already present on machine and can be accessed by the pod
+14s         Normal   SuccessfulCreate     daemonset/harbor-bridge-plugin           Created pod: harbor-bridge-plugin-f598z
+14s         Normal   SuccessfulCreate     daemonset/harbor-bridge-plugin           Created pod: harbor-bridge-plugin-zd8fr
+13s         Normal   Pulled               pod/harbor-bridge-plugin-zd8fr           Container image "harbor-bridge-plugin:e2e" already present on machine and can be accessed by the pod
+13s         Normal   Created              pod/harbor-bridge-plugin-zd8fr           Container created
+13s         Normal   Started              pod/harbor-bridge-plugin-cmpmf           Container started
+13s         Normal   Started              pod/harbor-bridge-plugin-f598z           Container started
+13s         Normal   Started              pod/harbor-bridge-plugin-zd8fr           Container started
+12s         Normal   Created              pod/harbor-bridge-plugin-f598z           Container created
+12s         Normal   Pulled               pod/harbor-bridge-plugin-f598z           Container image "registry.k8s.io/pause:3.10" already present on machine and can be accessed by the pod
+12s         Normal   Pulled               pod/harbor-bridge-plugin-zd8fr           Container image "registry.k8s.io/pause:3.10" already present on machine and can be accessed by the pod
+12s         Normal   Created              pod/harbor-bridge-plugin-cmpmf           Container created
+12s         Normal   Pulled               pod/harbor-bridge-plugin-cmpmf           Container image "registry.k8s.io/pause:3.10" already present on machine and can be accessed by the pod
+12s         Normal   Created              pod/harbor-bridge-plugin-zd8fr           Container created
+3s          Normal   Started              pod/harbor-bridge-plugin-f598z           Container started
+3s          Normal   Started              pod/harbor-bridge-plugin-zd8fr           Container started
+3s          Normal   Started              pod/harbor-bridge-plugin-cmpmf           Container started

@@ -1,0 +1,4 @@
+NAME                       STATUS   ROLES           AGE     VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION     CONTAINER-RUNTIME
+bridge-e2e-control-plane   Ready    control-plane   4m22s   v1.35.0   172.18.0.4    <none>        Debian GNU/Linux 12 (bookworm)   6.12.76-linuxkit   containerd://2.2.0
+bridge-e2e-worker          Ready    <none>          4m8s    v1.35.0   172.18.0.3    <none>        Debian GNU/Linux 12 (bookworm)   6.12.76-linuxkit   containerd://2.2.0
+bridge-e2e-worker2         Ready    <none>          4m8s    v1.35.0   172.18.0.2    <none>        Debian GNU/Linux 12 (bookworm)   6.12.76-linuxkit   containerd://2.2.0

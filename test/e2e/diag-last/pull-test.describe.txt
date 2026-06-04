@@ -1,0 +1,63 @@
+Name:             bridge-pull-test-8mps8
+Namespace:        test-pull
+Priority:         0
+Service Account:  image-puller
+Node:             bridge-e2e-worker2/172.18.0.2
+Start Time:       Thu, 04 Jun 2026 12:10:00 +0200
+Labels:           app=bridge-pull-test
+                  batch.kubernetes.io/controller-uid=906e5a2e-0566-4c7a-8556-ee6234fb31ad
+                  batch.kubernetes.io/job-name=bridge-pull-test
+                  controller-uid=906e5a2e-0566-4c7a-8556-ee6234fb31ad
+                  job-name=bridge-pull-test
+Annotations:      <none>
+Status:           Pending
+IP:               10.244.2.133
+IPs:
+  IP:           10.244.2.133
+Controlled By:  Job/bridge-pull-test
+Containers:
+  main:
+    Container ID:  
+    Image:         127.0.0.1:30843/your-project/alpine:test3
+    Image ID:      
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      sh
+      -c
+    Args:
+      echo bridge-pull-test pulled successfully; exit 0
+    State:          Waiting
+      Reason:       ErrImagePull
+    Ready:          False
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-qzcdm (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       False 
+  ContainersReady             False 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-qzcdm:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age   From               Message
+  ----     ------     ----  ----               -------
+  Normal   Scheduled  2s    default-scheduler  Successfully assigned test-pull/bridge-pull-test-8mps8 to bridge-e2e-worker2
+  Normal   Pulling    1s    kubelet            spec.containers{main}: Pulling image "127.0.0.1:30843/your-project/alpine:test3"
+  Warning  Failed     1s    kubelet            spec.containers{main}: Failed to pull image "127.0.0.1:30843/your-project/alpine:test3": failed to pull and unpack image "127.0.0.1:30843/your-project/alpine:test3": failed to resolve reference "127.0.0.1:30843/your-project/alpine:test3": unexpected status from HEAD request to https://127.0.0.1:30843/v2/your-project/alpine/manifests/test3: 401 Unauthorized
+  Warning  Failed     1s    kubelet            spec.containers{main}: Error: ErrImagePull
+  Normal   BackOff    1s    kubelet            spec.containers{main}: Back-off pulling image "127.0.0.1:30843/your-project/alpine:test3"
+  Warning  Failed     1s    kubelet            spec.containers{main}: Error: ImagePullBackOff

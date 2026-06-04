@@ -1,0 +1,11 @@
+bridge_credential_issuances_total{result="bad_request"} 0
+bridge_credential_issuances_total{result="forbidden"} 0
+bridge_credential_issuances_total{result="ok"} 0
+bridge_credential_issuances_total{result="server_error"} 0
+bridge_credential_issuances_total{result="unauthorized"} 0
+bridge_credential_issuances_total{result="unavailable"} 0
+bridge_oidc_validation_failures_total{reason="bad_signature"} 0
+bridge_oidc_validation_failures_total{reason="expired"} 0
+bridge_oidc_validation_failures_total{reason="malformed"} 0
+bridge_oidc_validation_failures_total{reason="other"} 0
+bridge_oidc_validation_failures_total{reason="wrong_issuer"} 0

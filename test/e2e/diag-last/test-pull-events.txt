@@ -1,0 +1,8 @@
+LAST SEEN   TYPE      REASON             OBJECT                       MESSAGE
+2s          Normal    Scheduled          pod/bridge-pull-test-8mps8   Successfully assigned test-pull/bridge-pull-test-8mps8 to bridge-e2e-worker2
+2s          Normal    SuccessfulCreate   job/bridge-pull-test         Created pod: bridge-pull-test-8mps8
+1s          Normal    Pulling            pod/bridge-pull-test-8mps8   Pulling image "127.0.0.1:30843/your-project/alpine:test3"
+1s          Warning   Failed             pod/bridge-pull-test-8mps8   Failed to pull image "127.0.0.1:30843/your-project/alpine:test3": failed to pull and unpack image "127.0.0.1:30843/your-project/alpine:test3": failed to resolve reference "127.0.0.1:30843/your-project/alpine:test3": unexpected status from HEAD request to https://127.0.0.1:30843/v2/your-project/alpine/manifests/test3: 401 Unauthorized
+1s          Warning   Failed             pod/bridge-pull-test-8mps8   Error: ErrImagePull
+1s          Normal    BackOff            pod/bridge-pull-test-8mps8   Back-off pulling image "127.0.0.1:30843/your-project/alpine:test3"
+1s          Warning   Failed             pod/bridge-pull-test-8mps8   Error: ImagePullBackOff

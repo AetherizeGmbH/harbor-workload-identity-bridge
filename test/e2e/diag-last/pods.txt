@@ -1,0 +1,31 @@
+NAMESPACE              NAME                                               READY   STATUS         RESTARTS      AGE     IP             NODE                       NOMINATED NODE   READINESS GATES
+cert-manager           cert-manager-76d9876496-scblx                      1/1     Running        0             2m23s   10.244.2.211   bridge-e2e-worker2         <none>           <none>
+cert-manager           cert-manager-cainjector-9f76b67db-kksdd            1/1     Running        0             2m23s   10.244.1.229   bridge-e2e-worker          <none>           <none>
+cert-manager           cert-manager-webhook-7699796787-fx77h              1/1     Running        0             2m23s   10.244.1.231   bridge-e2e-worker          <none>           <none>
+harbor-bridge-system   harbor-bridge-7d54cc8d6c-26bb9                     1/1     Running        0             14s     10.244.1.162   bridge-e2e-worker          <none>           <none>
+harbor-bridge-system   harbor-bridge-plugin-cmpmf                         1/1     Running        0             14s     10.244.2.52    bridge-e2e-worker2         <none>           <none>
+harbor-bridge-system   harbor-bridge-plugin-f598z                         1/1     Running        0             14s     10.244.1.184   bridge-e2e-worker          <none>           <none>
+harbor-bridge-system   harbor-bridge-plugin-zd8fr                         1/1     Running        0             14s     10.244.0.229   bridge-e2e-control-plane   <none>           <none>
+harbor                 harbor-core-7f67fcff54-8vrlr                       1/1     Running        0             112s    10.244.2.148   bridge-e2e-worker2         <none>           <none>
+harbor                 harbor-database-0                                  1/1     Running        0             112s    10.244.2.70    bridge-e2e-worker2         <none>           <none>
+harbor                 harbor-jobservice-7c689c7465-gxm48                 1/1     Running        3 (61s ago)   112s    10.244.2.8     bridge-e2e-worker2         <none>           <none>
+harbor                 harbor-nginx-548745d8f4-wgk47                      1/1     Running        0             112s    10.244.2.166   bridge-e2e-worker2         <none>           <none>
+harbor                 harbor-portal-5bcb4f7554-llxd5                     1/1     Running        0             112s    10.244.1.76    bridge-e2e-worker          <none>           <none>
+harbor                 harbor-redis-0                                     1/1     Running        0             112s    10.244.1.122   bridge-e2e-worker          <none>           <none>
+harbor                 harbor-registry-76d9d79fbf-59q7v                   2/2     Running        0             112s    10.244.1.106   bridge-e2e-worker          <none>           <none>
+kube-system            cilium-9cnb2                                       1/1     Running        0             4m2s    172.18.0.4     bridge-e2e-control-plane   <none>           <none>
+kube-system            cilium-envoy-7q7fk                                 1/1     Running        0             4m2s    172.18.0.4     bridge-e2e-control-plane   <none>           <none>
+kube-system            cilium-envoy-dxsmj                                 1/1     Running        0             4m2s    172.18.0.3     bridge-e2e-worker          <none>           <none>
+kube-system            cilium-envoy-kj88r                                 1/1     Running        0             4m2s    172.18.0.2     bridge-e2e-worker2         <none>           <none>
+kube-system            cilium-operator-9788c47cb-x7ncq                    1/1     Running        0             4m2s    172.18.0.3     bridge-e2e-worker          <none>           <none>
+kube-system            cilium-operator-9788c47cb-xljp6                    1/1     Running        0             4m2s    172.18.0.2     bridge-e2e-worker2         <none>           <none>
+kube-system            cilium-qgwg9                                       1/1     Running        0             4m2s    172.18.0.3     bridge-e2e-worker          <none>           <none>
+kube-system            cilium-zjvd5                                       1/1     Running        0             4m2s    172.18.0.2     bridge-e2e-worker2         <none>           <none>
+kube-system            coredns-7d764666f9-srsv6                           1/1     Running        0             4m13s   10.244.0.41    bridge-e2e-control-plane   <none>           <none>
+kube-system            coredns-7d764666f9-zrkmf                           1/1     Running        0             4m13s   10.244.0.172   bridge-e2e-control-plane   <none>           <none>
+kube-system            etcd-bridge-e2e-control-plane                      1/1     Running        0             4m20s   172.18.0.4     bridge-e2e-control-plane   <none>           <none>
+kube-system            kube-apiserver-bridge-e2e-control-plane            1/1     Running        0             4m20s   172.18.0.4     bridge-e2e-control-plane   <none>           <none>
+kube-system            kube-controller-manager-bridge-e2e-control-plane   1/1     Running        0             4m20s   172.18.0.4     bridge-e2e-control-plane   <none>           <none>
+kube-system            kube-scheduler-bridge-e2e-control-plane            1/1     Running        0             4m20s   172.18.0.4     bridge-e2e-control-plane   <none>           <none>
+local-path-storage     local-path-provisioner-67b8995b4b-j29g8            1/1     Running        0             4m13s   10.244.0.203   bridge-e2e-control-plane   <none>           <none>
+test-pull              bridge-pull-test-8mps8                             0/1     ErrImagePull   0             2s      10.244.2.133   bridge-e2e-worker2         <none>           <none>
