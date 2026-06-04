@@ -19,6 +19,7 @@ jobs:
     name: semantic-release
     runs-on: ubuntu-latest
     outputs:
+      # cycjimmy/semantic-release-action sets these — npx semantic-release alone does not.
       released: ${{ steps.semrel.outputs.new_release_published }}
       version:  ${{ steps.semrel.outputs.new_release_version }}
     steps:
@@ -34,20 +35,21 @@ jobs:
           cache: true
       - uses: azure/setup-helm@v4
         with: { version: v4.2.0 }  # semantic-release prepareCmd regenerates chart goldens
-      - name: Install semantic-release
-        run: |
-          npm install --no-save \
-            semantic-release@24 \
-            @semantic-release/changelog \
-            @semantic-release/git \
-            @semantic-release/exec \
-            @semantic-release/github \
-            conventional-changelog-conventionalcommits
-      - name: Run semantic-release
+      # cycjimmy/semantic-release-action exposes `new_release_published`
+      # and `new_release_version` as step outputs — the bare `npx
+      # semantic-release` does not, which silently broke our downstream
+      # dispatch (chart-release + release-images) for v0.0.0–v0.0.5.
+      - uses: cycjimmy/semantic-release-action@v4
         id: semrel
+        with:
+          semantic_version: 24
+          extra_plugins: |
+            @semantic-release/changelog@6
+            @semantic-release/git@10
+            @semantic-release/exec@6
+            conventional-changelog-conventionalcommits@7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx semantic-release
 
   # release-images.yml and release-chart.yml are dispatched explicitly
   # from here. We can't rely on `on: push: tags` because semantic-release
