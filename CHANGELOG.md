@@ -1,3 +1,9 @@
+## [0.1.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.7...v0.1.0) (2026-06-04)
+
+### Features
+
+* **release:** publish chart as OCI artifact to ghcr.io ([0ec0b22](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/0ec0b22752be8503b2b13944514b74fe73fb99c2))
+
 ## [0.0.7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.6...v0.0.7) (2026-06-04)
 
 ### Bug Fixes
