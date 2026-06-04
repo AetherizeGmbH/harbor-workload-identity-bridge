@@ -132,10 +132,34 @@ plugin:
 
   # Where on each node the plugin binary and config are written. These
   # MUST match the kubelet's --image-credential-provider-bin-dir and
-  # --image-credential-provider-config flags. The chart can't change
-  # those flags — the operator does that at node provisioning time.
+  # --image-credential-provider-config flags. When patchKubelet=true
+  # (the default below) the DaemonSet patches and restarts kubelet
+  # itself, so these paths just need to be writable. When
+  # patchKubelet=false the operator owns the kubelet flags — set
+  # these to whatever the node image / cluster module configured.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
+
+  # Whether the install init container should patch the host's
+  # /etc/default/kubelet to add --image-credential-provider-*
+  # flags and restart kubelet.service via nsenter into PID 1.
+  #
+  # Set to FALSE when the node image / cluster module already
+  # configures kubelet for credential providers (EKS / GKE / AKS
+  # nodes, baked images, or a kind/kubeadm setup that pre-stages
+  # the flags). The DaemonSet will then only refresh the binary,
+  # config, and CA — no kubelet restart, no hostPID, no nsenter.
+  #
+  # Set to TRUE for self-managed clusters where the operator does
+  # not control the node image (kind, vanilla kubeadm, k3s on
+  # commodity hosts). The DaemonSet does the wiring once per node;
+  # kubelet restarts on first install, then idempotency keeps it
+  # untouched on every subsequent reschedule.
+  #
+  # Default true matches the "no upstream pattern for this exists,
+  # so the chart handles it" reality. If you know your environment
+  # bakes it in, flip to false.
+  patchKubelet: true
 
   # How long kubelet may cache credentials returned by the plugin.
   # Bounded above by the HarborAccess CR's spec.tokenTTL; this is just

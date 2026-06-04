@@ -4,16 +4,26 @@
 imagePullSecrets, no long-lived credentials in workload namespaces, no
 per-namespace token-distribution chores.**
 
-> Status: **alpha**. Bridge, plugin, and Helm chart are feature-complete
-> and verified end-to-end on a single kind cluster against a real Harbor:
-> `crane pull` succeeded using the credentials the bridge returned
-> ([ADR-0013](docs/adr/0013-return-robot-basic-auth-credentials.md)), and
-> the plugin's `CredentialProviderResponse` carries a Basic Auth pair
-> byte-equal to what `curl` receives from the bridge directly. What's
-> left for v0.1.0 is the kubelet-driven fork+exec path (Phase 6 e2e
-> against a kind cluster recreated with `--image-credential-provider-*`
-> flags) and the SECURITY.md threat model polish. See
-> [`docs/PHASES.md`](docs/PHASES.md) for the full state.
+> Status: **alpha, Phase 6 in progress — kubelet integration blocked**.
+> Bridge, plugin, and Helm chart are feature-complete and verified
+> end-to-end on a single kind cluster against a real Harbor: `crane
+> pull` succeeded using the credentials the bridge returned
+> ([ADR-0013](docs/adr/0013-return-robot-basic-auth-credentials.md)),
+> and the plugin's `CredentialProviderResponse` carries a Basic Auth
+> pair byte-equal to what `curl` receives from the bridge directly.
+>
+> What's left for v0.1.0 is the kubelet fork+exec path. After
+> patching kubelet with `--image-credential-provider-*` flags on
+> kind v1.35, kubelet registers and **matches** our provider for the
+> test pod's image (`plugins.go:55 Registered credential provider`
+> + `plugins.go:75 Generating per pod credential provider`) but
+> then silently aborts ~2 ms later without executing the binary —
+> proven by replacing the binary with a logging wrapper that was
+> never called. Likely a KEP-4412 `tokenAttributes` /
+> `KubeletServiceAccountTokenForCredentialProviders` feature-gate
+> quirk in kind's 1.35 build. Three concrete diagnostics + the
+> exact cluster state left behind are documented in
+> [`docs/PHASES.md`](docs/PHASES.md#phase-6--kubelet-driven-e2e--finalize-docs--in-progress).
 
 ---
 
@@ -131,7 +141,7 @@ spec: { selfSigned: {} }
 YAML
 
 # 3. Install the chart.
-helm install harbor-bridge ./chart -n harbor-bridge-system \
+helm install harbor-bridge ./charts/harbor-bridge -n harbor-bridge-system \
   --set clusterName=prod-eu-west \
   --set harbor.url=https://harbor.example.com \
   --set harbor.adminCredsSecret.name=harbor-admin \
@@ -139,11 +149,14 @@ helm install harbor-bridge ./chart -n harbor-bridge-system \
   --set 'plugin.matchImages={harbor.example.com/*}' \
   --set tls.issuerRef.name=harbor-bridge-ca
 
-# 4. Configure each node's kubelet to use the plugin. The chart can't
-#    set these flags for you; do it at node provisioning:
-#      --image-credential-provider-bin-dir=/etc/kubernetes/credential-provider
-#      --image-credential-provider-config=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml
-#    For kind, see https://kind.sigs.k8s.io/docs/user/configuration/#kubelet-extra-args.
+# 4. The chart's plugin DaemonSet does the kubelet wiring for you:
+#    init container `nsenter`s into PID 1, patches /etc/default/kubelet
+#    with --image-credential-provider-{bin-dir,config}, and runs
+#    `systemctl restart kubelet`. Once per node, idempotency-guarded.
+#    Expect a brief node-local kubelet bounce as the DaemonSet rolls
+#    out (control-plane static pods recover within seconds).
+#    Set `plugin.patchKubelet=false` when the node image already wires
+#    kubelet (EKS / GKE / AKS, baked AMIs).
 
 # 5. Apply a HarborAccess CR. The audience MUST match plugin.audience above.
 cat <<'YAML' | kubectl apply -f -
@@ -175,6 +188,32 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
 via `kubectl proxy`) is documented in [HOW-TO-TEST.md](HOW-TO-TEST.md)
 along with the manual plugin-driver procedure that proves the chain
 end-to-end without a kubelet-config change.
+
+### Helm upgrade caveat — kubelet restart on config changes
+
+The chart's idempotency guard only checks whether `/etc/default/kubelet`
+already has the credential-provider flags; it does **not** detect when
+the *config file content* changes (e.g. you change `plugin.matchImages`,
+`plugin.audience`, or rotate the bridge CA). Kubelet reads the
+credential-provider config **once at boot** — there is no hot reload
+(`DynamicKubeletConfig` was removed in 1.26). So after a `helm upgrade`
+that changes anything in the config file, you must restart kubelet on
+each node manually so the new content takes effect:
+
+```bash
+# After a helm upgrade that changed matchImages / audience / TLS:
+for node in $(kubectl get nodes -o name); do
+  docker exec ${node##*/} systemctl restart kubelet   # kind
+  # or: ssh ${node##*/} sudo systemctl restart kubelet
+done
+```
+
+A future chart version should make the idempotency content-aware (hash
+the config file and compare); for now this is operator-driven. The
+DaemonSet itself rolls fresh pods on `helm upgrade` (annotation
+checksums force a re-roll) — that updates the files on disk — but the
+init container's restart check shortcuts because the flags are still
+present in `/etc/default/kubelet`.
 
 ## Architecture and decisions
 
@@ -213,7 +252,7 @@ end-to-end without a kubelet-config change.
 | 3 | Data plane: OIDC validator, HTTP handler, HTTPS server, metrics, cmd/main.go, ADR-0013 pivot | ✅ Complete |
 | 4 | Plugin binary (KEP-4412 stdin/stdout protocol), ADR-0015 | ✅ Complete |
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
-| 6 | Kubelet-driven e2e (kind cluster with `--image-credential-provider-*` flags) + SECURITY.md polish + v0.1.0 tag | ⏳ Next |
+| 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | 🚧 In progress — blocked on kubelet aborting between provider match and binary exec (see [PHASES.md](docs/PHASES.md#where-it-stops--the-open-blocker)) |
 
 ## Contributing
 

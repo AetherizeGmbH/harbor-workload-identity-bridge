@@ -246,6 +246,13 @@ spec:
     spec:
       serviceAccountName: harbor-bridge-plugin
       hostNetwork: false
+      # Required so the install container's `nsenter -t 1 ...` can
+      # reach the host's PID namespace to patch /etc/default/kubelet
+      # and signal kubelet.service. ECR / GCR / ACR sidestep this by
+      # baking everything into the cloud node image; for self-managed
+      # clusters where the operator does not control the node image
+      # (kind, kubeadm, k3s), this is the install handoff.
+      hostPID: true
       priorityClassName: system-node-critical
       securityContext:
         runAsNonRoot: false  # need root to write into /etc/kubernetes
@@ -273,6 +280,33 @@ spec:
               echo "installing bridge CA → ${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
               cp -f /tls/ca.crt "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
               chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
+
+              # Kubelet only reads --image-credential-provider-* at
+              # startup (no hot-reload — DynamicKubeletConfig was
+              # removed in 1.26), AND it fails its boot-time check if
+              # either path doesn't exist. So we add the flags AFTER
+              # the files are in place, then restart kubelet. nsenter
+              # runs the patch + restart in the host's namespaces.
+              # Idempotency marker: the bin-dir flag already present
+              # in /etc/default/kubelet. Skips on every reschedule
+              # after the first install so kubelet doesn't churn.
+              echo "checking kubelet credential-provider wiring"
+              nsenter -t 1 -m -u -i -n -p -- env \
+                NODE_BIN_DIR="${HOST_BIN_DIR#/host}" \
+                NODE_CONFIG_FILE="${HOST_CONFIG_DIR#/host}/credential-provider-config.yaml" \
+                sh -c '
+                  set -eu
+                  if grep -q image-credential-provider-bin-dir /etc/default/kubelet 2>/dev/null; then
+                    echo "kubelet already wired for credential providers; not restarting"
+                    exit 0
+                  fi
+                  echo "writing /etc/default/kubelet and restarting kubelet.service"
+                  mkdir -p /etc/default
+                  printf "KUBELET_EXTRA_ARGS=\"--image-credential-provider-bin-dir=%s --image-credential-provider-config=%s\"\n" \
+                    "${NODE_BIN_DIR}" "${NODE_CONFIG_FILE}" > /etc/default/kubelet
+                  systemctl daemon-reload
+                  systemctl restart kubelet
+                '
 
               echo "install complete"
           env:

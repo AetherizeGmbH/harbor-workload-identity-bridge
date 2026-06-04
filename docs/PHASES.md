@@ -16,7 +16,7 @@ This document is written to survive context compaction. The detail sections belo
 - Phase 3 Slice D (server + metrics + cmd/main.go): COMPLETE
 - Phase 4 (plugin binary): COMPLETE
 - Phase 5 (Helm chart): COMPLETE
-- Phase 6 (e2e + docs): **NEXT**
+- Phase 6 (kubelet-driven e2e + docs + v0.1.0): **IN PROGRESS — BLOCKED on kubelet silently aborting between credential-provider match and exec; see Phase 6 section.**
 
 ## Architecture snapshot (post-ADR-0013)
 
@@ -273,19 +273,19 @@ Originally-planned section (kept for archaeology):
 
 ### Delivered
 
-- [chart/Chart.yaml](../chart/Chart.yaml) (`harbor-workload-identity-bridge` v0.1.0, kubeVersion `>=1.34.0-0` for KEP-4412 beta).
-- [chart/values.yaml](../chart/values.yaml) — 7 REQUIRED fields gated at template time (`clusterName`, `harbor.url`, `harbor.adminCredsSecret.name`, `plugin.matchImages`, `plugin.audience`, `tls.issuerRef.name` when `tls.enabled`, `bridge.mTLS.clientIssuerRef.name` when mTLS enabled); everything else defaulted with comments explaining each knob.
-- [chart/templates/_helpers.tpl](../chart/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide, leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
+- [charts/harbor-bridge/Chart.yaml](../chart/Chart.yaml) (`harbor-workload-identity-bridge` v0.1.0, kubeVersion `>=1.34.0-0` for KEP-4412 beta).
+- [charts/harbor-bridge/values.yaml](../chart/values.yaml) — 7 REQUIRED fields gated at template time (`clusterName`, `harbor.url`, `harbor.adminCredsSecret.name`, `plugin.matchImages`, `plugin.audience`, `tls.issuerRef.name` when `tls.enabled`, `bridge.mTLS.clientIssuerRef.name` when mTLS enabled); everything else defaulted with comments explaining each knob.
+- [charts/harbor-bridge/templates/_helpers.tpl](../chart/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide, leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
 - Bridge templates: `bridge-serviceaccount.yaml`, `bridge-rbac.yaml` (ClusterRole for HarborAccess cluster-wide, Role for Secrets + Lease in release namespace — tightened from the over-broad kubebuilder markers), `bridge-deployment.yaml` (2 replicas with pod-anti-affinity, distroless `nonroot` security context, projected admin-creds and TLS volumes, TLS-cert-checksum annotation for cert-rotation reload), `bridge-service.yaml` (NodePort 31443 per ADR-0008), `bridge-certificate.yaml` (cert-manager Certificate with optional client-cert when mTLS enabled), `bridge-servicemonitor.yaml` (optional, only when `metrics.serviceMonitor.enabled`).
 - Plugin templates: `plugin-serviceaccount.yaml` (`automountServiceAccountToken: false` — plugin pods don't talk to the K8s API), `plugin-configmap.yaml` (kubelet `CredentialProviderConfig` with `cacheType: ServiceAccount`, `defaultCacheDuration`, `matchImages` from values, `HARBOR_BRIDGE_*` env including CA path), `plugin-daemonset.yaml` (privileged init container that copies binary + config + CA + optional mTLS client cert into `/etc/kubernetes/credential-provider*` hostPaths, then a `registry.k8s.io/pause:3.10` main container so the DaemonSet stays "running" and `kubectl logs` surfaces the install output; `priorityClassName: system-node-critical`, `tolerations: [{operator: Exists}]` so the plugin lands on control-plane nodes).
-- [chart/crds/harbor.aetherize.io_harboraccesses.yaml](../chart/crds/harbor.aetherize.io_harboraccesses.yaml) — CRD copied from `config/crd/bases`. Helm's `crds/` directory installs it but does not upgrade it; CRD changes are an explicit operator step.
-- [chart/templates/NOTES.txt](../chart/templates/NOTES.txt) — prints `clusterName`, the unique prefix, the audience the operator must set on every CR, and the kubelet flags the chart cannot set (`--image-credential-provider-{bin-dir,config}` must already be on the node).
+- [charts/harbor-bridge/crds/harbor.aetherize.io_harboraccesses.yaml](../chart/crds/harbor.aetherize.io_harboraccesses.yaml) — CRD copied from `config/crd/bases`. Helm's `crds/` directory installs it but does not upgrade it; CRD changes are an explicit operator step.
+- [charts/harbor-bridge/templates/NOTES.txt](../chart/templates/NOTES.txt) — prints `clusterName`, the unique prefix, the audience the operator must set on every CR, and the kubelet flags the chart cannot set (`--image-credential-provider-{bin-dir,config}` must already be on the node).
 
 ### Validation
 
 - `make chart-lint` — `helm lint` clean on both test values files (`values-complete.yaml`, `values-mtls.yaml`).
-- `make chart-test-required` — [chart/tests/test-required-values.sh](../chart/tests/test-required-values.sh) verifies all 7 required-value gates fire with the expected error substring. `plugin.matchImages` (an empty list, not a missing key) is tested via a values overlay because `--set foo=[]` doesn't reproduce the empty-list path.
-- `make chart-golden` — diff current render against `chart/tests/golden/{default,mtls}.yaml`. CI fails on unintended template drift; `make chart-golden-update` re-captures after intentional changes.
+- `make chart-test-required` — [charts/harbor-bridge/tests/test-required-values.sh](../chart/tests/test-required-values.sh) verifies all 7 required-value gates fire with the expected error substring. `plugin.matchImages` (an empty list, not a missing key) is tested via a values overlay because `--set foo=[]` doesn't reproduce the empty-list path.
+- `make chart-golden` — diff current render against `charts/harbor-bridge/tests/golden/{default,mtls}.yaml`. CI fails on unintended template drift; `make chart-golden-update` re-captures after intentional changes.
 - `make chart-test` — full suite (lint + required-value + golden), used as the chart's gate.
 - Server-side dry-run against the 2026-05-31 kind cluster accepted all 11 resources for the default variant and all 12 for the mTLS variant (the ServiceMonitor's CRD wasn't installed; YAML structurally fine).
 - [Makefile](../Makefile) gains `verify-plugin-isolation` which fails the build if `go list -deps ./plugin/...` returns any `k8s.io` / `sigs.k8s.io` package — mechanises ADR-0015's consequence.
@@ -334,11 +334,107 @@ Originally-planned section (kept for archaeology):
 - Golden-file render test: render with sample `values.yaml`, diff against `tests/golden/`.
 - Required-value test: `helm template` without `clusterName` must fail.
 
-## Phase 6 — e2e + finalize docs
+## Phase 6 — kubelet-driven e2e + finalize docs — IN PROGRESS
+
+**Scope change from original plan:** the two-cluster e2e (Cluster A `prod-eu-west` + Cluster B `staging-us-east` against one Harbor) is dropped. Single-cluster verification already covers the architectural claims, the multi-cluster ownership model is mechanically verified by [ADR-0009](adr/0009-multi-cluster-topology.md) + the prefix-check unit tests, and standing up two real kind clusters with cert-manager + Harbor on each is disproportionate setup for the marginal coverage it adds.
+
+**Goal:** kubelet-driven pull works end-to-end on a single kind cluster, configured for KEP-4412 with the chart-installed plugin.
+
+### What was verified during the 2026-05-31 single-cluster run
+
+Everything below works on the `tofu-dev` kind cluster (k8s 1.35, 1 cp + 3 workers, cert-manager + Harbor in-cluster) with the chart installed via `helm install harbor-bridge ./charts/harbor-bridge -n harbor-bridge-system -f charts/harbor-bridge/tests/values-e2e.yaml`:
+
+- Chart installs cleanly; bridge Deployment + plugin DaemonSet both Ready.
+- Bridge → apiserver TLS + auth works in-cluster via `BRIDGE_OIDC_CA_FILE` + per-request Bearer-token RoundTripper (commit `7615794` fixed three real bugs hidden by yesterday's laptop-bridge setup).
+- HarborAccess CR reaches `Ready=True`; robot `bridge-dev-test-pull-image-puller` appears in Harbor; per-CR Secret created in bridge namespace.
+- Plugin binary installed on every node at `/etc/kubernetes/credential-provider/harbor-bridge-plugin` by the DaemonSet, with config + CA at `/etc/kubernetes/credential-provider-config/`.
+- Direct invocation of the on-node binary via `docker exec -i <node> ... harbor-bridge-plugin` (with kubelet-equivalent stdin and env) returns a `CredentialProviderResponse` with a Basic Auth pair **byte-equal** to what `curl /v1/credentials` returns through `kubectl port-forward`.
+- After patching the four kubelet configs (`/etc/default/kubelet` with `KUBELET_EXTRA_ARGS="--image-credential-provider-bin-dir=... --image-credential-provider-config=..."` — the KubeletConfiguration v1beta1 schema does **not** accept `imageCredentialProvider*` fields in this kubelet build, despite the docs implying it should; `strict decoding error: unknown field` confirms), kubelet:
+  - Registers the provider at startup: `plugins.go:55 "Registered credential provider" provider="harbor-bridge-plugin"`.
+  - Matches the provider when scheduling the test pod: `plugins.go:75 "Generating per pod credential provider" provider="harbor-bridge-plugin" podName="pull-test" podNamespace="test-pull" podUID="…" serviceAccountName="image-puller"`.
+
+### Where it stops — the open blocker
+
+Between the `Generating per pod credential provider` log and `Pulling image without credentials` ~2 ms later, kubelet **silently aborts**. The plugin binary is never executed.
+
+**Definitive proof:** the plugin binary was replaced with a wrapper script that logs every invocation to `/tmp/plugin-invoked.log` before exec'ing the real binary. The log file is never created — kubelet does not exec the binary at all.
+
+**What we verified is NOT the cause:**
+
+- Plugin works when invoked manually (`docker exec -i tofu-dev-worker ... harbor-bridge-plugin`). Returns valid response.
+- Bridge serves `/v1/credentials` correctly (verified via curl through port-forward, with byte-equal Basic Auth to direct plugin invocation).
+- Kubelet command line shows the flags correctly: `--image-credential-provider-bin-dir=/etc/kubernetes/credential-provider --image-credential-provider-config=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml`.
+- The credential-provider-config.yaml file on the node has correct content; `tokenAttributes.serviceAccountTokenAudience` is `harbor-bridge`, `cacheType` is `ServiceAccount`.
+- `kubectl create token image-puller -n test-pull --audience=harbor-bridge --duration=10m` succeeds — apiserver accepts the audience.
+- Bridge metrics show **0** issuances during the kubelet-pull window (the plugin was never invoked).
+- Kubelet at `--v=4` and `--v=6` shows no `Error getting service account token`, no `RequestServiceAccountToken`, no plugin exec attempt; the next log line after `Generating per pod credential provider` is `BackOff` or the next sync — nothing between.
+
+**Three plausible causes, in order of likelihood:**
+
+1. **KEP-4412 ServiceAccount-token-for-credential-providers feature gate.** The relevant gate is `KubeletServiceAccountTokenForCredentialProviders` (beta in 1.34, default-enabled per upstream). Kind's 1.35 build may compile or configure it differently. Quick check: omit `tokenAttributes` entirely (use the older Image-cache-type provider path) and see if kubelet exec's the binary. If the binary runs without `tokenAttributes` but not with, the gate or its expected wiring is the cause.
+2. **Token projection failing silently.** Kubelet calls `TokenRequest` on the apiserver to mint a pod-bound SA token. If that call 401s/403s, kubelet returns empty credentials without logging at V=6. `kubectl create token` succeeds for the same SA + audience, but `kubectl` uses an unbound token whereas kubelet projects a pod-bound one — different code path on the apiserver. Quick check: run kubelet with `--v=8` and grep for `tokenmanager`, `RequestServiceAccountToken`, `TokenRequest`.
+3. **`tokenAttributes` schema mismatch in this kubelet's v1 CredentialProviderConfig.** The chart's config file uses `apiVersion: kubelet.config.k8s.io/v1`. If this kubelet's compiled-in v1 schema doesn't include `tokenAttributes` (was promoted later or only in v1beta1), kubelet may parse the provider, register it, log "Generating", then bail when actually wiring the token attributes. Quick check: change the config's `apiVersion` to `kubelet.config.k8s.io/v1beta1`.
+
+### Recommended pick-up
+
+Before further chart or plugin changes, run the three quick checks above in order. Each is 5 min and one will narrow the cause. Most likely outcome: a chart-side fix (drop `tokenAttributes` for this k8s version, or downshift the CredentialProviderConfig apiVersion).
+
+### Cluster state left behind (as of 2026-05-31)
+
+- Bridge + plugin DaemonSet installed in `harbor-bridge-system` namespace.
+- HarborAccess CR `test-access` applied; `Ready=True`.
+- ClusterIssuer `harbor-bridge-ca` (self-signed) and `harbor-admin` Secret in place.
+- All 4 kubelet configs have `--image-credential-provider-*` flags via `/etc/default/kubelet`; kubelet running.
+- KubeletConfiguration files restored to original (the `imageCredentialProvider*` fields were rejected as unknown — flags-only is the working path).
+- Plugin binary restored on `tofu-dev-worker` (debug wrapper removed).
+
+### 2026-06-03 — kubelet startup check + DaemonSet self-installs the kubelet flags
+
+Two new discoveries from the 2026-06-03 attempt to run the cluster with the kubelet flags pre-baked via terraform:
+
+1. **Kubelet refuses to start when either `--image-credential-provider-bin-dir` or `--image-credential-provider-config` points at a non-existent path.** The check is in `pkg/kubelet/kuberuntime/kuberuntime_manager.go:301`; failure emits `Failed to register CRI auth plugins err="plugin binary directory ... did not exist"` / `unable to access path ".../credential-provider-config.yaml": no such file or directory`. kubelet then crash-loops, kubeadm init fails, terraform-kind fails to create the cluster. This is also the most likely retro-explanation for the silent-abort behaviour seen on 2026-05-31: kubelet was patched on a *running* cluster where the files were already on disk, but on a *fresh* boot the same flags would have prevented kubelet from coming up at all.
+2. **There is no upstream pattern for installing credential providers via a Kubernetes workload.** ECR, GCR, and ACR all bake the binary + config + kubelet flags into the cloud provider node image; the chart isn't running on those nodes. For self-managed clusters (kind, vanilla kubeadm, k3s) the standard advice is to place files at node-provisioning time (cloud-init / Ansible / Terraform `remote-exec`). No widely-used "install via DaemonSet" pattern exists.
+
+**The chart now closes the gap itself.** [charts/harbor-bridge/templates/plugin-daemonset.yaml](../chart/templates/plugin-daemonset.yaml) gained `hostPID: true` and an `nsenter`-into-PID-1 block that, after copying the binary + config + CA into place, writes `KUBELET_EXTRA_ARGS` into `/etc/default/kubelet` and runs `systemctl daemon-reload && systemctl restart kubelet` — once per node, guarded by an idempotency `grep`. Gated on `plugin.patchKubelet: true` (default; flip to false when the node image already wires kubelet, e.g. EKS).
+
+**Test-cluster terraform module reverted.** [modules/test-cluster/main.tf](https://github.com/50hz/terraform-modules) keeps the feature gates (`KubeletServiceAccountTokenForCredentialProviders`, `ServiceAccountNodeAudienceRestriction`) but no longer sets `--image-credential-provider-*` flags itself — the chart owns kubelet wiring end-to-end.
+
+### 2026-06-04 — fully automated reproduction in `test/e2e/`
+
+The blocker is now reproducible from a clean repo via a single `tofu test` invocation in [test/e2e/](../test/e2e/). The test:
+
+1. `cluster` — kind v1.35.0, Cilium kube-proxy replacement, cert-manager, containerd `hosts.toml` skip-verify for the Harbor NodePort, `kind load` of the locally-built bridge + plugin images.
+2. `harbor` — Harbor via the upstream helm chart, exposed as NodePort 30843 with auto self-signed cert.
+3. `seed_image` — in-cluster Job that creates the `your-project` Harbor project and `crane copy`s `alpine:3.20` into it.
+4. `bridge_install` — our chart, including the plugin DaemonSet's `nsenter` patch-and-restart of kubelet on every node.
+5. `harbor_access` — HarborAccess CR + test SA.
+6. `pull_pod` — Job pulling `127.0.0.1:30843/your-project/alpine:test3`.
+
+**Outcome (2026-06-04 run):** 5 of 6 pass. `pull_pod` fails. `test/e2e/diag-last/` captures, from the *live* cluster moments before tofu's destroy phase:
+
+- `bridge-metrics.txt` — every `bridge_credential_issuances_total{result=*}` counter is **0**. The bridge was never reached.
+- `pull-test.describe.txt` — pod `ErrImagePull`, `401 Unauthorized`. Containerd attempted the pull without credentials.
+- `bridge-e2e-worker.node-state.log` — `/etc/default/kubelet` carries both `--image-credential-provider-*` flags, the binary exists at `/etc/kubernetes/credential-provider/harbor-bridge-plugin` (mode 0755), the config file's `matchImages` is `127.0.0.1:30843/*` which exactly matches the test image reference.
+
+All preconditions kubelet needs to invoke the plugin are met. Kubelet still doesn't. This is the silent-abort blocker, **now reproduced in a fully scripted, clean-room environment** rather than on a manually-poked tofu-dev cluster.
+
+[docs/UPSTREAM-ISSUE.md](UPSTREAM-ISSUE.md) is the ready-to-file draft; the embedded `kind create cluster` + minimal printer-plugin recipe still stands and is independent of our chart.
+
+### Remaining work
+
+1. **File the upstream issue** — kubernetes/kubernetes. The standalone reproduction in `UPSTREAM-ISSUE.md` is a minimum-viable kind-only repro that the maintainers can run in seconds.
+2. **`02-traefik.tftest.hcl`** — production-realistic test that adds Traefik + IngressRoute on top of `01-bridge.tftest.hcl`. Separate test so the fast-feedback `01` stays under 15 minutes. Today the e2e drops Traefik and uses NodePort + `skip_verify` on containerd, which is enough to prove the bridge / plugin / chart wiring but does not cover the Traefik path operators will deploy.
+3. **`docs/SECURITY.md` polish.** Needs a pass to reflect the elevated privilege the install DaemonSet now requires (`hostPID: true`, `privileged: true`, restarts kubelet on every node).
+4. **`docs/ARCHITECTURE.md`.** Optional for v0.1.0.
+5. **`v0.1.0` tag.** Annotated tag, push, release notes summarising Phases 1–6 + the upstream blocker.
+
+### Originally-planned section (kept for archaeology)
 
 **Goal:** two kind clusters share one Harbor; each manages only its own robots; image pulls succeed.
 
-### e2e setup
+The original two-cluster setup is preserved below in case we revisit it for a multi-cluster CI gate. Most claims it would validate are now mechanically covered by unit tests + the 2026-05-31 single-cluster run.
+
+#### e2e setup
 
 - `test/e2e/` with `sigs.k8s.io/e2e-framework`.
 - Two kind clusters: `prod-eu-west` and `staging-us-east`. Different `clusterName` values.
@@ -346,23 +442,23 @@ Originally-planned section (kept for archaeology):
 - Apply `HarborAccess` in each cluster (sample CR).
 - Deploy a test pod that image-pulls from Harbor; assert pull succeeds within timeout.
 
-### What the e2e validates
+#### What the e2e validates
 
-- ADR-0013's claim: containerd accepts our Basic Auth credentials and successfully completes its registry handshake with Harbor.
-- ADR-0009's claim: cluster A's robots have prefix `bridge-prod-eu-west-…`, cluster B's have `bridge-staging-us-east-…`. Audit Harbor robot list and assert no cross-contamination.
-- ADR-0011's claim: workloads in cluster A cannot read the robot Secret (RBAC test: deploy a pod with default SA, `kubectl exec` into it, try to read the Secret, expect Forbidden).
-- ADR-0012's claim: deleting a `HarborAccess` causes the janitor to remove the Harbor robot. Tweak janitor sweep interval to 5s in e2e for tractable test runtime.
+- ADR-0013's claim: containerd accepts our Basic Auth credentials and successfully completes its registry handshake with Harbor. **Already proven via crane on 2026-05-31.**
+- ADR-0009's claim: cluster A's robots have prefix `bridge-prod-eu-west-…`, cluster B's have `bridge-staging-us-east-…`. Audit Harbor robot list and assert no cross-contamination. **Covered by `harbor.OwnsRobot` unit tests and the prefix-construction logic in `harbor.RobotName`; a real two-cluster run would be confirmation rather than discovery.**
+- ADR-0011's claim: workloads in cluster A cannot read the robot Secret (RBAC test). **Single-cluster RBAC test would suffice; the chart's Role/RoleBinding scopes Secrets to the bridge namespace only.**
+- ADR-0012's claim: deleting a `HarborAccess` causes the janitor to remove the Harbor robot. **Single-cluster test, no need for two.**
 
-### Docs to write
+#### Docs to write
 
 - `docs/ARCHITECTURE.md` — request flow diagram (sequence-diagram-as-mermaid), component overview, lifecycle of a HarborAccess.
 - `docs/SECURITY.md` — threat model, blast-radius analysis post-ADR-0013, mTLS guidance, audit-log shape, SA-revocation latency.
-- `README.md` — install walkthrough, two-cluster example, troubleshooting (incl. the prefix-collision caveat).
-- `docs/MIGRATION.md` — extend with post-pivot decommission walkthrough and the `forceLocalValidation` flip story for the Harbor #17520 future.
+- `README.md` — install walkthrough, two-cluster example, troubleshooting (incl. the prefix-collision caveat). **Rewritten 2026-05-31 to chart-led quickstart with single-cluster scope.**
+- `docs/MIGRATION.md` — extend with post-pivot decommission walkthrough and the `forceLocalValidation` flip story for the Harbor #17520 future. **Stays a stub until #17520 has a public direction.**
 
-### Tag
+#### Tag
 
-`v0.1.0` after e2e green + docs reviewed.
+`v0.1.0` after kubelet-exec blocker resolved + verification green + SECURITY.md polished.
 
 ## Cross-cutting non-goals (intentionally not in any phase)
 

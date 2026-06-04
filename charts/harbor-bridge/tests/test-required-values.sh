@@ -4,7 +4,7 @@
 # was silently dropped — caught by the test.
 set -euo pipefail
 
-CHART_DIR="${CHART_DIR:-chart}"
+CHART_DIR="${CHART_DIR:-charts/harbor-bridge}"
 COMPLETE="${CHART_DIR}/tests/values-complete.yaml"
 
 # Each case: (label, --set arg to clear the required field, expected

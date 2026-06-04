@@ -8,3 +8,15 @@ cover.out
 .vscode/
 *.swp
 .DS_Store
+
+# OpenTofu / Terraform e2e
+test/e2e/.terraform/
+test/e2e/.terraform.lock.hcl
+test/e2e/**/.gen/
+test/e2e/**/terraform.tfstate*
+test/e2e/**/.terraform/
+
+# Node tooling (semantic-release / commitlint)
+node_modules/
+package-lock.json
+npm-debug.log

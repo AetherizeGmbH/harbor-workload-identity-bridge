@@ -35,14 +35,26 @@ NEXT STEPS
 
        {{ .Values.plugin.audience }}
 
-  4. Confirm kubelet on each node has these flags set:
+  4. Kubelet integration:
 
        --image-credential-provider-bin-dir={{ .Values.plugin.hostBinaryDir }}
        --image-credential-provider-config={{ .Values.plugin.hostConfigDir }}/credential-provider-config.yaml
 
-     The chart installs the binary and config onto each node, but
-     it CANNOT change kubelet's flags. Without them the plugin is
-     installed but never invoked.
+{{- if .Values.plugin.patchKubelet }}
+
+     plugin.patchKubelet=true (current setting): the plugin DaemonSet
+     patches /etc/default/kubelet on each node and restarts kubelet
+     ONCE per node to apply the flags. Expect a brief node-local
+     kubelet bounce as the DaemonSet rolls out — static pods on the
+     control plane (apiserver / controller-manager / scheduler) will
+     recover within seconds.
+{{- else }}
+
+     plugin.patchKubelet=false (current setting): the chart will NOT
+     touch kubelet. You must configure the two flags above at node
+     provisioning time (kind kubeadm patches, EKS node bootstrap,
+     custom AMI, etc.), or the plugin is installed but never invoked.
+{{- end }}
 
 {{- if not .Values.tls.enabled }}
 

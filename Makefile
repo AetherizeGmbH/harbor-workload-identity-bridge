@@ -115,7 +115,7 @@ verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sig
 # Helm chart targets (Phase 5)
 # ====================================================================
 
-CHART_DIR ?= chart
+CHART_DIR ?= charts/harbor-bridge
 CHART_TESTS_DIR ?= $(CHART_DIR)/tests
 GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 

@@ -13,7 +13,14 @@ harbor:
 
 plugin:
   matchImages:
-    - "harbor.dev.aetherize.com/*"
+    # tofu-dev kind quirk: containerd runs in each node's host network
+    # ns where CoreDNS doesn't apply and ClusterIPs aren't reachable
+    # (Cilium kube-proxy replacement without bpf-lb-sock). Traefik's
+    # NodePort 30843 IS reachable per-node via /etc/hosts mapping the
+    # FQDN to a node IP. Image refs therefore include :30843 so
+    # containerd connects to where Traefik actually listens on the
+    # node network ns.
+    - "harbor.dev.127.0.0.1.nip.io:30843/*"
   audience: harbor-bridge
   image:
     repository: harbor-bridge-plugin
