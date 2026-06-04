@@ -35,7 +35,7 @@ jobs:
       - uses: opentofu/setup-opentofu@v1
         with: { tofu_version: 1.8.5 }
       - uses: azure/setup-helm@v4
-        with: { version: v3.16.1 }
+        with: { version: v4.2.0 }
       - name: Build bridge + plugin images
         # Built locally with the `:e2e` tag — the kind-cluster module
         # then does `kind load docker-image ...:e2e` after the cluster

@@ -45,5 +45,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-        with: { version: v3.16.1 }
+        with: { version: v4.2.0 }
       - run: make chart-test

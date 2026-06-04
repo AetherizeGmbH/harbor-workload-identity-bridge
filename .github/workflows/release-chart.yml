@@ -33,7 +33,7 @@ jobs:
           sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/harbor-bridge/Chart.yaml
           head charts/harbor-bridge/Chart.yaml
       - uses: azure/setup-helm@v4
-        with: { version: v3.16.1 }
+        with: { version: v4.2.0 }
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
