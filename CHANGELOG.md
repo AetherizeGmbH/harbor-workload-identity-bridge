@@ -1,3 +1,9 @@
+## [0.0.7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.6...v0.0.7) (2026-06-04)
+
+### Bug Fixes
+
+* **release:** grant actions: write so dispatch can fire downstream jobs ([bc268ea](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/bc268eae1f4620b5dad4173e1d259cd2c85cf69a))
+
 ## [0.0.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.5...v0.0.6) (2026-06-04)
 
 ### Bug Fixes
