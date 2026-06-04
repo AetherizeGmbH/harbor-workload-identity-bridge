@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -56,6 +57,12 @@ type Server struct {
 	cfg     ServerConfig
 	srv     *http.Server
 	tlsConf *tls.Config
+
+	// boundAddr is set once by Start after net.Listen resolves any `:0`
+	// placeholder, then read by Addr(). The atomic.Pointer crossing
+	// satisfies -race; tests that poll Addr() while Start runs would
+	// otherwise race the s.srv.Addr field.
+	boundAddr atomic.Pointer[string]
 }
 
 // Compile-time interface check. controller-runtime's manager.Add takes
@@ -130,11 +137,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
-// Addr returns the address the server is bound to. After Start has
-// resolved a `:0` placeholder, the returned value is the actual address.
-// Useful in tests.
+// Addr returns the address the server is bound to. Before Start binds
+// the listener this is the configured value (which may be ":0"); after
+// Start resolves the bound port it is the concrete `127.0.0.1:NNNN`.
+// Safe to call concurrently with Start — backed by atomic.Pointer to
+// satisfy -race.
 func (s *Server) Addr() string {
-	return s.srv.Addr
+	if p := s.boundAddr.Load(); p != nil {
+		return *p
+	}
+	return s.cfg.ListenAddr
 }
 
 // Start implements manager.Runnable. Blocks until ctx is cancelled, then
@@ -149,11 +161,12 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("server: listen on %s: %w", s.cfg.ListenAddr, err)
 	}
-	s.srv.Addr = ln.Addr().String()
+	addr := ln.Addr().String()
+	s.boundAddr.Store(&addr)
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("data-plane server listening", "addr", s.srv.Addr, "mtls", s.cfg.ClientCAFile != "")
+		logger.Info("data-plane server listening", "addr", addr, "mtls", s.cfg.ClientCAFile != "")
 		// ServeTLS with empty cert/key falls back to TLSConfig.GetCertificate.
 		if err := s.srv.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
