@@ -9,6 +9,7 @@ permissions:
   contents: write       # tag + release
   issues: write         # semantic-release adds release-note comments
   pull-requests: write  # ditto
+  actions: write        # createWorkflowDispatch for trigger-{chart-release,release-images}
 
 concurrency:
   group: release-${{ github.ref }}
