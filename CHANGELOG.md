@@ -1,3 +1,9 @@
+## [0.0.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.4...v0.0.5) (2026-06-04)
+
+### Bug Fixes
+
+* **release:** make release-images concurrency group per-tag ([8fb51a4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/8fb51a433977b25e168113e9a407be6303289fb4))
+
 ## [0.0.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.3...v0.0.4) (2026-06-04)
 
 ### Bug Fixes
