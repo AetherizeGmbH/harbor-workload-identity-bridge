@@ -1,3 +1,9 @@
+## [0.1.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.1.0...v0.1.1) (2026-06-04)
+
+### Bug Fixes
+
+* **release:** clean image names + correct org slug ([b1c92b5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/b1c92b52e2e558824ae23f3f0f476f0129fd370b))
+
 ## [0.1.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.7...v0.1.0) (2026-06-04)
 
 ### Features

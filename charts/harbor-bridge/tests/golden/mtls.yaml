@@ -6,8 +6,8 @@ metadata:
   name: harbor-bridge
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -23,8 +23,8 @@ metadata:
   name: harbor-bridge-plugin
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -44,8 +44,8 @@ metadata:
   name: harbor-bridge-plugin
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -86,8 +86,8 @@ kind: ClusterRole
 metadata:
   name: harbor-bridge-harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -111,8 +111,8 @@ kind: ClusterRoleBinding
 metadata:
   name: harbor-bridge-harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -134,8 +134,8 @@ metadata:
   name: harbor-bridge
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -162,8 +162,8 @@ metadata:
   name: harbor-bridge
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -186,8 +186,8 @@ metadata:
   name: harbor-bridge
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -214,8 +214,8 @@ metadata:
   name: harbor-bridge-plugin
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -234,8 +234,8 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-        app.kubernetes.io/version: "0.1.0"
+        helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+        app.kubernetes.io/version: "0.1.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: harbor-workload-identity-bridge
         app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -244,7 +244,7 @@ spec:
       annotations:
         # Force re-roll on config or CA rotation so the on-disk copies
         # are refreshed across the fleet.
-        plugin.harbor.aetherize.io/config-checksum: 29111db366add6c998005075061d99813b1dbe3d7bcb1aec10484c1529016e69
+        plugin.harbor.aetherize.io/config-checksum: c6d0cb766bc6571aac2a6e6ffb6574e2ccc1847c506b0b5dbc57c3ea290b269a
         plugin.harbor.aetherize.io/tls-checksum: b84f1c25e5f65271fd9a4d3d3abf7821fc2b628c31b267eb978e29c1aff84e00
     spec:
       serviceAccountName: harbor-bridge-plugin
@@ -264,7 +264,7 @@ spec:
         - operator: Exists
       initContainers:
         - name: install
-          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.1.0
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.1.1
           imagePullPolicy: IfNotPresent
           command: [/bin/sh, -c]
           args:
@@ -401,8 +401,8 @@ metadata:
   name: harbor-bridge
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -423,8 +423,8 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-        app.kubernetes.io/version: "0.1.0"
+        helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+        app.kubernetes.io/version: "0.1.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: harbor-workload-identity-bridge
         app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -460,7 +460,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: bridge
-          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge:0.1.0
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge:0.1.1
           imagePullPolicy: IfNotPresent
           args: []
           ports:
@@ -566,8 +566,8 @@ metadata:
   name: harbor-bridge-tls
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -609,8 +609,8 @@ metadata:
   name: harbor-bridge-plugin-mtls-client
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -640,8 +640,8 @@ metadata:
   name: harbor-bridge
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.1.0
-    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
