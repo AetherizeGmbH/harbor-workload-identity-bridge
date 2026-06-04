@@ -25,19 +25,6 @@ harbor:
       username: username
       password: password
 
-plugin:
-  # Image patterns (kubelet glob format) for which kubelet should call
-  # this plugin. REQUIRED — an empty list means kubelet never invokes
-  # the plugin and image pulls silently fall back to anonymous.
-  # Example: ["harbor.example.com/*", "*.harbor.example.com/*"]
-  matchImages: []
-
-  # Audience the kubelet projects the SA token with. Must match
-  # spec.trustPolicy.audience on every HarborAccess CR served by this
-  # bridge. Pick one string per cluster; embedding the cluster name is
-  # a defensible default ("harbor-bridge-<cluster>").
-  audience: ""
-
 tls:
   # Set to false ONLY if you are terminating TLS upstream (e.g. service
   # mesh sidecar). Direct kubelet→plugin→bridge with TLS off is unsafe.
@@ -122,6 +109,20 @@ bridge:
   extraEnvFrom: []
 
 plugin:
+  # ─── REQUIRED ───────────────────────────────────────────────────────
+  # Image patterns (kubelet glob format) for which kubelet should call
+  # this plugin. REQUIRED — an empty list means kubelet never invokes
+  # the plugin and image pulls silently fall back to anonymous.
+  # Example: ["harbor.example.com/*", "*.harbor.example.com/*"]
+  matchImages: []
+
+  # Audience the kubelet projects the SA token with. Must match
+  # spec.trustPolicy.audience on every HarborAccess CR served by this
+  # bridge. Pick one string per cluster; embedding the cluster name is
+  # a defensible default ("harbor-bridge-<cluster>").
+  audience: ""
+
+  # ─── DEFAULTED ──────────────────────────────────────────────────────
   # Image carrying the plugin binary. The DaemonSet copies the binary
   # out of this image onto each node's filesystem; the kubelet exec's
   # the on-node binary, not anything in the pod.

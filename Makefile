@@ -126,20 +126,20 @@ chart-lint: ## helm lint the chart against every test values file
 
 .PHONY: chart-render
 chart-render: ## Render the chart with the complete-values test file to stdout
-	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system
 
 .PHONY: chart-golden
 chart-golden: ## Diff current render against the checked-in golden files
-	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > /tmp/render-complete.yaml
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > /tmp/render-complete.yaml
 	@diff -u $(GOLDEN_DIR)/default.yaml /tmp/render-complete.yaml || { echo "golden mismatch for values-complete.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
-	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > /tmp/render-mtls.yaml
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > /tmp/render-mtls.yaml
 	@diff -u $(GOLDEN_DIR)/mtls.yaml /tmp/render-mtls.yaml || { echo "golden mismatch for values-mtls.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
 	@echo "golden render unchanged"
 
 .PHONY: chart-golden-update
 chart-golden-update: ## Re-capture golden files after intentional template changes
-	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/default.yaml
-	@helm template harbor-bridge $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/mtls.yaml
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/default.yaml
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/mtls.yaml
 	@echo "golden files refreshed; commit them after review"
 
 .PHONY: chart-test-required

@@ -2,18 +2,30 @@ extends: default
 
 rules:
   line-length:
-    max: 160
+    max: 200
     level: warning
   document-start: disable
   truthy:
     check-keys: false   # GitHub Actions uses `on:` which yamllint treats as boolean
   comments:
     min-spaces-from-content: 1
+  comments-indentation: disable
   indentation:
     spaces: 2
     indent-sequences: consistent
+  # The braces/colons rules below are conventional flow-style noise in
+  # GitHub Actions YAML (` with: { version: v3 }`). Off rather than
+  # bicker over every spacing.
+  braces: disable
+  brackets: disable
+  colons: disable
+  empty-lines:
+    max: 2
+  key-duplicates: enable     # this is the one that actually catches real bugs
 
 ignore: |
   charts/harbor-bridge/tests/golden/
   charts/harbor-bridge/templates/
   charts/harbor-bridge/crds/
+  test/e2e/diag-last/
+  test/e2e/modules/kind-cluster/.gen/

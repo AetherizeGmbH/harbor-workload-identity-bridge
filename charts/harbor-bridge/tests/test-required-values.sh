@@ -23,7 +23,7 @@ failed=0
 for case in "${cases[@]}"; do
   IFS='|' read -r label flag setval want <<< "${case}"
 
-  out=$(helm template harbor-bridge "${CHART_DIR}" -f "${COMPLETE}" \
+  out=$(helm template harbor-bridge "${CHART_DIR}" --kube-version 1.34.0 -f "${COMPLETE}" \
         --namespace harbor-bridge-system \
         "${flag}" "${setval}" 2>&1 || true)
 
@@ -53,7 +53,7 @@ tls:
   issuerRef:
     name: harbor-bridge-ca
 EOF
-out=$(helm template harbor-bridge "${CHART_DIR}" -f /tmp/values-no-matchimages.yaml \
+out=$(helm template harbor-bridge "${CHART_DIR}" --kube-version 1.34.0 -f /tmp/values-no-matchimages.yaml \
       --namespace harbor-bridge-system 2>&1 || true)
 if echo "${out}" | grep -q "plugin.matchImages is REQUIRED"; then
   echo "PASS  plugin.matchImages (empty list)"

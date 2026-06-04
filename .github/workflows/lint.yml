@@ -26,7 +26,12 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62.0
+          # v1.62 was built on go1.23; our module is go1.26, which
+          # golangci-lint refuses to load. The `latest` channel tracks
+          # whatever the most recent build is. Renovate's
+          # github-actions manager will pin this once it sees a
+          # specific version we can hold (current: 1.64+).
+          version: latest
           args: --timeout=5m
 
   gofmt:

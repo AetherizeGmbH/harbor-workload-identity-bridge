@@ -104,7 +104,7 @@ resource "helm_release" "harbor" {
       nodePort = {
         name = "harbor"
         ports = {
-          http  = { port = 80,  nodePort = var.http_node_port }
+          http  = { port = 80, nodePort = var.http_node_port }
           https = { port = 443, nodePort = var.https_node_port }
         }
       }
