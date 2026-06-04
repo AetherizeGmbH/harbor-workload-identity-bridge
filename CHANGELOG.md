@@ -1,3 +1,10 @@
+## [0.0.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.5...v0.0.6) (2026-06-04)
+
+### Bug Fixes
+
+* **release:** unpin semantic-release plugin majors ([ac52d19](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/ac52d19186ad1fadcb8369352b64273ecb1576b3))
+* **release:** use cycjimmy/semantic-release-action to expose outputs ([ebf06f1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/ebf06f1b6e1a077f54c8bea5169fc07fb00de23f))
+
 ## [0.0.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.4...v0.0.5) (2026-06-04)
 
 ### Bug Fixes
