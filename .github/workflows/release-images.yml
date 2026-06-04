@@ -25,7 +25,10 @@ permissions:
   id-token: write
 
 concurrency:
-  group: release-images-${{ github.ref }}
+  # Group by tag so independent versions don't queue against each other.
+  # If we grouped by github.ref, dispatching three orphan-rebuilds in
+  # parallel would let GitHub drop all-but-newest queued runs.
+  group: release-images-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
