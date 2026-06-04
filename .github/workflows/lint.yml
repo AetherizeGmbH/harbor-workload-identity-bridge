@@ -24,11 +24,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           # v2 series of golangci-lint is built with newer Go (the v1
           # series was stuck on go1.23/1.24, refused to load our go1.26
-          # source). Pin explicitly so Renovate can bump deterministically.
+          # source). Action v7 is the first to accept linter v2.
+          # Renovate's github-actions manager will bump both deterministically.
           version: v2.12.2
           args: --timeout=5m
 
