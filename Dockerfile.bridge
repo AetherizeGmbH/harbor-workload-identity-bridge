@@ -2,7 +2,13 @@
 # Bridge image. Distroless static + nonroot — the bridge has no shell,
 # no package manager, only the binary and its TLS roots.
 
-FROM golang:1.26-alpine AS builder
+# Pin the builder to the native build platform — under buildx, Go cross-
+# compiles via GOARCH much faster than QEMU emulates the whole toolchain.
+# Without this, arm64 builds on an amd64 runner stall for 30+ min on
+# k8s.io/client-go alone (real outage we hit on v0.0.0).
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 
 # Cache modules separately so source edits don't bust the layer.
@@ -10,7 +16,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY bridge ./bridge
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' \
     -o /out/bridge ./bridge/cmd
 
 FROM gcr.io/distroless/static-debian12:nonroot

@@ -1,18 +1,23 @@
 name: release-images
 
 on:
-  # Fires after `release.yml` (semantic-release) succeeds and tags the
-  # repo. We use the tag as the image tag so the chart's `appVersion`
-  # (semantic-release also bumps Chart.yaml) lines up 1:1 with the
-  # docker image tag operators pull.
-  push:
-    tags: ["v*"]
+  # PRIMARY trigger: explicit dispatch from release.yml after
+  # semantic-release succeeds. The `tag` input is the semver string
+  # without leading `v`. Reason for not using `on: push: tags`:
+  # semantic-release pushes the tag with GITHUB_TOKEN, and GitHub's
+  # security model suppresses workflow triggers for GITHUB_TOKEN-pushed
+  # events — so `push: tags` would silently never fire on releases.
   workflow_dispatch:
     inputs:
       tag:
         description: Image tag to push (without leading v). For ad-hoc rebuilds.
         required: true
         type: string
+  # FALLBACK trigger: manual tag pushes from a developer's machine (e.g.,
+  # rebuilding an existing release after a Dockerfile fix). Will not fire
+  # from semantic-release's tag pushes, see above.
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: read
