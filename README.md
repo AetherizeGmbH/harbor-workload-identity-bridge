@@ -140,14 +140,22 @@ metadata: { name: harbor-bridge-ca }
 spec: { selfSigned: {} }
 YAML
 
-# 3. Install the chart.
-helm install harbor-bridge ./charts/harbor-bridge -n harbor-bridge-system \
+# 3. Install the chart from the ghcr.io OCI registry.
+#    (Need Helm >= 3.8; OCI is enabled by default since 3.9.)
+helm install harbor-bridge \
+  oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
+  --version 0.0.7 \
+  -n harbor-bridge-system \
   --set clusterName=prod-eu-west \
   --set harbor.url=https://harbor.example.com \
   --set harbor.adminCredsSecret.name=harbor-admin \
   --set plugin.audience=harbor-bridge-prod-eu-west \
   --set 'plugin.matchImages={harbor.example.com/*}' \
   --set tls.issuerRef.name=harbor-bridge-ca
+
+# (Or from a clone of this repo:
+#    helm install harbor-bridge ./charts/harbor-bridge -n harbor-bridge-system \
+#      ... --set flags as above ...)
 
 # 4. The chart's plugin DaemonSet does the kubelet wiring for you:
 #    init container `nsenter`s into PID 1, patches /etc/default/kubelet

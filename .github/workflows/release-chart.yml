@@ -1,5 +1,17 @@
 name: release-chart
 
+# Publishes the Helm chart as an OCI artifact to ghcr.io. We do NOT use
+# helm/chart-releaser-action + gh-pages: the org enforces GitHub's
+# "Immutable Releases" policy, which fails chart-releaser's
+# create-release-then-upload-asset flow with HTTP 422 "Cannot upload
+# assets to an immutable release". OCI sidesteps GitHub Releases
+# entirely and puts the chart next to the images in ghcr.io.
+#
+# Users install via:
+#   helm install harbor-bridge \
+#     oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
+#     --version X.Y.Z -f values.yaml
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,22 +21,22 @@ on:
         type: string
 
 permissions:
-  contents: write  # write to gh-pages branch
-  pages: write
-  id-token: write
+  contents: read
+  packages: write  # OCI push to ghcr.io
 
 concurrency:
-  group: release-chart  # only one chart release at a time, ever
+  # Per-version so backfills don't queue against each other.
+  group: release-chart-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: chart-releaser
+  push:
+    name: helm OCI push
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # chart-releaser needs full history
+      - uses: azure/setup-helm@v4
+        with: { version: v4.2.0 }
       - name: Set chart version + appVersion
         env:
           VERSION: ${{ inputs.version }}
@@ -32,16 +44,21 @@ jobs:
           sed -i "s/^version: .*/version: ${VERSION}/" charts/harbor-bridge/Chart.yaml
           sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/harbor-bridge/Chart.yaml
           head charts/harbor-bridge/Chart.yaml
-      - uses: azure/setup-helm@v4
-        with: { version: v4.2.0 }
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.7.0
-        with:
-          charts_dir: charts
-          skip_existing: true
+      - name: Package chart
+        run: helm package charts/harbor-bridge --destination /tmp
+      - name: Login to ghcr.io
         env:
-          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Lowercased owner: ghcr.io is case-insensitive at the registry
+        # layer but the OCI spec mandates lowercase for namespaces.
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LC=$OWNER_LC" >> "$GITHUB_ENV"
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+      - name: Push to OCI
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          helm push "/tmp/harbor-workload-identity-bridge-${VERSION}.tgz" \
+            "oci://ghcr.io/${OWNER_LC}/charts"
