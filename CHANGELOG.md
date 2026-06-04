@@ -1,3 +1,10 @@
+## [0.0.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.2...v0.0.3) (2026-06-04)
+
+### Bug Fixes
+
+* **ci:** regen goldens for 0.0.2 ([3613a69](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/3613a6900f54144264a7cac36dc6a5a70d08105f))
+* **ci:** regen goldens on release + golangci-lint-action v7 ([8bccbf3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/8bccbf3df7ab0e4fd6423f677abc89e123ad381b))
+
 ## [0.0.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.0.1...v0.0.2) (2026-06-04)
 
 ### Bug Fixes
