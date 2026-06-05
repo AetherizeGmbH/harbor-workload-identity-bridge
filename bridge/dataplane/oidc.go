@@ -148,11 +148,11 @@ type goOIDCValidator struct {
 func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claims, error) {
 	idToken, err := v.verifier.Verify(ctx, rawToken)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	var raw rawClaims
 	if err := idToken.Claims(&raw); err != nil {
-		return nil, fmt.Errorf("%w: parse claims: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: parse claims: %w", ErrInvalidToken, err)
 	}
 	out := &Claims{
 		Subject:  raw.Sub,

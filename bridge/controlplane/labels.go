@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// Finalizer the reconciler attaches to every HarborAccess it manages so it
-// gets a chance to delete the Harbor robot before the CR is removed.
+// FinalizerName is the finalizer the reconciler attaches to every
+// HarborAccess it manages so it gets a chance to delete the Harbor robot
+// before the CR is removed.
 const FinalizerName = "harbor.aetherize.io/robot"
 
 // Kubernetes label keys used on bridge-managed Secrets. They make ownership

@@ -395,13 +395,10 @@ func wrapHarborOp(op string, err error) error {
 	if isConflict(err) {
 		out.aliases = append(out.aliases, ErrRobotAlreadyExists)
 	}
-	if isNotFound(err) {
-		// We intentionally do NOT alias to ErrRobotNotFound here: a 404
-		// from POST /robots means "referenced project not found", not
-		// "this robot does not exist". ErrRobotNotFound stays scoped
-		// to the GetByID/GetByName semantics. The reconciler's only
-		// branch on 404 from Create is "operator action required",
-		// which it can derive from the readable message above.
-	}
+	// Note: a 404 from POST /robots means "referenced project not found",
+	// not "this robot does not exist", so we deliberately do not alias it
+	// to ErrRobotNotFound. ErrRobotNotFound stays scoped to the
+	// GetByID/GetByName semantics; the reconciler derives the
+	// operator-action-required branch from the readable message above.
 	return out
 }

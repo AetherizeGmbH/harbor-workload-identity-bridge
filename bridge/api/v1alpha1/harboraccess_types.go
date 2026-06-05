@@ -5,6 +5,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // TrustPolicy describes the OIDC trust this HarborAccess places in incoming
@@ -188,5 +189,8 @@ type HarborAccessList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&HarborAccess{}, &HarborAccessList{})
+	addToSchemeBuilder(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &HarborAccess{}, &HarborAccessList{})
+		return nil
+	})
 }

@@ -201,8 +201,9 @@ func TestServer_MTLS_RejectsConnectionWithoutClientCert(t *testing.T) {
 		},
 		Timeout: 2 * time.Second,
 	}
-	_, err = client.Get("https://" + addr + "/")
+	resp, err := client.Get("https://" + addr + "/")
 	if err == nil {
+		_ = resp.Body.Close()
 		t.Fatal("expected TLS handshake to fail without client cert")
 	}
 }

@@ -109,7 +109,7 @@ func (c *bridgeClient) fetch(image, token string) (*bridgeResponse, error) {
 
 	resp, status, err := c.do(body, token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errBridgeUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", errBridgeUnavailable, err)
 	}
 
 	// One-time retry on 503 — gives the control plane a beat to finish
@@ -119,7 +119,7 @@ func (c *bridgeClient) fetch(image, token string) (*bridgeResponse, error) {
 		time.Sleep(retryBackoff)
 		resp, status, err = c.do(body, token)
 		if err != nil {
-			return nil, fmt.Errorf("%w: retry failed: %v", errBridgeUnavailable, err)
+			return nil, fmt.Errorf("%w: retry failed: %w", errBridgeUnavailable, err)
 		}
 	}
 
@@ -162,7 +162,7 @@ func (c *bridgeClient) do(body []byte, token string) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

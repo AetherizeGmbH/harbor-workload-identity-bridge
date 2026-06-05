@@ -1,15 +1,16 @@
-# golangci-lint config. Conservative on purpose — the bridge and plugin
-# already have tight unit tests. Linters here catch the high-value stuff
-# without drowning every PR in style complaints.
+# golangci-lint v2 config. Conservative on purpose — the bridge and
+# plugin already have tight unit tests. Linters here catch the
+# high-value stuff without drowning every PR in style complaints.
+version: "2"
+
 run:
   timeout: 5m
   modules-download-mode: readonly
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
@@ -24,23 +25,22 @@ linters:
     - unconvert
     - unparam
     - usestdlibvars
-
-linters-settings:
-  errcheck:
-    check-blank: false
-    check-type-assertions: true
-  revive:
+  settings:
+    errcheck:
+      check-type-assertions: true
+    revive:
+      rules:
+        - name: var-naming
+        - name: receiver-naming
+        - name: exported
+          arguments: ["disableStutteringCheck"]
+        - name: indent-error-flow
+        - name: superfluous-else
+  exclusions:
     rules:
-      - name: var-naming
-      - name: receiver-naming
-      - name: exported
-        arguments: ["disableStutteringCheck"]
-      - name: indent-error-flow
-      - name: superfluous-else
+      - path: _test\.go
+        linters: [errcheck, unparam, revive]
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters: [errcheck, unparam, revive]
   max-issues-per-linter: 0
   max-same-issues: 0

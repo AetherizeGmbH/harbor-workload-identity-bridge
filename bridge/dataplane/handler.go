@@ -126,7 +126,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var req Request
 	if r.Body != nil && r.ContentLength != 0 {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			// Body is optional but if present must parse — otherwise the
 			// audit log loses the image and we shouldn't pretend.

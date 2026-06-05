@@ -92,7 +92,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err := r.Update(ctx, ha); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
-		return ctrl.Result{Requeue: true}, nil
+		// The Update writes the CR we watch; that triggers the next
+		// reconcile on its own. (ctrl.Result.Requeue was deprecated in
+		// favour of letting the watch loop do the work.)
+		return ctrl.Result{}, nil
 	}
 
 	return r.reconcileNormal(ctx, ha)
@@ -137,7 +140,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	case errors.Is(err, harbor.ErrRobotNotFound):
 		return r.createAndStatus(ctx, ha, robotName, desiredDescription, desiredPerms)
 	case err != nil:
-		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("lookup robot: %w", err))
+		return r.markTransientError(ctx, ha, fmt.Errorf("lookup robot: %w", err))
 	}
 
 	// 5. Adoption discipline: refuse to manage a robot whose description does
@@ -160,7 +163,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	// the data plane has no credentials to authenticate with.
 	secretMissing, err := r.secretMissing(ctx, ha)
 	if err != nil {
-		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("check robot Secret: %w", err))
+		return r.markTransientError(ctx, ha, fmt.Errorf("check robot Secret: %w", err))
 	}
 
 	// 7. Permission update on generation change.
@@ -168,7 +171,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	if generationChanged {
 		logger.Info("updating Harbor robot permissions", "robot", robotName, "generation", ha.Generation)
 		if err := r.Harbor.UpdatePermissions(ctx, existing.ID, desiredDescription, desiredPerms); err != nil {
-			return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("update permissions: %w", err))
+			return r.markTransientError(ctx, ha, fmt.Errorf("update permissions: %w", err))
 		}
 	}
 
@@ -183,7 +186,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		}
 		newSecret, err := r.Harbor.RefreshSecret(ctx, existing.ID)
 		if err != nil {
-			return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("refresh secret: %w", err))
+			return r.markTransientError(ctx, ha, fmt.Errorf("refresh secret: %w", err))
 		}
 		existing.Secret = newSecret
 		if err := r.writeRobotSecret(ctx, ha, existing); err != nil {
@@ -218,7 +221,7 @@ func (r *Reconciler) createAndStatus(
 		logger.Info("Harbor returned 409 on create; recovering existing robot", "name", name)
 		return r.recoverExistingRobot(ctx, ha, name)
 	default:
-		return r.markTransientError(ctx, ha, ReasonHarborError, fmt.Errorf("create robot: %w", err))
+		return r.markTransientError(ctx, ha, fmt.Errorf("create robot: %w", err))
 	}
 	if err := r.writeRobotSecret(ctx, ha, robot); err != nil {
 		return ctrl.Result{}, err
@@ -238,7 +241,7 @@ func (r *Reconciler) recoverExistingRobot(ctx context.Context, ha *harborv1alpha
 		// Including the "after 409" prefix so a future operator reading
 		// the status condition sees the causal chain: create said
 		// conflict, lookup said something else, we couldn't recover.
-		return r.markTransientError(ctx, ha, ReasonHarborError,
+		return r.markTransientError(ctx, ha,
 			fmt.Errorf("recover after create 409: lookup robot: %w", err))
 	}
 	if !RobotBelongsToCluster(existing.Description, r.Config.ClusterName) {
@@ -249,7 +252,7 @@ func (r *Reconciler) recoverExistingRobot(ctx context.Context, ha *harborv1alpha
 	}
 	newSecret, err := r.Harbor.RefreshSecret(ctx, existing.ID)
 	if err != nil {
-		return r.markTransientError(ctx, ha, ReasonHarborError,
+		return r.markTransientError(ctx, ha,
 			fmt.Errorf("recover after create 409: refresh secret: %w", err))
 	}
 	existing.Secret = newSecret
@@ -451,8 +454,11 @@ func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.Harbor
 // reconcile error so controller-runtime retries with exponential backoff.
 // Use for Harbor API failures, network errors, and any condition where a
 // later attempt could plausibly succeed without operator intervention.
-func (r *Reconciler) markTransientError(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason string, cause error) (ctrl.Result, error) {
-	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, reason, cause.Error()); err != nil {
+// The Reason is fixed to ReasonHarborError because every current caller
+// originates in a Harbor-API hop; broaden the API if a non-Harbor
+// transient class ever appears.
+func (r *Reconciler) markTransientError(ctx context.Context, ha *harborv1alpha1.HarborAccess, cause error) (ctrl.Result, error) {
+	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, ReasonHarborError, cause.Error()); err != nil {
 		// Status update itself failed; surface that error instead of cause
 		// so the controller manager logs the real blocker.
 		return ctrl.Result{}, fmt.Errorf("update status while reporting transient error %q: %w", cause.Error(), err)
