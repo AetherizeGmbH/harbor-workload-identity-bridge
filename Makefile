@@ -60,6 +60,14 @@ envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
 	@KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test ./bridge/controlplane/... -run TestEnvtest -count=1 -v -timeout 120s
 
+.PHONY: e2e
+e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, image-pull assertion (~5 min)
+	cd test/e2e && tofu init -upgrade -no-color && TF_VAR_pause_before_pull=false tofu test -verbose
+
+.PHONY: e2e-pause
+e2e-pause: ## Run e2e but pause between bridge_install and pull_pod — `rm test/e2e/.tofu-sleep` to continue
+	cd test/e2e && tofu init -upgrade -no-color && TF_VAR_pause_before_pull=true tofu test -verbose
+
 .PHONY: proxy
 proxy: ## Expose the cluster's apiserver at http://localhost:8001 so the bridge can fetch the JWKS off-cluster
 	@echo "Run this in a separate terminal; leave it running while \`make run-local\` is active."

@@ -6,6 +6,6 @@ variable "enabled" {
 
 variable "file_sleep_path" {
   type        = string
-  description = "Path for the sleep file. If null, defaults to $${path.root}/.tofu-sleep (i.e. test/e2e/.tofu-sleep under `tofu test`). Delete the file to unblock the apply. Ignored when enabled=false."
+  description = "Path for the sleep file. If null, defaults to $${path.cwd}/.tofu-sleep — i.e. test/e2e/.tofu-sleep when invoked via `cd test/e2e && tofu test`. Delete the file to unblock the apply. Ignored when enabled=false."
   default     = null
 }
