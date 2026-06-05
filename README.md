@@ -318,6 +318,16 @@ present in `/etc/default/kubelet`.
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
 | 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
 
+## Support and services
+
+The project is Apache-2.0 and free to run. If your team is wrestling
+with Harbor robot sprawl, unclear namespace-to-image ownership, or wants
+to move to workload identity but doesn't know where to start, Aetherize
+offers a free one-hour audit. We walk through your current setup with
+you and draft a plan to clean it up. Email
+[contact@aetherize.com](mailto:contact@aetherize.com). Paid engagement
+covers implementation, migration, and ongoing operation.
+
 ## Contributing
 
 This is single-maintainer alpha and not yet open to contributions. File
