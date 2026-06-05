@@ -4,26 +4,32 @@
 imagePullSecrets, no long-lived credentials in workload namespaces, no
 per-namespace token-distribution chores.**
 
-> Status: **alpha, Phase 6 in progress — kubelet integration blocked**.
-> Bridge, plugin, and Helm chart are feature-complete and verified
-> end-to-end on a single kind cluster against a real Harbor: `crane
-> pull` succeeded using the credentials the bridge returned
-> ([ADR-0013](docs/adr/0013-return-robot-basic-auth-credentials.md)),
-> and the plugin's `CredentialProviderResponse` carries a Basic Auth
-> pair byte-equal to what `curl` receives from the bridge directly.
+> Status: **alpha — Phases 1 through 6 complete, end-to-end verified
+> on kind v1.35 + Harbor 2.x**. `make e2e` brings up a fresh kind
+> cluster, installs Harbor + the chart, seeds a private image, and
+> the load-bearing `pull_pod` assertion passes: kubelet exec's the
+> plugin, the plugin reaches the bridge over a NodePort, the bridge
+> mints/serves a Harbor robot's Basic Auth credentials, containerd
+> completes Harbor's bearer-token handshake itself, and the image
+> pulls. See [HOW-TO-TEST.md §1](HOW-TO-TEST.md).
 >
-> What's left for v0.1.0 is the kubelet fork+exec path. After
-> patching kubelet with `--image-credential-provider-*` flags on
-> kind v1.35, kubelet registers and **matches** our provider for the
-> test pod's image (`plugins.go:55 Registered credential provider`
-> + `plugins.go:75 Generating per pod credential provider`) but
-> then silently aborts ~2 ms later without executing the binary —
-> proven by replacing the binary with a logging wrapper that was
-> never called. Likely a KEP-4412 `tokenAttributes` /
-> `KubeletServiceAccountTokenForCredentialProviders` feature-gate
-> quirk in kind's 1.35 build. Three concrete diagnostics + the
-> exact cluster state left behind are documented in
-> [`docs/PHASES.md`](docs/PHASES.md#phase-6--kubelet-driven-e2e--finalize-docs--in-progress).
+> A previously-reported "silent abort" on kubelet's credential-provider
+> path (originally filed as
+> [kind#4185](https://github.com/kubernetes-sigs/kind/issues/4185))
+> turned out to be three bugs on our side, each masking the next:
+> a chart `matchImages` example that used a kubelet-unsupported path
+> glob; missing audience-scoped RBAC for
+> `ServiceAccountNodeAudienceRestriction` (default since v1.32);
+> and a bridge response that emitted an invalid `cacheKeyType`. All
+> three are fixed and documented in
+> [ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md) +
+> [ADR-0017](docs/adr/0017-chart-provisions-audience-rbac.md). The
+> kind issue is closed; not a kubelet / kind bug.
+>
+> Pre-v0.1.0 polish: `SECURITY.md` pass to document the elevated
+> privilege the install DaemonSet requires (`hostPID`, kubelet
+> restart) and an optional `02-traefik` e2e for the Traefik-fronted
+> Harbor path.
 
 ---
 
@@ -144,14 +150,19 @@ YAML
 #    (Need Helm >= 3.8; OCI is enabled by default since 3.9.)
 helm install harbor-bridge \
   oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
-  --version 0.0.7 \
+  --version 0.2.0 \
   -n harbor-bridge-system \
   --set clusterName=prod-eu-west \
   --set harbor.url=https://harbor.example.com \
   --set harbor.adminCredsSecret.name=harbor-admin \
   --set plugin.audience=harbor-bridge-prod-eu-west \
-  --set 'plugin.matchImages={harbor.example.com/*}' \
+  --set 'plugin.matchImages={harbor.example.com}' \
   --set tls.issuerRef.name=harbor-bridge-ca
+
+# IMPORTANT: matchImages does NOT support globs in the path. Use the
+# bare host (or host:port) form — `harbor.example.com` matches every
+# image from that registry; `harbor.example.com/*` is a literal `/*`
+# path prefix and will never match.
 
 # (Or from a clone of this repo:
 #    helm install harbor-bridge ./charts/harbor-bridge -n harbor-bridge-system \
@@ -183,7 +194,7 @@ spec:
   permissions:
     - project: production
       action: pull
-  tokenTTL: 1h
+  tokenTTL: 1h0m0s   # canonical Go time.Duration form — see ADR-0016 §test fixtures
 YAML
 ```
 
@@ -192,10 +203,16 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
 `robot-harbor-bridge-system-flux-access` Secret, and pods running as
 `flux-system/source-controller` can pull from `harbor.example.com/production/*`.
 
-**Local development** (no chart, run the bridge against your kubeconfig
-via `kubectl proxy`) is documented in [HOW-TO-TEST.md](HOW-TO-TEST.md)
-along with the manual plugin-driver procedure that proves the chain
-end-to-end without a kubelet-config change.
+**Testing.** Two paths in [HOW-TO-TEST.md](HOW-TO-TEST.md):
+
+- **§1 `tofu test` (recommended)** — `make e2e` brings up a fresh
+  kind cluster, installs Harbor + the chart, seeds a private image,
+  asserts the pull end-to-end. `make e2e-pause` halts before the
+  load-bearing pull so you can `kubectl` around the cluster. ~5 min.
+- **§2 Remote / manual cluster** — drive the bridge as a `go run`
+  process against an existing Kubernetes + Harbor by hand, with
+  `kubectl proxy` for OIDC discovery. Useful when iterating on the
+  bridge binary against real-world infra.
 
 ### Helm upgrade caveat — kubelet restart on config changes
 
@@ -250,6 +267,17 @@ present in `/etc/default/kubelet`.
     the plugin defines its own wire types instead of importing
     `k8s.io/kubelet` or `bridge/dataplane`. (Mechanised via
     `make verify-plugin-isolation`.)
+  - [ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md) —
+    the bridge emits `cacheKeyType: Registry`, not the often-confused
+    `ServiceAccount` (which is a *kubelet-side* tokenAttributes enum,
+    not a CredentialProviderResponse value). Fixes a bug that masked
+    as a kubelet silent-abort.
+  - [ADR-0017](docs/adr/0017-chart-provisions-audience-rbac.md) — the
+    chart ships a ClusterRole + Binding granting `system:nodes` the
+    `request-serviceaccounts-token-audience` verb on
+    `plugin.audience`. Required since v1.32 default-on of
+    `ServiceAccountNodeAudienceRestriction`; without it kubelet's
+    `TokenRequest` for the credential provider silently fails.
 
 ## Status and roadmap
 
@@ -260,7 +288,7 @@ present in `/etc/default/kubelet`.
 | 3 | Data plane: OIDC validator, HTTP handler, HTTPS server, metrics, cmd/main.go, ADR-0013 pivot | ✅ Complete |
 | 4 | Plugin binary (KEP-4412 stdin/stdout protocol), ADR-0015 | ✅ Complete |
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
-| 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | 🚧 In progress — blocked on kubelet aborting between provider match and binary exec (see [PHASES.md](docs/PHASES.md#where-it-stops--the-open-blocker)) |
+| 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); SECURITY.md polish + optional Traefik-fronted e2e (`02-traefik.tftest.hcl`) outstanding before the v0.1.0 tag |
 
 ## Contributing
 
