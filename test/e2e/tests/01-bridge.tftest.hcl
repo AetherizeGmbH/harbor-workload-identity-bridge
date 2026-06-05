@@ -271,7 +271,12 @@ run "bridge_install" {
     harbor_url            = run.harbor.internal_api_url
     harbor_admin_password = run.harbor.admin_password
     audience              = "harbor-bridge"
-    match_images          = ["harbor.e2e:30843/*"]
+    # No path glob — kubelet's matchImages doesn't support globs in
+    # the path component (only in the domain), so `harbor.e2e:30843/*`
+    # was being interpreted as a literal `/*` path prefix and silently
+    # failed to match `harbor.e2e:30843/your-project/alpine:test3`.
+    # The bare host:port form matches any image from that registry.
+    match_images = ["harbor.e2e:30843"]
   }
 }
 

@@ -16,6 +16,8 @@
 | 0012 | [Robot description as the cross-component reconciler↔janitor contract](0012-robot-description-as-component-contract.md) | Accepted |
 | 0013 | [Return robot Basic Auth credentials, not pre-minted Docker JWTs](0013-return-robot-basic-auth-credentials.md) | Accepted (supersedes 0005, supersedes 0007) |
 | 0014 | [Handle Harbor's `robot$` prefix asymmetry at the comparison boundary](0014-harbor-robot-dollar-prefix-handling.md) | Accepted |
-| 0015 | [The plugin duplicates wire types instead of importing them](0015-plugin-duplicates-wire-types.md) | Accepted |
+| 0015 | [The plugin duplicates wire types instead of importing them](0015-plugin-duplicates-wire-types.md) | Accepted (enum-mismatch reasoning corrected by 0016) |
+| 0016 | [`cacheKeyType` in the credential-provider response is `Registry`, not `ServiceAccount`](0016-credential-provider-cache-key-type.md) | Accepted (supersedes the enum claim in 0015) |
+| 0017 | [The chart provisions audience-scoped RBAC for kubelet token requests](0017-chart-provisions-audience-rbac.md) | Accepted |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

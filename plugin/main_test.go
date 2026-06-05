@@ -43,7 +43,7 @@ func TestRun_HappyPath(t *testing.T) {
 		Username:      "robot$bridge-prod-foo",
 		Password:      "s3cret",
 		ExpiresInSecs: 3600,
-		CacheKeyType:  "ServiceAccount",
+		CacheKeyType:  "Image",
 	}}
 
 	var stdout bytes.Buffer
@@ -63,8 +63,8 @@ func TestRun_HappyPath(t *testing.T) {
 	if resp.APIVersion != credentialProviderAPIVersion || resp.Kind != responseKind {
 		t.Errorf("TypeMeta wrong: got %q/%q", resp.APIVersion, resp.Kind)
 	}
-	if resp.CacheKeyType != "ServiceAccount" {
-		t.Errorf("CacheKeyType = %q, want ServiceAccount", resp.CacheKeyType)
+	if resp.CacheKeyType != "Image" {
+		t.Errorf("CacheKeyType = %q, want Image", resp.CacheKeyType)
 	}
 	if resp.CacheDuration != (time.Hour).String() {
 		t.Errorf("CacheDuration = %q, want %q", resp.CacheDuration, (time.Hour).String())
@@ -85,7 +85,7 @@ func TestRun_HostWithPort(t *testing.T) {
 	}
 	body, _ := json.Marshal(req)
 	fetcher := &fakeFetcher{resp: &bridgeResponse{
-		Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "ServiceAccount",
+		Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Image",
 	}}
 
 	var stdout bytes.Buffer

@@ -186,8 +186,8 @@ func TestHandler_HappyPath_ReturnsRobotBasicAuth(t *testing.T) {
 	if got.Password != hTestRobotPass {
 		t.Errorf("Password = %q, want %q (robot's actual password)", got.Password, hTestRobotPass)
 	}
-	if got.CacheKeyType != cacheKeyTypeServiceAccount {
-		t.Errorf("CacheKeyType = %q", got.CacheKeyType)
+	if got.CacheKeyType != cacheKeyTypeRegistry {
+		t.Errorf("CacheKeyType = %q, want %q", got.CacheKeyType, cacheKeyTypeRegistry)
 	}
 	// ExpiresInSecs reflects spec.tokenTTL (1h in our fixture).
 	if got.ExpiresInSecs != 3600 {

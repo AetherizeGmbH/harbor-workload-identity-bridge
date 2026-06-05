@@ -23,10 +23,15 @@ import (
 // CredentialsPath is the HTTP path the plugin POSTs to.
 const CredentialsPath = "/v1/credentials"
 
-// cacheKeyTypeServiceAccount mirrors KEP-4412's CredentialProviderCacheKeyType.
-// We always emit this value; see ADR-0006 for why the kubelet credential-
-// provider config sets cacheType: ServiceAccount.
-const cacheKeyTypeServiceAccount = "ServiceAccount"
+// cacheKeyTypeRegistry is the cacheKeyType we emit in every successful
+// CredentialProviderResponse. The kubelet API restricts this field to
+// {"Image", "Registry", "Global"}; "Registry" matches our credential model
+// (one Harbor robot per HarborAccess CR has permissions across one project,
+// so all repos sharing the same registry host can re-use the same creds).
+// NOTE: this is DIFFERENT from the kubelet credential-provider config's
+// `tokenAttributes.cacheType: ServiceAccount` (ADR-0006) — that controls
+// kubelet's SA-token cache, this controls the credential cache.
+const cacheKeyTypeRegistry = "Registry"
 
 // Request is the HTTP API the kubelet plugin POSTs to the bridge. The SA
 // token rides in the Authorization: Bearer header; the body carries only
@@ -288,7 +293,7 @@ func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl ti
 		Username:      creds.username,
 		Password:      creds.password,
 		ExpiresInSecs: int(ttl / time.Second),
-		CacheKeyType:  cacheKeyTypeServiceAccount,
+		CacheKeyType:  cacheKeyTypeRegistry,
 	})
 }
 

@@ -1,0 +1,39 @@
+{{- /*
+Authorises every kubelet (system:nodes group) to mint ServiceAccount
+tokens with the audience this bridge serves. Required when the cluster
+has the `ServiceAccountNodeAudienceRestriction` feature gate enabled
+(default since v1.32) — otherwise kubelet's TokenRequest for the
+credential provider fails with "audience X not authorized for node"
+and the credential provider silently produces no credentials.
+
+See ADR-0017 for the architectural rationale, scope limits, and the
+alternatives considered. Disable via plugin.audienceRBAC.create=false
+if you provide your own RBAC (rare).
+*/}}
+{{- if and .Values.plugin.audience .Values.plugin.audienceRBAC.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "harbor-bridge.fullname" . }}-audience-token-request
+  labels:
+    {{- include "harbor-bridge.labels.common" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    verbs:     ["request-serviceaccounts-token-audience"]
+    resources: [{{ .Values.plugin.audience | quote }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "harbor-bridge.fullname" . }}-audience-token-request
+  labels:
+    {{- include "harbor-bridge.labels.common" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind:     ClusterRole
+  name:     {{ include "harbor-bridge.fullname" . }}-audience-token-request
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind:     Group
+    name:     system:nodes
+{{- end }}

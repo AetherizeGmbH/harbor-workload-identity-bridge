@@ -47,7 +47,7 @@ func TestFetch_OK(t *testing.T) {
 			t.Errorf("image in body = %q", body.Image)
 		}
 		_ = json.NewEncoder(w).Encode(bridgeResponse{
-			Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "ServiceAccount",
+			Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Image",
 		})
 	})
 
@@ -88,7 +88,7 @@ func TestFetch_503ThenOK_RetriesOnce(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(bridgeResponse{
-			Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "ServiceAccount",
+			Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Image",
 		})
 	})
 
@@ -146,7 +146,7 @@ func TestFetch_500_IsNotRetried(t *testing.T) {
 func TestFetch_200WithEmptyCreds_Errors(t *testing.T) {
 	bc, _ := newTestBridge(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(bridgeResponse{
-			Username: "", Password: "", ExpiresInSecs: 60, CacheKeyType: "ServiceAccount",
+			Username: "", Password: "", ExpiresInSecs: 60, CacheKeyType: "Image",
 		})
 	})
 	_, err := bc.fetch("harbor.example.com/x:1", "tok")

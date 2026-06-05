@@ -77,6 +77,21 @@ data:
           cacheType: ServiceAccount
 
 ---
+# Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-bridge-audience-token-request
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+rules:
+  - apiGroups: [""]
+    verbs:     ["request-serviceaccounts-token-audience"]
+    resources: ["harbor-bridge-prod-eu-west"]
+---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -101,6 +116,26 @@ rules:
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/finalizers]
     verbs: [update]
+---
+# Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-bridge-audience-token-request
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.1.1
+    app.kubernetes.io/version: "0.1.1"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind:     ClusterRole
+  name:     harbor-bridge-audience-token-request
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind:     Group
+    name:     system:nodes
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1

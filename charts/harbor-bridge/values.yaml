@@ -113,7 +113,12 @@ plugin:
   # Image patterns (kubelet glob format) for which kubelet should call
   # this plugin. REQUIRED — an empty list means kubelet never invokes
   # the plugin and image pulls silently fall back to anonymous.
-  # Example: ["harbor.example.com/*", "*.harbor.example.com/*"]
+  # Kubelet's matchImages supports globs in the DOMAIN only — not in
+  # the port or path. So `harbor.example.com/*` is a literal `/*`
+  # path prefix and won't match `harbor.example.com/library/img:tag`.
+  # Use the bare host (or host:port) form to match any image from a
+  # registry. Subdomain globs work: `*.harbor.example.com`.
+  # Example: ["harbor.example.com", "*.harbor.example.com"]
   matchImages: []
 
   # Audience the kubelet projects the SA token with. Must match
@@ -123,6 +128,17 @@ plugin:
   audience: ""
 
   # ─── DEFAULTED ──────────────────────────────────────────────────────
+  # Audience-scoped ClusterRole + ClusterRoleBinding that grants every
+  # kubelet (system:nodes) permission to mint TokenRequests for the
+  # audience above. REQUIRED on clusters with the
+  # ServiceAccountNodeAudienceRestriction feature gate enabled
+  # (default since Kubernetes v1.32) — without it kubelet's TokenRequest
+  # fails and the credential provider silently produces no credentials.
+  # See ADR-0017. Disable only if you provide your own RBAC.
+  audienceRBAC:
+    create: true
+
+
   # Image carrying the plugin binary. The DaemonSet copies the binary
   # out of this image onto each node's filesystem; the kubelet exec's
   # the on-node binary, not anything in the pod.
