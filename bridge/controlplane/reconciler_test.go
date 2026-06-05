@@ -339,12 +339,15 @@ func TestReconcile_AddsFinalizerOnFirstReconcile(t *testing.T) {
 	mh := newMockHarbor()
 	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
 
-	_, err := r.Reconcile(context.Background(), reqFor(ha))
+	res, err := r.Reconcile(context.Background(), reqFor(ha))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No Harbor calls on this pass: the finalizer-add Update triggers
-	// the next reconcile through the watch loop.
+	if res.RequeueAfter == 0 {
+		t.Errorf("expected RequeueAfter>0 after adding finalizer; got %+v", res)
+	}
+	// No Harbor calls on this pass: the reconciler requeues itself to
+	// pick up the real work on the next iteration.
 	if len(mh.createCalls) != 0 {
 		t.Errorf("Create called before finalizer was set: %+v", mh.createCalls)
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -92,10 +93,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err := r.Update(ctx, ha); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
-		// The Update writes the CR we watch; that triggers the next
-		// reconcile on its own. (ctrl.Result.Requeue was deprecated in
-		// favour of letting the watch loop do the work.)
-		return ctrl.Result{}, nil
+		// Requeue immediately to pick up the reconcile pass that does
+		// the actual work, rather than waiting on the watch event for
+		// our own Update. ctrl.Result.Requeue is deprecated in favour
+		// of any non-zero RequeueAfter; a microsecond is the idiomatic
+		// "as soon as possible" value.
+		return ctrl.Result{RequeueAfter: time.Microsecond}, nil
 	}
 
 	return r.reconcileNormal(ctx, ha)

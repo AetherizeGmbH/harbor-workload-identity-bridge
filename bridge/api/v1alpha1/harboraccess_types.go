@@ -191,6 +191,10 @@ type HarborAccessList struct {
 func init() {
 	addToSchemeBuilder(func(s *runtime.Scheme) error {
 		s.AddKnownTypes(GroupVersion, &HarborAccess{}, &HarborAccessList{})
+		// Required for informer/Watch to decode metav1.WatchEvent under
+		// our GroupVersion. controller-runtime's scheme.Builder used to
+		// call this for us; runtime.SchemeBuilder does not.
+		metav1.AddToGroupVersion(s, GroupVersion)
 		return nil
 	})
 }
