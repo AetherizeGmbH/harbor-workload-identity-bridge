@@ -29,6 +29,18 @@ variable "dns_rewrite_targets" {
   EOT
 }
 
+variable "dns_hosts_entries" {
+  type        = map(string)
+  default     = {}
+  description = <<-EOT
+    Map of hostname → IP. Materialised into CoreDNS's `hosts` plugin
+    (an /etc/hosts-style A-record table) so every in-cluster pod can
+    resolve the hostname. Use for synthetic names that have to point
+    at something CNAME can't reach — e.g. `harbor.e2e → <kind_node_ip>`,
+    where the target is a kind-node docker IP (no in-cluster DNS).
+  EOT
+}
+
 provider "kubernetes" {
   host                   = var.kubeconfig.host
   client_certificate     = var.kubeconfig.client_certificate
@@ -60,6 +72,14 @@ resource "kubernetes_config_map_v1_data" "coredns" {
           answer "{{ .Name }} 60 IN CNAME ${v}"
         }
         %{endfor~}
+        %{if length(var.dns_hosts_entries) > 0~}
+        hosts {
+          %{for hostname, ip in var.dns_hosts_entries~}
+          ${ip} ${hostname}
+          %{endfor~}
+          fallthrough
+        }
+        %{endif~}
         prometheus :9153
         forward . /etc/resolv.conf {
            max_concurrent 1000

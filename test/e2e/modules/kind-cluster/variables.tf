@@ -52,6 +52,19 @@ variable "registry_insecure_hostnames" {
   EOT
 }
 
+variable "extra_etc_hosts" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Extra `/etc/hosts` lines written to every kind node after the
+    cluster is up. Format: "IP HOSTNAME" per entry. Use to map
+    synthetic hostnames (e.g. "127.0.0.1 harbor.e2e") so containerd
+    can resolve them without a real DNS record — needed because
+    go-containerregistry refuses loopback/private realm hosts in
+    www-authenticate, forcing us off literal-IP image refs.
+  EOT
+}
+
 variable "images_to_load" {
   type        = list(string)
   default     = []

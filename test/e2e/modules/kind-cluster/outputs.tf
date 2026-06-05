@@ -14,6 +14,11 @@ output "kubeconfig" {
   sensitive   = true
 }
 
+output "node_names" {
+  value       = local.node_names
+  description = "Docker container names of every kind node (control-plane + workers). Other modules `docker exec` into these to write hosts.toml, /etc/hosts, ca.crt, etc."
+}
+
 output "ports" {
   value = {
     http               = var.http_port

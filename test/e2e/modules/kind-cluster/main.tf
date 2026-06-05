@@ -52,9 +52,19 @@ resource "kind_cluster" "this" {
 
     # Tell containerd to read per-registry overrides from certs.d.
     # Individual hosts.toml files are mounted in below.
+    # Patch BOTH plugin paths so this works regardless of containerd
+    # major version:
+    #   - v1.x lives at plugins."io.containerd.grpc.v1.cri".registry
+    #   - v2.x lives at plugins."io.containerd.cri.v1.images".registry
+    # The unused path is silently ignored. kindest/node:v1.35.0 ships
+    # containerd 2.x — v1 path alone is no-op there and TLS skip_verify
+    # never reaches the image pull.
     containerd_config_patches = [
       <<-TOML
       [plugins."io.containerd.grpc.v1.cri".registry]
+        config_path = "/etc/containerd/certs.d"
+
+      [plugins."io.containerd.cri.v1.images".registry]
         config_path = "/etc/containerd/certs.d"
       TOML
     ]
@@ -142,6 +152,43 @@ resource "null_resource" "containerd_hosts" {
 ${each.value.body}
 EOF
       docker exec '${each.value.node}' systemctl restart containerd
+    BASH
+  }
+
+  depends_on = [kind_cluster.this]
+}
+
+# Append /etc/hosts entries on every node. Containerd reads /etc/hosts
+# for any hostname not covered by certs.d hosts.toml routing, and the
+# auth-realm follow on a 401 from Harbor needs to be able to resolve
+# the externalURL host on the kind node itself.
+resource "null_resource" "etc_hosts" {
+  for_each = {
+    for pair in flatten([
+      for entry in var.extra_etc_hosts : [
+        for node in local.node_names : {
+          key   = "${node}/${entry}"
+          node  = node
+          entry = entry
+        }
+      ]
+    ]) : pair.key => pair
+  }
+
+  triggers = {
+    node          = each.value.node
+    entry         = each.value.entry
+    cluster_token = kind_cluster.this.name
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-BASH
+      set -euo pipefail
+      # Idempotent: only append if the entry isn't already present.
+      docker exec '${each.value.node}' sh -c '
+        grep -qxF "${each.value.entry}" /etc/hosts || echo "${each.value.entry}" >> /etc/hosts
+      '
     BASH
   }
 

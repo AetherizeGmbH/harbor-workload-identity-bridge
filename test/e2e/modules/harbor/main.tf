@@ -44,12 +44,19 @@ variable "http_node_port" {
 
 variable "external_hostname" {
   type        = string
-  default     = "127.0.0.1"
+  default     = "harbor.e2e"
   description = <<-EOT
-    Host that Harbor's auto-generated TLS cert is issued for, and
-    that the external URL uses. 127.0.0.1 works for both laptop
-    (via kind extra_port_mapping) and on-node containerd (NodePort
-    routes via Cilium from any node's host netns).
+    Hostname used in Harbor's externalURL and propagated to the
+    docker-registry www-authenticate realm.
+
+    Cannot be 127.0.0.1 or any RFC1918-private IP: go-containerregistry
+    (crane / containerd's image puller) hard-rejects loopback /
+    private realms with `invalid realm in www-authenticate: realm
+    host "X" is a private or link-local address`. Use a synthetic
+    TLD-less name and resolve it both inside-cluster (CoreDNS
+    rewrite or pod hostAlias) and on kind nodes (containerd
+    hosts.toml). The kind_node_ip output below gives callers a
+    routable IP for the pod hostAlias.
   EOT
 }
 
