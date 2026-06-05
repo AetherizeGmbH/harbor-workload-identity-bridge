@@ -1,3 +1,10 @@
+## [0.2.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.0...v0.2.1) (2026-06-05)
+
+### Bug Fixes
+
+* **bridge:** restore Watch event decoding and immediate finalizer requeue ([9c8316b](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/9c8316b757e6498e47f7328bd1d77a5d6928d3bb))
+* **lint:** migrate golangci-lint to v2 schema and clear all findings ([d0d24a3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/d0d24a3ad932034d93eee778b8357f84abb9c073))
+
 ## [0.2.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.1.1...v0.2.0) (2026-06-05)
 
 ### Features
