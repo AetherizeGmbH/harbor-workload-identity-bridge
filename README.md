@@ -35,47 +35,84 @@ per-namespace token-distribution chores.**
 
 ## The problem
 
-Pulling from a private registry in Kubernetes still works the way it did
-in 2016:
+Pulling from a private registry in Kubernetes still works the way it
+did in 2016. The operational cost grows linearly with the cluster:
 
-- You create an `imagePullSecret` in every namespace that needs to pull.
-- The Secret holds a long-lived robot password.
-- Any pod in that namespace can `kubectl exec → cat /run/secrets/...` and
-  exfiltrate the credentials.
-- Rotation requires touching every namespace at once.
+- An `imagePullSecret` lives in every namespace that pulls. 200
+  namespaces × 3 Harbor projects = 600 Secrets to provision and
+  remember.
+- Each Secret holds a long-lived robot password. Any pod in that
+  namespace can `kubectl exec` and `cat /run/secrets/…` to lift the
+  credentials. Namespace-as-boundary doesn't survive a compromised
+  pod, and the credential it lifts is the same one every other
+  workload in the namespace uses.
+- Rotation requires touching every namespace at once. Many teams
+  defer this and end up with credentials older than the cluster.
+- Onboarding a new workload is a Secret-provisioning ticket: name
+  the Secret, document it, attach it to the right Service Account,
+  hope it doesn't drift.
 
 Cloud-managed registries (ECR, GCR, ACR) sidestep this through
-[KEP-4412](https://github.com/kubernetes/enhancements/issues/4412): the
+[KEP-4412](https://github.com/kubernetes/enhancements/issues/4412):
 kubelet exec's a credential-provider plugin per pull, the plugin
-authenticates the **workload** via its Service Account token, and the
+authenticates the **workload** by its Service Account token, and the
 returned credentials never touch the workload's namespace.
 
-Harbor doesn't have this yet — [goharbor/harbor#17520](https://github.com/goharbor/harbor/issues/17520)
-tracks the upstream OIDC trust-policy work. Once it lands, the standard
-SA-token → registry flow will work natively with Harbor. **This project
-is the bridge in between.**
+Harbor doesn't have this yet. [goharbor/harbor#17520](https://github.com/goharbor/harbor/issues/17520)
+tracks the upstream OIDC trust-policy work. Once it lands, the
+standard SA-token → registry flow will work natively with Harbor.
+**This project is the bridge in between.**
 
-## What you get
+## What changes operationally
 
-- A `HarborAccess` CRD: "this Service Account in this cluster gets these
-  permissions on these Harbor projects."
-- A controller that materialises each CR into a persistent Harbor robot
-  account, rotates its password every 24h, and tears it down when the CR
-  is deleted.
-- A small HTTPS server that the kubelet plugin asks for credentials per
-  pull. SA token in, robot Basic Auth credentials out.
-- A KEP-4412 credential-provider plugin binary, a stateless adapter
+For the operator:
+
+- **Zero imagePullSecrets.** Workload namespaces hold no Harbor
+  credentials. A compromised pod has nothing to exfiltrate.
+- **One declarative `HarborAccess` CR per Service Account.** Lives
+  in git, lives in the bridge's namespace, reviewable as code.
+  Onboarding a new workload is one CR commit.
+- **Robots scoped per Service Account.** Two SAs in the same
+  namespace get two robots with separate Harbor projects. Least
+  privilege replaces the over-broad namespace-wide secret.
+- **One rotation point.** The bridge rotates every robot's password
+  every 24h. The whole cluster's blast-radius window is 24h, no
+  matter how many namespaces.
+- **New nodes self-provision.** The plugin DaemonSet installs the
+  binary, config, and CA on every new node and patches kubelet. No
+  node-image rebuilds, no cloud-init scripts to ship.
+- **Auditable end-to-end.** Every credential issuance logs the SA
+  subject, audience, image, and matching HarborAccess CR. Prometheus
+  metrics break out by result (`ok` / `unauthorized` / `forbidden`
+  / `unavailable`).
+
+For the workload:
+
+- The pod runs as a Service Account; it pulls. No volume mounts to
+  manage, no `imagePullSecrets` array to maintain, no credentials in
+  `kubectl describe pod`.
+
+## What the project ships
+
+- A `HarborAccess` CRD: *"this Service Account in this cluster gets
+  these permissions on these Harbor projects."*
+- A controller that materialises each CR into a persistent Harbor
+  robot account, rotates its password every 24h, and tears it down
+  when the CR is deleted.
+- A small HTTPS server that the kubelet plugin asks for credentials
+  per pull. SA token in, robot Basic Auth credentials out.
+- A KEP-4412 credential-provider plugin binary — a stateless adapter
   between kubelet's stdin/stdout protocol and the bridge's HTTPS API
   ([ADR-0015](docs/adr/0015-plugin-duplicates-wire-types.md)).
-- A Helm chart that installs both: bridge as a Deployment in the release
-  namespace, plugin as a DaemonSet that copies the binary + kubelet
-  config + bridge CA onto every node's filesystem. Required values
-  fail-fast with action-oriented errors at template time.
+- A Helm chart that installs both: bridge as a Deployment in the
+  release namespace, plugin as a DaemonSet that copies the binary +
+  kubelet config + bridge CA onto every node's filesystem. Required
+  values fail-fast with action-oriented errors at template time.
 
-When upstream Harbor lands #17520, you delete the HTTPS server and the
-plugin; the CRD and reconciler survive as a thin declarative layer. This
-is the same shape ExternalDNS and cert-manager have to their respective
-backends.
+When upstream Harbor lands #17520, you delete the HTTPS server and
+the plugin; the CRD and reconciler survive as a thin declarative
+layer. This is the same shape ExternalDNS and cert-manager have to
+their respective backends.
 
 ## How it works
 

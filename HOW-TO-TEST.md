@@ -92,6 +92,43 @@ kubectl -n harbor-bridge-system exec deploy/harbor-bridge -- \
 # manually run the pull_pod manifest, exec into it, etc.
 ```
 
+### Open Harbor in your browser
+
+The chart configures Harbor at `https://harbor.e2e:30843` — that
+hostname only resolves on kind nodes and inside the cluster. To reach
+the Harbor web UI from your laptop, port-forward to the harbor service:
+
+```bash
+# In another shell — leave running while you browse.
+kubectl -n harbor port-forward svc/harbor 30843:443
+```
+
+Then open <https://localhost:30843/>. Your browser will warn about the
+self-signed cert (CN=`harbor.e2e`, you're hitting `localhost`) — click
+through. Log in as `admin`.
+
+Retrieve the admin password the chart auto-generated:
+
+```bash
+kubectl -n harbor get secret harbor-core \
+  -o jsonpath='{.data.HARBOR_ADMIN_PASSWORD}' | base64 -d
+echo
+```
+
+Once logged in, the bridge-managed robot accounts show up under
+**Administration → Robot Accounts** — one robot per `HarborAccess`
+CR, prefixed `robot$bridge-<clusterName>-<sa-namespace>-<sa-name>`
+([ADR-0003](docs/adr/0003-persistent-robots-per-harboraccess.md)),
+described with the chart's managed-by tag + the originating CR
+([ADR-0012](docs/adr/0012-robot-description-as-component-contract.md)):
+
+![Harbor robot account created by the bridge](docs/img/harbor-screenshot.png)
+
+The description column (`managed-by=harbor-workload-identity-bridge
+cluster=dev harboraccess=harbor-bridge-system/test-access`) is the
+cross-component contract the janitor uses to reverse-map robots to
+CRs and tear down orphans — see ADR-0012.
+
 When done:
 
 ```bash
