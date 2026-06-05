@@ -317,4 +317,6 @@ non-trivial change ships with an ADR.
 
 ## License
 
-Apache 2.0 (per `SPDX-License-Identifier` headers on every source file).
+Apache 2.0. Full text in [LICENSE](LICENSE); attribution requirements in
+[NOTICE](NOTICE); every source file carries an `SPDX-License-Identifier`
+header.
