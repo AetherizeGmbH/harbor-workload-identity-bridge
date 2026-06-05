@@ -1,0 +1,258 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 960" width="1320" height="960" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="1320" height="960" fill="#ffffff"/>
+  <style>
+    .title { fill: #0f172a; font-weight: 700; font-size: 16px; }
+    .lbl   { fill: #0f172a; font-weight: 600; }
+    .sub   { fill: #475569; font-size: 11px; }
+    .note  { fill: #334155; font-size: 11px; font-style: italic; }
+    .stepBox  { fill: #ffffff; stroke: #2563eb; stroke-width: 1.5; }
+    .stepBoxK { fill: #ffffff; stroke: #047857; stroke-width: 1.5; }
+    .stepBoxR { fill: #ffffff; stroke: #be123c; stroke-width: 1.5; }
+    .step  { fill: #2563eb; font-weight: 700; font-size: 12px; }
+    .stepR { fill: #be123c; font-weight: 700; font-size: 12px; }
+    .stepM { fill: #047857; font-weight: 700; font-size: 12px; }
+    .mono  { font-family: 'SF Mono', ui-monospace, Menlo, monospace; fill: #0f172a; font-size: 11px; }
+    .monoS { font-family: 'SF Mono', ui-monospace, Menlo, monospace; fill: #475569; font-size: 10px; }
+
+    .laptop  { fill: #f8fafc; stroke: #475569; stroke-width: 1.8; stroke-dasharray: 6 4; }
+    .kind    { fill: #f8fafc; stroke: #047857; stroke-width: 1.8; stroke-dasharray: 6 4; }
+    .subzone { fill: #fbfdff; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 3 3; }
+    .box     { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
+    .ours    { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; }
+    .harborB { fill: #fff1f2; stroke: #be123c; stroke-width: 1.5; }
+
+    .arrow      { stroke: #475569; stroke-width: 1.6; fill: none; }
+    .arrow-emph { stroke: #2563eb; stroke-width: 1.8; fill: none; }
+    .arrow-kind { stroke: #047857; stroke-width: 1.6; fill: none; }
+    .arrow-harb { stroke: #be123c; stroke-width: 1.6; fill: none; }
+    .arrow-setup { stroke: #94a3b8; stroke-width: 1.2; fill: none; stroke-dasharray: 4 3; }
+  </style>
+  <defs>
+    <marker id="head-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="head-kind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#047857"/>
+    </marker>
+    <marker id="head-harb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#be123c"/>
+    </marker>
+    <marker id="head-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <text x="660" y="32" text-anchor="middle" class="title">e2e test topology — `tofu test` (bridge runs IN the cluster)</text>
+  <text x="660" y="52" text-anchor="middle" class="sub">Numbered flow = the runtime image-pull chain. Dashed grey = one-time setup tofu drives.</text>
+  <text x="660" y="68" text-anchor="middle" class="sub">All cluster components live in one kind Docker container; the bridge is a real Deployment, not a laptop process.</text>
+
+  <!-- =================== LAPTOP ZONE =================== -->
+  <rect class="laptop" x="20" y="100" width="220" height="430" rx="10"/>
+  <text x="130" y="124" text-anchor="middle" class="lbl">Your laptop</text>
+
+  <rect class="ours" x="40" y="150" width="180" height="80" rx="6"/>
+  <text x="130" y="174" text-anchor="middle" class="lbl">make e2e</text>
+  <text x="130" y="192" text-anchor="middle" class="sub">tofu test orchestrator</text>
+  <text x="130" y="208" text-anchor="middle" class="sub">applies chart, seeds Harbor,</text>
+  <text x="130" y="224" text-anchor="middle" class="sub">asserts the pull</text>
+
+  <rect class="box" x="40" y="260" width="180" height="70" rx="6"/>
+  <text x="130" y="284" text-anchor="middle" class="lbl">Docker daemon</text>
+  <text x="130" y="302" text-anchor="middle" class="sub">builds bridge + plugin +</text>
+  <text x="130" y="318" text-anchor="middle" class="sub">seed images, kind load → kind</text>
+
+  <text x="40" y="360" class="note">No bridge process on the laptop.</text>
+  <text x="40" y="376" class="note">No kubectl proxy.</text>
+  <text x="40" y="392" class="note">Tofu test does apply, build, seed,</text>
+  <text x="40" y="408" class="note">and the assertion in one run.</text>
+  <text x="40" y="430" class="note">`make e2e-pause` halts before the</text>
+  <text x="40" y="446" class="note">load-bearing pull; a sleep file at</text>
+  <text x="40" y="462" class="note">test/e2e/.tofu-sleep gates it.</text>
+  <text x="40" y="478" class="note">Delete the file to resume.</text>
+
+  <text x="40" y="510" class="note">~5 min cluster → chart → pass.</text>
+
+  <!-- =================== KIND CLUSTER ZONE =================== -->
+  <rect class="kind" x="260" y="100" width="1040" height="820" rx="10"/>
+  <text x="780" y="124" text-anchor="middle" class="lbl">kind cluster — single Docker container</text>
+  <text x="780" y="140" text-anchor="middle" class="sub">Cilium kube-proxy replacement (socketLB routes host-netns 127.0.0.1:NodePort to the right pod); cert-manager; KEP-4412 feature gates ON</text>
+
+  <!-- ============== SUB-ZONE 1: NODE HOST ============== -->
+  <!-- Sub-zone label moved to a corner pill so the centre is clear for arrow #2 -->
+  <rect class="subzone" x="280" y="170" width="1000" height="250" rx="8"/>
+  <rect fill="#fbfdff" stroke="#94a3b8" stroke-width="1" x="290" y="176" width="430" height="20" rx="4"/>
+  <text x="298" y="190" class="lbl">Worker node — host netns / kubelet / containerd / /etc</text>
+
+  <!-- kubelet -->
+  <rect class="box" x="300" y="220" width="290" height="180" rx="6"/>
+  <text x="445" y="242" text-anchor="middle" class="lbl">kubelet</text>
+  <text x="312" y="264" class="monoS">--image-credential-provider-bin-dir</text>
+  <text x="312" y="278" class="monoS">--image-credential-provider-config</text>
+  <text x="312" y="298" class="sub">reads CredentialProviderConfig:</text>
+  <text x="312" y="314" class="monoS">  matchImages: harbor.e2e:30843</text>
+  <text x="312" y="328" class="monoS">  audience: harbor-bridge</text>
+  <text x="312" y="342" class="monoS">  cacheType: ServiceAccount</text>
+  <text x="312" y="364" class="note">Feature gates ON:</text>
+  <text x="312" y="380" class="note">KubeletServiceAccountTokenForCredentialProviders</text>
+  <text x="312" y="394" class="note">ServiceAccountNodeAudienceRestriction</text>
+
+  <!-- containerd -->
+  <rect class="box" x="630" y="220" width="290" height="180" rx="6"/>
+  <text x="775" y="242" text-anchor="middle" class="lbl">containerd</text>
+  <text x="642" y="264" class="monoS">/etc/containerd/certs.d/</text>
+  <text x="642" y="278" class="monoS">  harbor.e2e:30843/</text>
+  <text x="642" y="292" class="monoS">    ca.crt        ← Harbor's leaf</text>
+  <text x="642" y="306" class="monoS">    hosts.toml    ← uses `ca`</text>
+  <text x="642" y="326" class="monoS">/etc/hosts:</text>
+  <text x="642" y="340" class="monoS">  127.0.0.1 harbor.e2e</text>
+  <text x="642" y="364" class="note">cert installed by tofu's</text>
+  <text x="642" y="380" class="note">containerd-registry-trust module</text>
+  <text x="642" y="394" class="note">(openssl s_client + docker exec).</text>
+
+  <!-- plugin binary -->
+  <rect class="ours" x="960" y="220" width="300" height="180" rx="6"/>
+  <text x="1110" y="242" text-anchor="middle" class="lbl">/etc/kubernetes/credential-provider/</text>
+  <text x="1110" y="258" text-anchor="middle" class="lbl">harbor-bridge-plugin</text>
+  <text x="972" y="280" class="sub">stdin / stdout transform</text>
+  <text x="972" y="294" class="sub">(no k8s.io deps — ADR-0015)</text>
+  <text x="972" y="316" class="monoS">env:</text>
+  <text x="972" y="330" class="monoS">  HARBOR_BRIDGE_ENDPOINT=</text>
+  <text x="972" y="344" class="monoS">    https://127.0.0.1:31443</text>
+  <text x="972" y="358" class="monoS">  HARBOR_BRIDGE_CA_BUNDLE=...</text>
+  <text x="972" y="380" class="note">binary + config + CA written to /etc</text>
+  <text x="972" y="394" class="note">by plugin DS init via nsenter PID 1.</text>
+
+  <!-- ============== SUB-ZONE 2: CLUSTER WORKLOADS ============== -->
+  <rect class="subzone" x="280" y="450" width="1000" height="460" rx="8"/>
+  <rect fill="#fbfdff" stroke="#94a3b8" stroke-width="1" x="290" y="456" width="160" height="20" rx="4"/>
+  <text x="298" y="470" class="lbl">Cluster workloads</text>
+
+  <!-- kube-system / CoreDNS -->
+  <rect class="box" x="300" y="495" width="220" height="130" rx="6"/>
+  <text x="410" y="517" text-anchor="middle" class="lbl">kube-system</text>
+  <text x="410" y="539" text-anchor="middle" class="sub">CoreDNS</text>
+  <text x="312" y="561" class="monoS">hosts {</text>
+  <text x="312" y="575" class="monoS">  &lt;node-ip&gt; harbor.e2e</text>
+  <text x="312" y="589" class="monoS">  fallthrough</text>
+  <text x="312" y="603" class="monoS">}</text>
+  <text x="312" y="619" class="note">added by tofu's coredns-cm module</text>
+
+  <!-- harbor ns -->
+  <rect class="harborB" x="540" y="495" width="240" height="290" rx="6"/>
+  <text x="660" y="517" text-anchor="middle" class="lbl">harbor namespace</text>
+  <text x="660" y="539" text-anchor="middle" class="sub">harbor chart, all components</text>
+  <text x="552" y="563" class="monoS">externalURL:</text>
+  <text x="552" y="577" class="monoS">  https://harbor.e2e:30843</text>
+  <text x="552" y="597" class="monoS">Service: NodePort :30843</text>
+  <text x="552" y="611" class="monoS">  → harbor-core :443 (HTTPS)</text>
+  <text x="552" y="631" class="monoS">/v2/your-project/alpine:test3</text>
+  <text x="552" y="647" class="sub">seeded by the seed_image Job</text>
+  <text x="552" y="663" class="sub">(crane copy from docker.io)</text>
+  <text x="552" y="687" class="note">cert: self-signed, CN=harbor.e2e</text>
+  <text x="552" y="703" class="note">(cert-manager auto, chart-side)</text>
+  <text x="552" y="727" class="note">Harbor robot account:</text>
+  <text x="552" y="743" class="note">created by bridge per HarborAccess,</text>
+  <text x="552" y="759" class="note">pull perm on your-project</text>
+
+  <!-- harbor-bridge-system ns -->
+  <rect class="ours" x="800" y="495" width="460" height="290" rx="6"/>
+  <text x="1030" y="517" text-anchor="middle" class="lbl">harbor-bridge-system namespace (this project)</text>
+
+  <rect class="box" x="816" y="535" width="210" height="105" rx="4"/>
+  <text x="921" y="553" text-anchor="middle" class="lbl">bridge Deployment</text>
+  <text x="828" y="571" class="sub">controller-runtime + HTTPS</text>
+  <text x="828" y="585" class="sub">/v1/credentials  (port 8443)</text>
+  <text x="828" y="603" class="monoS">Service: NodePort :31443</text>
+  <text x="828" y="621" class="sub">reconciles HarborAccess CRs</text>
+
+  <rect class="box" x="1036" y="535" width="220" height="105" rx="4"/>
+  <text x="1146" y="553" text-anchor="middle" class="lbl">plugin DaemonSet</text>
+  <text x="1048" y="571" class="sub">init: installs binary + config</text>
+  <text x="1048" y="585" class="sub">+ CA + restarts kubelet</text>
+  <text x="1048" y="603" class="sub">(via hostPID + nsenter)</text>
+  <text x="1048" y="621" class="sub">runtime container: sleep</text>
+
+  <rect class="box" x="816" y="655" width="440" height="55" rx="4"/>
+  <text x="828" y="674" class="lbl">HarborAccess CR (test-access)</text>
+  <text x="828" y="690" class="monoS">spec.serviceAccountRef: test-pull/image-puller</text>
+  <text x="828" y="704" class="monoS">spec.permissions: [{project: your-project, action: pull}]</text>
+
+  <rect class="box" x="816" y="720" width="440" height="55" rx="4"/>
+  <text x="828" y="738" class="lbl">audience RBAC (ADR-0017)</text>
+  <text x="828" y="754" class="monoS">ClusterRole: request-serviceaccounts-token-audience on "harbor-bridge"</text>
+  <text x="828" y="768" class="monoS">ClusterRoleBinding → system:nodes</text>
+
+  <!-- test-pull ns -->
+  <rect class="box" x="300" y="805" width="500" height="100" rx="6"/>
+  <text x="550" y="827" text-anchor="middle" class="lbl">test-pull namespace</text>
+  <text x="312" y="847" class="monoS">ServiceAccount: image-puller</text>
+  <text x="312" y="865" class="monoS">Pod: bridge-pull-test</text>
+  <text x="312" y="881" class="monoS">  image: harbor.e2e:30843/your-project/alpine:test3</text>
+  <text x="312" y="897" class="monoS">  imagePullPolicy: Always   ← forces a fresh pull each time</text>
+
+  <!-- =================== RUNTIME PULL FLOW (NUMBERED) =================== -->
+
+  <!-- 1: pull_pod referenced image → kubelet matches matchImages.
+       Route around kube-system box: left edge (x=290) up to the gap (y=435), then right to kubelet (x=445). -->
+  <path class="arrow-kind" d="M 320 805 L 290 805 L 290 435 L 445 435 L 445 420" marker-end="url(#head-kind)"/>
+  <rect class="stepBoxK" x="296" y="700" width="200" height="20" rx="4"/>
+  <text x="304" y="714" class="stepM">1</text>
+  <text x="316" y="714" class="sub">pod's image matches matchImages</text>
+
+  <!-- 2: kubelet → plugin binary exec.  Route ABOVE the boxes so the pill
+       doesn't sit on containerd's text. -->
+  <path class="arrow-emph" d="M 590 235 C 700 200, 860 200, 960 235" marker-end="url(#head-blue)"/>
+  <rect class="stepBox" x="725" y="194" width="130" height="20" rx="4"/>
+  <text x="733" y="208" class="step">2</text>
+  <text x="745" y="208" class="sub">fork+exec plugin</text>
+
+  <!-- 3: plugin → bridge NodePort.  From plugin bottom (x=1110, y=400)
+       curve down to bridge box top (x=921, y=535). -->
+  <path class="arrow-emph" d="M 1110 400 C 1040 460, 980 500, 921 535" marker-end="url(#head-blue)"/>
+  <rect class="stepBox" x="970" y="428" width="244" height="22" rx="4"/>
+  <text x="978" y="443" class="step">3</text>
+  <text x="990" y="443" class="sub">POST /v1/credentials → 127.0.0.1:31443</text>
+
+  <!-- 4: bridge → harbor API (admin auth, robot CRUD, returns creds to plugin).
+       Short arrow in the narrow gap between bridge and harbor boxes.  Number
+       in a small white-backed badge; descriptor pill placed just BELOW the
+       bridge box, in the 15-px gap before the HarborAccess CR row.  Keeps
+       label visually tied to the arrow it describes. -->
+  <path class="arrow-harb" d="M 816 590 L 780 590" marker-end="url(#head-harb)"/>
+  <rect class="stepBoxR" x="785" y="578" width="14" height="14" rx="2"/>
+  <text x="792" y="589" text-anchor="middle" class="stepR">4</text>
+  <rect class="stepBoxR" x="815" y="641" width="226" height="13" rx="3"/>
+  <text x="823" y="652" class="sub">robot CRUD + creds (admin Basic Auth)</text>
+
+  <!-- 5: containerd → harbor pull (with creds + cert).  Pill in the gap
+       between sub-zones (y=435 area), x=720-880. -->
+  <path class="arrow-harb" d="M 775 400 C 740 425, 700 450, 660 495" marker-end="url(#head-harb)"/>
+  <rect class="stepBoxR" x="700" y="430" width="194" height="20" rx="4"/>
+  <text x="708" y="444" class="stepR">5</text>
+  <text x="720" y="444" class="sub">pull from harbor.e2e:30843</text>
+
+  <!-- =================== SETUP ARROW (DASHED GREY) =================== -->
+
+  <!-- tofu test → kind cluster.  From laptop right edge (~x=240, y=190 — at
+       the make-e2e box centre) curve right into the sub-zone gap. -->
+  <path class="arrow-setup" d="M 240 190 C 252 190, 260 425, 280 435" marker-end="url(#head-grey)"/>
+  <text x="245" y="180" class="note">setup</text>
+
+  <!-- =================== LEGEND =================== -->
+  <rect class="laptop"  x="20"  y="930" width="14" height="14" rx="2"/>
+  <text x="42"  y="941" class="sub">your laptop</text>
+  <rect class="kind"    x="140" y="930" width="14" height="14" rx="2"/>
+  <text x="162" y="941" class="sub">kind cluster (Docker)</text>
+  <rect class="ours"    x="320" y="930" width="14" height="14" rx="2"/>
+  <text x="342" y="941" class="sub">our component</text>
+  <rect class="harborB" x="450" y="930" width="14" height="14" rx="2"/>
+  <text x="472" y="941" class="sub">Harbor</text>
+  <line x1="540" y1="937" x2="590" y2="937" class="arrow-emph"/>
+  <text x="600" y="941" class="sub">plugin ↔ bridge</text>
+  <line x1="710" y1="937" x2="760" y2="937" class="arrow-kind"/>
+  <text x="770" y="941" class="sub">kubelet / CRI</text>
+  <line x1="870" y1="937" x2="920" y2="937" class="arrow-harb"/>
+  <text x="930" y="941" class="sub">registry pull</text>
+  <line x1="1030" y1="937" x2="1080" y2="937" class="arrow-setup"/>
+  <text x="1090" y="941" class="sub">setup (one-time)</text>
+</svg>

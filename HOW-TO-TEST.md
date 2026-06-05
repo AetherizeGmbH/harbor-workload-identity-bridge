@@ -40,6 +40,17 @@ make e2e-pause   # pauses between bridge_install and pull_pod so you can poke ar
 
 Both end with `run "pull_pod"... pass` if the chain works end-to-end.
 
+## Topology
+
+Everything except `tofu test` and the local Docker daemon runs inside a
+single kind cluster. The bridge is a real Deployment (not a laptop
+`go run`), the plugin is on each node's filesystem (installed by the
+chart's DaemonSet via `nsenter`), and Harbor is in-cluster behind a
+NodePort. The numbered arrows are the runtime pull chain; the grey
+dashed arrow is the one-time setup tofu drives.
+
+![tofu-test topology](docs/img/local-dev-topology-tofu.svg)
+
 ## Stages, in order
 
 Every `run` block in [`test/e2e/tests/01-bridge.tftest.hcl`](test/e2e/tests/01-bridge.tftest.hcl):
