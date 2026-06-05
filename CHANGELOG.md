@@ -1,3 +1,13 @@
+## [0.2.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.1.1...v0.2.0) (2026-06-05)
+
+### Features
+
+* **e2e:** hostname-based Harbor + cert distribution + helper modules ([2b87199](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/2b8719927d4c74d00d7298fc8dd36c94987a87df))
+
+### Bug Fixes
+
+* **bridge:** emit cacheKeyType=Registry; chart RBAC for kubelet audience ([a43dd79](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/a43dd79f43d17562ab5e556dcfb4e1084cd6dafe)), closes [#1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/1)
+
 ## [0.1.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.1.0...v0.1.1) (2026-06-04)
 
 ### Bug Fixes
