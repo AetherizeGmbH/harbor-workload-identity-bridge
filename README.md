@@ -167,6 +167,15 @@ YAML
 
 # 3. Install the chart from the ghcr.io OCI registry.
 #    (Need Helm >= 3.8; OCI is enabled by default since 3.9.)
+#
+# About `plugin.audience`: the string kubelet writes into the `aud`
+# claim of the SA token it sends to the bridge. Every HarborAccess
+# CR's `spec.trustPolicy.audience` must match this value, or the
+# bridge rejects the token. Pick one string per cluster and embed
+# the cluster name so a leaked token from cluster A can't be replayed
+# against cluster B (both sharing the same Harbor). Convention:
+# `harbor-bridge-<clusterName>`. The chart auto-generates the
+# Kubernetes RBAC kubelet needs to mint this audience (see ADR-0017).
 helm install harbor-bridge \
   oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
   --version 0.2.0 \
