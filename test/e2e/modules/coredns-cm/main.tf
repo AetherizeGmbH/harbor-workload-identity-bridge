@@ -25,7 +25,7 @@ variable "dns_rewrite_targets" {
     Map of suffix → CNAME target. For each entry, CoreDNS gets a
     `template IN ANY <key>` block that CNAMEs the matched query to
     the target. Use to make in-cluster pods resolve nip.io-style
-    hostnames to in-cluster services (Traefik, ingress-nginx, etc.).
+    hostnames to in-cluster services (ingress controllers, etc.).
   EOT
 }
 

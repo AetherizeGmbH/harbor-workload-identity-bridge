@@ -38,7 +38,7 @@ variable "cluster_name" {
 
 variable "harbor_url" {
   type        = string
-  description = "In-cluster Harbor REST API URL (the bridge talks to this, not via Traefik)."
+  description = "In-cluster Harbor REST API URL (e.g. http://harbor-core.harbor.svc.cluster.local). The bridge talks to this directly over service DNS."
 }
 
 variable "harbor_admin_password" {

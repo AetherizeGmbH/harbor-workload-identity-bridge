@@ -181,23 +181,96 @@ tokens.
 
 ### Replay of cached credentials after revocation
 
-The kubelet caches credentials for the `expires_in` returned by the
-bridge (driven by `spec.tokenTTL`, default 1h, max 24h). After you
-delete a `HarborAccess`, the kubelet on every node may still hold
-cached credentials until that TTL expires. The 24h rotation in
-Harbor means the cached credentials *also* become invalid at Harbor
-within 24h regardless of `tokenTTL`.
+Kubelet caches credentials per `cacheKeyType` returned by the plugin.
+The bridge emits `Registry` ([ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md)),
+so kubelet keys its cache by `(SA, registry-host)` for the
+`cacheDuration` driven by `spec.tokenTTL` (default 1h, max 24h).
+
+Consequences:
+
+- After you delete a `HarborAccess`, kubelets on each node may still
+  serve cached credentials for that SA until the entry expires.
+- The bridge's 24h password rotation (`harbor.RefreshSecret`) means
+  cached credentials *also* become invalid at Harbor within 24h
+  regardless of `tokenTTL`. A cached entry that hasn't expired in
+  the kubelet cache still fails the registry handshake once the
+  underlying robot password rotates.
 
 Mitigations:
 
 - Use the shortest `tokenTTL` that still keeps your pull rate
-  reasonable. The bridge is cheap to ask; there is no Harbor round
-  trip for cached SA tokens.
-- For *immediate* revocation, rotate the robot at Harbor level
-  (`kubectl patch harboraccess … -p '{"metadata":{"annotations":
-  {"force-rotate":"…"}}}'` is not implemented yet — track this as
-  a Phase 6 task) and the cached credentials at every kubelet will
-  fail their next handshake.
+  reasonable. The bridge is cheap to ask; cluster-local NodePort
+  hop, no Harbor round-trip for already-issued robots.
+- For *immediate* revocation, force a password rotation: bump the
+  CR's `metadata.generation` via any non-spec change, which triggers
+  the reconciler's `RefreshSecret` path. The cached credentials at
+  every kubelet then fail their next Harbor handshake.
+
+### Privilege of the install DaemonSet
+
+The plugin DaemonSet is the system's most privileged workload. Its
+install init container:
+
+- runs as root (`runAsUser: 0`).
+- bind-mounts the node's `/etc/kubernetes/credential-provider*`
+  hostPaths so it can write the binary, config, and CA bundle.
+- when `plugin.patchKubelet: true` (default), runs with
+  `hostPID: true` and `nsenter`s into PID 1 to patch
+  `/etc/default/kubelet` with `--image-credential-provider-{bin-dir,config}`
+  flags and runs `systemctl restart kubelet` on the host; once per
+  node, idempotency-guarded.
+
+This privilege model is non-negotiable for installing a credential
+provider on nodes the operator doesn't control the image of (kind,
+kubeadm, k3s). Cloud-managed clusters (EKS, GKE, AKS) bake the
+binary + config + kubelet flags into the node image instead.
+
+Operator choices:
+
+- `plugin.patchKubelet: false`: disables the nsenter + kubelet
+  restart block; use when the node image already wires kubelet.
+  The init container also drops `hostPID` in this mode.
+- The Helm release is the install boundary. Anyone who can
+  `helm upgrade` this chart can swap the plugin binary that kubelet
+  on every node will exec next pull. Restrict the helm caller's
+  RBAC accordingly.
+- The DaemonSet's runtime container after install is a `sleep` loop
+  with no special privileges. The init container only runs at pod
+  start.
+
+### Audience-scoped RBAC
+
+With `ServiceAccountNodeAudienceRestriction` on (default since
+Kubernetes v1.32), the apiserver enforces that kubelets can only
+mint SA tokens for audiences they're explicitly authorised for. The
+chart ships this authorisation via
+[ADR-0017](docs/adr/0017-chart-provisions-audience-rbac.md):
+
+```yaml
+ClusterRole:        verbs: ["request-serviceaccounts-token-audience"]
+                    resources: ["<plugin.audience>"]
+ClusterRoleBinding: subjects: [Group: system:nodes]
+```
+
+Scope:
+
+- **Narrow on the audience axis.** The grant covers exactly one
+  audience: the value of `plugin.audience` configured for this
+  release. Every other audience in the cluster is unaffected.
+- **Broad on the subject axis.** The grant binds the whole
+  `system:nodes` Group, so every kubelet in the cluster can mint
+  tokens for this specific audience.
+
+The combination is acceptable because every kubelet in the cluster
+runs the same credential-provider config and would request the same
+audience anyway. The convention `plugin.audience: harbor-bridge-<clusterName>`
+makes the audience cluster-scoped, so a `system:nodes` member in
+cluster A cannot exchange a token for the audience configured in
+cluster B sharing the same Harbor.
+
+Operators who want to bind to specific nodes via a custom admission
+webhook can set `plugin.audienceRBAC.create: false` and provide
+their own RBAC.
 
 ## Hardening the bridge
 
@@ -206,9 +279,12 @@ Mitigations:
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor system robot scoped to robot-account management |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
-| Pod security | unset | `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drop `ALL` capabilities |
+| `plugin.patchKubelet` | `true` | Set `false` on EKS / GKE / AKS / baked AMIs so the DaemonSet drops `hostPID` and the nsenter / kubelet-restart block |
+| `plugin.audienceRBAC.create` | `true` | Keep `true` unless you're providing a tighter binding via admission webhook; the chart's binding is audience-narrow but `system:nodes`-broad |
+| Pod security (bridge) | unset | `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drop `ALL` capabilities |
 | Bridge namespace RBAC | unset | Restrict `secrets` get/list/watch to the bridge ServiceAccount only |
-| Network exposure | NodePort | Cluster-local only; firewall the NodePort to the cluster network |
+| Helm caller RBAC | unset | Restrict who can `helm upgrade` this chart — they can swap the binary kubelet runs on every node |
+| Network exposure | NodePort `:31443` | Cluster-local only; firewall the NodePort to the cluster network. With Cilium kube-proxy replacement, socketLB intercepts host-netns `127.0.0.1:31443` from kubelet without exposing the port externally |
 
 ## Audit log shape
 

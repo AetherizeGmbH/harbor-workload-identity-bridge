@@ -1,9 +1,10 @@
 locals {
-  # NodePort that kind extra_port_mapping exposes Traefik HTTPS on.
-  # Fixed so the harbor-bridge-install module and any caller can
-  # construct image refs of the form host:30843.
-  traefik_https_node_port = 30843
-  traefik_http_node_port  = 30880
+  # NodePorts the kind cluster exposes via extra_port_mapping. Fixed
+  # so the harbor module and any caller can construct image refs of
+  # the form host:30843. Harbor binds here directly via its own
+  # NodePort Service.
+  https_node_port_internal = 30843
+  http_node_port_internal  = 30880
 
   # Containerd hosts.toml content for each insecure registry. Written
   # to the host via `docker exec` after kind is up — see docs/E2E-MANUAL-SETUP.md
@@ -88,13 +89,13 @@ resource "kind_cluster" "this" {
       ]
       extra_port_mappings {
         host_port      = var.http_port
-        container_port = local.traefik_http_node_port
+        container_port = local.http_node_port_internal
         listen_address = "127.0.0.1"
         protocol       = "TCP"
       }
       extra_port_mappings {
         host_port      = var.https_port
-        container_port = local.traefik_https_node_port
+        container_port = local.https_node_port_internal
         listen_address = "127.0.0.1"
         protocol       = "TCP"
       }

@@ -16,7 +16,7 @@ This document is written to survive context compaction. The detail sections belo
 - Phase 3 Slice D (server + metrics + cmd/main.go): COMPLETE
 - Phase 4 (plugin binary): COMPLETE
 - Phase 5 (Helm chart): COMPLETE
-- Phase 6 (kubelet-driven e2e + docs + v0.1.0): **E2E PASSES.** `make e2e` against a fresh kind v1.35 cluster runs the full pull chain end-to-end and the `pull_pod` assertion succeeds. SECURITY.md polish and the optional `02-traefik.tftest.hcl` are the only items between here and the v0.1.0 tag.
+- Phase 6 (kubelet-driven e2e + docs + v0.1.0): **E2E PASSES.** `make e2e` against a fresh kind v1.35 cluster runs the full pull chain end-to-end and the `pull_pod` assertion succeeds. Only the `v0.1.0` tag itself remains.
 
 ## Architecture snapshot (post-ADR-0013)
 
@@ -384,10 +384,9 @@ The first attempt at containerd cert trust used `skip_verify = true` in `hosts.t
 
 ### Remaining work (pre-v0.1.0)
 
-1. **`02-traefik.tftest.hcl`** — production-realistic test that adds Traefik + IngressRoute on top of `01-bridge.tftest.hcl`. Separate test so the fast-feedback `01` stays under 5 minutes. Today the e2e uses NodePort + a cert-trust install on containerd, which proves the bridge / plugin / chart wiring but doesn't cover the Traefik path many operators will deploy.
-2. **`docs/SECURITY.md` polish.** Needs a pass to reflect the elevated privilege the install DaemonSet requires (`hostPID: true`, kubelet restart, the wide-scope `system:nodes` ClusterRoleBinding from ADR-0017).
-3. **`docs/ARCHITECTURE.md`.** Optional for v0.1.0.
-4. **`v0.1.0` tag.** Annotated, push, release notes summarising Phases 1–6 + the three-bug postmortem.
+1. **`SECURITY.md` polish.** ✅ Done. Documents the elevated privilege the install DaemonSet requires (`hostPID: true`, kubelet restart, the audience-scoped `system:nodes` ClusterRoleBinding from ADR-0017).
+2. **`docs/ARCHITECTURE.md`.** Optional for v0.1.0.
+3. **`v0.1.0` tag.** Annotated, push, release notes summarising Phases 1–6 + the three-bug postmortem.
 
 ### Originally-planned section (kept for archaeology)
 
@@ -419,7 +418,7 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 
 #### Tag
 
-`v0.1.0` after Phase 6 polish (SECURITY.md + optional Traefik e2e).
+`v0.1.0` after Phase 6 polish (SECURITY.md done; only the annotated tag remains).
 
 ## Cross-cutting non-goals (intentionally not in any phase)
 

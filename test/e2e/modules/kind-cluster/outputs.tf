@@ -21,10 +21,10 @@ output "node_names" {
 
 output "ports" {
   value = {
-    http               = var.http_port
-    https              = var.https_port
-    traefik_node_http  = local.traefik_http_node_port
-    traefik_node_https = local.traefik_https_node_port
+    host_http       = var.http_port
+    host_https      = var.https_port
+    node_port_http  = local.http_node_port_internal
+    node_port_https = local.https_node_port_internal
   }
-  description = "Port mapping summary."
+  description = "Port mapping summary. host_* are the laptop-facing ports kind binds; node_port_* are the kind-internal NodePorts they map to."
 }

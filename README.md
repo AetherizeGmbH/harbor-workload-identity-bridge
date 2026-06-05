@@ -12,24 +12,6 @@ per-namespace token-distribution chores.**
 > mints/serves a Harbor robot's Basic Auth credentials, containerd
 > completes Harbor's bearer-token handshake itself, and the image
 > pulls. See [HOW-TO-TEST.md §1](HOW-TO-TEST.md).
->
-> A previously-reported "silent abort" on kubelet's credential-provider
-> path (originally filed as
-> [kind#4185](https://github.com/kubernetes-sigs/kind/issues/4185))
-> turned out to be three bugs on our side, each masking the next:
-> a chart `matchImages` example that used a kubelet-unsupported path
-> glob; missing audience-scoped RBAC for
-> `ServiceAccountNodeAudienceRestriction` (default since v1.32);
-> and a bridge response that emitted an invalid `cacheKeyType`. All
-> three are fixed and documented in
-> [ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md) +
-> [ADR-0017](docs/adr/0017-chart-provisions-audience-rbac.md). The
-> kind issue is closed; not a kubelet / kind bug.
->
-> Pre-v0.1.0 polish: `SECURITY.md` pass to document the elevated
-> privilege the install DaemonSet requires (`hostPID`, kubelet
-> restart) and an optional `02-traefik` e2e for the Traefik-fronted
-> Harbor path.
 
 ---
 
@@ -325,7 +307,7 @@ present in `/etc/default/kubelet`.
 | 3 | Data plane: OIDC validator, HTTP handler, HTTPS server, metrics, cmd/main.go, ADR-0013 pivot | ✅ Complete |
 | 4 | Plugin binary (KEP-4412 stdin/stdout protocol), ADR-0015 | ✅ Complete |
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
-| 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); SECURITY.md polish + optional Traefik-fronted e2e (`02-traefik.tftest.hcl`) outstanding before the v0.1.0 tag |
+| 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
 
 ## Contributing
 

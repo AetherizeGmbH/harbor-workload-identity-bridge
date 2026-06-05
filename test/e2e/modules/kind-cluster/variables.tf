@@ -13,13 +13,13 @@ variable "worker_count" {
 variable "http_port" {
   type        = number
   default     = 8080
-  description = "Host port mapped to Traefik HTTP NodePort"
+  description = "Laptop host port that kind binds, forwarding to the HTTP NodePort inside the kind container (default 30880, currently Harbor)."
 }
 
 variable "https_port" {
   type        = number
   default     = 8443
-  description = "Host port mapped to Traefik HTTPS NodePort"
+  description = "Laptop host port that kind binds, forwarding to the HTTPS NodePort inside the kind container (default 30843, currently Harbor)."
 }
 
 variable "api_server_port" {
@@ -44,11 +44,12 @@ variable "registry_insecure_hostnames" {
   type        = list(string)
   default     = []
   description = <<-EOT
-    Registry host:port values for which containerd should skip TLS
-    verification (e.g. ["harbor.dev.127.0.0.1.nip.io:30843"]). The
-    module writes a hosts.toml for each via containerd's certs.d.
-    Self-signed Harbor served by Traefik on NodePort is the typical
-    use case — see docs/E2E-MANUAL-SETUP.md §4.
+    Registry host:port values for which the module writes a
+    skip_verify=true hosts.toml under containerd's certs.d. NOTE:
+    the e2e harness now installs a real ca.crt via
+    containerd-registry-trust rather than relying on skip_verify
+    (containerd v2.2.0 has been seen to silently ignore it). This
+    var stays for callers who deliberately want skip_verify.
   EOT
 }
 
