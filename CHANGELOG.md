@@ -1,3 +1,9 @@
+## [0.2.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.3...v0.2.4) (2026-06-06)
+
+### Bug Fixes
+
+* **e2e:** kind_load must wait for containerd_hosts restart ([273c6e6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/273c6e627d8b0dc8dd17d43eb6195fe58a629de4))
+
 ## [0.2.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.2...v0.2.3) (2026-06-06)
 
 ### Bug Fixes
