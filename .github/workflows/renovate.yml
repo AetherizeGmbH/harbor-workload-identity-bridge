@@ -19,6 +19,13 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  # Renovate reads commit status + check-run state before deciding to
+  # open or merge a PR. Without these, the github-actions integration
+  # 403s on /commits/{ref}/status and the worker errors out as
+  # `integration-unauthorized` before any PR can be ensured.
+  statuses: read
+  checks: read
+  actions: read
 
 concurrency:
   group: renovate
