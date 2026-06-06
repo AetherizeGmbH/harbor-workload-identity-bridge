@@ -67,6 +67,11 @@
       "pinDigests": true
     },
     {
+      "description": "golangci/golangci-lint is the binary version (with: version: vX.Y.Z) read by golangci-lint-action, not a Git ref. It cannot be digest-pinned; the action only accepts a release tag string.",
+      "matchPackageNames": ["golangci/golangci-lint"],
+      "pinDigests": false
+    },
+    {
       "description": "kubernetes 1.x dependencies in go.mod — keep on minor channel",
       "matchPackageNames": ["/^k8s\\.io//", "/^sigs\\.k8s\\.io//"],
       "groupName": "Kubernetes Go modules",
