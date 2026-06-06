@@ -27,14 +27,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
           cache: true
-      - uses: opentofu/setup-opentofu@v1
+      - uses: opentofu/setup-opentofu@847eaa4afeb791b06daa46e8eafa8b1b68d7cfb4 # v2
         with: { tofu_version: 1.8.5 }
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5
         with: { version: v4.2.0 }
       # No separate docker build step: the tofu test harness's
       # `build_images` run block (modules/docker-build) shells out to
@@ -71,13 +71,13 @@ jobs:
           kubectl -n test-pull get events --sort-by='.lastTimestamp'             > /tmp/diag/test-pull-events.txt 2>&1
       - name: Upload tofu test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tofu-test-log
           path: /tmp/tofu-test.log
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cluster-diagnostics
           path: /tmp/diag/

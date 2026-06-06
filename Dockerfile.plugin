@@ -7,7 +7,7 @@
 # Pin the builder to the native build platform — under buildx, Go cross-
 # compiles via GOARCH much faster than QEMU emulates the whole toolchain.
 # (See Dockerfile.bridge for the v0.0.0 hang that motivated this.)
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -19,5 +19,5 @@ COPY plugin ./plugin
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' \
     -o /out/harbor-bridge-plugin ./plugin
 
-FROM alpine:3.20
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 COPY --from=builder /out/harbor-bridge-plugin /plugin/harbor-bridge-plugin
