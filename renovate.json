@@ -11,6 +11,7 @@
   ],
   "timezone": "Europe/Berlin",
   "platformAutomerge": true,
+  "platformCommit": "enabled",
   "automergeStrategy": "squash",
   "labels": ["dependencies"],
   "prConcurrentLimit": 10,
