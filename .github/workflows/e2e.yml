@@ -44,7 +44,11 @@ jobs:
         uses: helm/kind-action@v1.10.0
         with:
           install_only: true   # we want the binary; cluster is created by tofu
-          version: v0.24.0
+          # Must be >= v0.25 to parse containerd 2.x's `ctr plugins ls`
+          # output (kindest/node:v1.35.0 ships containerd 2.x). v0.24
+          # silently fails snapshotter detection here. Pinned to v0.32
+          # to match what brew installs on developer machines.
+          version: v0.32.0
       - name: Run tofu test
         working-directory: test/e2e
         run: |
