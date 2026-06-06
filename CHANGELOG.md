@@ -1,3 +1,9 @@
+## [0.2.8](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.7...v0.2.8) (2026-06-06)
+
+### Bug Fixes
+
+* **ci:** bump kind from v0.24.0 to v0.32.0 for containerd 2.x ([6183780](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/6183780e6c26537c65bdd75bce66337f99315b33))
+
 ## [0.2.7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.6...v0.2.7) (2026-06-06)
 
 ### Bug Fixes
