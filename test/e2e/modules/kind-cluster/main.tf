@@ -213,7 +213,13 @@ resource "null_resource" "kind_load" {
     command     = "kind load docker-image '${each.value}' --name '${kind_cluster.this.name}'"
   }
 
-  depends_on = [kind_cluster.this]
+  # Must wait for containerd_hosts: that resource restarts containerd
+  # on each node, and `kind load` shells in to ctr to read the
+  # snapshotter plugin list. A mid-restart query returns "failed to
+  # detect containerd snapshotter" and aborts the load. Slower CI
+  # runners lose this race; local runs typically finish the restart in
+  # time. Cilium has the same dep below for the same reason.
+  depends_on = [kind_cluster.this, null_resource.containerd_hosts]
 }
 
 # Cilium replaces kube-proxy and provides the CNI. Wait for the
