@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.24@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 # Bridge image. Distroless static + nonroot — the bridge has no shell,
 # no package manager, only the binary and its TLS roots.
 
@@ -6,7 +6,7 @@
 # compiles via GOARCH much faster than QEMU emulates the whole toolchain.
 # Without this, arm64 builds on an amd64 runner stall for 30+ min on
 # k8s.io/client-go alone (real outage we hit on v0.0.0).
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -19,7 +19,7 @@ COPY bridge ./bridge
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' \
     -o /out/bridge ./bridge/cmd
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 COPY --from=builder /out/bridge /bin/bridge
 USER 65532:65532
 ENTRYPOINT ["/bin/bridge"]

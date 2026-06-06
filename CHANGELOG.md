@@ -1,3 +1,28 @@
+## [0.2.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.4...v0.2.5) (2026-06-06)
+
+### Bug Fixes
+
+* **deps:** update kubernetes go modules ([9678954](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/9678954fd71f130a13e9d2c8e50ed33085cc54b3))
+
+## [0.2.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.3...v0.2.4) (2026-06-06)
+
+### Bug Fixes
+
+* **e2e:** kind_load must wait for containerd_hosts restart ([273c6e6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/273c6e627d8b0dc8dd17d43eb6195fe58a629de4))
+
+## [0.2.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.2...v0.2.3) (2026-06-06)
+
+### Bug Fixes
+
+* **ci:** Renovate uses GitHub App installation token ([d289be0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/d289be02c6633a2d59c4fdd638c7af89382a5a12))
+
+## [0.2.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.1...v0.2.2) (2026-06-06)
+
+### Bug Fixes
+
+* **ci:** grant renovate token statuses/checks/actions read ([31294c2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/31294c2759e7cf4e9a787ab7bd22c4d5f88a7fc3))
+* **renovate:** exclude golangci/golangci-lint binary from digest pinning ([8a8293a](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/8a8293a7a8c325ed10546d7efc0883b8050f3754))
+
 ## [0.2.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.0...v0.2.1) (2026-06-05)
 
 ### Bug Fixes
