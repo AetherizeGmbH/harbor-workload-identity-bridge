@@ -2,7 +2,11 @@ name: renovate
 
 on:
   schedule:
-    - cron: "0 3 */3 * *"   # every 3 days at 03:00 UTC
+    # Twice a day so automerge has a chance to rebase open PRs against
+    # the latest main shortly after a merge. UTC is the only timezone
+    # GitHub Actions cron understands; 07:00/16:00 UTC is 09:00/18:00
+    # Berlin in CEST (summer) and 08:00/17:00 Berlin in CET (winter).
+    - cron: "0 7,16 * * *"
   workflow_dispatch:
     inputs:
       logLevel:
