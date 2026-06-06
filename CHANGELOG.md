@@ -1,3 +1,10 @@
+## [0.2.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.1...v0.2.2) (2026-06-06)
+
+### Bug Fixes
+
+* **ci:** grant renovate token statuses/checks/actions read ([31294c2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/31294c2759e7cf4e9a787ab7bd22c4d5f88a7fc3))
+* **renovate:** exclude golangci/golangci-lint binary from digest pinning ([8a8293a](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/8a8293a7a8c325ed10546d7efc0883b8050f3754))
+
 ## [0.2.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.0...v0.2.1) (2026-06-05)
 
 ### Bug Fixes
