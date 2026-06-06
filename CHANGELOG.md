@@ -1,3 +1,9 @@
+## [0.2.7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.6...v0.2.7) (2026-06-06)
+
+### Bug Fixes
+
+* **e2e:** bridge_install pulls from build_images, no silent defaults ([0051dd3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/0051dd358cf66db0b48fddb0e98736cdac68fa1b))
+
 ## [0.2.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.5...v0.2.6) (2026-06-06)
 
 ### Bug Fixes
