@@ -1,3 +1,9 @@
+## [0.2.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.2...v0.2.3) (2026-06-06)
+
+### Bug Fixes
+
+* **ci:** Renovate uses GitHub App installation token ([d289be0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/d289be02c6633a2d59c4fdd638c7af89382a5a12))
+
 ## [0.2.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.2.1...v0.2.2) (2026-06-06)
 
 ### Bug Fixes
