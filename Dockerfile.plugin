@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # Plugin image. Used ONLY by the chart's init container, which copies
 # the binary onto the node's filesystem and exits. The image needs
 # sh + cp for that copy step, so we use alpine rather than distroless.
@@ -7,7 +7,7 @@
 # Pin the builder to the native build platform — under buildx, Go cross-
 # compiles via GOARCH much faster than QEMU emulates the whole toolchain.
 # (See Dockerfile.bridge for the v0.0.0 hang that motivated this.)
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
