@@ -70,10 +70,7 @@ variable "bridge_image" {
     repository = string
     tag        = string
   })
-  default = {
-    repository = "harbor-bridge"
-    tag        = "e2e"
-  }
+  description = "Bridge container image. Required. Caller is expected to derive this from the test's docker-build run output so the install exercises the working-tree Dockerfiles instead of a stale tag."
 }
 
 variable "plugin_image" {
@@ -81,10 +78,7 @@ variable "plugin_image" {
     repository = string
     tag        = string
   })
-  default = {
-    repository = "harbor-bridge-plugin"
-    tag        = "e2e"
-  }
+  description = "Plugin container image. Required. See bridge_image."
 }
 
 provider "helm" {

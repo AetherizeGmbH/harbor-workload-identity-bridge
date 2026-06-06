@@ -277,6 +277,12 @@ run "bridge_install" {
     # failed to match `harbor.e2e:30843/your-project/alpine:test3`.
     # The bare host:port form matches any image from that registry.
     match_images = ["harbor.e2e:30843"]
+    # Use the images we just built in build_images, not the install
+    # module's defaults. Establishes the dependency edge explicitly
+    # and guarantees the test exercises the working tree's Dockerfiles
+    # rather than a stale tag that happens to match.
+    bridge_image = run.build_images.image_refs.bridge
+    plugin_image = run.build_images.image_refs.plugin
   }
 }
 

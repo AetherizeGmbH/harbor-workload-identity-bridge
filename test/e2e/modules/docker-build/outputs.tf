@@ -13,6 +13,27 @@ output "image_ids" {
   value       = { for k, v in docker_image.build : k => v.image_id }
 }
 
+output "image_refs" {
+  description = <<-EOT
+    Map of friendly name to {repository, tag} pair, split from the built
+    tag. Helm charts that follow the Bitnami `image: {repository, tag}`
+    convention can consume these directly. Use this (not the raw
+    `image_tags`) when piping into a downstream install module: it
+    makes the just-built image the source of truth, eliminating the
+    silent-coincidence failure where the install's default tag happens
+    to match what the build produces.
+  EOT
+  value = {
+    for k, v in docker_image.build :
+    k => {
+      # Split on the last `:` so registry refs like `host:port/path:tag`
+      # parse correctly (split() on `:` would chop the port off).
+      repository = regex("^(.+):([^:]+)$", v.name)[0]
+      tag        = regex("^(.+):([^:]+)$", v.name)[1]
+    }
+  }
+}
+
 output "build_id" {
   description = <<-EOT
     Aggregate sha256 over every built image's content ID. Rotates
