@@ -24,6 +24,36 @@ weight below is there and in the CR→robot→secret identity mapping.
 | F8 | Low | OIDC validation error string logged at debug | Recommended |
 | F9 | Info | `tls.enabled=false` and other "fail-open-ish" chart knobs | Recommended |
 
+### Fix status (as of commit `6d23c74`, branch `audit/collision-guards`)
+
+**Applied (with regression tests; `go build`, `go vet`, `go test ./...`, and
+`-race` all green):**
+
+- **F1 — Fixed.** Request body bounded with `http.MaxBytesReader` (64 KiB)
+  before decode. Test: `TestHandler_RejectsOversizedBody`.
+- **F2 — Partially fixed.** Three non-breaking guards turn the collision from a
+  silent cross-wire into a clean denial: reconciler refuses to overwrite a
+  Secret owned by another HarborAccess, refuses to adopt/rotate/delete a robot
+  whose description names another HarborAccess, and the data plane returns 403
+  when the Secret at the expected name is stamped for another HarborAccess.
+  Tests: `TestReconcile_SecretNameCollision_RefusesToOverwrite`,
+  `TestReconcile_RobotNameCollision_RefusesForeignHarborAccess`,
+  `TestHandler_SecretOwnerMismatch_Forbidden`. The collision-free *naming
+  scheme* itself is still open — see the F2 section's "Residual".
+- **F5 — Fixed.** `findHarborAccess` re-validates `trustPolicy.issuer` against
+  the token `iss`. Test: `TestHandler_IssuerMismatch_NoMatch`.
+
+**Still open (no code change yet):**
+
+- **F2 residual** — collision-free naming scheme (breaking; Needs-decision). A
+  dot-delimiter scheme is the leading candidate (provably injective because the
+  left-of-last fields are namespaces/cluster label, and it also retires the
+  ADR-0009 hyphen-prefix footgun); it requires a rename migration.
+- **F3, F4, F6** — Recommended / Needs-decision (transport exposure, metrics
+  exposure, supply-chain). Operational/default changes left to the maintainer.
+- **F7, F8, F9** — Recommended (deterministic CR match, debug log hygiene,
+  chart fail-open guards).
+
 ---
 
 ## F1 — Unauthenticated request-body memory-exhaustion DoS (High) — FIXED
