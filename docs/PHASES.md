@@ -360,11 +360,12 @@ Originally-planned section (kept for archaeology):
 3. `harbor` — Harbor via the upstream chart, `externalURL: https://harbor.e2e:30843`, NodePort 30843, cert-manager-issued self-signed cert.
 4. `containerd_trust` — extracts Harbor's TLS leaf via `openssl s_client` from inside each kind node, installs as `/etc/containerd/certs.d/harbor.e2e:30843/ca.crt`, writes `hosts.toml` with `ca` directive.
 5. `coredns_rewrite` — CoreDNS hosts plugin: `harbor.e2e → <kind-node-IP>` so in-cluster pods can resolve it.
-6. `seed_image` — Job in `e2e-seed` namespace runs a purpose-built image (`alpine + curl + crane + jq + openssl`); creates `your-project` in Harbor and `crane copy`s `alpine:3.20` into it.
+6. `seed_image` — Job in `e2e-seed` namespace runs a purpose-built image (`alpine + curl + crane + jq + openssl`); creates the scenario projects (`your-project`, `project-alpha/beta/gamma`, `beta-1/2/3`) and `crane copy`s `alpine:3.20` into each.
 7. `bridge_install` — our chart, including the audience RBAC and the plugin DaemonSet's `nsenter` patch + restart of kubelet on every node.
-8. `harbor_access` — `HarborAccess` CR + test SA; waits on `Ready=True` (bridge controller's umbrella condition).
-9. `file_sleep` — no-op unless `TF_VAR_pause_before_pull=true`, in which case it blocks on `rm test/e2e/.tofu-sleep`.
-10. `pull_pod` — pod with `imagePullPolicy: Always` pulls `harbor.e2e:30843/your-project/alpine:test3`; success = the whole chain works.
+8. `harbor_access` — the `HarborAccess` CRs + test SAs: baseline, two collision-prone SAs (ADR-0018), a tenant-namespace CR, and a multi-project `pull,push` CR; waits on `Ready=True` (bridge controller's umbrella condition).
+9. `pull_pod` / `_alpha` / `_beta` / `_gamma` / `_multi` — pods pull their project via the credential provider; together they cover multi-tenancy, collision-resistance, cluster-wide CR matching, and a multi-project robot.
+10. `robot_push_test` — Job using the multi-project robot's credentials to push a tag to one project and pull another; verifies the `pull,push` action end-to-end.
+11. `file_sleep` — no-op unless `TF_VAR_pause_after_pull=true`, in which case it blocks (AFTER all assertions) on `rm test/e2e/.tofu-sleep`.
 
 Topology + flow diagram in [docs/img/local-dev-topology-tofu.svg](img/local-dev-topology-tofu.svg).
 

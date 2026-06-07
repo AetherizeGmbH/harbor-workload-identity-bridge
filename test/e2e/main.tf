@@ -12,8 +12,8 @@ terraform {
 # them settable via `tofu test -var ...` or TF_VAR_* env vars. CI gets
 # the defaults; local dev flips them on as needed.
 
-variable "pause_before_pull" {
+variable "pause_after_pull" {
   type        = bool
-  description = "When true, the test pauses between harbor_access and pull_pod via the test-sleep module — a file appears at test/e2e/.tofu-sleep and the apply blocks until you `rm` it. Lets you kubectl-poke at the cluster before the load-bearing assertion. Off in CI; flip on via TF_VAR_pause_before_pull=true."
+  description = "When true, the test pauses AFTER all the pull/push assertions via the test-sleep module — a file appears at test/e2e/.tofu-sleep and the apply blocks until you `rm` it. Lets you kubectl-poke a fully-populated cluster (robots, Secrets, pushed tags). Off in CI; flip on via TF_VAR_pause_after_pull=true."
   default     = false
 }

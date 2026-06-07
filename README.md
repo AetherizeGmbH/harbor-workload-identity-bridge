@@ -1,8 +1,20 @@
+<p align="center">
+  <img src="docs/img/project-banner.png" alt="Harbor Workload Identity Bridge — pull from Harbor using your pod's Kubernetes ServiceAccount, no imagePullSecrets" width="100%">
+</p>
+
 # Harbor Workload Identity Bridge
 
 **Pull from Harbor with the Service Account your pod is already running as. No
 imagePullSecrets, no long-lived credentials in workload namespaces, no
 per-namespace token-distribution chores.**
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/github/license/AetherizeGmbH/harbor-workload-identity-bridge"></a>
+  <a href="https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/AetherizeGmbH/harbor-workload-identity-bridge?sort=semver"></a>
+  <a href="https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/AetherizeGmbH/harbor-workload-identity-bridge/test.yml?branch=main&label=tests"></a>
+  <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/AetherizeGmbH/harbor-workload-identity-bridge">
+  <a href="https://github.com/goharbor/harbor/issues/17520"><img alt="Upstream: goharbor/harbor#17520" src="https://img.shields.io/badge/upstream-goharbor%2Fharbor%2317520-0066CC"></a>
+</p>
 
 > Status: **alpha — Phases 1 through 6 complete, end-to-end verified
 > on kind v1.35 + Harbor 2.x**. `make e2e` brings up a fresh kind

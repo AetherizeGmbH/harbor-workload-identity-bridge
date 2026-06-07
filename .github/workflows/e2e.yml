@@ -64,7 +64,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           tofu init
-          TF_VAR_pause_before_pull=false tofu test -verbose 2>&1 | tee /tmp/tofu-test.log
+          TF_VAR_pause_after_pull=false tofu test -verbose 2>&1 | tee /tmp/tofu-test.log
       - name: Capture cluster diagnostics on failure
         # Runs BEFORE the cleanup happens, so we still see the actual
         # pod state, kubelet logs, and bridge metrics that let us tell

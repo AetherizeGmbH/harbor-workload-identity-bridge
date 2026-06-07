@@ -62,24 +62,26 @@ Every `run` block in [`test/e2e/tests/01-bridge.tftest.hcl`](test/e2e/tests/01-b
 | 3 | `harbor`           | Harbor chart, exposed at `https://harbor.e2e:30843` |
 | 4 | `containerd_trust` | Extract Harbor's TLS cert from each node, install as `/etc/containerd/certs.d/harbor.e2e:30843/ca.crt` |
 | 5 | `coredns_rewrite`  | CoreDNS hosts-plugin entry so `harbor.e2e` resolves to a kind node IP cluster-wide |
-| 6 | `seed_image`       | crane copy `alpine:3.20` → `harbor.e2e:30843/your-project/alpine:test3` |
+| 6 | `seed_image`       | crane copy `alpine:3.20` into several projects (`your-project`, `project-alpha/beta/gamma`, `beta-1/2/3`) |
 | 7 | `bridge_install`   | The chart — CRDs, bridge Deployment, plugin DaemonSet, audience RBAC |
-| 8 | `harbor_access`    | Apply a `HarborAccess` CR; wait on `Ready=True` |
-| 9 | `file_sleep`       | No-op unless `TF_VAR_pause_before_pull=true` (see below) |
-| 10 | `pull_pod`        | The load-bearing assertion: pod pulls the seeded private image |
+| 8 | `harbor_access`    | Apply the `HarborAccess` CRs (baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR); wait on `Ready=True` |
+| 9 | `pull_pod*`        | Load-bearing pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot) |
+| 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and pull another — verifies the `pull,push` action |
+| 11 | `file_sleep`      | No-op unless `TF_VAR_pause_after_pull=true` — pauses AFTER all assertions (see below) |
 
 ## Pause-for-inspection mode
 
-`make e2e-pause` sets `TF_VAR_pause_before_pull=true`. That flips the
-`enabled` input on the `test-sleep` module wired between
-`harbor_access` and `pull_pod`. While paused:
+`make e2e-pause` sets `TF_VAR_pause_after_pull=true`. That flips the
+`enabled` input on the `test-sleep` module, which runs AFTER all the
+pull/push assertions. While paused:
 
 - A file appears at **`test/e2e/.tofu-sleep`**.
 - The terraform apply blocks on a `while [ -f ... ]; do sleep 2; done`
   loop watching that file.
-- The cluster is fully set up: Harbor running, chart installed,
-  `HarborAccess` CR `Ready=True`, test image in Harbor, plugin on
-  every node. The only thing that hasn't run yet is the assertion pod.
+- The cluster is fully exercised: Harbor running, chart installed, all
+  `HarborAccess` CRs `Ready=True`, robots minted, the seeded images
+  pulled, and the push test's `pushed-by-robot` tag present in `beta-2`.
+  You're inspecting the end state, after every assertion has passed.
 
 In another shell, poke around:
 
@@ -145,7 +147,7 @@ cleanly. No orphan kind clusters.
 
 | File / module | Role |
 |---|---|
-| [`test/e2e/main.tf`](test/e2e/main.tf) | Declares `pause_before_pull` variable |
+| [`test/e2e/main.tf`](test/e2e/main.tf) | Declares `pause_after_pull` variable |
 | [`test/e2e/tests/01-bridge.tftest.hcl`](test/e2e/tests/01-bridge.tftest.hcl) | The test definition — every `run` block |
 | [`test/e2e/modules/docker-build`](test/e2e/modules/docker-build) | `docker build` bridge + plugin + seed images |
 | [`test/e2e/modules/kind-cluster`](test/e2e/modules/kind-cluster) | Kind + Cilium + cert-manager + `extra_etc_hosts` |
