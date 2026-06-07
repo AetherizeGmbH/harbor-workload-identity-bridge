@@ -4,6 +4,8 @@
 package controlplane
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -28,6 +30,45 @@ const (
 // Secret names so an administrator can `kubectl get secrets -l ...` and
 // reason about which Secrets are bridge-managed.
 const SecretNamePrefix = "robot-"
+
+const (
+	// secretNameMax is the Kubernetes object-name limit (DNS subdomain).
+	secretNameMax = 253
+	// secretNameHashLen is the hex digest length appended when a Secret name
+	// would overflow secretNameMax. 16 hex chars = 64 bits, matching the
+	// robot-name overflow handling in harbor/naming.go.
+	secretNameHashLen = 16
+)
+
+// robotSecretNameFor computes the per-CR robot-password Secret name. The
+// namespace and name are dot-joined for injectivity (ADR-0018; the HA
+// namespace is a dot-free RFC 1123 label, so the first dot is an unambiguous
+// boundary). When the natural name would exceed the 253-char Kubernetes limit
+// it is hash-truncated, mirroring harbor.RobotName's overflow handling — only
+// this path is probabilistic rather than provably injective.
+//
+// The data plane duplicates this exactly in dataplane.robotSecretName
+// (ADR-0015 — it must not import the control plane). The two MUST stay
+// byte-identical; both are pinned by tests (controlplane:
+// TestRobotSecretNameFor_*, dataplane: TestRobotSecretName_ContractPinned).
+func robotSecretNameFor(ns, name string) string {
+	full := SecretNamePrefix + ns + "." + name
+	if len(full) <= secretNameMax {
+		return full
+	}
+	sum := sha256.Sum256([]byte(ns + "\x00" + name))
+	digest := hex.EncodeToString(sum[:])[:secretNameHashLen]
+	budget := secretNameMax - len(SecretNamePrefix) - 1 - secretNameHashLen
+	mid := ns + "." + name
+	if len(mid) > budget {
+		mid = mid[:budget]
+	}
+	mid = strings.TrimRight(mid, "-._")
+	if mid == "" {
+		return SecretNamePrefix + digest
+	}
+	return SecretNamePrefix + mid + "." + digest
+}
 
 // PasswordRotationInterval is the maximum age of a robot password before
 // the reconciler refreshes it (ADR-0003: rotate daily).

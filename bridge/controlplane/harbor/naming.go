@@ -110,7 +110,9 @@ func RobotName(cluster, saNamespace, saName string) (string, error) {
 	if mid == "" {
 		return prefix + digest, nil
 	}
-	return prefix + mid + "-" + digest, nil
+	// Join the disambiguating digest with '.' to match the rest of the
+	// scheme (ADR-0018). budget already reserves one char for this separator.
+	return prefix + mid + "." + digest, nil
 }
 
 // ClusterPrefix returns the ownership prefix for the given cluster. Robots

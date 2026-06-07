@@ -5,6 +5,8 @@ package dataplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,13 +325,34 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 	return &robotCreds{username: user, password: pass}, nil
 }
 
-// robotSecretName mirrors controlplane.secretNameFor — kept here as a
+// robotSecretName mirrors controlplane.robotSecretNameFor — kept here as a
 // local helper so the data plane does not import the control plane
-// (ADR-0002). The format ("robot-<haNs>.<haName>", dot-joined for
-// injectivity — ADR-0018) is the cross-package contract; if the control
-// plane ever changes its secret naming it has to announce that here too.
+// (ADR-0002). The format ("robot-<haNs>.<haName>", dot-joined for injectivity
+// — ADR-0018, with hash-truncation when it would exceed the 253-char k8s name
+// limit) is the cross-package contract; this MUST stay byte-identical to the
+// control-plane helper (pinned by TestRobotSecretName_ContractPinned here and
+// TestRobotSecretNameFor_* in controlplane).
 func robotSecretName(ha *harborv1alpha1.HarborAccess) string {
-	return "robot-" + ha.Namespace + "." + ha.Name
+	const (
+		secretNameMax     = 253
+		secretNameHashLen = 16
+	)
+	full := "robot-" + ha.Namespace + "." + ha.Name
+	if len(full) <= secretNameMax {
+		return full
+	}
+	sum := sha256.Sum256([]byte(ha.Namespace + "\x00" + ha.Name))
+	digest := hex.EncodeToString(sum[:])[:secretNameHashLen]
+	budget := secretNameMax - len("robot-") - 1 - secretNameHashLen
+	mid := ha.Namespace + "." + ha.Name
+	if len(mid) > budget {
+		mid = mid[:budget]
+	}
+	mid = strings.TrimRight(mid, "-._")
+	if mid == "" {
+		return "robot-" + digest
+	}
+	return "robot-" + mid + "." + digest
 }
 
 // Robot-Secret ownership label keys. Mirrored from controlplane/labels.go —

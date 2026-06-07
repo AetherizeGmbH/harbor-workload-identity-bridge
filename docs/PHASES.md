@@ -56,7 +56,7 @@ Read these before touching code in any phase.
 
 - **Harbor robot username**: regex `^[a-z0-9]+(?:[._-][a-z0-9]+)*$`, postgres column `varchar(255)`. We use soft cap **240** in [bridge/controlplane/harbor/naming.go](../bridge/controlplane/harbor/naming.go). Overflows are deterministically hash-truncated.
 - **Robot name format**: `bridge-<cluster>.<saNs>.<saName>` (dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)).
-- **Secret name format**: `robot-<haNs>.<haName>` (bridge namespace; dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)). 253-char k8s limit; no truncation implemented yet — flagged as TODO in `reconciler.secretNameFor`.
+- **Secret name format**: `robot-<haNs>.<haName>` (bridge namespace; dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)). Hash-truncated to the 253-char k8s limit when it would overflow (`controlplane.robotSecretNameFor`, mirrored in `dataplane.robotSecretName`).
 - **Finalizer**: `harbor.aetherize.io/robot` ([controlplane/labels.go](../bridge/controlplane/labels.go)).
 - **Managed-by label value**: `harbor-workload-identity-bridge`.
 

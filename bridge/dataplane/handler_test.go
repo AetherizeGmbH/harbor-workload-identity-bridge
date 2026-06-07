@@ -461,6 +461,20 @@ func TestRobotSecretName_ContractPinned(t *testing.T) {
 	if got, want := robotSecretName(ha), "robot-team-a.flux-access"; got != want {
 		t.Fatalf("robotSecretName = %q, want %q (must match controlplane.secretNameFor)", got, want)
 	}
+	// Overflow must hash-truncate to a valid (<=253) Secret name, matching
+	// the control-plane helper's behaviour. (Byte-for-byte equality with the
+	// control-plane output rests on the two implementations being identical;
+	// the short-form literal above pins the common drift, the delimiter.)
+	long := &harborv1alpha1.HarborAccess{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: strings.Repeat("z", 300)},
+	}
+	got := robotSecretName(long)
+	if len(got) > 253 {
+		t.Fatalf("overflow Secret name len = %d, want <= 253: %q", len(got), got)
+	}
+	if !strings.HasPrefix(got, "robot-") {
+		t.Fatalf("overflow Secret name lost its prefix: %q", got)
+	}
 }
 
 func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {

@@ -443,15 +443,7 @@ func (r *Reconciler) writeRobotSecret(ctx context.Context, ha *harborv1alpha1.Ha
 }
 
 func (r *Reconciler) secretNameFor(ha *harborv1alpha1.HarborAccess) string {
-	// "robot-<haNs>.<haName>" — the namespace and name are joined with '.',
-	// NOT '-', so the mapping is injective (ADR-0018): the HarborAccess
-	// namespace is a dot-free RFC 1123 label, so the first dot after it is an
-	// unambiguous boundary even though both fields may contain dashes. The
-	// data plane mirrors this in robotSecretName (handler.go) — keep both in
-	// lockstep (ADR-0015). The result is a valid Secret name (DNS subdomain;
-	// dots allowed). We do not hash-truncate here: the longest reasonable
-	// namespace+name combination fits well under Kubernetes' 253-char limit.
-	return SecretNamePrefix + ha.Namespace + "." + ha.Name
+	return robotSecretNameFor(ha.Namespace, ha.Name)
 }
 
 func (r *Reconciler) secretLabels(ha *harborv1alpha1.HarborAccess) map[string]string {
