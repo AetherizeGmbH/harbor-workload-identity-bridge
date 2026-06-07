@@ -472,20 +472,19 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 
 func TestFilterOwned_PrefixFilter(t *testing.T) {
 	robots := []Robot{
-		{Name: "bridge-prod-flux"},
-		{Name: "bridge-prod-system"},
-		{Name: "bridge-staging-flux"},
+		{Name: "bridge-prod.flux"},
+		{Name: "bridge-prod.system"},
+		{Name: "bridge-staging.flux"},
 		{Name: "robot-foo"},
-		{Name: "bridge-prod-eu-thing"}, // documented prefix-collision case
+		{Name: "bridge-prod-eu.thing"}, // prod-eu's robot — must NOT be owned by prod
 	}
 	got := FilterOwned(robots, "prod")
-	// Per ADR-0009 known limitation: cluster "prod" also picks up
-	// "bridge-prod-eu-thing". The test pins the behaviour so a change has
-	// to update the ADR and this expectation together.
+	// ADR-0018: the dot-terminated prefix "bridge-prod." excludes
+	// "bridge-prod-eu.thing" (cluster prod-eu), fixing the ADR-0009
+	// hyphen-prefix false positive. Only prod's own robots are owned.
 	wantNames := map[string]bool{
-		"bridge-prod-flux":     true,
-		"bridge-prod-system":   true,
-		"bridge-prod-eu-thing": true,
+		"bridge-prod.flux":   true,
+		"bridge-prod.system": true,
 	}
 	if len(got) != len(wantNames) {
 		t.Errorf("FilterOwned returned %d, want %d", len(got), len(wantNames))

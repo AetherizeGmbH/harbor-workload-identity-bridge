@@ -39,7 +39,7 @@ func TestJanitor_DeletesOrphanRobot(t *testing.T) {
 	// A robot owned by this bridge whose HarborAccess has been deleted.
 	mh := newMockHarbor()
 	orphanID := mh.preexisting(
-		"bridge-prod-eu-west-flux-system-orphan",
+		"bridge-prod-eu-west.flux-system.orphan",
 		RobotDescription(testCluster, "harbor-bridge-system", "long-gone-cr"),
 	)
 	j := newJanitor(t, mh) // no HarborAccess objects in the cluster
@@ -60,7 +60,7 @@ func TestJanitor_PreservesRobotWithLiveCR(t *testing.T) {
 	ha := newHarborAccess() // namespace=harbor-bridge-system, name=flux-access
 	mh := newMockHarbor()
 	liveID := mh.preexisting(
-		"bridge-prod-eu-west-flux-system-source-controller",
+		"bridge-prod-eu-west.flux-system.source-controller",
 		RobotDescription(testCluster, ha.Namespace, ha.Name),
 	)
 	j := newJanitor(t, mh, ha)
@@ -77,14 +77,14 @@ func TestJanitor_PreservesRobotWithLiveCR(t *testing.T) {
 }
 
 func TestJanitor_PreservesForeignClusterRobot(t *testing.T) {
-	// Robot whose name happens to be in our prefix (ADR-0009 prefix-collision
-	// class) but whose description marks it as another cluster's. We must
-	// not touch it even though its owning HarborAccess doesn't exist in our
-	// cluster (it lives in the other cluster's apiserver, which we cannot
-	// see).
+	// Robot whose name IS in our ownership prefix ("bridge-prod-eu-west.")
+	// but whose description marks it as another cluster's. Layer 2
+	// (RobotBelongsToCluster) must keep us from touching it even though its
+	// owning HarborAccess doesn't exist in our cluster (it lives in the other
+	// cluster's apiserver, which we cannot see).
 	mh := newMockHarbor()
 	foreignDesc := RobotDescription("prod-eu-west-other", "ns", "cr")
-	foreignID := mh.preexisting("bridge-prod-eu-west-other-ns-cr", foreignDesc)
+	foreignID := mh.preexisting("bridge-prod-eu-west.ns.cr", foreignDesc)
 	j := newJanitor(t, mh) // empty cluster — but we still must not touch it
 
 	if err := j.Sweep(context.Background()); err != nil {
@@ -99,7 +99,7 @@ func TestJanitor_PreservesUnmarkedRobotInOurPrefix(t *testing.T) {
 	// A robot that happens to share our prefix but was not created by the
 	// bridge (no managed-by marker). Must never be deleted.
 	mh := newMockHarbor()
-	id := mh.preexisting("bridge-prod-eu-west-handmade", "manually created by ops, do not touch")
+	id := mh.preexisting("bridge-prod-eu-west.handmade", "manually created by ops, do not touch")
 	j := newJanitor(t, mh)
 
 	if err := j.Sweep(context.Background()); err != nil {
@@ -132,15 +132,15 @@ func TestJanitor_HandlesMixedRobotPopulation(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()
 	live := mh.preexisting(
-		"bridge-prod-eu-west-flux-system-source-controller",
+		"bridge-prod-eu-west.flux-system.source-controller",
 		RobotDescription(testCluster, ha.Namespace, ha.Name),
 	)
 	orphan := mh.preexisting(
-		"bridge-prod-eu-west-gone-cr",
+		"bridge-prod-eu-west.gone.cr",
 		RobotDescription(testCluster, "some-ns", "deleted-cr"),
 	)
 	foreign := mh.preexisting(
-		"bridge-prod-eu-west-impostor",
+		"bridge-prod-eu-west.impostor.cr",
 		RobotDescription("not-our-cluster", "ns", "cr"),
 	)
 	unrelated := mh.preexisting("operator-handmade", "manually")

@@ -5,9 +5,13 @@ package dataplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +26,15 @@ import (
 
 // CredentialsPath is the HTTP path the plugin POSTs to.
 const CredentialsPath = "/v1/credentials"
+
+// maxRequestBodyBytes caps the credential-request body. The body carries
+// only an image reference for audit logging; a few KiB is generous. The
+// cap is the defense against an unauthenticated memory-exhaustion DoS:
+// the endpoint is reachable on every node's NodePort (ADR-0008), the body
+// is decoded before the SA token is verified, and a caller need only send
+// a dummy "Authorization: Bearer x" header to reach the json decode. Without
+// this bound a single large body can OOM the bridge. See AUDIT.md F1.
+const maxRequestBodyBytes = 64 << 10 // 64 KiB
 
 // cacheKeyTypeRegistry is the cacheKeyType we emit in every successful
 // CredentialProviderResponse. The kubelet API restricts this field to
@@ -127,6 +140,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req Request
 	if r.Body != nil && r.ContentLength != 0 {
 		defer func() { _ = r.Body.Close() }()
+		// Bound the body before decoding: it is attacker-reachable and
+		// parsed before token validation (AUDIT.md F1).
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			// Body is optional but if present must parse — otherwise the
 			// audit log loses the image and we shouldn't pretend.
@@ -173,6 +189,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the registry auth handshake itself (ADR-0013).
 	creds, err := h.readRobotSecret(ctx, matched)
 	if err != nil {
+		if errors.Is(err, errSecretOwnerMismatch) {
+			// Secret-name collision (AUDIT.md F2): the Secret at the
+			// expected name belongs to a different HarborAccess. Deny —
+			// never cross-wire one workload's credentials to another.
+			logger.Error(err, "robot Secret owner mismatch; refusing to issue credentials",
+				"harboraccess", matched.Namespace+"/"+matched.Name, "image", req.Image)
+			http.Error(w, "credential Secret ownership mismatch", http.StatusForbidden)
+			h.recordResult(ResultForbidden)
+			return
+		}
 		if apierrors.IsNotFound(err) {
 			// Robot Secret should exist whenever the CR is Ready; absence
 			// means the control plane is mid-rotation or has not yet
@@ -233,24 +259,87 @@ func (h *Handler) recordOIDCFailure(err error) {
 //
 // The audience value that matched is also returned so the audit log
 // records the exact aud string the kubelet projected the token with.
+//
+// Selection is deterministic (AUDIT.md F7). In a correct configuration
+// exactly one CR matches a given (subject, issuer, audience). If two or
+// more match, that is an operator misconfiguration — two CRs claim the
+// same workload identity, typically with different permission sets.
+// Returning whichever CR k8s.List happened to yield first would let the
+// effective permission set flip between bridge restarts and between the
+// two HA replicas (List order is not stable across informer caches), so
+// a workload could intermittently receive a more- or less-privileged
+// robot than intended. We therefore pick the namespace/name-sorted first
+// match and log the ambiguity so an operator can resolve it.
 func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harborv1alpha1.HarborAccess, string, error) {
 	var list harborv1alpha1.HarborAccessList
 	if err := h.K8sClient.List(ctx, &list); err != nil {
 		return nil, "", fmt.Errorf("list HarborAccess: %w", err)
 	}
+	type match struct {
+		ha  *harborv1alpha1.HarborAccess
+		aud string
+	}
+	var matches []match
 	for i := range list.Items {
 		ha := &list.Items[i]
+		// Defense-in-depth (AUDIT.md F13): a CR with an empty audience or
+		// issuer must never match. The CRD enforces MinLength=1 on both
+		// trustPolicy.audience and trustPolicy.issuer, but the data plane is
+		// the security boundary and must not rely solely on CRD validation
+		// (a CR applied with --validate=false, or a future API revision that
+		// relaxes the marker, would otherwise let an empty trustPolicy.audience
+		// match a token carrying aud:"" — a silent auth bypass).
+		if ha.Spec.TrustPolicy.Audience == "" || ha.Spec.TrustPolicy.Issuer == "" {
+			continue
+		}
 		expectedSub := "system:serviceaccount:" + ha.Spec.ServiceAccountRef.Namespace + ":" + ha.Spec.ServiceAccountRef.Name
 		if expectedSub != claims.Subject {
 			continue
 		}
+		// Defense-in-depth (AUDIT.md F5): the Validator already pins iss to
+		// the bridge's configured issuer, and the reconciler refuses to
+		// provision a robot for a CR whose trustPolicy.issuer disagrees with
+		// the cluster issuer. Re-checking here means a CR is never matched
+		// against a token from an issuer it did not declare, even if those
+		// upstream invariants regress.
+		if ha.Spec.TrustPolicy.Issuer != claims.Issuer {
+			continue
+		}
 		for _, aud := range claims.Audience {
+			// Never honor an empty aud entry, even against a (guarded-above)
+			// non-empty CR audience — keeps the match total over both sides.
+			if aud == "" {
+				continue
+			}
 			if aud == ha.Spec.TrustPolicy.Audience {
-				return ha, aud, nil
+				matches = append(matches, match{ha: ha, aud: aud})
+				break
 			}
 		}
 	}
-	return nil, "", nil
+	if len(matches) == 0 {
+		return nil, "", nil
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].ha.Namespace != matches[j].ha.Namespace {
+			return matches[i].ha.Namespace < matches[j].ha.Namespace
+		}
+		return matches[i].ha.Name < matches[j].ha.Name
+	})
+	if len(matches) > 1 {
+		names := make([]string, len(matches))
+		for i, m := range matches {
+			names[i] = m.ha.Namespace + "/" + m.ha.Name
+		}
+		log.FromContext(ctx).WithName("dataplane").Info(
+			"multiple HarborAccess CRs match this token; selecting deterministically by namespace/name — resolve this ambiguity, the matched CRs grant potentially different permissions",
+			"subject", claims.Subject,
+			"audience", matches[0].aud,
+			"matches", strings.Join(names, ","),
+			"selected", names[0],
+		)
+	}
+	return matches[0].ha, matches[0].aud, nil
 }
 
 // robotCreds carries the username and password read from a robot Secret.
@@ -269,6 +358,19 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 		secret); err != nil {
 		return nil, err
 	}
+	// Read-path collision backstop (AUDIT.md F2). If the Secret carries the
+	// bridge's ownership labels and they name a DIFFERENT HarborAccess than
+	// the one matched for this token, two CRs have collided on the
+	// dash-joined Secret name. Refuse rather than hand one workload's SA the
+	// other workload's robot password.
+	if secret.Labels[labelManagedBy] == labelManagedByValue &&
+		(secret.Labels[labelHarborAccessNamespace] != ha.Namespace ||
+			secret.Labels[labelHarborAccessName] != ha.Name) {
+		return nil, fmt.Errorf("%w: Secret %s/%s is stamped for HarborAccess %s/%s, not %s/%s",
+			errSecretOwnerMismatch, h.Config.BridgeNamespace, name,
+			secret.Labels[labelHarborAccessNamespace], secret.Labels[labelHarborAccessName],
+			ha.Namespace, ha.Name)
+	}
 	user := string(secret.Data["username"])
 	pass := string(secret.Data["password"])
 	if user == "" || pass == "" {
@@ -278,14 +380,56 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 	return &robotCreds{username: user, password: pass}, nil
 }
 
-// robotSecretName mirrors controlplane.secretNameFor — kept here as a
+// robotSecretName mirrors controlplane.robotSecretNameFor — kept here as a
 // local helper so the data plane does not import the control plane
-// (ADR-0002). The format ("robot-<haNs>-<haName>") is the cross-package
-// contract; if the control plane ever changes its secret naming it has to
-// announce that here too. Worth a future ADR if the contract gets richer.
+// (ADR-0002). The format ("robot-<haNs>.<haName>", dot-joined for injectivity
+// — ADR-0018, with hash-truncation when it would exceed the 253-char k8s name
+// limit) is the cross-package contract; this MUST stay byte-identical to the
+// control-plane helper (pinned by TestRobotSecretName_ContractPinned here and
+// TestRobotSecretNameFor_* in controlplane).
 func robotSecretName(ha *harborv1alpha1.HarborAccess) string {
-	return "robot-" + ha.Namespace + "-" + ha.Name
+	const (
+		secretNameMax     = 253
+		secretNameHashLen = 16
+	)
+	full := "robot-" + ha.Namespace + "." + ha.Name
+	if len(full) <= secretNameMax {
+		return full
+	}
+	sum := sha256.Sum256([]byte(ha.Namespace + "\x00" + ha.Name))
+	digest := hex.EncodeToString(sum[:])[:secretNameHashLen]
+	budget := secretNameMax - len("robot-") - 1 - secretNameHashLen
+	mid := ha.Namespace + "." + ha.Name
+	if len(mid) > budget {
+		mid = mid[:budget]
+	}
+	mid = strings.TrimRight(mid, "-._")
+	if mid == "" {
+		return "robot-" + digest
+	}
+	return "robot-" + mid + "." + digest
 }
+
+// Robot-Secret ownership label keys. Mirrored from controlplane/labels.go —
+// the data plane does not import the control plane (ADR-0002), the same way
+// robotSecretName mirrors secretNameFor. The reconciler stamps these on every
+// robot Secret it writes.
+const (
+	labelManagedBy             = "harbor.aetherize.io/managed-by"
+	labelManagedByValue        = "harbor-workload-identity-bridge"
+	labelHarborAccessNamespace = "harbor.aetherize.io/harboraccess-namespace"
+	labelHarborAccessName      = "harbor.aetherize.io/harboraccess-name"
+)
+
+// errSecretOwnerMismatch is returned by readRobotSecret when the robot Secret
+// found at the expected name is stamped as belonging to a different
+// HarborAccess than the one matched for this request. This is the read-path
+// backstop for the Secret-name collision class (AUDIT.md F2). The Secret name
+// is now dot-joined ("robot-<haNs>.<haName>", ADR-0018) and therefore
+// injective, so this never fires in normal operation; it remains so that even
+// if two distinct CRs ever collapsed to the same Secret name (an invariant
+// regression), a token matched to CR A is never handed a Secret stamped for CR B.
+var errSecretOwnerMismatch = errors.New("robot Secret owner mismatch")
 
 func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl time.Duration) {
 	w.Header().Set("Content-Type", "application/json")

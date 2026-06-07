@@ -5,7 +5,7 @@
 # child's variables, not the test root's — so values are passed in
 # directly as literals or `run.<previous>.<output>` references.
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.12"
 }
 
 # File-scope variables for the tftest files. Declaring them here makes

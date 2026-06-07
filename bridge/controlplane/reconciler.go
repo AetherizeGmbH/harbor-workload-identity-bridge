@@ -134,6 +134,21 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		)
 	}
 
+	// 3b. Secret-name collision guard (AUDIT.md F2). The Secret name is now
+	// dot-joined ("robot-<haNs>.<haName>", ADR-0018), which is injective, so
+	// in normal operation this never fires. It remains as defense-in-depth:
+	// if the dot-free invariant ever regressed (a non-trailing field gaining
+	// a dot) two CRs could still collapse to one Secret name, and overwriting
+	// it would let one workload's SA read the other's robot password. Refuse
+	// rather than overwrite; first owner wins.
+	if conflict, err := r.secretOwnedByOtherHA(ctx, ha); err != nil {
+		return r.markTransientError(ctx, ha, fmt.Errorf("check robot Secret ownership: %w", err))
+	} else if conflict {
+		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+			"robot-password Secret %q is already owned by a different HarborAccess (naming collision); refusing to overwrite",
+			r.secretNameFor(ha)))
+	}
+
 	desiredDescription := RobotDescription(r.Config.ClusterName, ha.Namespace, ha.Name)
 	desiredPerms := toHarborPerms(ha.Spec.Permissions)
 
@@ -154,6 +169,20 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 			"Harbor robot %q exists but its description does not mark it as belonging to cluster %q; refusing to adopt",
 			robotName, r.Config.ClusterName,
 		))
+	}
+
+	// 5b. Robot-name collision guard (AUDIT.md F2). The robot name is now
+	// dot-joined ("bridge-<cluster>.<saNs>.<saName>", ADR-0018), injective in
+	// the common case. This remains defense-in-depth for the two paths where
+	// injectivity is not guaranteed: the hash-truncation overflow tail (only
+	// probabilistically unique) and a future dot-free-invariant regression.
+	// If the existing robot's description names a different HarborAccess,
+	// adopting it would let two CRs fight over one robot (permission overwrite
+	// + a password rotation that breaks the other's stored Secret). Refuse.
+	if descNS, descName, ok := ParseRobotDescription(existing.Description); ok && (descNS != ha.Namespace || descName != ha.Name) {
+		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+			"Harbor robot %q belongs to HarborAccess %s/%s, not %s/%s (robot-name collision); refusing to adopt",
+			robotName, descNS, descName, ha.Namespace, ha.Name))
 	}
 
 	// 6. Check whether the password Secret is missing in k8s. If so we must
@@ -253,6 +282,12 @@ func (r *Reconciler) recoverExistingRobot(ctx context.Context, ha *harborv1alpha
 			name, r.Config.ClusterName,
 		))
 	}
+	// Robot-name collision guard (AUDIT.md F2): same check as the happy path.
+	if descNS, descName, ok := ParseRobotDescription(existing.Description); ok && (descNS != ha.Namespace || descName != ha.Name) {
+		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+			"Harbor robot %q belongs to HarborAccess %s/%s, not %s/%s (robot-name collision); refusing to adopt",
+			name, descNS, descName, ha.Namespace, ha.Name))
+	}
 	newSecret, err := r.Harbor.RefreshSecret(ctx, existing.ID)
 	if err != nil {
 		return r.markTransientError(ctx, ha,
@@ -282,6 +317,30 @@ func (r *Reconciler) secretMissing(ctx context.Context, ha *harborv1alpha1.Harbo
 	return false, nil
 }
 
+// secretOwnedByOtherHA reports whether the per-CR robot Secret name this CR
+// would write to is already occupied by a bridge-managed Secret stamped for a
+// DIFFERENT HarborAccess (AUDIT.md F2, secret-name collision class). Only
+// Secrets this bridge created carry the ownership labels; a Secret without
+// them (hand-created, or written by a pre-labels bridge) is adoptable and
+// returns false so upgrades do not break.
+func (r *Reconciler) secretOwnedByOtherHA(ctx context.Context, ha *harborv1alpha1.HarborAccess) (bool, error) {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx,
+		client.ObjectKey{Namespace: r.Config.Namespace, Name: r.secretNameFor(ha)},
+		secret)
+	switch {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	if secret.Labels[LabelManagedBy] != LabelManagedByValue {
+		return false, nil
+	}
+	return secret.Labels[LabelHarborAccessNamespace] != ha.Namespace ||
+		secret.Labels[LabelHarborAccessName] != ha.Name, nil
+}
+
 func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.HarborAccess) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -309,6 +368,15 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 			logger.Info("skipping delete of robot whose description does not match this cluster",
 				"robot", name, "description", existing.Description)
 		default:
+			// Robot-name collision guard (AUDIT.md F2): if the robot's
+			// description names a different HarborAccess, this CR's name
+			// collided with another's SA ref. Deleting it would tear down
+			// the sibling CR's still-live robot. Skip.
+			if descNS, descName, ok := ParseRobotDescription(existing.Description); ok && (descNS != ha.Namespace || descName != ha.Name) {
+				logger.Info("skipping delete of robot owned by a different HarborAccess (name collision)",
+					"robot", name, "owner", descNS+"/"+descName, "description", existing.Description)
+				break
+			}
 			if err := r.Harbor.Delete(ctx, existing.ID); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete robot %d: %w", existing.ID, err)
 			}
@@ -375,11 +443,7 @@ func (r *Reconciler) writeRobotSecret(ctx context.Context, ha *harborv1alpha1.Ha
 }
 
 func (r *Reconciler) secretNameFor(ha *harborv1alpha1.HarborAccess) string {
-	// We do not hash-truncate here yet: the longest reasonable HarborAccess
-	// namespace+name combination fits well under Kubernetes' 253-char name
-	// limit. If we ever encounter a real CR that overflows, mirror the
-	// truncation pattern from harbor/naming.go.
-	return SecretNamePrefix + ha.Namespace + "-" + ha.Name
+	return robotSecretNameFor(ha.Namespace, ha.Name)
 }
 
 func (r *Reconciler) secretLabels(ha *harborv1alpha1.HarborAccess) map[string]string {

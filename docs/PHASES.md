@@ -23,10 +23,10 @@ This document is written to survive context compaction. The detail sections belo
 The bridge is one Go binary with two logically separated packages ([ADR-0002](adr/0002-bridge-control-plane-data-plane-split.md)):
 
 **`bridge/controlplane`** — controller-runtime reconciler + periodic janitor:
-- Reconciler manages a persistent Harbor robot per `HarborAccess` CR. Robot name is `bridge-<cluster>-<saNs>-<saName>`, deterministic, ownership-prefix scoped to the configured cluster.
-- Robot password lives in a per-CR Kubernetes Secret `robot-<haNs>-<haName>` in the bridge namespace, type `Opaque`, data keys `username` + `password` ([ADR-0011](adr/0011-robot-password-secret-storage.md)).
+- Reconciler manages a persistent Harbor robot per `HarborAccess` CR. Robot name is `bridge-<cluster>.<saNs>.<saName>` (dot-delimited for injectivity, [ADR-0018](adr/0018-dot-delimited-naming.md)), deterministic, ownership-prefix scoped to the configured cluster.
+- Robot password lives in a per-CR Kubernetes Secret `robot-<haNs>.<haName>` in the bridge namespace, type `Opaque`, data keys `username` + `password` ([ADR-0011](adr/0011-robot-password-secret-storage.md)).
 - Robot description follows a stable key=value format the janitor parses to reverse-map robots → CRs ([ADR-0012](adr/0012-robot-description-as-component-contract.md)): `managed-by=harbor-workload-identity-bridge cluster=<X> harboraccess=<ns>/<name>`.
-- Multi-cluster safety is two layers ([ADR-0009](adr/0009-multi-cluster-topology.md)): ownership-prefix on the name, AND cluster tag in the description (defense-in-depth against the known hyphen-prefix collision class).
+- Multi-cluster safety is two layers ([ADR-0009](adr/0009-multi-cluster-topology.md)): dot-terminated ownership-prefix `bridge-<cluster>.` on the name ([ADR-0018](adr/0018-dot-delimited-naming.md) — the dot makes prefixes non-colliding across clusters, retiring the old hyphen-prefix caveat), AND cluster tag in the description (defense-in-depth).
 - Janitor sweeps every 5 min, lists Harbor robots, parses descriptions, deletes orphans (no live CR).
 
 **`bridge/dataplane`** — HTTPS server that accepts plugin requests, validates SA tokens, returns the robot's Basic Auth credentials ([ADR-0013](adr/0013-return-robot-basic-auth-credentials.md)):
@@ -55,8 +55,8 @@ Read these before touching code in any phase.
 ### Names and limits
 
 - **Harbor robot username**: regex `^[a-z0-9]+(?:[._-][a-z0-9]+)*$`, postgres column `varchar(255)`. We use soft cap **240** in [bridge/controlplane/harbor/naming.go](../bridge/controlplane/harbor/naming.go). Overflows are deterministically hash-truncated.
-- **Robot name format**: `bridge-<cluster>-<saNs>-<saName>`.
-- **Secret name format**: `robot-<haNs>-<haName>` (bridge namespace). 253-char k8s limit; no truncation implemented yet — flagged as TODO in `reconciler.secretNameFor`.
+- **Robot name format**: `bridge-<cluster>.<saNs>.<saName>` (dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)).
+- **Secret name format**: `robot-<haNs>.<haName>` (bridge namespace; dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)). Hash-truncated to the 253-char k8s limit when it would overflow (`controlplane.robotSecretNameFor`, mirrored in `dataplane.robotSecretName`).
 - **Finalizer**: `harbor.aetherize.io/robot` ([controlplane/labels.go](../bridge/controlplane/labels.go)).
 - **Managed-by label value**: `harbor-workload-identity-bridge`.
 
@@ -94,7 +94,7 @@ Response on success (200):
 
 ```json
 {
-  "username": "robot$bridge-<cluster>-<ns>-<sa>",
+  "username": "robot$bridge-<cluster>.<ns>.<sa>",
   "password": "<robot password from bridge-namespace Secret>",
   "expires_in": 3600,
   "cache_key_type": "Registry"

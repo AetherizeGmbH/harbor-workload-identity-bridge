@@ -11,13 +11,15 @@
   Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
   Plugin image : {{ include "harbor-bridge.plugin.image" . }}
 
-WARNING — cluster-name uniqueness (ADR-0009):
+NOTE — cluster-name uniqueness (ADR-0009 / ADR-0018):
   Bridges that share one Harbor must each have a distinct
-  `clusterName` that is NOT a hyphen-prefix of any other cluster's
-  name. Robots in Harbor are namespaced by name prefix; two clusters
-  whose names share a prefix can adopt each other's robots.
+  `clusterName`. Robots are owned by the dot-terminated name prefix
+  below; the trailing dot makes distinct cluster names collision-free
+  (`bridge-prod.` is NOT a prefix of `bridge-prod-eu.…`). Unlike the
+  older hyphen-delimited scheme, there is therefore NO requirement that
+  cluster names avoid being hyphen-prefixes of one another (ADR-0018).
 
-  This cluster's prefix is: `bridge-{{ .Values.clusterName }}-`
+  This cluster's robot-ownership prefix is: `bridge-{{ .Values.clusterName }}.`
 
 NEXT STEPS
 

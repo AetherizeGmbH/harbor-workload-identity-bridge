@@ -58,7 +58,7 @@ type ProjectPermission struct {
 // ServiceAccountRef identifies the Kubernetes ServiceAccount this HarborAccess
 // grants credentials for. It is the canonical workload identity for the CR:
 // the control plane uses it to name the Harbor robot
-// (bridge-<cluster>-<namespace>-<name>) and the data plane uses it to
+// (bridge-<cluster>.<namespace>.<name>) and the data plane uses it to
 // construct the expected sub claim on incoming SA tokens
 // ("system:serviceaccount:<namespace>:<name>").
 // See docs/adr/0010-service-account-ref-as-identity.md.

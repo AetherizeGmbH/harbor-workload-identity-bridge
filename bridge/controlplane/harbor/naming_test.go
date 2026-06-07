@@ -14,7 +14,7 @@ func TestRobotName_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "bridge-prod-eu-west-flux-system-source-controller"
+	want := "bridge-prod-eu-west.flux-system.source-controller"
 	if got != want {
 		t.Errorf("RobotName = %q, want %q", got, want)
 	}
@@ -26,11 +26,11 @@ func TestRobotName_HappyPath(t *testing.T) {
 func TestRobotName_LengthExactlyAtCap(t *testing.T) {
 	// Construct inputs that produce exactly RobotNameCap chars: avoids
 	// hitting the truncation branch.
-	// prefix = "bridge-prod-" (12)
+	// prefix = "bridge-prod." (12)
 	// remainder budget = 240 - 12 = 228
-	// "<ns>-<sa>" must total 228 chars.
+	// "<ns>.<sa>" must total 228 chars.
 	ns := strings.Repeat("n", 100)
-	sa := strings.Repeat("s", 127) // 100 + 1 (-) + 127 = 228
+	sa := strings.Repeat("s", 127) // 100 + 1 (.) + 127 = 228
 	got, err := RobotName("prod", ns, sa)
 	if err != nil {
 		t.Fatal(err)
@@ -38,10 +38,10 @@ func TestRobotName_LengthExactlyAtCap(t *testing.T) {
 	if len(got) != RobotNameCap {
 		t.Errorf("len(RobotName) = %d, want exactly %d", len(got), RobotNameCap)
 	}
-	// The result should NOT include a hash suffix since we did not truncate.
-	if strings.Count(got, "-") != 3 {
-		// bridge-prod-<ns>-<sa> has 3 hyphens (between bridge|prod, prod|ns, ns|sa)
-		t.Errorf("RobotName %q has unexpected hyphen count, expected non-truncated form", got)
+	// The natural (non-truncated) form is exactly "bridge-prod.<ns>.<sa>":
+	// one hyphen (in the "bridge-" prefix) and two dot delimiters, no hash.
+	if want := "bridge-prod." + ns + "." + sa; got != want {
+		t.Errorf("RobotName = %q, want non-truncated dot form %q", got, want)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestRobotName_TruncatesDeterministically(t *testing.T) {
 	if len(a) > RobotNameCap {
 		t.Errorf("truncated name exceeds cap: %d > %d", len(a), RobotNameCap)
 	}
-	if !strings.HasPrefix(a, "bridge-prod-") {
+	if !strings.HasPrefix(a, "bridge-prod.") {
 		t.Errorf("truncated name lost its prefix: %q", a)
 	}
 	if !IsValidHarborRobotName(a) {
@@ -86,6 +86,30 @@ func TestRobotName_DifferentInputsProduceDifferentNames(t *testing.T) {
 	}
 }
 
+// TestRobotName_DotDelimiterIsInjective pins ADR-0018's core property: inputs
+// that collide under a '-' join must NOT collide under the '.' join. These are
+// exactly the F2 collision pairs ("a-b"/"c" vs "a"/"b-c"); under the old dash
+// scheme several of these mapped to the same robot name.
+func TestRobotName_DotDelimiterIsInjective(t *testing.T) {
+	pairs := []struct{ ns, sa string }{
+		{"a-b", "c"}, {"a", "b-c"},
+		{"team-a", "svc"}, {"team", "a-svc"},
+		{"x", "y-z-w"}, {"x-y", "z-w"}, {"x-y-z", "w"},
+	}
+	seen := map[string]string{} // robot name -> "ns/sa" that produced it
+	for _, p := range pairs {
+		name, err := RobotName("prod", p.ns, p.sa)
+		if err != nil {
+			t.Fatalf("RobotName(prod, %q, %q): %v", p.ns, p.sa, err)
+		}
+		key := p.ns + "/" + p.sa
+		if prev, ok := seen[name]; ok && prev != key {
+			t.Errorf("collision: (%s) and (%s) both map to robot name %q", prev, key, name)
+		}
+		seen[name] = key
+	}
+}
+
 func TestRobotName_ClusterNameTooLong(t *testing.T) {
 	// A 230-char cluster name leaves no room for the ns/sa even with the
 	// hash. Note: real configurations cap clusterName at 63 chars via the
@@ -105,13 +129,13 @@ func TestRobotName_TrailingSeparatorTrimmed(t *testing.T) {
 	// with a separator. We need ns+"-"+sa whose budget cut lands on the "-".
 	// Easier: use a separator-containing name that hits the boundary.
 	cluster := "prod"
-	// prefix length: 7 ("bridge-") + 4 ("prod") + 1 ("-") = 12
+	// prefix length: 7 ("bridge-") + 4 ("prod") + 1 (".") = 12
 	// budget = 240 - 12 - 1 - 16 = 211
 	// We want mid[211-1:] to begin with a separator so trimming changes the result.
 	// Pick ns of exactly 211 chars; sa contributes nothing in the truncated form.
 	ns := strings.Repeat("x", 210) + "-" // 211 chars, ends with "-"
 	sa := strings.Repeat("y", 50)
-	full := "bridge-prod-" + ns + "-" + sa
+	full := "bridge-prod." + ns + "." + sa
 	if len(full) <= RobotNameCap {
 		t.Fatalf("test premise: full name %d <= cap %d, won't truncate", len(full), RobotNameCap)
 	}
@@ -130,9 +154,9 @@ func TestOwnsRobot_PositiveCases(t *testing.T) {
 		cluster string
 		robot   string
 	}{
-		{"prod", "bridge-prod-flux-system-source-controller"},
-		{"prod-eu-west", "bridge-prod-eu-west-flux-system-source-controller"},
-		{"a", "bridge-a-b"}, // minimum-length both sides
+		{"prod", "bridge-prod.flux-system.source-controller"},
+		{"prod-eu-west", "bridge-prod-eu-west.flux-system.source-controller"},
+		{"a", "bridge-a.b"}, // minimum-length both sides
 
 		// Harbor adds "robot$" to system-level robot names on read paths
 		// (GET /robots and GET /robots/{id}). POST /robots accepts the
@@ -141,8 +165,8 @@ func TestOwnsRobot_PositiveCases(t *testing.T) {
 		// looking for "bridge-..." but Harbor returned "robot$bridge-...",
 		// and every subsequent reconcile re-took the create branch and
 		// got 409.
-		{"prod", "robot$bridge-prod-flux-system-source-controller"},
-		{"prod-eu-west", "robot$bridge-prod-eu-west-flux"},
+		{"prod", "robot$bridge-prod.flux-system.source-controller"},
+		{"prod-eu-west", "robot$bridge-prod-eu-west.flux"},
 	}
 	for _, c := range cases {
 		if !OwnsRobot(c.cluster, c.robot) {
@@ -161,7 +185,7 @@ func TestOwnsRobot_NegativeCases(t *testing.T) {
 		{"prod", "bridgeXprod-flux"},             // different separator
 		{"prod", "bridge-production-flux"},       // longer cluster name, no hyphen boundary
 		{"prod", "robot$bridge-production-flux"}, // ditto with prefix
-		{"prod", "bridge-prod"},                  // missing trailing "-"
+		{"prod", "bridge-prod"},                  // missing trailing "."
 		{"prod", ""},                             // empty robot name
 		{"", "bridge-prod-flux"},                 // empty cluster — must refuse to claim anything
 	}
@@ -172,25 +196,29 @@ func TestOwnsRobot_NegativeCases(t *testing.T) {
 	}
 }
 
-// TestOwnsRobot_DocumentsPrefixCollisionLimitation pins down the known
-// false-positive class flagged in ADR-0009: cluster "prod" considers cluster
-// "prod-eu"'s robots its own because "bridge-prod-eu-..." DOES start with
-// "bridge-prod-". This is operator-responsibility per ADR-0009 ("cluster
-// names must not be hyphen-prefixes of each other"). The test pins the
-// behaviour so a future change has to acknowledge the trade-off explicitly.
-func TestOwnsRobot_DocumentsPrefixCollisionLimitation(t *testing.T) {
-	// Cluster "prod" sees a robot intended for cluster "prod-eu" as its own.
-	got := OwnsRobot("prod", "bridge-prod-eu-flux-system-source-controller")
-	if !got {
-		t.Errorf(
-			"BEHAVIOUR CHANGE: OwnsRobot no longer reports the documented " +
-				"prefix-collision case as true. Update ADR-0009 and this test.",
-		)
+// TestOwnsRobot_DotDelimiterFixesPrefixCollision pins the ADR-0018 fix for the
+// hyphen-prefix false-positive that ADR-0009 had to push onto operators:
+// cluster "prod" used to consider cluster "prod-eu"'s robots its own because
+// "bridge-prod-eu-..." started with "bridge-prod-". With the dot-terminated
+// ownership prefix "bridge-prod.", a robot named for cluster "prod-eu" is
+// "bridge-prod-eu.flux..." — the char after "bridge-prod" is '-', not the
+// required '.', so it is correctly NOT owned by "prod".
+func TestOwnsRobot_DotDelimiterFixesPrefixCollision(t *testing.T) {
+	if OwnsRobot("prod", "bridge-prod-eu.flux-system.source-controller") {
+		t.Error("OwnsRobot(\"prod\", prod-eu's robot) = true; dot delimiter should make it false (ADR-0018)")
+	}
+	// The robot$-prefixed read-path form must also be rejected.
+	if OwnsRobot("prod", "robot$bridge-prod-eu.flux-system.source-controller") {
+		t.Error("OwnsRobot(\"prod\", robot$ + prod-eu's robot) = true; want false")
+	}
+	// And the bridge still owns its own cluster's robot.
+	if !OwnsRobot("prod", "bridge-prod.flux-system.source-controller") {
+		t.Error("OwnsRobot(\"prod\", prod's own robot) = false; want true")
 	}
 }
 
 func TestClusterPrefix(t *testing.T) {
-	if got := ClusterPrefix("prod-eu-west"); got != "bridge-prod-eu-west-" {
+	if got := ClusterPrefix("prod-eu-west"); got != "bridge-prod-eu-west." {
 		t.Errorf("ClusterPrefix = %q", got)
 	}
 }

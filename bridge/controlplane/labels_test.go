@@ -3,7 +3,37 @@
 
 package controlplane
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestRobotSecretNameFor(t *testing.T) {
+	// Natural (non-truncated) dot form.
+	if got, want := robotSecretNameFor("team-a", "flux-access"), "robot-team-a.flux-access"; got != want {
+		t.Errorf("robotSecretNameFor = %q, want %q", got, want)
+	}
+	// Overflow: a name past the 253-char k8s limit must be hash-truncated,
+	// stay within the limit, keep the prefix, and be deterministic.
+	long := strings.Repeat("z", 300)
+	got := robotSecretNameFor("team", long)
+	if len(got) > secretNameMax {
+		t.Errorf("len(%q) = %d, want <= %d", got, len(got), secretNameMax)
+	}
+	if !strings.HasPrefix(got, SecretNamePrefix) {
+		t.Errorf("truncated name lost its %q prefix: %q", SecretNamePrefix, got)
+	}
+	if got2 := robotSecretNameFor("team", long); got != got2 {
+		t.Errorf("not deterministic: %q vs %q", got, got2)
+	}
+	// Distinct long inputs that share a truncation prefix must still differ
+	// (the hash suffix carries the uniqueness).
+	a := robotSecretNameFor("team", strings.Repeat("a", 300))
+	b := robotSecretNameFor("team", strings.Repeat("b", 300))
+	if a == b {
+		t.Errorf("distinct long inputs produced identical Secret names: %q", a)
+	}
+}
 
 func TestRobotDescription_RoundTrip(t *testing.T) {
 	desc := RobotDescription("prod-eu-west", "harbor-bridge-system", "flux-access")
@@ -20,10 +50,11 @@ func TestRobotDescription_RoundTrip(t *testing.T) {
 }
 
 func TestRobotBelongsToCluster_RejectsWrongCluster(t *testing.T) {
-	// The defense-in-depth case from ADR-0009: cluster "prod-eu"'s robot
-	// has cluster="prod-eu" in its description, so cluster "prod" must
-	// see it as foreign even though "bridge-prod-eu-..." starts with
-	// "bridge-prod-".
+	// Defense-in-depth (ADR-0009/ADR-0012): cluster "prod-eu"'s robot has
+	// cluster="prod-eu" in its description, so cluster "prod" must see it as
+	// foreign. Since ADR-0018 the name prefix "bridge-prod." already excludes
+	// "bridge-prod-eu.…" (the dot terminator); this description check is the
+	// second, independent layer.
 	foreignDesc := RobotDescription("prod-eu", "harbor-bridge-system", "flux-access")
 	if RobotBelongsToCluster(foreignDesc, "prod") {
 		t.Errorf("description %q (cluster=prod-eu) wrongly claimed by cluster=prod", foreignDesc)

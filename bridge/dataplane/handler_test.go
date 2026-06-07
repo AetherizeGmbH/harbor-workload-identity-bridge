@@ -43,7 +43,7 @@ const (
 	hTestHANs      = "harbor-bridge-system"
 	hTestSubject   = "system:serviceaccount:flux-system:source-controller"
 	hTestAudience  = "harbor.example.com"
-	hTestRobotUser = "robot$bridge-prod-flux-system-source-controller"
+	hTestRobotUser = "robot$bridge-prod.flux-system.source-controller"
 	hTestRobotPass = "robot-password-v1"
 )
 
@@ -72,7 +72,7 @@ func newTestRobotSecret() *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: hTestBridgeNS,
-			Name:      "robot-" + hTestHANs + "-" + hTestHAName,
+			Name:      "robot-" + hTestHANs + "." + hTestHAName,
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -279,6 +279,140 @@ func TestHandler_NoMatchingAudience_403(t *testing.T) {
 	}
 }
 
+// unsortedListClient returns its HarborAccess items in a fixed, caller-
+// controlled order regardless of namespace/name, so a test can prove
+// findHarborAccess sorts internally rather than leaning on the informer's
+// (or the fake client's) own ordering. Only List is exercised by
+// findHarborAccess; the embedded nil client.Client makes every other method
+// a compile-time satisfier this test never calls.
+type unsortedListClient struct {
+	client.Client
+	items []harborv1alpha1.HarborAccess
+}
+
+func (c *unsortedListClient) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	hal, ok := list.(*harborv1alpha1.HarborAccessList)
+	if !ok {
+		return errors.New("unsortedListClient: unexpected list type")
+	}
+	hal.Items = c.items
+	return nil
+}
+
+func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
+	// Two CRs claim the same (subject, issuer, audience) identity — an
+	// operator misconfiguration. findHarborAccess must resolve it the same
+	// way on every call: the namespace/name-sorted-first match, never
+	// whichever the informer cache happened to list first (AUDIT.md F7).
+	// A non-deterministic pick would let a workload intermittently receive
+	// a more- or less-privileged robot than intended.
+	mk := func(name string, action harborv1alpha1.HarborAction) harborv1alpha1.HarborAccess {
+		return harborv1alpha1.HarborAccess{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: hTestBridgeNS},
+			Spec: harborv1alpha1.HarborAccessSpec{
+				ServiceAccountRef: harborv1alpha1.ServiceAccountRef{
+					Namespace: "flux-system", Name: "source-controller",
+				},
+				TrustPolicy: harborv1alpha1.TrustPolicy{
+					Issuer:   "https://kubernetes.default.svc",
+					Audience: hTestAudience,
+				},
+				Permissions: []harborv1alpha1.ProjectPermission{{Project: "p", Action: action}},
+			},
+		}
+	}
+	// Deliberately reverse-sorted List order: a "return the first match
+	// iterated" regression picks zzz-dup; the contract requires aaa-dup.
+	h := &Handler{
+		K8sClient: &unsortedListClient{
+			items: []harborv1alpha1.HarborAccess{mk("zzz-dup", "pull,push"), mk("aaa-dup", "pull")},
+		},
+		Validator: &stubValidator{claims: newTestClaims()},
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+	}
+	for i := 0; i < 5; i++ {
+		matched, aud, err := h.findHarborAccess(context.Background(), newTestClaims())
+		if err != nil {
+			t.Fatalf("iteration %d: findHarborAccess: %v", i, err)
+		}
+		if matched == nil {
+			t.Fatalf("iteration %d: expected a match, got nil", i)
+		}
+		if matched.Name != "aaa-dup" {
+			t.Fatalf("iteration %d: selected %q, want deterministic min %q (List returned zzz-dup first)", i, matched.Name, "aaa-dup")
+		}
+		// The sorted-first CR carries pull-only; proves we did not silently
+		// hand the workload the more-privileged pull,push robot.
+		if got := string(matched.Spec.Permissions[0].Action); got != "pull" {
+			t.Fatalf("iteration %d: selected CR action = %q, want %q", i, got, "pull")
+		}
+		if aud != hTestAudience {
+			t.Errorf("iteration %d: aud = %q, want %q", i, aud, hTestAudience)
+		}
+	}
+}
+
+func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
+	// The CRD enforces MinLength=1 on trustPolicy.{audience,issuer}, but the
+	// data plane must not depend on that (AUDIT.md F13). A CR that somehow
+	// carries an empty audience must NOT match a token whose aud claim is
+	// (or contains) the empty string, and likewise for issuer.
+	base := func() *harborv1alpha1.HarborAccess {
+		return &harborv1alpha1.HarborAccess{
+			ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: hTestBridgeNS},
+			Spec: harborv1alpha1.HarborAccessSpec{
+				ServiceAccountRef: harborv1alpha1.ServiceAccountRef{
+					Namespace: "flux-system", Name: "source-controller",
+				},
+				TrustPolicy: harborv1alpha1.TrustPolicy{
+					Issuer:   "https://kubernetes.default.svc",
+					Audience: hTestAudience,
+				},
+				Permissions: []harborv1alpha1.ProjectPermission{{Project: "p", Action: "pull"}},
+			},
+		}
+	}
+	cases := map[string]struct {
+		mutateCR     func(*harborv1alpha1.HarborAccess)
+		claimsAud    []string
+		claimsIssuer string
+	}{
+		"empty CR audience vs empty token aud": {
+			mutateCR:     func(h *harborv1alpha1.HarborAccess) { h.Spec.TrustPolicy.Audience = "" },
+			claimsAud:    []string{""},
+			claimsIssuer: "https://kubernetes.default.svc",
+		},
+		"empty CR issuer vs empty token issuer": {
+			mutateCR:     func(h *harborv1alpha1.HarborAccess) { h.Spec.TrustPolicy.Issuer = "" },
+			claimsAud:    []string{hTestAudience},
+			claimsIssuer: "",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cr := base()
+			tc.mutateCR(cr)
+			k8s := fake.NewClientBuilder().
+				WithScheme(handlerTestScheme).
+				WithObjects(cr).
+				Build()
+			h := &Handler{
+				K8sClient: k8s,
+				Validator: &stubValidator{},
+				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+			}
+			claims := &Claims{Subject: hTestSubject, Audience: tc.claimsAud, Issuer: tc.claimsIssuer}
+			matched, _, err := h.findHarborAccess(context.Background(), claims)
+			if err != nil {
+				t.Fatalf("findHarborAccess: %v", err)
+			}
+			if matched != nil {
+				t.Fatalf("empty audience/issuer must not match; got CR %s/%s", matched.Namespace, matched.Name)
+			}
+		})
+	}
+}
+
 func TestHandler_MissingRobotSecret_503(t *testing.T) {
 	// Bridge namespace exists but the Secret is missing — control plane
 	// is mid-rotation or hasn't caught up yet. 503 invites the plugin
@@ -309,7 +443,7 @@ func TestHandler_SecretInWrongNamespace_503(t *testing.T) {
 	wrongNs := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "some-other-namespace",
-			Name:      "robot-" + hTestHANs + "-" + hTestHAName,
+			Name:      "robot-" + hTestHANs + "." + hTestHAName,
 		},
 		Data: map[string][]byte{
 			"username": []byte("attacker-supplied"),
@@ -392,5 +526,117 @@ func TestHandler_EmptyBody_OK(t *testing.T) {
 	fx.Handler.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d (empty body should be accepted): %s", w.Code, w.Body.String())
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Security regression tests (see AUDIT.md)
+// ----------------------------------------------------------------------------
+
+// AUDIT.md F1: the credential-request body is bounded by maxRequestBodyBytes
+// and the decode happens before token validation, so an attacker who supplies
+// only a dummy Bearer header must not be able to make the bridge buffer an
+// arbitrarily large body. We assert the oversized body is rejected (400) and
+// never reaches the validator.
+func TestHandler_RejectsOversizedBody(t *testing.T) {
+	fx := newHandlerFixture(t)
+	// A JSON string value larger than the cap. The decoder must error out
+	// via MaxBytesReader rather than buffer the whole thing.
+	huge := strings.Repeat("A", maxRequestBodyBytes+1<<10)
+	body := []byte(`{"image":"` + huge + `"}`)
+	r := httptest.NewRequest(http.MethodPost, CredentialsPath, bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer some-sa-token")
+	r.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for oversized body; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// AUDIT.md F5: a CR whose trustPolicy.issuer disagrees with the validated
+// token's iss claim must not be matched, even when sub and aud line up.
+func TestHandler_IssuerMismatch_NoMatch(t *testing.T) {
+	fx := newHandlerFixture(t)
+	// Token validated as a different issuer than the CR declares.
+	fx.Validator.claims = &Claims{
+		Subject:  hTestSubject,
+		Audience: []string{hTestAudience},
+		Issuer:   "https://attacker.example.com",
+		Expiry:   time.Now().Add(time.Hour),
+	}
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, "harbor.example.com/production/img:v1"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no matching HarborAccess on issuer mismatch); body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
+// AUDIT.md F2: defense-in-depth read-path backstop. Since ADR-0018 the Secret
+// name "robot-<haNs>.<haName>" is dot-joined and injective, so in normal
+// operation two CRs never share a Secret name. This test forces the
+// owner-label mismatch directly to prove that, even if that invariant ever
+// regressed, the read path refuses to hand a token matched to CR A a Secret
+// stamped (via labels) for CR B — returning 403, never the other CR's creds.
+// TestRobotSecretName_ContractPinned pins the data-plane mirror of the Secret
+// name to the exact dot-delimited contract (ADR-0018 / ADR-0015). The data
+// plane cannot import the control plane, so this literal must stay in lockstep
+// with controlplane.secretNameFor by hand; controlplane has the matching pin
+// (TestSecretNameFor_DotDelimiterIsInjective). If the two ever diverge the
+// plugin reads a Secret the reconciler never wrote and every pull 503s.
+func TestRobotSecretName_ContractPinned(t *testing.T) {
+	ha := &harborv1alpha1.HarborAccess{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "flux-access"},
+	}
+	if got, want := robotSecretName(ha), "robot-team-a.flux-access"; got != want {
+		t.Fatalf("robotSecretName = %q, want %q (must match controlplane.secretNameFor)", got, want)
+	}
+	// Overflow must hash-truncate to a valid (<=253) Secret name, matching
+	// the control-plane helper's behaviour. (Byte-for-byte equality with the
+	// control-plane output rests on the two implementations being identical;
+	// the short-form literal above pins the common drift, the delimiter.)
+	long := &harborv1alpha1.HarborAccess{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: strings.Repeat("z", 300)},
+	}
+	got := robotSecretName(long)
+	if len(got) > 253 {
+		t.Fatalf("overflow Secret name len = %d, want <= 253: %q", len(got), got)
+	}
+	if !strings.HasPrefix(got, "robot-") {
+		t.Fatalf("overflow Secret name lost its prefix: %q", got)
+	}
+}
+
+func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {
+	fx := newHandlerFixture(t)
+	sec := &corev1.Secret{}
+	if err := fx.K8s.Get(context.Background(),
+		client.ObjectKey{Namespace: hTestBridgeNS, Name: "robot-" + hTestHANs + "." + hTestHAName},
+		sec); err != nil {
+		t.Fatal(err)
+	}
+	// Stamp the Secret as owned by a DIFFERENT HarborAccess.
+	sec.Labels = map[string]string{
+		"harbor.aetherize.io/managed-by":             "harbor-workload-identity-bridge",
+		"harbor.aetherize.io/harboraccess-namespace": "other-ns",
+		"harbor.aetherize.io/harboraccess-name":      "other-ha",
+	}
+	if err := fx.K8s.Update(context.Background(), sec); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, "harbor.example.com/production/img:v1"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (Secret owner mismatch must not disclose creds); body=%s",
+			w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), hTestRobotPass) {
+		t.Fatal("response body leaked the robot password on an owner mismatch")
 	}
 }
