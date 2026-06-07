@@ -166,6 +166,49 @@ Mitigations:
 - Lock down `secrets` access in the bridge namespace via RBAC to
   the bridge ServiceAccount only.
 
+### Unauthorized HarborAccess authorship
+
+The bridge grants Harbor permissions purely from `HarborAccess` contents.
+The reconciler creates a system-level robot with exactly the
+`spec.permissions` a CR requests, bound to exactly the
+`spec.serviceAccountRef` it names, and the data plane serves that robot's
+credentials to any token whose `sub`/`aud`/`iss` match. There is **no**
+check that the CR's author is entitled to those Harbor projects or to that
+ServiceAccount identity, and the bridge honours `HarborAccess` CRs in
+**any** namespace (it watches and lists them cluster-wide). There is no
+admission webhook.
+
+Consequence: **`HarborAccess` is a cluster-privileged resource.** Whoever
+can create or update one can grant any workload identity they can run a pod
+as `pull`/`push` on any Harbor project — including overwriting base-image
+tags other tenants pull (a supply-chain vector). This is *not* the same as
+the cross-tenant *read* protection above: that stops a pod reading another
+workload's Secret; it does nothing about a malicious author *granting*
+themselves access in the first place.
+
+In a default install this is contained, because only cluster-admins can
+create the CR (the chart grants no tenant-facing access to
+`harboraccesses`). It becomes exploitable the moment you delegate CR
+authorship — exactly the self-service, "one CR per workload, lives in git"
+model this project encourages.
+
+Mitigations:
+
+- Treat `create`/`update`/`patch` on `harboraccesses.harbor.aetherize.io`
+  as a privileged grant. Restrict it to the platform team via RBAC; do not
+  fold it into the default `edit`/`admin` roles.
+- Never wire `HarborAccess` into a tenant-writable GitOps path without an
+  authorization policy. Ship a ValidatingAdmissionPolicy (CEL) or webhook
+  that constrains, per source namespace, which `permissions[*].project` and
+  which `serviceAccountRef.namespace` a CR may reference.
+- Keep CR authorship in one trusted namespace and RBAC-lock creation there
+  (convention today; a future `BRIDGE_HARBORACCESS_NAMESPACE` confinement
+  knob would let the bridge enforce it).
+- Scope the bridge's own Harbor identity to a system robot limited to the
+  projects you actually reference (see *Compromised bridge* above). Then
+  even an over-broad CR cannot reach projects outside that set — Harbor
+  rejects the robot create/update.
+
 ### Token theft from a legitimately-authorised workload
 
 If an attacker compromises a workload that *legitimately* has access
@@ -278,10 +321,15 @@ their own RBAC.
 | `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
 | `plugin.patchKubelet` | `true` | Set `false` on EKS / GKE / AKS / baked AMIs so the DaemonSet drops `hostPID` and the nsenter / kubelet-restart block |
 | `plugin.audienceRBAC.create` | `true` | Keep `true` unless you're providing a tighter binding via admission webhook; the chart's binding is audience-narrow but `system:nodes`-broad |
-| Pod security (bridge) | unset | `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drop `ALL` capabilities |
+| Pod security (bridge) | hardened by default (`runAsNonRoot`, `runAsUser: 65532`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drops `ALL` capabilities, `seccompProfile: RuntimeDefault`) | Keep the defaults; relax only if a sidecar genuinely requires it |
 | Bridge namespace RBAC | unset | Restrict `secrets` get/list/watch to the bridge ServiceAccount only |
 | Helm caller RBAC | unset | Restrict who can `helm upgrade` this chart — they can swap the binary kubelet runs on every node |
 | Network exposure | NodePort `:31443` | Cluster-local only; firewall the NodePort to the cluster network. With Cilium kube-proxy replacement, socketLB intercepts host-netns `127.0.0.1:31443` from kubelet without exposing the port externally |
+| `HarborAccess` authorship | any principal RBAC-granted `create harboraccesses` | **Cluster-privileged** — whoever authors a CR grants any project to any SA identity. Restrict to the platform team; gate any tenant-writable path behind an admission policy constraining projects / `serviceAccountRef` per namespace. See *Unauthorized HarborAccess authorship* above |
+| Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`repository@sha256:…`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
+| `/metrics` endpoint | unauthenticated on the NodePort TLS port | Enable mTLS (it gates the whole port) or firewall the NodePort. The series are aggregate counts only — no secrets, subjects, robots, or images — so the leak is a recon oracle, not credentials |
+| `tls.enabled` | `true` | Leave it `true`. `false` does **not** serve plaintext (the bridge has no HTTP listener); it only removes the serving cert and breaks startup |
+| Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go.mod` pins `toolchain go1.26.4` for the GO-2026-5037/5038/5039 stdlib fixes; Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
 

@@ -279,6 +279,140 @@ func TestHandler_NoMatchingAudience_403(t *testing.T) {
 	}
 }
 
+// unsortedListClient returns its HarborAccess items in a fixed, caller-
+// controlled order regardless of namespace/name, so a test can prove
+// findHarborAccess sorts internally rather than leaning on the informer's
+// (or the fake client's) own ordering. Only List is exercised by
+// findHarborAccess; the embedded nil client.Client makes every other method
+// a compile-time satisfier this test never calls.
+type unsortedListClient struct {
+	client.Client
+	items []harborv1alpha1.HarborAccess
+}
+
+func (c *unsortedListClient) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	hal, ok := list.(*harborv1alpha1.HarborAccessList)
+	if !ok {
+		return errors.New("unsortedListClient: unexpected list type")
+	}
+	hal.Items = c.items
+	return nil
+}
+
+func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
+	// Two CRs claim the same (subject, issuer, audience) identity — an
+	// operator misconfiguration. findHarborAccess must resolve it the same
+	// way on every call: the namespace/name-sorted-first match, never
+	// whichever the informer cache happened to list first (AUDIT.md F7).
+	// A non-deterministic pick would let a workload intermittently receive
+	// a more- or less-privileged robot than intended.
+	mk := func(name string, action harborv1alpha1.HarborAction) harborv1alpha1.HarborAccess {
+		return harborv1alpha1.HarborAccess{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: hTestBridgeNS},
+			Spec: harborv1alpha1.HarborAccessSpec{
+				ServiceAccountRef: harborv1alpha1.ServiceAccountRef{
+					Namespace: "flux-system", Name: "source-controller",
+				},
+				TrustPolicy: harborv1alpha1.TrustPolicy{
+					Issuer:   "https://kubernetes.default.svc",
+					Audience: hTestAudience,
+				},
+				Permissions: []harborv1alpha1.ProjectPermission{{Project: "p", Action: action}},
+			},
+		}
+	}
+	// Deliberately reverse-sorted List order: a "return the first match
+	// iterated" regression picks zzz-dup; the contract requires aaa-dup.
+	h := &Handler{
+		K8sClient: &unsortedListClient{
+			items: []harborv1alpha1.HarborAccess{mk("zzz-dup", "pull,push"), mk("aaa-dup", "pull")},
+		},
+		Validator: &stubValidator{claims: newTestClaims()},
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+	}
+	for i := 0; i < 5; i++ {
+		matched, aud, err := h.findHarborAccess(context.Background(), newTestClaims())
+		if err != nil {
+			t.Fatalf("iteration %d: findHarborAccess: %v", i, err)
+		}
+		if matched == nil {
+			t.Fatalf("iteration %d: expected a match, got nil", i)
+		}
+		if matched.Name != "aaa-dup" {
+			t.Fatalf("iteration %d: selected %q, want deterministic min %q (List returned zzz-dup first)", i, matched.Name, "aaa-dup")
+		}
+		// The sorted-first CR carries pull-only; proves we did not silently
+		// hand the workload the more-privileged pull,push robot.
+		if got := string(matched.Spec.Permissions[0].Action); got != "pull" {
+			t.Fatalf("iteration %d: selected CR action = %q, want %q", i, got, "pull")
+		}
+		if aud != hTestAudience {
+			t.Errorf("iteration %d: aud = %q, want %q", i, aud, hTestAudience)
+		}
+	}
+}
+
+func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
+	// The CRD enforces MinLength=1 on trustPolicy.{audience,issuer}, but the
+	// data plane must not depend on that (AUDIT.md F13). A CR that somehow
+	// carries an empty audience must NOT match a token whose aud claim is
+	// (or contains) the empty string, and likewise for issuer.
+	base := func() *harborv1alpha1.HarborAccess {
+		return &harborv1alpha1.HarborAccess{
+			ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: hTestBridgeNS},
+			Spec: harborv1alpha1.HarborAccessSpec{
+				ServiceAccountRef: harborv1alpha1.ServiceAccountRef{
+					Namespace: "flux-system", Name: "source-controller",
+				},
+				TrustPolicy: harborv1alpha1.TrustPolicy{
+					Issuer:   "https://kubernetes.default.svc",
+					Audience: hTestAudience,
+				},
+				Permissions: []harborv1alpha1.ProjectPermission{{Project: "p", Action: "pull"}},
+			},
+		}
+	}
+	cases := map[string]struct {
+		mutateCR     func(*harborv1alpha1.HarborAccess)
+		claimsAud    []string
+		claimsIssuer string
+	}{
+		"empty CR audience vs empty token aud": {
+			mutateCR:     func(h *harborv1alpha1.HarborAccess) { h.Spec.TrustPolicy.Audience = "" },
+			claimsAud:    []string{""},
+			claimsIssuer: "https://kubernetes.default.svc",
+		},
+		"empty CR issuer vs empty token issuer": {
+			mutateCR:     func(h *harborv1alpha1.HarborAccess) { h.Spec.TrustPolicy.Issuer = "" },
+			claimsAud:    []string{hTestAudience},
+			claimsIssuer: "",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cr := base()
+			tc.mutateCR(cr)
+			k8s := fake.NewClientBuilder().
+				WithScheme(handlerTestScheme).
+				WithObjects(cr).
+				Build()
+			h := &Handler{
+				K8sClient: k8s,
+				Validator: &stubValidator{},
+				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+			}
+			claims := &Claims{Subject: hTestSubject, Audience: tc.claimsAud, Issuer: tc.claimsIssuer}
+			matched, _, err := h.findHarborAccess(context.Background(), claims)
+			if err != nil {
+				t.Fatalf("findHarborAccess: %v", err)
+			}
+			if matched != nil {
+				t.Fatalf("empty audience/issuer must not match; got CR %s/%s", matched.Namespace, matched.Name)
+			}
+		})
+	}
+}
+
 func TestHandler_MissingRobotSecret_503(t *testing.T) {
 	// Bridge namespace exists but the Secret is missing — control plane
 	// is mid-rotation or hasn't caught up yet. 503 invites the plugin

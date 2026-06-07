@@ -4,9 +4,12 @@
 # ====================================================================
 
 # Logical name for this cluster, used as the Harbor robot-name prefix
-# (ADR-0009). Must be a DNS label and MUST NOT be a hyphen-prefix of
-# any other cluster's name sharing the same Harbor (operator
-# responsibility — there is no central coordinator to enforce this).
+# (ADR-0009 / ADR-0018). Must be a DNS label and distinct from every
+# other cluster sharing the same Harbor. The ownership prefix is
+# dot-terminated (`bridge-<clusterName>.`), so distinct names are
+# automatically collision-free — there is no longer any requirement to
+# avoid being a hyphen-prefix of another cluster's name (the old
+# hyphen-delimited scheme had that footgun; ADR-0018 removed it).
 clusterName: ""
 
 harbor:

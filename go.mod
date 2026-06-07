@@ -2,6 +2,13 @@ module github.com/aetherize/harbor-workload-identity-bridge
 
 go 1.26.0
 
+// Pin the minimum toolchain to a release that carries the fixes for
+// GO-2026-5037 (crypto/x509 hostname parsing DoS), GO-2026-5038 (mime
+// quadratic header decode DoS) and GO-2026-5039 (net/textproto error
+// escaping) — all reachable from the bridge's OIDC/x509 paths. See
+// AUDIT.md F11.
+toolchain go1.26.4
+
 require (
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/go-logr/logr v1.4.3

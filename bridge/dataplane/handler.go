@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -258,13 +259,39 @@ func (h *Handler) recordOIDCFailure(err error) {
 //
 // The audience value that matched is also returned so the audit log
 // records the exact aud string the kubelet projected the token with.
+//
+// Selection is deterministic (AUDIT.md F7). In a correct configuration
+// exactly one CR matches a given (subject, issuer, audience). If two or
+// more match, that is an operator misconfiguration — two CRs claim the
+// same workload identity, typically with different permission sets.
+// Returning whichever CR k8s.List happened to yield first would let the
+// effective permission set flip between bridge restarts and between the
+// two HA replicas (List order is not stable across informer caches), so
+// a workload could intermittently receive a more- or less-privileged
+// robot than intended. We therefore pick the namespace/name-sorted first
+// match and log the ambiguity so an operator can resolve it.
 func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harborv1alpha1.HarborAccess, string, error) {
 	var list harborv1alpha1.HarborAccessList
 	if err := h.K8sClient.List(ctx, &list); err != nil {
 		return nil, "", fmt.Errorf("list HarborAccess: %w", err)
 	}
+	type match struct {
+		ha  *harborv1alpha1.HarborAccess
+		aud string
+	}
+	var matches []match
 	for i := range list.Items {
 		ha := &list.Items[i]
+		// Defense-in-depth (AUDIT.md F13): a CR with an empty audience or
+		// issuer must never match. The CRD enforces MinLength=1 on both
+		// trustPolicy.audience and trustPolicy.issuer, but the data plane is
+		// the security boundary and must not rely solely on CRD validation
+		// (a CR applied with --validate=false, or a future API revision that
+		// relaxes the marker, would otherwise let an empty trustPolicy.audience
+		// match a token carrying aud:"" — a silent auth bypass).
+		if ha.Spec.TrustPolicy.Audience == "" || ha.Spec.TrustPolicy.Issuer == "" {
+			continue
+		}
 		expectedSub := "system:serviceaccount:" + ha.Spec.ServiceAccountRef.Namespace + ":" + ha.Spec.ServiceAccountRef.Name
 		if expectedSub != claims.Subject {
 			continue
@@ -279,12 +306,40 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 			continue
 		}
 		for _, aud := range claims.Audience {
+			// Never honor an empty aud entry, even against a (guarded-above)
+			// non-empty CR audience — keeps the match total over both sides.
+			if aud == "" {
+				continue
+			}
 			if aud == ha.Spec.TrustPolicy.Audience {
-				return ha, aud, nil
+				matches = append(matches, match{ha: ha, aud: aud})
+				break
 			}
 		}
 	}
-	return nil, "", nil
+	if len(matches) == 0 {
+		return nil, "", nil
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].ha.Namespace != matches[j].ha.Namespace {
+			return matches[i].ha.Namespace < matches[j].ha.Namespace
+		}
+		return matches[i].ha.Name < matches[j].ha.Name
+	})
+	if len(matches) > 1 {
+		names := make([]string, len(matches))
+		for i, m := range matches {
+			names[i] = m.ha.Namespace + "/" + m.ha.Name
+		}
+		log.FromContext(ctx).WithName("dataplane").Info(
+			"multiple HarborAccess CRs match this token; selecting deterministically by namespace/name — resolve this ambiguity, the matched CRs grant potentially different permissions",
+			"subject", claims.Subject,
+			"audience", matches[0].aud,
+			"matches", strings.Join(names, ","),
+			"selected", names[0],
+		)
+	}
+	return matches[0].ha, matches[0].aud, nil
 }
 
 // robotCreds carries the username and password read from a robot Secret.
