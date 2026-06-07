@@ -17,7 +17,7 @@
           { "type": "ci",       "release": false   },
           { "type": "chore",    "release": false   },
           { "type": "revert",   "release": "patch" },
-          { "breaking": true,   "release": "major" }
+          { "breaking": true,   "release": "minor" }
         ]
       }
     ],
