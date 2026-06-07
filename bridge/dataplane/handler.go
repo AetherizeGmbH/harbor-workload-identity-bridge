@@ -6,6 +6,7 @@ package dataplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -22,6 +23,15 @@ import (
 
 // CredentialsPath is the HTTP path the plugin POSTs to.
 const CredentialsPath = "/v1/credentials"
+
+// maxRequestBodyBytes caps the credential-request body. The body carries
+// only an image reference for audit logging; a few KiB is generous. The
+// cap is the defense against an unauthenticated memory-exhaustion DoS:
+// the endpoint is reachable on every node's NodePort (ADR-0008), the body
+// is decoded before the SA token is verified, and a caller need only send
+// a dummy "Authorization: Bearer x" header to reach the json decode. Without
+// this bound a single large body can OOM the bridge. See AUDIT.md F1.
+const maxRequestBodyBytes = 64 << 10 // 64 KiB
 
 // cacheKeyTypeRegistry is the cacheKeyType we emit in every successful
 // CredentialProviderResponse. The kubelet API restricts this field to
@@ -127,6 +137,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req Request
 	if r.Body != nil && r.ContentLength != 0 {
 		defer func() { _ = r.Body.Close() }()
+		// Bound the body before decoding: it is attacker-reachable and
+		// parsed before token validation (AUDIT.md F1).
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			// Body is optional but if present must parse — otherwise the
 			// audit log loses the image and we shouldn't pretend.
@@ -173,6 +186,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the registry auth handshake itself (ADR-0013).
 	creds, err := h.readRobotSecret(ctx, matched)
 	if err != nil {
+		if errors.Is(err, errSecretOwnerMismatch) {
+			// Secret-name collision (AUDIT.md F2): the Secret at the
+			// expected name belongs to a different HarborAccess. Deny —
+			// never cross-wire one workload's credentials to another.
+			logger.Error(err, "robot Secret owner mismatch; refusing to issue credentials",
+				"harboraccess", matched.Namespace+"/"+matched.Name, "image", req.Image)
+			http.Error(w, "credential Secret ownership mismatch", http.StatusForbidden)
+			h.recordResult(ResultForbidden)
+			return
+		}
 		if apierrors.IsNotFound(err) {
 			// Robot Secret should exist whenever the CR is Ready; absence
 			// means the control plane is mid-rotation or has not yet
@@ -244,6 +267,15 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 		if expectedSub != claims.Subject {
 			continue
 		}
+		// Defense-in-depth (AUDIT.md F5): the Validator already pins iss to
+		// the bridge's configured issuer, and the reconciler refuses to
+		// provision a robot for a CR whose trustPolicy.issuer disagrees with
+		// the cluster issuer. Re-checking here means a CR is never matched
+		// against a token from an issuer it did not declare, even if those
+		// upstream invariants regress.
+		if ha.Spec.TrustPolicy.Issuer != claims.Issuer {
+			continue
+		}
 		for _, aud := range claims.Audience {
 			if aud == ha.Spec.TrustPolicy.Audience {
 				return ha, aud, nil
@@ -269,6 +301,19 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 		secret); err != nil {
 		return nil, err
 	}
+	// Read-path collision backstop (AUDIT.md F2). If the Secret carries the
+	// bridge's ownership labels and they name a DIFFERENT HarborAccess than
+	// the one matched for this token, two CRs have collided on the
+	// dash-joined Secret name. Refuse rather than hand one workload's SA the
+	// other workload's robot password.
+	if secret.Labels[labelManagedBy] == labelManagedByValue &&
+		(secret.Labels[labelHarborAccessNamespace] != ha.Namespace ||
+			secret.Labels[labelHarborAccessName] != ha.Name) {
+		return nil, fmt.Errorf("%w: Secret %s/%s is stamped for HarborAccess %s/%s, not %s/%s",
+			errSecretOwnerMismatch, h.Config.BridgeNamespace, name,
+			secret.Labels[labelHarborAccessNamespace], secret.Labels[labelHarborAccessName],
+			ha.Namespace, ha.Name)
+	}
 	user := string(secret.Data["username"])
 	pass := string(secret.Data["password"])
 	if user == "" || pass == "" {
@@ -286,6 +331,26 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 func robotSecretName(ha *harborv1alpha1.HarborAccess) string {
 	return "robot-" + ha.Namespace + "-" + ha.Name
 }
+
+// Robot-Secret ownership label keys. Mirrored from controlplane/labels.go —
+// the data plane does not import the control plane (ADR-0002), the same way
+// robotSecretName mirrors secretNameFor. The reconciler stamps these on every
+// robot Secret it writes.
+const (
+	labelManagedBy             = "harbor.aetherize.io/managed-by"
+	labelManagedByValue        = "harbor-workload-identity-bridge"
+	labelHarborAccessNamespace = "harbor.aetherize.io/harboraccess-namespace"
+	labelHarborAccessName      = "harbor.aetherize.io/harboraccess-name"
+)
+
+// errSecretOwnerMismatch is returned by readRobotSecret when the robot Secret
+// found at the expected name is stamped as belonging to a different
+// HarborAccess than the one matched for this request. This is the read-path
+// backstop for the Secret-name collision class (AUDIT.md F2): the Secret name
+// "robot-<haNs>-<haName>" is dash-joined and therefore ambiguous, so even if
+// two distinct CRs collapse to the same Secret name, a token matched to CR A
+// must never receive a Secret stamped for CR B.
+var errSecretOwnerMismatch = errors.New("robot Secret owner mismatch")
 
 func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl time.Duration) {
 	w.Header().Set("Content-Type", "application/json")

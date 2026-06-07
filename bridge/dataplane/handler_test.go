@@ -394,3 +394,85 @@ func TestHandler_EmptyBody_OK(t *testing.T) {
 		t.Errorf("status = %d (empty body should be accepted): %s", w.Code, w.Body.String())
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Security regression tests (see AUDIT.md)
+// ----------------------------------------------------------------------------
+
+// AUDIT.md F1: the credential-request body is bounded by maxRequestBodyBytes
+// and the decode happens before token validation, so an attacker who supplies
+// only a dummy Bearer header must not be able to make the bridge buffer an
+// arbitrarily large body. We assert the oversized body is rejected (400) and
+// never reaches the validator.
+func TestHandler_RejectsOversizedBody(t *testing.T) {
+	fx := newHandlerFixture(t)
+	// A JSON string value larger than the cap. The decoder must error out
+	// via MaxBytesReader rather than buffer the whole thing.
+	huge := strings.Repeat("A", maxRequestBodyBytes+1<<10)
+	body := []byte(`{"image":"` + huge + `"}`)
+	r := httptest.NewRequest(http.MethodPost, CredentialsPath, bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer some-sa-token")
+	r.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for oversized body; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// AUDIT.md F5: a CR whose trustPolicy.issuer disagrees with the validated
+// token's iss claim must not be matched, even when sub and aud line up.
+func TestHandler_IssuerMismatch_NoMatch(t *testing.T) {
+	fx := newHandlerFixture(t)
+	// Token validated as a different issuer than the CR declares.
+	fx.Validator.claims = &Claims{
+		Subject:  hTestSubject,
+		Audience: []string{hTestAudience},
+		Issuer:   "https://attacker.example.com",
+		Expiry:   time.Now().Add(time.Hour),
+	}
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, "harbor.example.com/production/img:v1"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no matching HarborAccess on issuer mismatch); body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
+// AUDIT.md F2: the robot Secret name "robot-<haNs>-<haName>" is dash-joined
+// and therefore ambiguous, so two distinct HarborAccess CRs can collapse to
+// the same Secret name. The read path must refuse to hand a token matched to
+// CR A a Secret that is stamped (via labels) for CR B — otherwise one
+// workload's SA receives another's robot credentials. We expect 403, not 200.
+func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {
+	fx := newHandlerFixture(t)
+	sec := &corev1.Secret{}
+	if err := fx.K8s.Get(context.Background(),
+		client.ObjectKey{Namespace: hTestBridgeNS, Name: "robot-" + hTestHANs + "-" + hTestHAName},
+		sec); err != nil {
+		t.Fatal(err)
+	}
+	// Stamp the Secret as owned by a DIFFERENT HarborAccess.
+	sec.Labels = map[string]string{
+		"harbor.aetherize.io/managed-by":             "harbor-workload-identity-bridge",
+		"harbor.aetherize.io/harboraccess-namespace": "other-ns",
+		"harbor.aetherize.io/harboraccess-name":      "other-ha",
+	}
+	if err := fx.K8s.Update(context.Background(), sec); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, "harbor.example.com/production/img:v1"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (Secret owner mismatch must not disclose creds); body=%s",
+			w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), hTestRobotPass) {
+		t.Fatal("response body leaked the robot password on an owner mismatch")
+	}
+}

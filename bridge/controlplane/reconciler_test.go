@@ -411,6 +411,79 @@ func TestReconcile_AdoptionDiscipline_RefusesForeignDescription(t *testing.T) {
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
 }
 
+// AUDIT.md F2 (secret-name collision): the per-CR Secret name
+// "robot-<haNs>-<haName>" is dash-joined and ambiguous, so a second CR can
+// collapse onto a Secret already owned by another. The reconciler must refuse
+// to overwrite it rather than cross-wire two workloads' credentials.
+func TestReconcile_SecretNameCollision_RefusesToOverwrite(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	// A bridge-managed Secret already occupies this CR's Secret name but is
+	// stamped for a DIFFERENT HarborAccess.
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNS,
+			Name:      SecretNamePrefix + testHANamespace + "-" + testHAName,
+			Labels: map[string]string{
+				LabelManagedBy:             LabelManagedByValue,
+				LabelCluster:               testCluster,
+				LabelHarborAccessNamespace: "other-ns",
+				LabelHarborAccessName:      "other-ha",
+			},
+		},
+		Data: map[string][]byte{"username": []byte("robot$other"), "password": []byte("foreign-pw")},
+	}
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha, foreign)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.createCalls) != 0 {
+		t.Errorf("Create called despite Secret-name collision: %+v", mh.createCalls)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
+	// The foreign Secret's credentials must be untouched.
+	s := &corev1.Secret{}
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: foreign.Name}, s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Data["password"]) != "foreign-pw" {
+		t.Errorf("foreign Secret password overwritten: %q", s.Data["password"])
+	}
+}
+
+// AUDIT.md F2 (robot-name collision): the robot name
+// "bridge-<cluster>-<saNs>-<saName>" is dash-joined and ambiguous, so two
+// distinct SA refs can collapse onto one robot. When the existing robot's
+// description names a different HarborAccess, the reconciler must refuse to
+// adopt it — no permission overwrite, no password rotation that would break
+// the rightful owner's stored Secret.
+func TestReconcile_RobotNameCollision_RefusesForeignHarborAccess(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	name := "bridge-prod-eu-west-flux-system-source-controller"
+	// In our prefix AND tagged for our cluster, but owned by another CR.
+	mh.preexisting(name, RobotDescription(testCluster, "other-ns", "other-ha"))
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.updateCalls) != 0 || len(mh.refreshCalls) != 0 {
+		t.Errorf("adopted a robot owned by another HarborAccess: updates=%+v refresh=%+v",
+			mh.updateCalls, mh.refreshCalls)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
+}
+
 func TestReconcile_DefenseInDepth_RejectsPrefixCollisionRobot(t *testing.T) {
 	// Cluster "prod" reconciling, but the robot's name (which would prefix-
 	// match cluster=prod by ADR-0009's known limitation) carries a
