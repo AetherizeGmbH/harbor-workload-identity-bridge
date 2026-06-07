@@ -33,7 +33,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: opentofu/setup-opentofu@847eaa4afeb791b06daa46e8eafa8b1b68d7cfb4 # v2
-        with: { tofu_version: 1.8.5 }
+        # 1.12+ allows function calls (base64encode, etc.) inside string
+        # interpolations within run-block `variables` heredocs. 1.8.5
+        # rejected them with "Function calls not allowed". Pinned to
+        # match what brew installs locally.
+        with: { tofu_version: 1.12.0 }
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5
         with: { version: v4.2.0 }
       # No separate docker build step: the tofu test harness's
@@ -51,7 +55,14 @@ jobs:
           version: v0.32.0
       - name: Run tofu test
         working-directory: test/e2e
+        # Explicit pipefail: the github-hosted runner's effective shell
+        # here is `/usr/bin/bash -e {0}` (no `-o pipefail`), so `tofu
+        # test ... | tee ...` returned tee's exit code (0) and a real
+        # tofu failure looked green. -E inherits ERR traps; -u catches
+        # accidentally-unset variables.
+        shell: bash
         run: |
+          set -Eeuo pipefail
           tofu init
           TF_VAR_pause_before_pull=false tofu test -verbose 2>&1 | tee /tmp/tofu-test.log
       - name: Capture cluster diagnostics on failure
