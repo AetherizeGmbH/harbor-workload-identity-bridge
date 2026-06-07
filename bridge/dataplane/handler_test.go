@@ -442,11 +442,27 @@ func TestHandler_IssuerMismatch_NoMatch(t *testing.T) {
 	}
 }
 
-// AUDIT.md F2: the robot Secret name "robot-<haNs>-<haName>" is dash-joined
-// and therefore ambiguous, so two distinct HarborAccess CRs can collapse to
-// the same Secret name. The read path must refuse to hand a token matched to
-// CR A a Secret that is stamped (via labels) for CR B — otherwise one
-// workload's SA receives another's robot credentials. We expect 403, not 200.
+// AUDIT.md F2: defense-in-depth read-path backstop. Since ADR-0018 the Secret
+// name "robot-<haNs>.<haName>" is dot-joined and injective, so in normal
+// operation two CRs never share a Secret name. This test forces the
+// owner-label mismatch directly to prove that, even if that invariant ever
+// regressed, the read path refuses to hand a token matched to CR A a Secret
+// stamped (via labels) for CR B — returning 403, never the other CR's creds.
+// TestRobotSecretName_ContractPinned pins the data-plane mirror of the Secret
+// name to the exact dot-delimited contract (ADR-0018 / ADR-0015). The data
+// plane cannot import the control plane, so this literal must stay in lockstep
+// with controlplane.secretNameFor by hand; controlplane has the matching pin
+// (TestSecretNameFor_DotDelimiterIsInjective). If the two ever diverge the
+// plugin reads a Secret the reconciler never wrote and every pull 503s.
+func TestRobotSecretName_ContractPinned(t *testing.T) {
+	ha := &harborv1alpha1.HarborAccess{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "flux-access"},
+	}
+	if got, want := robotSecretName(ha), "robot-team-a.flux-access"; got != want {
+		t.Fatalf("robotSecretName = %q, want %q (must match controlplane.secretNameFor)", got, want)
+	}
+}
+
 func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {
 	fx := newHandlerFixture(t)
 	sec := &corev1.Secret{}

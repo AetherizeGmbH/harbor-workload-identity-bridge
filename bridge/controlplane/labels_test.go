@@ -20,10 +20,11 @@ func TestRobotDescription_RoundTrip(t *testing.T) {
 }
 
 func TestRobotBelongsToCluster_RejectsWrongCluster(t *testing.T) {
-	// The defense-in-depth case from ADR-0009: cluster "prod-eu"'s robot
-	// has cluster="prod-eu" in its description, so cluster "prod" must
-	// see it as foreign even though "bridge-prod-eu-..." starts with
-	// "bridge-prod-".
+	// Defense-in-depth (ADR-0009/ADR-0012): cluster "prod-eu"'s robot has
+	// cluster="prod-eu" in its description, so cluster "prod" must see it as
+	// foreign. Since ADR-0018 the name prefix "bridge-prod." already excludes
+	// "bridge-prod-eu.…" (the dot terminator); this description check is the
+	// second, independent layer.
 	foreignDesc := RobotDescription("prod-eu", "harbor-bridge-system", "flux-access")
 	if RobotBelongsToCluster(foreignDesc, "prod") {
 		t.Errorf("description %q (cluster=prod-eu) wrongly claimed by cluster=prod", foreignDesc)

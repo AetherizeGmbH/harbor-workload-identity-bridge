@@ -411,10 +411,12 @@ func TestReconcile_AdoptionDiscipline_RefusesForeignDescription(t *testing.T) {
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
 }
 
-// AUDIT.md F2 (secret-name collision): the per-CR Secret name
-// "robot-<haNs>-<haName>" is dash-joined and ambiguous, so a second CR can
-// collapse onto a Secret already owned by another. The reconciler must refuse
-// to overwrite it rather than cross-wire two workloads' credentials.
+// AUDIT.md F2 (secret-name collision): defense-in-depth. Since ADR-0018 the
+// per-CR Secret name "robot-<haNs>.<haName>" is dot-joined and injective, so
+// distinct CRs no longer collapse onto one Secret in normal operation. This
+// test forces the foreign-owner state directly to prove that, if that ever
+// regressed, the reconciler refuses to overwrite rather than cross-wire two
+// workloads' credentials.
 func TestReconcile_SecretNameCollision_RefusesToOverwrite(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()
