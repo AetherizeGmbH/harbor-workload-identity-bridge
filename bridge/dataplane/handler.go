@@ -325,11 +325,11 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 
 // robotSecretName mirrors controlplane.secretNameFor — kept here as a
 // local helper so the data plane does not import the control plane
-// (ADR-0002). The format ("robot-<haNs>-<haName>") is the cross-package
-// contract; if the control plane ever changes its secret naming it has to
-// announce that here too. Worth a future ADR if the contract gets richer.
+// (ADR-0002). The format ("robot-<haNs>.<haName>", dot-joined for
+// injectivity — ADR-0018) is the cross-package contract; if the control
+// plane ever changes its secret naming it has to announce that here too.
 func robotSecretName(ha *harborv1alpha1.HarborAccess) string {
-	return "robot-" + ha.Namespace + "-" + ha.Name
+	return "robot-" + ha.Namespace + "." + ha.Name
 }
 
 // Robot-Secret ownership label keys. Mirrored from controlplane/labels.go —
@@ -346,10 +346,11 @@ const (
 // errSecretOwnerMismatch is returned by readRobotSecret when the robot Secret
 // found at the expected name is stamped as belonging to a different
 // HarborAccess than the one matched for this request. This is the read-path
-// backstop for the Secret-name collision class (AUDIT.md F2): the Secret name
-// "robot-<haNs>-<haName>" is dash-joined and therefore ambiguous, so even if
-// two distinct CRs collapse to the same Secret name, a token matched to CR A
-// must never receive a Secret stamped for CR B.
+// backstop for the Secret-name collision class (AUDIT.md F2). The Secret name
+// is now dot-joined ("robot-<haNs>.<haName>", ADR-0018) and therefore
+// injective, so this never fires in normal operation; it remains so that even
+// if two distinct CRs ever collapsed to the same Secret name (an invariant
+// regression), a token matched to CR A is never handed a Secret stamped for CR B.
 var errSecretOwnerMismatch = errors.New("robot Secret owner mismatch")
 
 func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl time.Duration) {

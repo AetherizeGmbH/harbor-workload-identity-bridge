@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted
+Accepted. **The robot-naming scheme (§2) and the hyphen-prefix ownership
+caveat (§3) are superseded by [ADR-0018](0018-dot-delimited-naming.md)**, which
+switches the field delimiter from `-` to `.`. The names below now read
+`bridge-<cluster>.<saNs>.<saName>`, the ownership prefix is `bridge-<cluster>.`,
+and the "cluster names must not be hyphen-prefixes of each other" operator
+burden is removed. The rest of this ADR (bridge-per-cluster, ownership as a
+safety invariant, per-cluster admin creds, issuer-mismatch detection) stands.
 
 ## Context
 
@@ -40,11 +46,13 @@ Each bridge deployment is configured with a required `clusterName`:
 
 ### 2. Robot naming carries the cluster prefix
 
-Robot username: `bridge-<clusterName>-<saNamespace>-<saName>`.
+Robot username: `bridge-<clusterName>.<saNamespace>.<saName>` (dot-delimited
+per [ADR-0018](0018-dot-delimited-naming.md); originally `-`-delimited, which
+was not injective — see that ADR).
 
 - Deterministic from the `HarborAccess` CR (its `serviceAccountRef`) plus the bridge's configured `clusterName`. Reconciles are idempotent.
-- Names exceeding Harbor's robot-username cap are deterministically truncated: keep the `bridge-<clusterName>-` prefix, then append `<base32(sha256(full-name))>` truncated to fit. The exact cap is verified against `goharbor/go-client` constants at code-time, not assumed.
-- Example: `bridge-prod-eu-west-flux-system-source-controller`.
+- Names exceeding Harbor's robot-username cap are deterministically truncated: keep the `bridge-<clusterName>.` prefix, then append a `sha256(full-name)` suffix truncated to fit. The exact cap is verified against `goharbor/go-client` constants at code-time, not assumed.
+- Example: `bridge-prod-eu-west.flux-system.source-controller`.
 
 ### 3. Ownership filter as a safety invariant
 
@@ -56,7 +64,7 @@ A bridge **must never list, modify, or delete a robot whose name does not begin 
 
 This is a safety invariant, not an optimisation. A bridge bug in one cluster must not be able to delete or modify robots produced by another cluster's bridge against the same Harbor.
 
-**Operator-side caveat: cluster names must not be hyphen-prefixes of each other.** The prefix check `strings.HasPrefix(robotName, "bridge-"+cluster+"-")` returns true for cluster `prod` against any robot named `bridge-prod-…`, including robots a separate bridge for cluster `prod-eu` created (`bridge-prod-eu-flux-…` does begin with `bridge-prod-`). The bridge cannot disambiguate from the name alone. This is operator responsibility: choose cluster names so that none is a hyphen-prefix of any other connected cluster. A future v1alpha2 could close the class entirely by using `.` as the cluster/identity separator (Harbor's robot-name regex permits `.`), but that requires a CRD bump and is deferred. The behaviour is pinned by the test `TestOwnsRobot_DocumentsPrefixCollisionLimitation` so any change to the prefix logic must also update this ADR.
+**~~Operator-side caveat: cluster names must not be hyphen-prefixes of each other.~~ — Resolved by [ADR-0018](0018-dot-delimited-naming.md).** The original ownership prefix `bridge-<cluster>-` produced a false positive: `strings.HasPrefix(robotName, "bridge-prod-")` returned true for cluster `prod-eu`'s `bridge-prod-eu-…` robots, which the bridge could not disambiguate from the name alone — pushing "choose cluster names so none is a hyphen-prefix of another" onto operators. ADR-0018 adopted the `.` separator this paragraph anticipated: the ownership prefix is now `bridge-<cluster>.`, and because `cluster` is a dot-free DNS label, `bridge-prod.` is *not* a prefix of `bridge-prod-eu.…`. The class is closed in software; the operator burden is gone. The fix is pinned by `TestOwnsRobot_DotDelimiterFixesPrefixCollision`.
 
 ### 4. The CRD does not carry cluster identity
 

@@ -43,7 +43,7 @@ const (
 	hTestHANs      = "harbor-bridge-system"
 	hTestSubject   = "system:serviceaccount:flux-system:source-controller"
 	hTestAudience  = "harbor.example.com"
-	hTestRobotUser = "robot$bridge-prod-flux-system-source-controller"
+	hTestRobotUser = "robot$bridge-prod.flux-system.source-controller"
 	hTestRobotPass = "robot-password-v1"
 )
 
@@ -72,7 +72,7 @@ func newTestRobotSecret() *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: hTestBridgeNS,
-			Name:      "robot-" + hTestHANs + "-" + hTestHAName,
+			Name:      "robot-" + hTestHANs + "." + hTestHAName,
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -309,7 +309,7 @@ func TestHandler_SecretInWrongNamespace_503(t *testing.T) {
 	wrongNs := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "some-other-namespace",
-			Name:      "robot-" + hTestHANs + "-" + hTestHAName,
+			Name:      "robot-" + hTestHANs + "." + hTestHAName,
 		},
 		Data: map[string][]byte{
 			"username": []byte("attacker-supplied"),
@@ -451,7 +451,7 @@ func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {
 	fx := newHandlerFixture(t)
 	sec := &corev1.Secret{}
 	if err := fx.K8s.Get(context.Background(),
-		client.ObjectKey{Namespace: hTestBridgeNS, Name: "robot-" + hTestHANs + "-" + hTestHAName},
+		client.ObjectKey{Namespace: hTestBridgeNS, Name: "robot-" + hTestHANs + "." + hTestHAName},
 		sec); err != nil {
 		t.Fatal(err)
 	}

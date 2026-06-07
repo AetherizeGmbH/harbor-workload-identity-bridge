@@ -118,16 +118,19 @@ for why earlier iterations got this wrong.)
 
 Many clusters can share one Harbor. Each cluster runs its own bridge;
 there is no central coordinator. Robots are name-prefixed
-`bridge-<cluster-name>-<sa-namespace>-<sa-name>` so the prefix is the
-ownership boundary.
+`bridge-<cluster-name>.<sa-namespace>.<sa-name>` so the prefix
+`bridge-<cluster-name>.` is the ownership boundary.
 
 ![Multi-cluster topology](docs/img/multi-cluster.svg)
 
-A defense-in-depth tag in the robot's Harbor description (`cluster=<name>`)
-guards against the edge case where one cluster's name is a hyphen-prefix
-of another. See [ADR-0009](docs/adr/0009-multi-cluster-topology.md) for
-the full ownership model and the one operator burden it imposes (cluster
-names must not be hyphen-prefixes of each other).
+The `.` delimiter makes the name injective and makes the ownership prefix
+collision-free across clusters (`bridge-prod.` is not a prefix of
+`bridge-prod-eu.…`), so there is no "cluster names must not be hyphen-prefixes
+of each other" operator burden. A defense-in-depth tag in the robot's Harbor
+description (`cluster=<name>`) backs the prefix check. See
+[ADR-0018](docs/adr/0018-dot-delimited-naming.md) for the naming scheme and
+[ADR-0009](docs/adr/0009-multi-cluster-topology.md) for the full ownership
+model.
 
 ## Security model
 
@@ -178,7 +181,7 @@ YAML
 # Kubernetes RBAC kubelet needs to mint this audience (see ADR-0017).
 helm install harbor-bridge \
   oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
-  --version 0.2.0 \
+  --version 0.2.8 \
   -n harbor-bridge-system \
   --set clusterName=prod-eu-west \
   --set harbor.url=https://harbor.example.com \
@@ -226,9 +229,9 @@ spec:
 YAML
 ```
 
-Within a few seconds a `bridge-prod-eu-west-flux-system-source-controller`
+Within a few seconds a `bridge-prod-eu-west.flux-system.source-controller`
 robot appears in Harbor's admin UI, the bridge namespace gets a
-`robot-harbor-bridge-system-flux-access` Secret, and pods running as
+`robot-harbor-bridge-system.flux-access` Secret, and pods running as
 `flux-system/source-controller` can pull from `harbor.example.com/production/*`.
 
 **Testing.** Two paths in [HOW-TO-TEST.md](HOW-TO-TEST.md):

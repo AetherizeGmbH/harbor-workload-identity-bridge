@@ -15,7 +15,7 @@ weight below is there and in the CR→robot→secret identity mapping.
 | ID | Severity | Title | Status |
 |----|----------|-------|--------|
 | F1 | High | Unauthenticated request-body memory-exhaustion DoS on credential endpoint | **Fixed** |
-| F2 | High | Robot-name & Secret-name delimiter collision → cross-identity credential/permission confusion | **Partially fixed** (guards + 403 read-path backstop) / Needs-decision (collision-free naming) |
+| F2 | High | Robot-name & Secret-name delimiter collision → cross-identity credential/permission confusion | **Fixed** (dot-delimited injective naming, ADR-0018; runtime guards + 403 backstop retained as defense-in-depth) |
 | F3 | Medium | Credential endpoint exposed to whole node network; mTLS off by default | Recommended |
 | F4 | Medium | `/metrics` served unauthenticated on the externally-exposed TLS port | Recommended |
 | F5 | Low | Data plane did not re-validate per-CR issuer (defense-in-depth) | **Fixed** |
@@ -31,24 +31,28 @@ weight below is there and in the CR→robot→secret identity mapping.
 
 - **F1 — Fixed.** Request body bounded with `http.MaxBytesReader` (64 KiB)
   before decode. Test: `TestHandler_RejectsOversizedBody`.
-- **F2 — Partially fixed.** Three non-breaking guards turn the collision from a
-  silent cross-wire into a clean denial: reconciler refuses to overwrite a
-  Secret owned by another HarborAccess, refuses to adopt/rotate/delete a robot
-  whose description names another HarborAccess, and the data plane returns 403
-  when the Secret at the expected name is stamped for another HarborAccess.
-  Tests: `TestReconcile_SecretNameCollision_RefusesToOverwrite`,
+- **F2 — Fixed (root cause).** The robot and Secret names are now dot-delimited
+  (`bridge-<cluster>.<saNs>.<saName>`, `robot-<haNs>.<haName>` — [ADR-0018]) and
+  therefore injective: every field left of the last dot is a namespace or the
+  cluster label, none of which may contain a dot, so distinct identities can no
+  longer collapse to one name. The dot also makes the ownership prefix
+  collision-free across clusters, retiring ADR-0009's hyphen-prefix operator
+  burden. The three runtime guards from the first pass (reconciler refuse-on-
+  Secret-collision, refuse-to-adopt-foreign-robot, data-plane 403 backstop) are
+  retained as defense-in-depth for the hash-overflow truncation tail and any
+  future invariant regression. Tests:
+  `TestRobotName_DotDelimiterIsInjective`, `TestSecretNameFor_DotDelimiterIsInjective`,
+  `TestOwnsRobot_DotDelimiterFixesPrefixCollision`,
+  `TestReconcile_SecretNameCollision_RefusesToOverwrite`,
   `TestReconcile_RobotNameCollision_RefusesForeignHarborAccess`,
-  `TestHandler_SecretOwnerMismatch_Forbidden`. The collision-free *naming
-  scheme* itself is still open — see the F2 section's "Residual".
+  `TestHandler_SecretOwnerMismatch_Forbidden`.
+
+[ADR-0018]: docs/adr/0018-dot-delimited-naming.md
 - **F5 — Fixed.** `findHarborAccess` re-validates `trustPolicy.issuer` against
   the token `iss`. Test: `TestHandler_IssuerMismatch_NoMatch`.
 
 **Still open (no code change yet):**
 
-- **F2 residual** — collision-free naming scheme (breaking; Needs-decision). A
-  dot-delimiter scheme is the leading candidate (provably injective because the
-  left-of-last fields are namespaces/cluster label, and it also retires the
-  ADR-0009 hyphen-prefix footgun); it requires a rename migration.
 - **F3, F4, F6** — Recommended / Needs-decision (transport exposure, metrics
   exposure, supply-chain). Operational/default changes left to the maintainer.
 - **F7, F8, F9** — Recommended (deterministic CR match, debug log hygiene,
@@ -98,7 +102,7 @@ entirely. Low effort; left as a decision because it reorders the audit-log
 
 ---
 
-## F2 — Robot-name & Secret-name delimiter collision → cross-identity confusion (High) — PARTIALLY FIXED (guards) / NEEDS DECISION (naming scheme)
+## F2 — Robot-name & Secret-name delimiter collision → cross-identity confusion (High) — FIXED (dot-delimited naming, ADR-0018)
 
 **Location:**
 - `bridge/controlplane/harbor/naming.go:76` — `RobotName` →
@@ -135,10 +139,10 @@ Consequences (multi-tenancy boundary break, plausible in a shared cluster):
 `naming.go` already has hash-suffix machinery (`hashOf`, `hashSuffixLen`) but it
 is only triggered on *length overflow*, not on this delimiter ambiguity.
 
-**Guards applied in this pass (safe, non-breaking — turn a silent cross-wire
-into a clean denial).** The naming scheme itself is unchanged (that change is
-breaking — see below), but three guards now make the collision fail safe rather
-than disclose:
+**Runtime guards (first pass — turn a silent cross-wire into a clean denial).**
+These were added before the naming-scheme fix and are retained as
+defense-in-depth (they now only fire on the hash-overflow truncation tail or a
+future invariant regression):
 
 1. **Reconciler — Secret-name guard.** New `secretOwnedByOtherHA`
    (`reconciler.go`) + an early check in `reconcileNormal` (step 3b): refuse
@@ -165,41 +169,31 @@ Regression tests: `TestReconcile_SecretNameCollision_RefusesToOverwrite`,
 `TestReconcile_RobotNameCollision_RefusesForeignHarborAccess` (controlplane),
 `TestHandler_SecretOwnerMismatch_Forbidden` (dataplane).
 
-**Residual (Needs-decision — the real cure is collision-resistant naming).**
-The guards prevent disclosure/hijack, but two genuinely-distinct workloads
-whose names collide still cannot *both* be served (one is denied). Eliminating
-that requires unambiguous names:
+**Root-cause fix applied — dot-delimited injective naming ([ADR-0018]).** The
+field delimiter changed from `-` to `.`:
 
-**How to fix (correct fix is collision-resistant naming).** Make both names a
-function of the *structured* tuple, not a lossy dash-join. Recommended: keep a
-human-readable prefix for grep-ability but always append a short hash of the
-canonical, unambiguously-delimited tuple:
+- Robot name: `bridge-<cluster>.<saNs>.<saName>` (`controlplane/harbor/naming.go`).
+- Secret name: `robot-<haNs>.<haName>` (`controlplane/reconciler.go` +
+  data-plane mirror `dataplane/handler.go`).
+- Ownership prefix: `bridge-<cluster>.` (`ClusterPrefix`/`OwnsRobot`).
 
-```go
-// naming.go — robot name
-func RobotName(cluster, saNs, saName string) (string, error) {
-    h := hashOf(cluster + "\x00" + saNs + "\x00" + saName) // \x00 can't appear in DNS labels
-    readable := fmt.Sprintf("%s%s-%s-%s", robotNamePrefix, cluster, saNs, saName)
-    // ... truncate `readable` to leave room for "-"+h, then return readable+"-"+h
-}
-```
+This is injective because a dot-joined name is unambiguous when every field
+*left of the last dot* is dot-free — and here those are all Kubernetes
+namespaces or the cluster label (RFC 1123 labels, no dots). The trailing field
+may contain dots without breaking the split. The hash-on-overflow fallback is
+unchanged and remains the only path where injectivity is probabilistic rather
+than provable. The dot delimiter additionally makes the ownership prefix
+collision-free across clusters (`bridge-prod.` is not a prefix of
+`bridge-prod-eu.…`), retiring ADR-0009's hyphen-prefix operator burden.
 
-Do the same for `secretNameFor`/`robotSecretName` using
-`ha.Namespace + "\x00" + ha.Name`. Both helpers must stay in lockstep
-(`handler.go` duplicates the secret-name logic — ADR-0015 — so update both and
-keep the cross-package test that pins the contract).
+Injectivity is pinned by `TestRobotName_DotDelimiterIsInjective` and
+`TestSecretNameFor_DotDelimiterIsInjective`; the prefix fix by
+`TestOwnsRobot_DotDelimiterFixesPrefixCollision`.
 
-Alternative if you want zero collision risk and don't care about readability:
-name purely by hash.
-
-**Why this is left as a decision:** it is a **breaking change** — every existing
-robot and Secret gets a new name, so on upgrade the reconciler re-creates robots
-and Secrets (old ones become orphans the janitor cleans up). For an alpha,
-single-cluster install that's tolerable, but it's an operator-visible migration,
-so the maintainer should choose the scheme and the rollout. Until fixed, the
-interim mitigation is operational: ADR-0009-style, document that SA
-namespace/name pairs (and HarborAccess namespace/name pairs) must not be
-dash-rearrangements of each other — but that's a footgun, not a fix.
+This was safe to apply in place (not a breaking rename) only because the project
+is pre-release with no deployed robots/Secrets to migrate. See [ADR-0018] for
+the full rationale, the dot-free invariant, and the alternatives weighed
+(always-hash, UID-keyed, admission webhook).
 
 ---
 

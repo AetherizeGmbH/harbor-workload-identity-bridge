@@ -134,12 +134,13 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		)
 	}
 
-	// 3b. Secret-name collision guard (AUDIT.md F2). The robot-password
-	// Secret name is "robot-<haNs>-<haName>", dash-joined, so two distinct
-	// (namespace, name) tuples can collapse to the same Secret name (e.g.
-	// ns "a-b"/name "c" and ns "a"/name "b-c"). Writing would overwrite the
-	// other CR's credentials and let one workload's SA read the other's
-	// robot password. Refuse rather than overwrite; first owner wins.
+	// 3b. Secret-name collision guard (AUDIT.md F2). The Secret name is now
+	// dot-joined ("robot-<haNs>.<haName>", ADR-0018), which is injective, so
+	// in normal operation this never fires. It remains as defense-in-depth:
+	// if the dot-free invariant ever regressed (a non-trailing field gaining
+	// a dot) two CRs could still collapse to one Secret name, and overwriting
+	// it would let one workload's SA read the other's robot password. Refuse
+	// rather than overwrite; first owner wins.
 	if conflict, err := r.secretOwnedByOtherHA(ctx, ha); err != nil {
 		return r.markTransientError(ctx, ha, fmt.Errorf("check robot Secret ownership: %w", err))
 	} else if conflict {
@@ -170,12 +171,14 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		))
 	}
 
-	// 5b. Robot-name collision guard (AUDIT.md F2). The robot name is
-	// "bridge-<cluster>-<saNs>-<saName>", dash-joined, so two distinct SA
-	// identities can collapse to one name. If the existing robot's
-	// description names a different HarborAccess, adopting it would let two
-	// CRs fight over one robot (permission overwrite + a password rotation
-	// that breaks the other's stored Secret). Refuse.
+	// 5b. Robot-name collision guard (AUDIT.md F2). The robot name is now
+	// dot-joined ("bridge-<cluster>.<saNs>.<saName>", ADR-0018), injective in
+	// the common case. This remains defense-in-depth for the two paths where
+	// injectivity is not guaranteed: the hash-truncation overflow tail (only
+	// probabilistically unique) and a future dot-free-invariant regression.
+	// If the existing robot's description names a different HarborAccess,
+	// adopting it would let two CRs fight over one robot (permission overwrite
+	// + a password rotation that breaks the other's stored Secret). Refuse.
 	if descNS, descName, ok := ParseRobotDescription(existing.Description); ok && (descNS != ha.Namespace || descName != ha.Name) {
 		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
 			"Harbor robot %q belongs to HarborAccess %s/%s, not %s/%s (robot-name collision); refusing to adopt",
@@ -440,11 +443,15 @@ func (r *Reconciler) writeRobotSecret(ctx context.Context, ha *harborv1alpha1.Ha
 }
 
 func (r *Reconciler) secretNameFor(ha *harborv1alpha1.HarborAccess) string {
-	// We do not hash-truncate here yet: the longest reasonable HarborAccess
-	// namespace+name combination fits well under Kubernetes' 253-char name
-	// limit. If we ever encounter a real CR that overflows, mirror the
-	// truncation pattern from harbor/naming.go.
-	return SecretNamePrefix + ha.Namespace + "-" + ha.Name
+	// "robot-<haNs>.<haName>" — the namespace and name are joined with '.',
+	// NOT '-', so the mapping is injective (ADR-0018): the HarborAccess
+	// namespace is a dot-free RFC 1123 label, so the first dot after it is an
+	// unambiguous boundary even though both fields may contain dashes. The
+	// data plane mirrors this in robotSecretName (handler.go) — keep both in
+	// lockstep (ADR-0015). The result is a valid Secret name (DNS subdomain;
+	// dots allowed). We do not hash-truncate here: the longest reasonable
+	// namespace+name combination fits well under Kubernetes' 253-char limit.
+	return SecretNamePrefix + ha.Namespace + "." + ha.Name
 }
 
 func (r *Reconciler) secretLabels(ha *harborv1alpha1.HarborAccess) map[string]string {

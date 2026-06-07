@@ -91,22 +91,19 @@ the Harbor hostname (`harbor.example.com`).
 Bridges share a Harbor instance but never each other's robots:
 
 - **Layer 1:** Each bridge only manages robots whose name starts with
-  `bridge-<cluster-name>-`.
+  the dot-terminated ownership prefix `bridge-<cluster-name>.`
+  ([ADR-0018](docs/adr/0018-dot-delimited-naming.md)).
 - **Layer 2:** Each bridge only adopts a robot whose description
   contains `cluster=<cluster-name>`.
 
-Layer 1 alone would fail when one cluster name is a hyphen-prefix of
-another (e.g. `prod` would match `prod-eu`'s robots). Layer 2 closes
-that gap unless both clusters share a description token, which they
-cannot if their `BRIDGE_CLUSTER_NAME`s differ. See
+Because the cluster field is a dot-free DNS label, distinct cluster names
+produce non-prefixing ownership prefixes: `bridge-prod.` is *not* a prefix of
+`bridge-prod-eu.flux.svc` (the character after `bridge-prod` is `-`, not the
+required `.`). So Layer 1 alone already isolates clusters, and there is **no**
+"cluster names must not be hyphen-prefixes of each other" operator burden — the
+earlier `-`-delimited scheme had one; ADR-0018 removed it. Layer 2 remains as
+defense-in-depth. See [ADR-0018](docs/adr/0018-dot-delimited-naming.md) and
 [ADR-0009](docs/adr/0009-multi-cluster-topology.md).
-
-**Operator burden:** cluster names *must not* be hyphen-prefixes of
-each other across bridges sharing a Harbor. Pick names that are
-disjoint in this sense: `prod-eu-west` and `prod-us-east` are fine;
-`prod` and `prod-eu` are not. The reconciler refuses to adopt
-mismatched robots but **does not detect this misconfiguration at
-startup**. Choose names carefully.
 
 ### Stale credentials after `HarborAccess` deletion
 
@@ -297,7 +294,7 @@ credential issued
   audience=harbor.example.com
   harboraccess=harbor-bridge-system/flux-access
   generation=3
-  robot=robot$bridge-prod-eu-west-flux-system-source-controller
+  robot=robot$bridge-prod-eu-west.flux-system.source-controller
   ttl_seconds=3600
   image=harbor.example.com/production/myimg:v1
 ```

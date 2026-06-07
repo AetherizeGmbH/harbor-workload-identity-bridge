@@ -39,8 +39,8 @@ const (
 	// every system-level robot name on read paths (GET /robots,
 	// GET /robots/{id}). POST /robots accepts the un-prefixed name and
 	// Harbor adds the prefix on store. So the bridge sends
-	// "bridge-<cluster>-<ns>-<sa>" to Create but reads back
-	// "robot$bridge-<cluster>-<ns>-<sa>". Every comparison between an
+	// "bridge-<cluster>.<ns>.<sa>" to Create but reads back
+	// "robot$bridge-<cluster>.<ns>.<sa>". Every comparison between an
 	// internally-constructed name and a name from Harbor must reckon
 	// with this asymmetry — see OwnsRobot and GetByName.
 	HarborRobotPrefix = "robot$"
@@ -62,22 +62,36 @@ var ErrClusterNameTooLong = errors.New("cluster name leaves no room for SA ident
 // (cluster, SA namespace, SA name) tuple. Reconciles must produce the same
 // output for the same input, so this function is intentionally pure.
 //
-// The natural form is "bridge-<cluster>-<ns>-<sa>". If that exceeds
-// RobotNameCap, the function falls back to a deterministic truncation:
-// the prefix is preserved, the ns+sa portion is truncated to fit, and a
-// hex-encoded SHA-256 suffix of the full pre-truncation name disambiguates
-// collisions.
+// The natural form is "bridge-<cluster>.<ns>.<sa>" — the three identity
+// fields are joined with '.', NOT '-'. This is what makes the mapping
+// injective (ADR-0018): cluster, SA namespace, and SA name are all
+// dash-allowed DNS labels, so a '-' delimiter is ambiguous
+// ("bridge-c-a-b-x" could be ns "a"/sa "b-x" or ns "a-b"/sa "x"). A '.'
+// delimiter is unambiguous because every field LEFT of the last dot is a
+// Kubernetes namespace or the cluster label, none of which may contain a
+// dot (RFC 1123 label). The trailing field (SA name) may contain dots
+// without breaking the split. The same '.'-after-cluster boundary also
+// retires ADR-0009's hyphen-prefix ownership footgun (see OwnsRobot).
+//
+// If the natural form exceeds RobotNameCap, the function falls back to a
+// deterministic truncation: the "bridge-<cluster>." prefix is preserved,
+// the ns.sa portion is truncated to fit, and a hex-encoded SHA-256 suffix
+// of the full pre-truncation name disambiguates (probabilistically — this
+// is the only path where injectivity rests on the hash rather than the
+// delimiter).
 //
 // All inputs must satisfy Harbor's robot-name regex segment rules
-// (lowercase alphanumerics + . _ - separators); the caller is responsible
-// for validating this upstream (CRD pattern markers on serviceAccountRef
-// fields and BRIDGE_CLUSTER_NAME validation handle this today).
+// (lowercase alphanumerics + . _ - separators) AND the injectivity
+// invariant above (no dots in cluster or SA namespace); the caller is
+// responsible for validating this upstream (CRD pattern markers on
+// serviceAccountRef fields and BRIDGE_CLUSTER_NAME validation handle this
+// today — both forbid dots).
 func RobotName(cluster, saNamespace, saName string) (string, error) {
-	full := fmt.Sprintf("%s%s-%s-%s", robotNamePrefix, cluster, saNamespace, saName)
+	full := fmt.Sprintf("%s%s.%s.%s", robotNamePrefix, cluster, saNamespace, saName)
 	if len(full) <= RobotNameCap {
 		return full, nil
 	}
-	prefix := fmt.Sprintf("%s%s-", robotNamePrefix, cluster)
+	prefix := fmt.Sprintf("%s%s.", robotNamePrefix, cluster)
 	digest := hashOf(full)
 
 	// budget = chars available between prefix and trailing "-<digest>".
@@ -85,7 +99,7 @@ func RobotName(cluster, saNamespace, saName string) (string, error) {
 	if budget < 1 {
 		return "", fmt.Errorf("%w: cluster %q", ErrClusterNameTooLong, cluster)
 	}
-	mid := saNamespace + "-" + saName
+	mid := saNamespace + "." + saName
 	if len(mid) > budget {
 		mid = mid[:budget]
 	}
@@ -103,7 +117,7 @@ func RobotName(cluster, saNamespace, saName string) (string, error) {
 // whose names do not begin with this string are not managed by this bridge
 // (ADR-0009 safety invariant).
 func ClusterPrefix(cluster string) string {
-	return robotNamePrefix + cluster + "-"
+	return robotNamePrefix + cluster + "."
 }
 
 // OwnsRobot reports whether the given robot name belongs to the bridge in
@@ -115,11 +129,14 @@ func ClusterPrefix(cluster string) string {
 // "robot$<internal>"). Callers should not have to know which form they
 // hold — this is the single normalization point.
 //
-// Caveat: prefix matching has a known false-positive class when cluster
-// names are hyphen-prefixes of each other (e.g. cluster "prod" would see
-// cluster "prod-eu"'s robots as its own). This is documented in ADR-0009
-// as an operator responsibility (cluster names must be chosen so none is a
-// hyphen-prefix of another).
+// The ownership prefix is "bridge-<cluster>." (dot-terminated, ADR-0018).
+// Because the cluster field is a dot-free DNS label, distinct cluster names
+// produce non-prefixing ownership prefixes — "bridge-prod." is NOT a prefix
+// of "bridge-prod-eu.flux.svc" (the char after "bridge-prod" is '-', not the
+// required '.'). This retires ADR-0009's hyphen-prefix false-positive class
+// (where cluster "prod" saw cluster "prod-eu"'s robots): the dot terminator
+// is the boundary the old '-' terminator could not provide. The
+// description-tag check (RobotBelongsToCluster) remains as defense-in-depth.
 func OwnsRobot(cluster, robotName string) bool {
 	if cluster == "" {
 		return false

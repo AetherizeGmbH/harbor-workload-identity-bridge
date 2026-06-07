@@ -117,7 +117,7 @@ echo
 
 Once logged in, the bridge-managed robot accounts show up under
 **Administration → Robot Accounts** — one robot per `HarborAccess`
-CR, prefixed `robot$bridge-<clusterName>-<sa-namespace>-<sa-name>`
+CR, prefixed `robot$bridge-<clusterName>.<sa-namespace>.<sa-name>`
 ([ADR-0003](docs/adr/0003-persistent-robots-per-harboraccess.md)),
 described with the chart's managed-by tag + the originating CR
 ([ADR-0012](docs/adr/0012-robot-description-as-component-contract.md)):
