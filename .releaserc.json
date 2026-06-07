@@ -44,7 +44,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "sed -i 's/^version: .*/version: ${nextRelease.version}/' charts/harbor-bridge/Chart.yaml && sed -i 's/^appVersion: .*/appVersion: \"${nextRelease.version}\"/' charts/harbor-bridge/Chart.yaml && make chart-golden-update"
+        "prepareCmd": "sed -i 's/^version: .*/version: ${nextRelease.version}/' charts/harbor-bridge/Chart.yaml && sed -i 's/^appVersion: .*/appVersion: \"${nextRelease.version}\"/' charts/harbor-bridge/Chart.yaml && sed -i -E 's/--version [0-9]+\\.[0-9]+\\.[0-9]+/--version ${nextRelease.version}/' README.md && make chart-golden-update"
       }
     ],
     [
@@ -54,7 +54,8 @@
           "CHANGELOG.md",
           "charts/harbor-bridge/Chart.yaml",
           "charts/harbor-bridge/tests/golden/default.yaml",
-          "charts/harbor-bridge/tests/golden/mtls.yaml"
+          "charts/harbor-bridge/tests/golden/mtls.yaml",
+          "README.md"
         ],
         "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }
