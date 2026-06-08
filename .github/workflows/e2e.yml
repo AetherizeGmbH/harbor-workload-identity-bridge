@@ -65,34 +65,3 @@ jobs:
           set -Eeuo pipefail
           tofu init
           TF_VAR_pause_after_pull=false tofu test -verbose 2>&1 | tee /tmp/tofu-test.log
-      - name: Capture cluster diagnostics on failure
-        # Runs BEFORE the cleanup happens, so we still see the actual
-        # pod state, kubelet logs, and bridge metrics that let us tell
-        # apart "kubelet silent-abort bug" from "networking", "TLS",
-        # "DNS" etc.
-        if: failure()
-        run: |
-          set +e
-          mkdir -p /tmp/diag
-          for node in $(docker ps --filter "label=io.x-k8s.kind.cluster=bridge-e2e" --format "{{.Names}}"); do
-            docker exec "$node" journalctl -u kubelet --no-pager -n 500 > "/tmp/diag/${node}.kubelet.log" 2>&1
-            docker exec "$node" sh -c 'cat /etc/default/kubelet 2>/dev/null; ls -la /etc/kubernetes/credential-provider /etc/kubernetes/credential-provider-config 2>/dev/null' > "/tmp/diag/${node}.cred-state.log" 2>&1
-          done
-          kubectl get pods -A -o wide                                > /tmp/diag/pods.txt 2>&1
-          kubectl describe pod -n test-pull -l app=bridge-pull-test  > /tmp/diag/pull-test.describe.txt 2>&1
-          kubectl logs    -n harbor-bridge-system deploy/harbor-bridge --tail=200 > /tmp/diag/bridge.log 2>&1
-          kubectl logs    -n harbor-bridge-system ds/harbor-bridge-plugin --tail=100 > /tmp/diag/plugin.log 2>&1
-          kubectl -n harbor-bridge-system get events --sort-by='.lastTimestamp' > /tmp/diag/bridge-events.txt 2>&1
-          kubectl -n test-pull get events --sort-by='.lastTimestamp'             > /tmp/diag/test-pull-events.txt 2>&1
-      - name: Upload tofu test log
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: tofu-test-log
-          path: /tmp/tofu-test.log
-      - name: Upload diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: cluster-diagnostics
-          path: /tmp/diag/
