@@ -66,6 +66,18 @@ variable "fail_message" {
   default = "test-exec-pod failed; check pod logs"
 }
 
+variable "image_pull_policy" {
+  type        = string
+  default     = "Always"
+  description = "Container imagePullPolicy. Use IfNotPresent for kind-loaded, local-only images (e.g. e2e-seed:e2e) that no registry can serve."
+}
+
+variable "env_from_secret" {
+  type        = string
+  default     = ""
+  description = "Optional Secret name in the job namespace; its keys are exposed as env vars via envFrom (e.g. a robot-credential Secret's username/password)."
+}
+
 locals {
   ns      = coalesce(var.namespace, var.name)
   use_sa  = var.service_account_name != ""
@@ -97,9 +109,17 @@ resource "kubernetes_job_v1" "this" {
         container {
           name              = "main"
           image             = var.image
-          image_pull_policy = "Always"
+          image_pull_policy = var.image_pull_policy
           command           = var.command
           args              = var.args
+          dynamic "env_from" {
+            for_each = var.env_from_secret != "" ? [var.env_from_secret] : []
+            content {
+              secret_ref {
+                name = env_from.value
+              }
+            }
+          }
         }
       }
     }
