@@ -324,6 +324,8 @@ present in `/etc/default/kubelet`.
 
 ## Status and roadmap
 
+### Shipped
+
 | Phase | What | State |
 | --- | --- | --- |
 | 1 | Scaffolding, CRD types, ADRs 0001–0008 | ✅ Complete |
@@ -332,6 +334,43 @@ present in `/etc/default/kubelet`.
 | 4 | Plugin binary (KEP-4412 stdin/stdout protocol), ADR-0015 | ✅ Complete |
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
 | 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
+
+### Next
+
+In order.
+
+1. **Harbor compatibility matrix.** State which Harbor versions the
+   bridge works against, and test each one instead of asserting it.
+   `make e2e` takes the Harbor version as a parameter, and CI runs the
+   full pull chain across the supported range and fills in the table
+   from those runs. The floor is the oldest robot-account API the
+   reconciler depends on; the ceiling is the newest version we've run.
+
+2. **Plugin installation on managed clusters.** The DaemonSet
+   `nsenter`s into PID 1 and patches `/etc/default/kubelet` (see the
+   upgrade caveat above). That fits self-managed nodes. On EKS, GKE,
+   and AKS the node image already wires the credential-provider
+   directory and kubelet config, so patching breaks them. Add install
+   modes for those three that drop the binary, config, and CA without
+   touching kubelet. Separately, hash the on-disk config so a `helm
+   upgrade` changing `matchImages`, `audience`, or the CA re-applies
+   instead of shortcutting the idempotency guard.
+
+3. **Label-selected `HarborAccess` CRs.** A bridge owns every
+   `HarborAccess` in its namespace. Add a label selector so one
+   cluster can run several bridges at once, each reconciling only the
+   CRs it matches: one bridge per Harbor, or one per team. The selector
+   joins the `bridge-<cluster>.` robot prefix as part of the ownership
+   boundary, so two bridges never touch the same robot.
+
+4. **Other registries via a backend plugin.** Move the Harbor-specific
+   code behind a translation layer so the CRD, reconciler, and data
+   plane no longer depend on Harbor, then add a Nexus backend. The flow
+   takes an SA token in and returns scoped credentials, which holds for
+   any registry; only account provisioning and the credential handshake
+   differ. It reuses the control-plane and data-plane split
+   ([ADR-0002](docs/adr/0002-bridge-control-plane-data-plane-split.md)),
+   with the backend as a third seam.
 
 ## Support and services
 
@@ -345,8 +384,7 @@ covers implementation, migration, and ongoing operation.
 
 ## Contributing
 
-This is single-maintainer alpha and not yet open to contributions. File
-an issue if you've found a bug or want to discuss the design. Any
+File an issue or a PR if you've found a bug or want to discuss the design. Any
 non-trivial change ships with an ADR.
 
 ## License

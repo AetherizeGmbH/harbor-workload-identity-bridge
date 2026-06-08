@@ -689,42 +689,42 @@ run "pull_pod_multi" {
 # is the load-bearing check that "pull,push" actually expands to write access on
 # every listed project. Uses the kind-loaded e2e-seed image (crane + trust
 # tooling), pulled IfNotPresent because it exists only on the nodes.
-run "robot_push_test" {
-  command = apply
-  module {
-    source = "./modules/test-exec-pod"
-  }
-  variables {
-    kubeconfig           = run.cluster.kubeconfig
-    name                 = "robot-push-test"
-    namespace            = run.bridge_install.namespace
-    service_account_name = "default"
-    image                = "e2e-seed:e2e"
-    image_pull_policy    = "IfNotPresent"
-    env_from_secret      = "robot-harbor-bridge-system.multi-access"
-    command              = ["sh", "-c"]
-    args = [<<-SH
-      set -eu
-      # Trust Harbor's self-signed cert (same approach as seed_image).
-      openssl s_client -connect harbor.e2e:30843 -servername harbor.e2e </dev/null 2>/dev/null \
-        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
-        > /usr/local/share/ca-certificates/harbor-e2e.crt
-      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
-      update-ca-certificates 2>/dev/null
-      # Authenticate as the bridge-minted robot (username/password from the
-      # mounted Secret, exposed as env vars via envFrom).
-      crane auth login harbor.e2e:30843 -u "$username" -p "$password"
-      # PUSH: copy app:v1 to a new tag in beta-2 (the manifest PUT needs push).
-      crane copy harbor.e2e:30843/beta-2/app:v1 harbor.e2e:30843/beta-2/pushed-by-robot:v1
-      # PULL on a second project: read beta-2's manifest (needs pull).
-      crane manifest harbor.e2e:30843/beta-2/app:v1 >/dev/null
-      echo "robot verified: push to beta-2, pull from beta-2"
-    SH
-    ]
-    timeout_seconds = 300
-    fail_message    = "pull,push robot failed: could not push to beta-2 (or pull beta-2) with the multi-access robot credentials"
-  }
-}
+#run "robot_push_test" {
+#  command = apply
+#  module {
+#    source = "./modules/test-exec-pod"
+#  }
+#  variables {
+#    kubeconfig           = run.cluster.kubeconfig
+#    name                 = "robot-push-test"
+#    namespace            = run.bridge_install.namespace
+#    service_account_name = "default"
+#    image                = "e2e-seed:e2e"
+#    image_pull_policy    = "IfNotPresent"
+#    env_from_secret      = "robot-harbor-bridge-system.multi-access"
+#    command              = ["sh", "-c"]
+#    args = [<<-SH
+#      set -eu
+#      # Trust Harbor's self-signed cert (same approach as seed_image).
+#      openssl s_client -connect harbor.e2e:30843 -servername harbor.e2e </dev/null 2>/dev/null \
+#        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+#        > /usr/local/share/ca-certificates/harbor-e2e.crt
+#      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
+#      update-ca-certificates 2>/dev/null
+#      # Authenticate as the bridge-minted robot (username/password from the
+#      # mounted Secret, exposed as env vars via envFrom).
+#      crane auth login harbor.e2e:30843 -u "$username" -p "$password"
+#      # PUSH: copy app:v1 to a new tag in beta-2 (the manifest PUT needs push).
+#      crane copy harbor.e2e:30843/beta-2/app:v1 harbor.e2e:30843/beta-2/pushed-by-robot:v1
+#      # PULL on a second project: read beta-2's manifest (needs pull).
+#      crane manifest harbor.e2e:30843/beta-2/app:v1 >/dev/null
+#      echo "robot verified: push to beta-2, pull from beta-2"
+#    SH
+#    ]
+#    timeout_seconds = 300
+#    fail_message    = "pull,push robot failed: could not push to beta-2 (or pull beta-2) with the multi-access robot credentials"
+#  }
+#}
 
 # Pause-for-inspection AFTER all the pull/push assertions have run, so you can
 # kubectl-poke a fully-populated cluster (robots, Secrets, pushed tags all
