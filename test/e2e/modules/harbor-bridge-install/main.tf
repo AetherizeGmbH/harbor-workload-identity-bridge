@@ -81,6 +81,40 @@ variable "plugin_image" {
   description = "Plugin container image. Required. See bridge_image."
 }
 
+variable "issuer_name" {
+  type        = string
+  default     = "harbor-bridge-ca"
+  description = "Name of the self-signed cert-manager ClusterIssuer created for the bridge's serving cert. Referenced by both the ClusterIssuer manifest and the chart's tls.issuerRef."
+}
+
+# Resource requests/limits for the bridge Deployment container, wired into
+# the chart's bridge.resources. Defaults mirror the chart's own defaults
+# (Burstable QoS: limits.memory ≫ requests.memory). Memory must be in Mi or
+# Gi format (validated below); CPU is free-form.
+variable "bridge_resources" {
+  type = object({
+    requests = optional(object({
+      cpu    = optional(string, "50m")
+      memory = optional(string, "64Mi")
+    }), {})
+    limits = optional(object({
+      cpu    = optional(string, "500m")
+      memory = optional(string, "256Mi")
+    }), {})
+  })
+  default     = {}
+  nullable    = false
+  description = "Resource requests/limits for the bridge Deployment container, fed straight into the chart's bridge.resources. Memory must be in Mi or Gi format."
+
+  validation {
+    condition = alltrue([
+      for m in [var.bridge_resources.requests.memory, var.bridge_resources.limits.memory] :
+      can(regex("^[0-9]+(Mi|Gi)$", m))
+    ])
+    error_message = "requests.memory and limits.memory must be in Mi or Gi format (e.g. \"64Mi\" or \"1Gi\")."
+  }
+}
+
 provider "helm" {
   kubernetes = {
     host                   = var.kubeconfig.host
@@ -126,7 +160,7 @@ resource "kubectl_manifest" "cluster_issuer" {
     apiVersion: cert-manager.io/v1
     kind: ClusterIssuer
     metadata:
-      name: harbor-bridge-ca
+      name: ${var.issuer_name}
     spec:
       selfSigned: {}
   YAML
@@ -160,14 +194,15 @@ resource "helm_release" "bridge" {
       image        = var.plugin_image
     }
     bridge = {
-      replicas = 1
-      logLevel = "debug"
-      image    = var.bridge_image
+      replicas  = 1
+      logLevel  = "debug"
+      image     = var.bridge_image
+      resources = var.bridge_resources
     }
     tls = {
       enabled = true
       issuerRef = {
-        name = "harbor-bridge-ca"
+        name = var.issuer_name
         kind = "ClusterIssuer"
       }
     }
