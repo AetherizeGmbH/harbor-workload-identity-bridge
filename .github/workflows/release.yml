@@ -35,7 +35,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5
-        with: { version: v4.2.0 }  # semantic-release prepareCmd regenerates chart goldens
+        with: { version: v4.2.1 }  # semantic-release prepareCmd regenerates chart goldens
       # cycjimmy/semantic-release-action exposes `new_release_published`
       # and `new_release_version` as step outputs — the bare `npx
       # semantic-release` does not, which silently broke our downstream
