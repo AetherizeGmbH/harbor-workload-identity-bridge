@@ -39,7 +39,7 @@ jobs:
         # match what brew installs locally.
         with: { tofu_version: 1.12.0 }
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5
-        with: { version: v4.2.1 }
+        with: { version: v4.2.2 }
       # No separate docker build step: the tofu test harness's
       # `build_images` run block (modules/docker-build) shells out to
       # `docker build` for bridge + plugin before the kind cluster
