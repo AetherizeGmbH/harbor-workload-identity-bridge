@@ -16,6 +16,7 @@
   "prConcurrentLimit": 20,
   "prHourlyLimit": 0,
   "rebaseWhen": "behind-base-branch",
+  "ignorePaths": ["**/node_modules/**", "**/vendor/**"],
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": true,
@@ -79,6 +80,16 @@
   "gomod": {
     "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"]
   },
+  "customManagers": [
+    {
+      "description": "Resolve versions stored in OpenTofu/Terraform variable defaults that the native terraform manager can't follow. Annotate the variable with a `# renovate:` comment on the line above its `default`.",
+      "customType": "regex",
+      "managerFilePatterns": ["/\\.tf$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+?)(?:\\s+versioning=(?<versioning>\\S+))?(?:\\s+registryUrl=(?<registryUrl>\\S+))?\\s*\\n\\s*default\\s*=\\s*\"(?:[^\"\\n]*:)?(?<currentValue>[^\":\\n]+)\""
+      ]
+    }
+  ],
   "vulnerabilityAlerts": {
     "enabled": true,
     "labels": ["security"],

@@ -29,7 +29,8 @@ variable "api_server_port" {
 }
 
 variable "node_image" {
-  type        = string
+  type = string
+  # renovate: datasource=docker depName=kindest/node
   default     = "kindest/node:v1.35.0"
   description = "kind node image (controls kubelet version)"
 }

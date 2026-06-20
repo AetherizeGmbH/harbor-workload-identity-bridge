@@ -61,7 +61,8 @@ variable "external_hostname" {
 }
 
 variable "version_harbor" {
-  type    = string
+  type = string
+  # renovate: datasource=helm depName=harbor registryUrl=https://helm.goharbor.io
   default = "1.16.0"
 }
 
