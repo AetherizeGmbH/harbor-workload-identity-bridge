@@ -89,7 +89,7 @@ jobs:
       matrix:
         dockerfile: [Dockerfile.bridge, Dockerfile.plugin]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
@@ -98,7 +98,7 @@ jobs:
     name: actionlint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       # Static-checks the workflows themselves: shellcheck on run: blocks,
       # ${{ }} expression typing, and invalid action inputs. Runs as the
       # upstream Docker image (digest-pinned; Renovate keeps tag+digest fresh).
