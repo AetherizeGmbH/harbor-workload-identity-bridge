@@ -13,7 +13,7 @@
 
 FROM gcr.io/go-containerregistry/crane:v0.21.7@sha256:6f95e0e453f09944a625fa219d6879aa2dfaf3f4c7fe3ac9bf41a0a41d45ec46 AS crane
 
-FROM alpine:3.20
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 RUN apk add --no-cache curl ca-certificates jq openssl
 COPY --from=crane /ko-app/crane /usr/local/bin/crane
 ENTRYPOINT ["/bin/sh"]
