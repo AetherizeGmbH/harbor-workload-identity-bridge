@@ -11,7 +11,7 @@
 # only ships the crane binary, so we copy that into a small alpine base
 # that also has the userland tools above.
 
-FROM gcr.io/go-containerregistry/crane:v0.21.6 AS crane
+FROM gcr.io/go-containerregistry/crane:v0.21.7@sha256:6f95e0e453f09944a625fa219d6879aa2dfaf3f4c7fe3ac9bf41a0a41d45ec46 AS crane
 
 FROM alpine:3.20
 RUN apk add --no-cache curl ca-certificates jq openssl
