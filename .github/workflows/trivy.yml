@@ -1,0 +1,63 @@
+name: trivy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required to publish the SARIF report to the repo's Security tab
+  # (code scanning). Free for this public repo; no GHAS needed.
+  security-events: write
+
+concurrency:
+  group: trivy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Trivy code scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      # Filesystem (repo) scan: dependency vulns (go.mod/go.sum),
+      # misconfigurations (Dockerfiles, Helm charts, OpenTofu) and
+      # leaked secrets. `version: latest` tracks the newest Trivy
+      # release; the action SHA itself is digest-pinned and bumped by
+      # Renovate's github-actions manager.
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: latest
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          # Without this the action forces ALL severities into the SARIF
+          # ("Building SARIF report with all severities") and `exit-code`
+          # then trips on LOW/MEDIUM too. Limiting the SARIF to the
+          # `severity` filter keeps the gate and the Security-tab report on
+          # the same set: HIGH/CRITICAL only.
+          limit-severities-for-sarif: true
+          # Don't gate on vulns that have no upstream fix yet — we can't
+          # act on them, so they shouldn't block PRs.
+          ignore-unfixed: true
+          # Accepted misconfigurations (e.g. the privileged node-installer
+          # DaemonSet) live here, each path-scoped and justified. Trivy does
+          # not auto-load the .yaml form, so point at it explicitly.
+          trivyignores: .trivyignore.yaml
+          # Fail the job on findings; the SARIF is written before exit, so
+          # the upload step (if: always()) still publishes results.
+          exit-code: "1"
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs

@@ -4,6 +4,8 @@ cover.out
 *.test
 *.out
 .claude/
+# Local agent orientation aid (ADR-0019 / not a shipped doc)
+CLAUDE.md
 .idea/
 .vscode/
 *.swp
