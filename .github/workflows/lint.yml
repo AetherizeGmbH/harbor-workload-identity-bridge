@@ -80,3 +80,26 @@ jobs:
           # over our 200-char soft limit in e2e.yml) shouldn't fail
           # CI. key-duplicates remains an `error` rule and so still fails.
           ~/.local/bin/yamllint -c .yamllint.yml .github/workflows charts/harbor-bridge
+
+  hadolint:
+    name: hadolint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile: [Dockerfile.bridge, Dockerfile.plugin]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # Static-checks the workflows themselves: shellcheck on run: blocks,
+      # ${{ }} expression typing, and invalid action inputs. Runs as the
+      # upstream Docker image (digest-pinned; Renovate keeps tag+digest fresh).
+      - uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
