@@ -19,6 +19,14 @@ jobs:
   release:
     name: semantic-release
     runs-on: ubuntu-latest
+    # semantic-release pushes the `chore(release)` commit back to main as
+    # the GitHub App (see the token step below). Unlike GITHUB_TOKEN, an
+    # App-authored push is NOT suppressed by GitHub's recursion guard, so
+    # it re-triggers this very workflow. Skip that echo run: its only new
+    # commit is the `chore(release)` chore, which produces no release, but
+    # evaluating it still spins up a pointless job. workflow_dispatch has
+    # no head_commit, so manual runs fall through the guard.
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):') }}
     outputs:
       # cycjimmy/semantic-release-action sets these — npx semantic-release alone does not.
       released: ${{ steps.semrel.outputs.new_release_published }}
@@ -28,6 +36,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # main's ruleset requires verified signatures and (once enabled)
+      # passing status checks — neither of which semantic-release's fresh
+      # direct push to main can satisfy (an unsigned commit with no prior
+      # check runs). We push as this GitHub App instead and add the App to
+      # the ruleset's bypass list, so the release push is exempt while
+      # humans and PRs stay fully gated. Reuses the Renovate App; it needs
+      # contents:write (push + create release) plus issues:write and
+      # pull-requests:write (semantic-release comments on released PRs).
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.RENOVATE_APP_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version: 22 }
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -55,13 +77,19 @@ jobs:
             @semantic-release/exec
             conventional-changelog-conventionalcommits
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # App token (not GITHUB_TOKEN): semantic-release uses GH_TOKEN/
+          # GITHUB_TOKEN both for the GitHub API and to build the
+          # authenticated push URL, so this routes the bypass-eligible
+          # App identity through the `git push` to main.
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-  # release-images.yml and release-chart.yml are dispatched explicitly
-  # from here. We can't rely on `on: push: tags` because semantic-release
-  # pushes the tag using the default GITHUB_TOKEN, and per GitHub's
-  # security model, events triggered by GITHUB_TOKEN do not create new
-  # workflow runs. (See: https://docs.github.com/actions/security-for-github-actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow)
+  # release-images.yml and release-chart.yml are dispatched explicitly from
+  # here, gated on a real release (released == 'true') so each fires exactly
+  # once per version with the precise tag. The App-pushed tag would now also
+  # satisfy `on: push: tags` (App pushes aren't recursion-suppressed like
+  # GITHUB_TOKEN), so release-images.yml's old push-tags fallback was removed
+  # to avoid a duplicate build racing this dispatch — manual rebuilds use its
+  # workflow_dispatch input instead.
   trigger-chart-release:
     name: Trigger chart-release
     needs: release

@@ -1,0 +1,45 @@
+name: scorecard
+
+on:
+  # Re-evaluate posture whenever branch protection changes, weekly, and on
+  # pushes to the default branch. Scorecard only scores the default branch,
+  # so it deliberately does not run on PRs.
+  branch_protection_rule:
+  schedule:
+    - cron: "0 7 * * 1"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload SARIF findings to the Security tab.
+      security-events: write
+      # Needed for the keyless signing of the published Scorecard result.
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Run analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishes the score to the public OpenSSF API so the repo can
+          # show a Scorecard badge; harmless for a public repo.
+          publish_results: true
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        with:
+          sarif_file: results.sarif
+          category: scorecard

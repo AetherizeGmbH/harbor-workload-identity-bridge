@@ -1,0 +1,34 @@
+# Accepted Trivy misconfigurations, each with justification and a path
+# scope so the suppression can't silently hide the same issue elsewhere.
+# Format: https://trivy.dev/docs/configuration/filtering/#trivyignoreyaml
+#
+# Reviewed in ADR-0019 (CI quality gates). Anything added here is a
+# conscious risk acceptance, not a way to make a real finding go away.
+
+misconfigurations:
+  # The plugin install DaemonSet is a node installer: its `install`
+  # container writes the kubelet credential-provider binary + config onto
+  # the host (/etc/kubernetes, host bin dir) and restarts kubelet. That
+  # genuinely requires host PID namespace, a privileged container, and a
+  # writable root FS. See charts/harbor-bridge/templates/plugin-daemonset.yaml
+  # (the `# need root to write into /etc/kubernetes` / `install handoff`
+  # comments). The runtime bridge Deployment and the pause container are
+  # fully locked down; these apply only to the install container, observed
+  # here via the rendered golden chart fixtures that Trivy scans.
+  - id: KSV-0010 # pod hostPID: true — host PID namespace for the install handoff
+    paths:
+      - "charts/harbor-bridge/tests/golden/*.yaml"
+  - id: KSV-0014 # install container rootfs writable — it writes host files
+    paths:
+      - "charts/harbor-bridge/tests/golden/*.yaml"
+  - id: KSV-0017 # install container privileged — writes /etc/kubernetes on host
+    paths:
+      - "charts/harbor-bridge/tests/golden/*.yaml"
+
+  # The e2e seed image is throwaway test scaffolding built during
+  # `make e2e` to prep Harbor; it is never shipped or run in production, so
+  # a non-root USER buys nothing. (The shipped Dockerfile.plugin does set a
+  # non-root USER.)
+  - id: DS-0002 # no USER instruction
+    paths:
+      - "test/e2e/seed/Dockerfile"

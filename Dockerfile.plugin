@@ -21,3 +21,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 COPY --from=builder /out/harbor-bridge-plugin /plugin/harbor-bridge-plugin
+# Default to a non-root UID. The chart's install container overrides this
+# to root (runAsUser: 0) because it writes onto the host, but defaulting
+# the image to non-root is the safe baseline for any other use.
+USER 65532:65532
