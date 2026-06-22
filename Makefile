@@ -60,13 +60,21 @@ envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
 	@KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test ./bridge/controlplane/... -run TestEnvtest -count=1 -v -timeout 120s
 
+# Optional pin for the Harbor Helm chart version the e2e harness installs.
+# Empty → the harness default (test/e2e/modules/harbor/main.tf). Set e.g.
+# `make e2e HARBOR_CHART_VERSION=1.13.5` to run the chain against an older
+# Harbor; this is what the harbor-compat CI matrix drives (ADR-0020). The
+# value is a *chart* version, not a Harbor app version (chart 1.N → Harbor 2.(N-4)).
+HARBOR_CHART_VERSION ?=
+e2e_harbor_var := $(if $(HARBOR_CHART_VERSION),TF_VAR_version_harbor=$(HARBOR_CHART_VERSION),)
+
 .PHONY: e2e
-e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/push assertions (~5 min)
-	cd test/e2e && tofu init -upgrade -no-color && TF_VAR_pause_after_pull=false tofu test -verbose
+e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/push assertions (~5 min). HARBOR_CHART_VERSION=<chart> pins Harbor.
+	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose
 
 .PHONY: e2e-pause
 e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep` to continue
-	cd test/e2e && tofu init -upgrade -no-color && TF_VAR_pause_after_pull=true tofu test -verbose
+	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose
 
 .PHONY: proxy
 proxy: ## Expose the cluster's apiserver at http://localhost:8001 so the bridge can fetch the JWKS off-cluster

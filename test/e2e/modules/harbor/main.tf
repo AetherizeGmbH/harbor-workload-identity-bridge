@@ -61,9 +61,17 @@ variable "external_hostname" {
 }
 
 variable "version_harbor" {
-  type = string
+  type        = string
+  default     = null
+  description = "Harbor Helm chart version to install. null → the renovate-pinned default in locals below (the normal path; the harbor-compat matrix overrides it per ADR-0020)."
+}
+
+locals {
   # renovate: datasource=helm depName=harbor registryUrl=https://helm.goharbor.io
-  default = "1.19.1"
+  default_version_harbor = "1.19.1"
+  # Single source of truth for the pin stays the line above so Renovate keeps
+  # bumping it; callers (incl. the compat matrix) override via var.version_harbor.
+  version_harbor = coalesce(var.version_harbor, local.default_version_harbor)
 }
 
 provider "helm" {
@@ -92,7 +100,7 @@ resource "helm_release" "harbor" {
   namespace        = var.namespace
   repository       = "https://helm.goharbor.io"
   chart            = "harbor"
-  version          = var.version_harbor
+  version          = local.version_harbor
   create_namespace = true
   timeout          = 900
   wait             = true

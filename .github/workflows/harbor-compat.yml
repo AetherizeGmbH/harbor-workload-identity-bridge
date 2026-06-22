@@ -1,0 +1,140 @@
+name: harbor-compat
+
+# Harbor compatibility matrix (ADR-0020). Runs the full kubelet-driven e2e
+# pull chain against several Harbor chart versions and writes the result into
+# the README compatibility table via an auto-opened PR. Weekly + on demand —
+# NOT per-PR: each leg stands up a real Harbor (~5 min) and four of those on
+# every change is wasteful. PR coverage stays single-version in e2e.yml.
+on:
+  schedule:
+    - cron: "0 4 * * 1"   # Mondays 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      charts:
+        description: >-
+          JSON array of Harbor *chart* versions to test (overrides the default
+          matrix). Use this to probe the floor downward, e.g. ["1.11.4","1.12.6"].
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harbor-compat
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    name: pick matrix
+    runs-on: ubuntu-latest
+    outputs:
+      charts: ${{ steps.pick.outputs.charts }}
+    steps:
+      - id: pick
+        env:
+          INPUT_CHARTS: ${{ inputs.charts }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_CHARTS" ]; then
+            echo "charts=$INPUT_CHARTS" >> "$GITHUB_OUTPUT"
+          else
+            # floor candidate + two mid + ceiling (chart 1.N -> Harbor 2.(N-4)):
+            # 1.13.5=2.9.5  1.15.2=2.11.2  1.17.5=2.13.5  1.19.1=2.15.1
+            echo 'charts=["1.13.5","1.15.2","1.17.5","1.19.1"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  matrix:
+    name: e2e ${{ matrix.chart }}
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        chart: ${{ fromJSON(needs.setup.outputs.charts) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: opentofu/setup-opentofu@847eaa4afeb791b06daa46e8eafa8b1b68d7cfb4 # v2
+        with: { tofu_version: 1.12.0 }
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5
+        with: { version: v4.2.2 }
+      - name: Install kind
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          install_only: true
+          version: v0.32.0
+      - name: Run e2e and record result
+        id: e2e
+        env:
+          CHART: ${{ matrix.chart }}
+        # No `set -e`: a red e2e must still produce a result record so the
+        # table shows the failure rather than the leg vanishing. The job is
+        # failed explicitly in the next step, after the artifact is uploaded.
+        run: |
+          set -uo pipefail
+          run_date="$(date -u +%F)"
+          helm repo add harbor https://helm.goharbor.io >/dev/null
+          helm repo update harbor >/dev/null
+          app="$(helm show chart harbor/harbor --version "$CHART" 2>/dev/null \
+            | awk -F': *' '/^appVersion:/{print $2}' | tr -d '"\r')"
+          [ -n "$app" ] || app="unknown"
+          ( cd test/e2e \
+            && tofu init \
+            && TF_VAR_version_harbor="$CHART" TF_VAR_pause_after_pull=false \
+               tofu test -verbose ) 2>&1 | tee /tmp/tofu-test.log
+          status_code=${PIPESTATUS[0]}
+          if [ "$status_code" -eq 0 ]; then status=pass; else status=fail; fi
+          mkdir -p compat-result
+          printf '{"chart":"%s","app":"%s","status":"%s","date":"%s"}\n' \
+            "$CHART" "$app" "$status" "$run_date" | tee compat-result/result.json
+          echo "status_code=$status_code" >> "$GITHUB_OUTPUT"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compat-result-${{ matrix.chart }}
+          path: compat-result/result.json
+          if-no-files-found: error
+      - name: Flag red run
+        if: steps.e2e.outputs.status_code != '0'
+        run: |
+          echo "::error::Harbor chart ${{ matrix.chart }} e2e failed" \
+            "(status ${{ steps.e2e.outputs.status_code }})"
+          exit 1
+
+  aggregate:
+    name: update README table
+    needs: matrix
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: compat-artifacts
+          pattern: compat-result-*
+      - name: Render compatibility table
+        run: |
+          set -euo pipefail
+          python3 hack/render-compat-table.py \
+            'compat-artifacts/compat-result-*/result.json' README.md
+      - name: Open PR with refreshed table
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          commit-message: "docs: refresh Harbor compatibility matrix from e2e runs"
+          title: "docs: refresh Harbor compatibility matrix"
+          body: >-
+            Auto-generated by the `harbor-compat` workflow from the latest matrix
+            e2e runs (ADR-0020). Floor = lowest passing Harbor, ceiling = highest.
+          branch: harbor-compat-table
+          delete-branch: true
+          labels: dependencies
+          add-paths: README.md
