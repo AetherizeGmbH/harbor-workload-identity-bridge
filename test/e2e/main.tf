@@ -17,3 +17,9 @@ variable "pause_after_pull" {
   description = "When true, the test pauses AFTER all the pull/push assertions via the test-sleep module — a file appears at test/e2e/.tofu-sleep and the apply blocks until you `rm` it. Lets you kubectl-poke a fully-populated cluster (robots, Secrets, pushed tags). Off in CI; flip on via TF_VAR_pause_after_pull=true."
   default     = false
 }
+
+variable "version_harbor" {
+  type        = string
+  description = "Harbor Helm *chart* version the harness installs (not the Harbor app version; chart 1.N → Harbor 2.(N-4)). Forwarded into the `run \"harbor\"` block in tests/02-bridge.tftest.hcl. Default null → the harbor module's own default (its current pin). The harbor-compat CI matrix sets this via TF_VAR_version_harbor to test the supported range (ADR-0020)."
+  default     = null
+}

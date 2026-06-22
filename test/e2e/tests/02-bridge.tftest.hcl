@@ -69,12 +69,12 @@ run "build_images" {
     images = {
       bridge = {
         tag        = "harbor-bridge:e2e"
-        dockerfile = "../../Dockerfile.bridge"
+        dockerfile = "Dockerfile.bridge"
         context    = "../.."
       }
       plugin = {
         tag        = "harbor-bridge-plugin:e2e"
-        dockerfile = "../../Dockerfile.plugin"
+        dockerfile = "Dockerfile.plugin"
         context    = "../.."
       }
       # alpine + curl + jq + crane — used by the seed_image Job.
@@ -82,7 +82,7 @@ run "build_images" {
       # curl) so we COPY the crane binary into a tiny alpine base.
       seed = {
         tag        = "e2e-seed:e2e"
-        dockerfile = "seed/Dockerfile"
+        dockerfile = "Dockerfile"
         context    = "seed"
       }
     }
@@ -118,6 +118,10 @@ run "harbor" {
     external_hostname = "harbor.e2e"
     https_node_port   = 30843
     http_node_port    = 30880
+    # null on a normal run → the harbor module's renovate-pinned default.
+    # The harbor-compat matrix sets TF_VAR_version_harbor to walk the
+    # supported chart range (ADR-0020).
+    version_harbor = var.version_harbor
   }
 }
 
