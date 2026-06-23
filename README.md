@@ -340,8 +340,8 @@ contract, not individually run.
 | Harbor | Chart | Tested | Last run (UTC) |
 | --- | --- | --- | --- |
 | 2.15.1 (ceiling) | 1.19.1 | ✅ | 2026-06-22 |
-| 2.13.5 | 1.17.5 | ⏳ pending first run | — |
-| 2.11.2 | 1.15.2 | ⏳ pending first run | — |
+| 2.13.5 | 1.17.5 | ✅ | 2026-06-22 |
+| 2.11.2 | 1.15.2 | ✅ | 2026-06-22 |
 | 2.9.5 (floor) | 1.13.5 | ✅ | 2026-06-22 |
 
 <!-- END HARBOR-COMPAT -->
