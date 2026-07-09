@@ -7,10 +7,10 @@ go 1.26.0
 // quadratic header decode DoS) and GO-2026-5039 (net/textproto error
 // escaping) — all reachable from the bridge's OIDC/x509 paths. See
 // AUDIT.md F11.
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
-	github.com/coreos/go-oidc/v3 v3.19.0
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-logr/logr v1.4.3
 	github.com/go-openapi/runtime v0.32.4
 	github.com/goharbor/go-client v0.213.1
