@@ -12,7 +12,7 @@ toolchain go1.26.5
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-logr/logr v1.4.4
-	github.com/go-openapi/runtime v0.32.6
+	github.com/go-openapi/runtime v0.33.0
 	github.com/goharbor/go-client v0.213.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/prometheus/client_golang v1.24.1
