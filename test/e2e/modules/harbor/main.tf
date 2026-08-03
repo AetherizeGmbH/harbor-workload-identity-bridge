@@ -68,7 +68,7 @@ variable "version_harbor" {
 
 locals {
   # renovate: datasource=helm depName=harbor registryUrl=https://helm.goharbor.io
-  default_version_harbor = "1.19.1"
+  default_version_harbor = "1.19.2"
   # Single source of truth for the pin stays the line above so Renovate keeps
   # bumping it; callers (incl. the compat matrix) override via var.version_harbor.
   version_harbor = coalesce(var.version_harbor, local.default_version_harbor)
