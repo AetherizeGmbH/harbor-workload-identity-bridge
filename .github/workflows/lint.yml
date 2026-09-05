@@ -19,7 +19,7 @@ jobs:
     name: golangci-lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
@@ -30,14 +30,14 @@ jobs:
           # series was stuck on go1.23/1.24, refused to load our go1.26
           # source). Action v7 is the first to accept linter v2.
           # Renovate's github-actions manager will bump both deterministically.
-          version: v2.12.2
+          version: v2.13.2
           args: --timeout=5m
 
   gofmt:
     name: gofmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with: { go-version-file: go.mod }
       - run: |
@@ -53,9 +53,9 @@ jobs:
     name: helm lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
-        with: { version: v4.2.3 }
+        with: { version: v4.2.4 }
       - run: helm lint charts/harbor-bridge -f charts/harbor-bridge/tests/values-complete.yaml
       - run: helm lint charts/harbor-bridge -f charts/harbor-bridge/tests/values-mtls.yaml
 
@@ -63,7 +63,7 @@ jobs:
     name: terraform fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
         # Match e2e.yml's pin: same major fmt rules, no laptop/CI drift.
         with: { tofu_version: 1.12.0 }
@@ -73,7 +73,7 @@ jobs:
     name: yamllint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           pip install --user yamllint
           # No --strict: warnings (e.g. one shell command that runs
@@ -89,8 +89,8 @@ jobs:
       matrix:
         dockerfile: [Dockerfile.bridge, Dockerfile.plugin]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
 
@@ -98,7 +98,7 @@ jobs:
     name: actionlint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # Static-checks the workflows themselves: shellcheck on run: blocks,
       # ${{ }} expression typing, and invalid action inputs. Runs as the
       # upstream Docker image (digest-pinned; Renovate keeps tag+digest fresh).
