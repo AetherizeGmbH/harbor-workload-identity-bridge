@@ -32,7 +32,7 @@ jobs:
       released: ${{ steps.semrel.outputs.new_release_published }}
       version:  ${{ steps.semrel.outputs.new_release_version }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -57,7 +57,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
-        with: { version: v4.2.3 }  # semantic-release prepareCmd regenerates chart goldens
+        with: { version: v4.2.4 }  # semantic-release prepareCmd regenerates chart goldens
       # cycjimmy/semantic-release-action exposes `new_release_published`
       # and `new_release_version` as step outputs — the bare `npx
       # semantic-release` does not, which silently broke our downstream
