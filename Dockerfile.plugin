@@ -19,7 +19,7 @@ COPY plugin ./plugin
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' \
     -o /out/harbor-bridge-plugin ./plugin
 
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 COPY --from=builder /out/harbor-bridge-plugin /plugin/harbor-bridge-plugin
 # Default to a non-root UID. The chart's install container overrides this
 # to root (runAsUser: 0) because it writes onto the host, but defaulting
