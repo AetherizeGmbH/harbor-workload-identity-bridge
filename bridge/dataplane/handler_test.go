@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
 // ----------------------------------------------------------------------------
@@ -582,32 +583,66 @@ func TestHandler_IssuerMismatch_NoMatch(t *testing.T) {
 // owner-label mismatch directly to prove that, even if that invariant ever
 // regressed, the read path refuses to hand a token matched to CR A a Secret
 // stamped (via labels) for CR B — returning 403, never the other CR's creds.
-// TestRobotSecretName_ContractPinned pins the data-plane mirror of the Secret
-// name to the exact dot-delimited contract (ADR-0018 / ADR-0015). The data
-// plane cannot import the control plane, so this literal must stay in lockstep
-// with controlplane.secretNameFor by hand; controlplane has the matching pin
-// (TestSecretNameFor_DotDelimiterIsInjective). If the two ever diverge the
-// plugin reads a Secret the reconciler never wrote and every pull 503s.
-func TestRobotSecretName_ContractPinned(t *testing.T) {
-	ha := &harborv1alpha1.HarborAccess{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "flux-access"},
+// TestHandler_SecretNameMatchesControlPlane: the handler must read the
+// Secret under exactly the name the control plane writes. Both use
+// robotsecret.Name now; this pins the literal so a change is deliberate.
+func TestHandler_SecretNameMatchesControlPlane(t *testing.T) {
+	if got := robotsecret.Name(hTestHANs, hTestHAName); got != newTestRobotSecret().Name {
+		t.Fatalf("fixture Secret name %q != robotsecret.Name %q", newTestRobotSecret().Name, got)
 	}
-	if got, want := robotSecretName(ha), "robot-team-a.flux-access"; got != want {
-		t.Fatalf("robotSecretName = %q, want %q (must match controlplane.secretNameFor)", got, want)
+}
+
+// TestHandler_CacheNeverOutlivesTheRotationPromise pins ADR-0023: kubelet
+// must not cache the password past the control plane's rotation-not-before
+// instant, or the scheduled daily rotation breaks pulls on every node
+// that cached within the last tokenTTL.
+func TestHandler_CacheNeverOutlivesTheRotationPromise(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		notBefore string // "" = annotation absent (older bridge)
+		want      int
+	}{
+		{"no promise keeps tokenTTL", "", 3600},
+		{"far promise keeps tokenTTL", now.Add(20 * time.Hour).Format(time.RFC3339), 3600},
+		{"near promise caps the cache", now.Add(10*time.Minute + 500*time.Millisecond).Format(time.RFC3339Nano), 600},
+		{"passed promise disables caching", now.Add(-time.Second).Format(time.RFC3339), 0},
+		{"unparseable promise keeps tokenTTL", "tomorrow", 3600},
 	}
-	// Overflow must hash-truncate to a valid (<=253) Secret name, matching
-	// the control-plane helper's behaviour. (Byte-for-byte equality with the
-	// control-plane output rests on the two implementations being identical;
-	// the short-form literal above pins the common drift, the delimiter.)
-	long := &harborv1alpha1.HarborAccess{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: strings.Repeat("z", 300)},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sec := newTestRobotSecret()
+			if tc.notBefore != "" {
+				sec.Annotations = map[string]string{robotsecret.AnnotationRotationNotBefore: tc.notBefore}
+			}
+			k8s := fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(newTestHA(), sec).Build()
+			h := &Handler{
+				K8sClient: k8s,
+				Validator: &stubValidator{claims: newTestClaims()},
+				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+				Now:       func() time.Time { return now },
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, bearerReq(t, ""))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", w.Code, w.Body.String())
+			}
+			if got := decodeResp(t, w).ExpiresInSecs; got != tc.want {
+				t.Errorf("ExpiresInSecs = %d, want %d", got, tc.want)
+			}
+		})
 	}
-	got := robotSecretName(long)
-	if len(got) > 253 {
-		t.Fatalf("overflow Secret name len = %d, want <= 253: %q", len(got), got)
+}
+
+func TestHandler_ResponseIsNotStorable(t *testing.T) {
+	fx := newHandlerFixture(t)
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, ""))
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
 	}
-	if !strings.HasPrefix(got, "robot-") {
-		t.Fatalf("overflow Secret name lost its prefix: %q", got)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store on a response carrying a password", got)
 	}
 }
 

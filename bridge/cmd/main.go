@@ -51,12 +51,14 @@ const (
 	envTLSClientCAFile  = "BRIDGE_TLS_CLIENT_CA_FILE"
 	envListenAddr       = "BRIDGE_LISTEN_ADDR"
 	envHealthAddr       = "BRIDGE_HEALTH_ADDR"
+	envMetricsAddr      = "BRIDGE_METRICS_ADDR"
 	envEnableLeaderElec = "BRIDGE_ENABLE_LEADER_ELECTION"
 
 	defaultTLSCertFile = "/etc/bridge/tls/tls.crt"
 	defaultTLSKeyFile  = "/etc/bridge/tls/tls.key"
 	defaultListenAddr  = ":8443"
 	defaultHealthAddr  = ":8081"
+	defaultMetricsAddr = ":8080"
 
 	leaderElectionID = "bridge.harbor.aetherize.io"
 )
@@ -96,18 +98,21 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("get rest config: %w", err)
 	}
-	if err := buildScheme(); err != nil {
+	// clientgo gives us the core resources; add our CRD so the manager's
+	// cached client can decode HarborAccess objects.
+	if err := harborv1alpha1.AddToScheme(clientgoscheme.Scheme); err != nil {
 		return fmt.Errorf("build scheme: %w", err)
 	}
 
 	// Step 3: build the controller-runtime Manager.
 	mgrOpts := ctrl.Options{
 		Scheme: clientgoscheme.Scheme,
-		// Disable the manager's HTTP metrics server; our data-plane
-		// server exposes /metrics on the same TLS as the credential
-		// endpoint. controller-runtime's metrics.Registry is still
-		// populated and re-used by our server.
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		// /metrics is served by the manager's metrics server on its own
+		// port, reachable on the pod network only. It used to share the
+		// credential listener, which the NodePort exposes on every node
+		// to anything that can reach it. "0" disables it. The data-plane
+		// metrics register into the same controller-runtime registry.
+		Metrics: metricsserver.Options{BindAddress: envOrDefault(envMetricsAddr, defaultMetricsAddr)},
 
 		LeaderElection:          envBool(envEnableLeaderElec, false),
 		LeaderElectionID:        leaderElectionID,
@@ -139,16 +144,14 @@ func run() error {
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
 	}
-	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
-		return fmt.Errorf("add readyz: %w", err)
-	}
 
 	// Step 4: load Harbor admin credentials and build the Harbor client.
 	adminCreds, err := cfg.LoadAdminCreds()
 	if err != nil {
 		return fmt.Errorf("load admin creds: %w", err)
 	}
-	harborClient, err := harbor.NewClient(cfg.HarborURL, adminCreds.Username, adminCreds.Password, nil)
+	harborClient, err := harbor.NewClient(cfg.HarborURL, adminCreds.Username, adminCreds.Password, nil,
+		harbor.WithRobotPrefix(cfg.HarborRobotPrefix))
 	if err != nil {
 		return fmt.Errorf("build harbor client: %w", err)
 	}
@@ -167,6 +170,9 @@ func run() error {
 	// Step 6: Janitor as a manager.Runnable.
 	if err := mgr.Add(&controlplane.Janitor{
 		Client: mgr.GetClient(),
+		// Uncached: the janitor must never judge a robot against a spec
+		// older than the one the robot was created from.
+		Reader: mgr.GetAPIReader(),
 		Harbor: harborClient,
 		Config: cfg,
 	}); err != nil {
@@ -217,7 +223,6 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle(dataplane.CredentialsPath, handler)
-	mux.Handle("/metrics", dataplane.PromHandler(crmetrics.Registry))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -235,6 +240,11 @@ func run() error {
 	if err := mgr.Add(server); err != nil {
 		return fmt.Errorf("add server: %w", err)
 	}
+	// Ready means "can serve credentials": the listener is bound (it
+	// binds only after the informer caches synced).
+	if err := mgr.AddReadyzCheck("dataplane", server.ReadyCheck); err != nil {
+		return fmt.Errorf("add readyz: %w", err)
+	}
 
 	// Step 9: start the manager. Blocks until SIGTERM/SIGINT.
 	setupLog.Info("starting bridge", "leader_election", mgrOpts.LeaderElection)
@@ -242,12 +252,6 @@ func run() error {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
-}
-
-// buildScheme adds our CRD types to the clientgo scheme so the manager's
-// cached client can decode HarborAccess objects.
-func buildScheme() error {
-	return harborv1alpha1.AddToScheme(clientgoscheme.Scheme)
 }
 
 // newLogger constructs a zap-backed logr.Logger at the requested level.

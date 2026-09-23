@@ -103,7 +103,10 @@ func TestMetrics_OIDCFailureClassification(t *testing.T) {
 	}{
 		{errors.New("oidc: token is expired"), OIDCReasonExpired, "expired"},
 		{errors.New("oidc: failed to verify signature"), OIDCReasonBadSignature, "bad_signature"},
-		{errors.New("oidc: issuer did not match"), OIDCReasonWrongIssuer, "wrong_issuer"},
+		// The exact message go-oidc v3 emits (oidc/verify.go); the old
+		// test used an invented "issuer did not match" string, so the
+		// wrong_issuer bucket could never fire in production.
+		{errors.New(`oidc: id token issued by a different provider, expected "https://a" got "https://b"`), OIDCReasonWrongIssuer, "wrong_issuer"},
 		{errors.New("oidc: malformed jwt"), OIDCReasonMalformed, "malformed"},
 		{errors.New("something else entirely"), OIDCReasonOther, "other"},
 	}

@@ -118,7 +118,9 @@ func classifyOIDCError(err error) string {
 		return OIDCReasonExpired
 	case strings.Contains(s, "signature"):
 		return OIDCReasonBadSignature
-	case strings.Contains(s, "issuer"):
+	// go-oidc's real message is "oidc: id token issued by a different
+	// provider, expected %q got %q" — it never contains "issuer".
+	case strings.Contains(s, "different provider"), strings.Contains(s, "issuer"):
 		return OIDCReasonWrongIssuer
 	case strings.Contains(s, "malformed"),
 		strings.Contains(s, "parse"),
