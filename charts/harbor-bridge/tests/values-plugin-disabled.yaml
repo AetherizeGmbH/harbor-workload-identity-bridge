@@ -1,0 +1,20 @@
+# plugin.enabled=false — the plugin is provisioned out of band (Talos
+# system extension, baked node image; issue #46). No DaemonSet, plugin
+# ConfigMap, or plugin ServiceAccount may render; the bridge and the
+# kubelet audience RBAC must. Also exercises the operator-provided TLS
+# Secret path (tls.enabled=false) and a custom Harbor robot prefix.
+clusterName: prod-eu-west
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+  robotNamePrefix: "robot_"
+
+plugin:
+  enabled: false
+  audience: harbor-bridge-prod-eu-west
+
+tls:
+  enabled: false
+  existingSecret: my-bridge-tls

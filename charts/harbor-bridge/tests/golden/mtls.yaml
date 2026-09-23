@@ -1,4 +1,27 @@
 ---
+# Source: harbor-workload-identity-bridge/templates/bridge-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.3.7
+    app.kubernetes.io/version: "0.3.7"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-workload-identity-bridge
+      app.kubernetes.io/instance: harbor-bridge
+      app.kubernetes.io/component: bridge
+
+---
 # Source: harbor-workload-identity-bridge/templates/bridge-serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -59,7 +82,7 @@ data:
       - name: harbor-bridge-plugin
         apiVersion: credentialprovider.kubelet.k8s.io/v1
         matchImages:
-          - "harbor.example.com/*"
+          - "harbor.example.com"
         defaultCacheDuration: "1h"
         env:
           - name: HARBOR_BRIDGE_ENDPOINT
@@ -220,6 +243,34 @@ subjects:
     namespace: harbor-bridge-system
 
 ---
+# Source: harbor-workload-identity-bridge/templates/bridge-metrics-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-bridge-metrics
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.3.7
+    app.kubernetes.io/version: "0.3.7"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+    harbor.aetherize.io/service: metrics
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
+
+---
 # Source: harbor-workload-identity-bridge/templates/bridge-service.yaml
 apiVersion: v1
 kind: Service
@@ -283,12 +334,16 @@ spec:
         app.kubernetes.io/instance: harbor-bridge
         app.kubernetes.io/component: plugin
       annotations:
-        # Force re-roll on config or CA rotation so the on-disk copies
-        # are refreshed across the fleet.
-        plugin.harbor.aetherize.io/config-checksum: 891242a8d3880293bbcb7096b63a788f766967462c2983221e8d3efeb53e36de
+        # Re-roll when the rendered provider config changes (the installer
+        # then converges kubelet) or when the TLS wiring changes (which
+        # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
+        # container copies rotated files in place (ADR-0021).
+        plugin.harbor.aetherize.io/config-checksum: 0a23fc86b7f264c5c62bfcceb8d01c5fe8bff3d4ce8e0ce27af67f5b457514d2
         plugin.harbor.aetherize.io/tls-checksum: b84f1c25e5f65271fd9a4d3d3abf7821fc2b628c31b267eb978e29c1aff84e00
     spec:
       serviceAccountName: harbor-bridge-plugin
+      # The installer never talks to the Kubernetes API.
+      automountServiceAccountToken: false
       hostNetwork: false
       # Required so the installer can read kubelet's command line from
       # /proc (auto/merge discovery) and `nsenter -t 1 ...` into the
@@ -338,6 +393,7 @@ spec:
               mountPath: /mtls
               readOnly: true
           securityContext:
+            readOnlyRootFilesystem: true
             # nsenter into PID 1 (kubelet restart) requires full
             # privileges; the sync container below does not get them.
             privileged: true
@@ -373,8 +429,10 @@ spec:
                 fieldRef:
                   fieldPath: status.hostIP
           volumeMounts:
-            - name: host-root
-              mountPath: /host
+            # Only the directory it writes: a compromised sync container
+            # must not be a host-root compromise (audit H6).
+            - name: host-config
+              mountPath: /host/etc/kubernetes/credential-provider-config
             - name: kubelet-config
               mountPath: /config
               readOnly: true
@@ -385,10 +443,14 @@ spec:
               mountPath: /mtls
               readOnly: true
           securityContext:
-            # File writes only — no nsenter, no /proc. Root via the pod
-            # securityContext, but never privileged.
+            # Copies CA/mTLS files as root into a root-owned host dir —
+            # no capabilities, no nsenter, no /proc, never privileged.
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             limits:
               cpu: 100m
@@ -401,6 +463,10 @@ spec:
           hostPath:
             path: /
             type: Directory
+        - name: host-config
+          hostPath:
+            path: /etc/kubernetes/credential-provider-config
+            type: DirectoryOrCreate
         - name: kubelet-config
           configMap:
             name: harbor-bridge-plugin
@@ -456,10 +522,11 @@ spec:
         app.kubernetes.io/instance: harbor-bridge
         app.kubernetes.io/component: bridge
       annotations:
-        # Force pod restart on TLS Secret rotation. cert-manager renews
-        # the Secret in place; without this annotation the deployment
-        # keeps serving the cached cert until the pod is restarted.
-        bridge.harbor.aetherize.io/tls-cert-checksum: 3e593f32d31b45ade61d22bea7f40729550c782ba3f3ccca1a81b5ee34277017
+        # Re-roll when the TLS wiring changes (which Secret; chart- vs
+        # operator-managed). Certificate ROTATION needs no restart: the
+        # bridge reloads the serving pair and client CA from the mounted
+        # Secret on its own.
+        bridge.harbor.aetherize.io/tls-cert-checksum: 315530593d5c0a99d6e050b75b77101e8a76404a2b98a629ff7e739e09e76868
     spec:
       serviceAccountName: harbor-bridge
       automountServiceAccountToken: true
@@ -495,6 +562,9 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
           env:
             - name: BRIDGE_CLUSTER_NAME
               value: "prod-eu-west"
@@ -519,6 +589,8 @@ spec:
               value: "https://harbor.example.com"
             - name: BRIDGE_HARBOR_ADMIN_DIR
               value: /etc/bridge/harbor-admin
+            - name: BRIDGE_HARBOR_ROBOT_PREFIX
+              value: "robot$"
             - name: BRIDGE_FORCE_LOCAL_VALIDATION
               value: "true"
             - name: BRIDGE_LOG_LEVEL
@@ -533,6 +605,8 @@ spec:
               value: ":8443"
             - name: BRIDGE_HEALTH_ADDR
               value: ":8081"
+            - name: BRIDGE_METRICS_ADDR
+              value: ":8080"
             - name: BRIDGE_ENABLE_LEADER_ELECTION
               value: "true"
           volumeMounts:
@@ -542,6 +616,9 @@ spec:
             - name: tls
               mountPath: /etc/bridge/tls
               readOnly: true
+          # Ready = the credential listener is bound (it binds only after
+          # the informer caches synced) — so every replica the Service
+          # routes to can actually serve.
           readinessProbe:
             httpGet:
               path: /readyz
@@ -679,17 +756,13 @@ spec:
       app.kubernetes.io/name: harbor-workload-identity-bridge
       app.kubernetes.io/instance: harbor-bridge
       app.kubernetes.io/component: bridge
+      harbor.aetherize.io/service: metrics
   namespaceSelector:
     matchNames:
       - harbor-bridge-system
   endpoints:
-    - port: https
-      scheme: https
+    - port: metrics
+      scheme: http
       path: /metrics
       interval: 30s
       scrapeTimeout: 10s
-      tlsConfig:
-        # Prometheus reaches the bridge by Service DNS, which the cert
-        # covers. Operator configures the CA out-of-band.
-        serverName: harbor-bridge.harbor-bridge-system.svc
-        insecureSkipVerify: false

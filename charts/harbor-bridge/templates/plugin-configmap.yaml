@@ -8,6 +8,7 @@ the DaemonSet copies it there.
 that tells kubelet to project an SA-bound token per pod rather than
 caching one credential per image.
 */}}
+{{- if .Values.plugin.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -48,3 +49,4 @@ data:
           # See KEP-4412: this makes the SA token + UID part of the
           # cache key so each pod gets its own credential.
           cacheType: ServiceAccount
+{{- end }}

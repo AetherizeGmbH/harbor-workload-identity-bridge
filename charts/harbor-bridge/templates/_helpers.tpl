@@ -125,9 +125,6 @@ errors surface during `helm install` with the message text intact.
 {{- if not .Values.harbor.adminCredsSecret.name -}}
 {{- fail "harbor.adminCredsSecret.name is REQUIRED. Pre-create a Secret in the release namespace holding Harbor admin {username,password}." -}}
 {{- end -}}
-{{- if not .Values.plugin.matchImages -}}
-{{- fail "plugin.matchImages is REQUIRED. Without match patterns kubelet never invokes the plugin." -}}
-{{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
@@ -135,6 +132,8 @@ errors surface during `helm install` with the message text intact.
 {{- if not .Values.tls.issuerRef.name -}}
 {{- fail "tls.issuerRef.name is REQUIRED when tls.enabled=true. Provide a cert-manager (Cluster)Issuer." -}}
 {{- end -}}
+{{- else if not .Values.tls.existingSecret -}}
+{{- fail "tls.existingSecret is REQUIRED when tls.enabled=false. The bridge always serves TLS and the plugin always verifies it: name a Secret in the release namespace with tls.crt, tls.key and ca.crt." -}}
 {{- end -}}
 {{- if .Values.bridge.mTLS.enabled -}}
 {{- if not .Values.bridge.mTLS.clientIssuerRef.name -}}
@@ -144,11 +143,24 @@ errors surface during `helm install` with the message text intact.
 {{- if hasKey .Values.plugin "patchKubelet" -}}
 {{- fail "plugin.patchKubelet was removed (ADR-0021). Use plugin.install.mode instead: patchKubelet=true → mode: auto (or patch), patchKubelet=false → mode: none. See MIGRATION.md." -}}
 {{- end -}}
-{{- if not (has .Values.plugin.install.mode (list "auto" "merge" "patch" "none")) -}}
-{{- fail (printf "plugin.install.mode=%q is invalid. Must be one of: auto, merge, patch, none (ADR-0021)." .Values.plugin.install.mode) -}}
+{{- if .Values.plugin.enabled -}}
+{{- if not .Values.plugin.matchImages -}}
+{{- fail "plugin.matchImages is REQUIRED when plugin.enabled=true. Without match patterns kubelet never invokes the plugin." -}}
 {{- end -}}
-{{- if ne (empty .Values.plugin.install.binDir) (empty .Values.plugin.install.configFile) -}}
+{{- $install := .Values.plugin.install | default dict -}}
+{{- if not (has $install.mode (list "auto" "merge" "patch" "none")) -}}
+{{- fail (printf "plugin.install.mode=%q is invalid. Must be one of: auto, merge, patch, none (ADR-0021)." (toString $install.mode)) -}}
+{{- end -}}
+{{- if ne (empty $install.binDir) (empty $install.configFile) -}}
 {{- fail "plugin.install.binDir and plugin.install.configFile must be set together (both name merge-mode targets)." -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9:_.@-]*$" (toString $install.kubeletUnit)) -}}
+{{- fail (printf "plugin.install.kubeletUnit=%q is not a valid systemd unit name." (toString $install.kubeletUnit)) -}}
+{{- end -}}
+{{- range $k, $v := dict "plugin.hostBinaryDir" .Values.plugin.hostBinaryDir "plugin.hostConfigDir" .Values.plugin.hostConfigDir "plugin.install.stateDir" $install.stateDir "plugin.install.binDir" $install.binDir "plugin.install.configFile" $install.configFile -}}
+{{- if and $v (or (not (hasPrefix "/" (toString $v))) (contains "/../" (printf "%s/" $v)) (hasSuffix "/" (toString $v))) -}}
+{{- fail (printf "%s=%q must be an absolute, clean node path." $k (toString $v)) -}}
+{{- end -}}
 {{- end -}}
 {{- if not .Values.plugin.allowSelfMatchImages -}}
 {{- $pluginHost := include "harbor-bridge.registryHost" .Values.plugin.image.repository -}}
@@ -156,6 +168,7 @@ errors surface during `helm install` with the message text intact.
 {{- range .Values.plugin.matchImages -}}
 {{- if or (eq . $pluginHost) (eq . $bridgeHost) -}}
 {{- fail (printf "plugin.matchImages entry %q matches the registry of the plugin/bridge images — the plugin cannot authenticate the pull of its own image (chicken-and-egg). Pull these images from a registry outside matchImages, or set plugin.allowSelfMatchImages=true if you accept the bootstrap ordering. ADR-0021." .) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -204,8 +217,16 @@ false
 {{- end -}}
 {{- end -}}
 
+{{/*
+The Secret holding the bridge's serving pair and the CA the plugin
+trusts: chart-managed (cert-manager) or operator-provided.
+*/}}
 {{- define "harbor-bridge.tlsSecretName" -}}
+{{- if .Values.tls.enabled -}}
 {{- printf "%s-tls" (include "harbor-bridge.bridge.fullname" .) -}}
+{{- else -}}
+{{- .Values.tls.existingSecret -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "harbor-bridge.mTLSClientSecretName" -}}

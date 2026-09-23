@@ -9,8 +9,10 @@ harbor:
 
 plugin:
   matchImages:
-    - "harbor.example.com/*"
-    - "*.harbor.example.com/*"
+    # Bare hosts: kubelet matchImages globs only the domain, so "host/*"
+    # would be a literal "/*" path prefix that never matches.
+    - "harbor.example.com"
+    - "*.harbor.example.com"
   audience: harbor-bridge-prod-eu-west
 
 tls:

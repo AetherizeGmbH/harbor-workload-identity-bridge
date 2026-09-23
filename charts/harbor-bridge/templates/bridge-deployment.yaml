@@ -23,10 +23,11 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        # Force pod restart on TLS Secret rotation. cert-manager renews
-        # the Secret in place; without this annotation the deployment
-        # keeps serving the cached cert until the pod is restarted.
-        bridge.harbor.aetherize.io/tls-cert-checksum: {{ printf "%s|%s" (include "harbor-bridge.tlsSecretName" .) .Values.tls.enabled | sha256sum }}
+        # Re-roll when the TLS wiring changes (which Secret; chart- vs
+        # operator-managed). Certificate ROTATION needs no restart: the
+        # bridge reloads the serving pair and client CA from the mounted
+        # Secret on its own.
+        bridge.harbor.aetherize.io/tls-cert-checksum: {{ printf "%s|%v" (include "harbor-bridge.tlsSecretName" .) .Values.tls.enabled | sha256sum }}
         {{- with .Values.bridge.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -74,6 +75,11 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: BRIDGE_CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
@@ -81,6 +87,10 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: BRIDGE_OIDC_ISSUER
               value: {{ .Values.bridge.oidcIssuer | quote }}
+            {{- with .Values.bridge.oidcJWKSURL }}
+            - name: BRIDGE_OIDC_JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
             - name: BRIDGE_OIDC_CA_FILE
               # In-cluster: the OIDC issuer is the apiserver and its
               # cert is signed by the cluster CA. The projected SA
@@ -98,6 +108,8 @@ spec:
               value: {{ .Values.harbor.url | quote }}
             - name: BRIDGE_HARBOR_ADMIN_DIR
               value: /etc/bridge/harbor-admin
+            - name: BRIDGE_HARBOR_ROBOT_PREFIX
+              value: {{ .Values.harbor.robotNamePrefix | quote }}
             - name: BRIDGE_FORCE_LOCAL_VALIDATION
               value: {{ .Values.bridge.forceLocalValidation | quote }}
             - name: BRIDGE_LOG_LEVEL
@@ -114,6 +126,8 @@ spec:
               value: ":8443"
             - name: BRIDGE_HEALTH_ADDR
               value: ":8081"
+            - name: BRIDGE_METRICS_ADDR
+              value: {{ ternary (printf ":%v" .Values.metrics.port) "0" .Values.metrics.enabled | quote }}
             - name: BRIDGE_ENABLE_LEADER_ELECTION
               value: {{ include "harbor-bridge.bridge.leaderElection" . | quote }}
             {{- with .Values.bridge.extraEnv }}
@@ -130,6 +144,9 @@ spec:
             - name: tls
               mountPath: /etc/bridge/tls
               readOnly: true
+          # Ready = the credential listener is bound (it binds only after
+          # the informer caches synced) — so every replica the Service
+          # routes to can actually serve.
           readinessProbe:
             httpGet:
               path: /readyz

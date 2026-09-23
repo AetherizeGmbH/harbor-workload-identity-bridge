@@ -4,8 +4,9 @@ cert-manager Certificate for the bridge's serving cert. The CA from
 the same chain is plumbed to plugin pods via the same Secret (ca.crt
 key) so kubelet nodes can verify the bridge's cert.
 
-The bridge pod restarts on cert rotation via the checksum annotation
-in bridge-deployment.yaml.
+The bridge reloads the rotated pair from the mounted Secret on its own
+(no restart); the plugin DaemonSet's sync container copies the rotated
+ca.crt to the nodes.
 */}}
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -44,12 +45,14 @@ spec:
     name: {{ .Values.tls.issuerRef.name }}
     kind: {{ .Values.tls.issuerRef.kind }}
     group: cert-manager.io
-{{- if .Values.bridge.mTLS.enabled }}
+{{- end }}
+{{- if and .Values.bridge.mTLS.enabled .Values.plugin.enabled }}
 ---
 {{/*
-Client cert plugin pods present to the bridge. Same CA chain via the
-configured client issuer (which the operator may have point at the
-same root as tls.issuerRef).
+Client cert the plugin presents to the bridge. Issued by
+bridge.mTLS.clientIssuerRef, independently of who provides the serving
+cert (tls.enabled): the bridge trusts the ca.crt of its TLS Secret for
+client certs, so that CA must be the client issuer's.
 */}}
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -73,5 +76,4 @@ spec:
     name: {{ .Values.bridge.mTLS.clientIssuerRef.name }}
     kind: {{ .Values.bridge.mTLS.clientIssuerRef.kind }}
     group: cert-manager.io
-{{- end }}
 {{- end }}

@@ -21,8 +21,16 @@ Everything except none mode needs hostPID (kubelet discovery via
 /proc + nsenter for the restart), a privileged install container, and
 the host root mounted at /host (merge-mode target paths are unknown at
 render time). none mode drops all of that and keeps two narrow
-hostPath mounts.
+hostPath mounts. The long-running sync container never gets more than
+the one host directory it writes (hostConfigDir), in every mode.
+
+Not rendered when plugin.enabled=false (plugin provisioned out of band,
+e.g. a Talos system extension — issue #46).
 */}}
+{{- if .Values.plugin.enabled }}
+{{- /* Validate first: this template dereferences plugin.install.*, and
+       helm may render it before any other template runs the checks. */}}
+{{- include "harbor-bridge.validateRequiredValues" . }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -46,8 +54,10 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        # Force re-roll on config or CA rotation so the on-disk copies
-        # are refreshed across the fleet.
+        # Re-roll when the rendered provider config changes (the installer
+        # then converges kubelet) or when the TLS wiring changes (which
+        # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
+        # container copies rotated files in place (ADR-0021).
         plugin.harbor.aetherize.io/config-checksum: {{ include (print $.Template.BasePath "/plugin-configmap.yaml") . | sha256sum }}
         plugin.harbor.aetherize.io/tls-checksum: {{ printf "%s|%v|%v" (include "harbor-bridge.tlsSecretName" .) .Values.tls.enabled .Values.bridge.mTLS.enabled | sha256sum }}
         {{- with .Values.plugin.podAnnotations }}
@@ -55,6 +65,8 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "harbor-bridge.plugin.serviceAccountName" . }}
+      # The installer never talks to the Kubernetes API.
+      automountServiceAccountToken: false
       hostNetwork: false
       {{- if ne .Values.plugin.install.mode "none" }}
       # Required so the installer can read kubelet's command line from
@@ -85,13 +97,17 @@ spec:
           volumeMounts:
             {{- include "harbor-bridge.plugin.installerMounts" . | nindent 12 }}
           securityContext:
+            readOnlyRootFilesystem: true
             {{- if ne .Values.plugin.install.mode "none" }}
             # nsenter into PID 1 (kubelet restart) requires full
             # privileges; the sync container below does not get them.
             privileged: true
             {{- else }}
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
             {{- end }}
           resources:
             {{- toYaml .Values.plugin.resources | nindent 12 }}
@@ -103,12 +119,20 @@ spec:
           env:
             {{- include "harbor-bridge.plugin.installerEnv" . | nindent 12 }}
           volumeMounts:
-            {{- include "harbor-bridge.plugin.installerMounts" . | nindent 12 }}
+            # Only the directory it writes: a compromised sync container
+            # must not be a host-root compromise (audit H6).
+            - name: host-config
+              mountPath: /host{{ .Values.plugin.hostConfigDir }}
+            {{- include "harbor-bridge.plugin.sourceMounts" . | nindent 12 }}
           securityContext:
-            # File writes only — no nsenter, no /proc. Root via the pod
-            # securityContext, but never privileged.
+            # Copies CA/mTLS files as root into a root-owned host dir —
+            # no capabilities, no nsenter, no /proc, never privileged.
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             {{- toYaml .Values.plugin.resources | nindent 12 }}
       volumes:
@@ -122,11 +146,11 @@ spec:
           hostPath:
             path: {{ .Values.plugin.hostBinaryDir }}
             type: DirectoryOrCreate
+        {{- end }}
         - name: host-config
           hostPath:
             path: {{ .Values.plugin.hostConfigDir }}
             type: DirectoryOrCreate
-        {{- end }}
         - name: kubelet-config
           configMap:
             name: {{ include "harbor-bridge.plugin.fullname" . }}
@@ -144,6 +168,7 @@ spec:
             secretName: {{ include "harbor-bridge.mTLSClientSecretName" . }}
             defaultMode: 0400
         {{- end }}
+{{- end }}
 
 {{/*
 Env + mounts shared by the install and sync containers. The installer
@@ -188,6 +213,11 @@ same addressing works without a host-root mount.
 - name: host-config
   mountPath: /host{{ .Values.plugin.hostConfigDir }}
 {{- end }}
+{{ include "harbor-bridge.plugin.sourceMounts" . }}
+{{- end -}}
+
+{{/* Read-only inputs both containers copy from. */}}
+{{- define "harbor-bridge.plugin.sourceMounts" -}}
 - name: kubelet-config
   mountPath: /config
   readOnly: true
