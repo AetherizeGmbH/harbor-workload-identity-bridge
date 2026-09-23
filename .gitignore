@@ -19,6 +19,17 @@ test/e2e/**/.gen/
 test/e2e/**/terraform.tfstate*
 test/e2e/**/errored_test.tfstate
 test/e2e/**/.tofu-sleep
+test/e2e/**/.diag/
+test/e2e/diag-last/
+
+# OpenTofu / GKE e2e (ADR-0022)
+test/e2e-gke/.terraform/
+test/e2e-gke/**/.terraform/
+test/e2e-gke/**/.gen/
+test/e2e-gke/**/terraform.tfstate*
+test/e2e-gke/**/errored_test.tfstate
+test/e2e-gke/**/.tofu-sleep
+test/e2e-gke/**/.diag/
 
 # Node tooling (semantic-release / commitlint)
 node_modules/

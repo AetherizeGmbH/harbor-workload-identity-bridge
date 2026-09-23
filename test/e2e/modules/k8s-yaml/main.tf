@@ -40,13 +40,10 @@ variable "manifests" {
     List of YAML documents to apply. Each entry's `yaml` is a single
     Kubernetes object's YAML. Set the optional `wait` field to block
     until the object's status reaches a desired condition / field.
+    Must not carry sensitive values: objects are keyed by identity for
+    for_each, and a sensitive list cannot provide keys. Create Secrets
+    with a native kubernetes_secret_v1 resource instead.
   EOT
-}
-
-variable "depends_on_resources" {
-  type        = list(any)
-  default     = []
-  description = "Use to wire ordering when downstream modules need to wait for these manifests."
 }
 
 provider "kubernetes" {
@@ -58,13 +55,30 @@ provider "kubernetes" {
 }
 
 locals {
+  # Instances are keyed by object IDENTITY (kind/namespace/name), never by
+  # list position. With index keys, a later run that re-applies this state
+  # with an edited list (a changed serviceAccountRef, one object removed,
+  # a reordering) turned "the same object, changed" into destroy+create of
+  # whatever now sat at each index — HarborAccess CRs were deleted and
+  # re-created instead of updated. Identity keys give in-place updates for
+  # edits and a real delete only for objects that left the list.
+  keyed = {
+    for m in var.manifests :
+    format("%s/%s/%s",
+      yamldecode(m.yaml).kind,
+      try(yamldecode(m.yaml).metadata.namespace, ""),
+      yamldecode(m.yaml).metadata.name,
+    ) => m
+  }
+
   # Split namespaces from everything else so namespaces apply first.
   # kubernetes_manifest with for_each parallelises all instances, which
   # races: SAs / Secrets in a yet-to-exist namespace fail with
   # "namespaces XYZ not found". Two resource blocks with depends_on
-  # serialises namespace creation before its tenants.
-  namespaces = { for i, m in var.manifests : i => m if yamldecode(m.yaml).kind == "Namespace" }
-  tenants    = { for i, m in var.manifests : i => m if yamldecode(m.yaml).kind != "Namespace" }
+  # serialises namespace creation before its tenants (and, on destroy,
+  # tenant deletion before the namespace).
+  namespaces = { for k, m in local.keyed : k => m if yamldecode(m.yaml).kind == "Namespace" }
+  tenants    = { for k, m in local.keyed : k => m if yamldecode(m.yaml).kind != "Namespace" }
 }
 
 resource "kubernetes_manifest" "namespaces" {

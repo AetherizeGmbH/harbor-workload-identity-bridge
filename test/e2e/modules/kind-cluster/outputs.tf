@@ -14,6 +14,11 @@ output "kubeconfig" {
   sensitive   = true
 }
 
+output "kubeconfig_path" {
+  value       = local.kubeconfig_path
+  description = "Path of the kubeconfig file kind wrote for this cluster (never ~/.kube/config). Point KUBECONFIG at it to inspect a paused run."
+}
+
 output "node_names" {
   value       = local.node_names
   description = "Docker container names of every kind node (control-plane + workers). Other modules `docker exec` into these to write hosts.toml, /etc/hosts, ca.crt, etc."

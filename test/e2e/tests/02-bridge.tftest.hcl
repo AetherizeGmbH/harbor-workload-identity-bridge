@@ -1,73 +1,65 @@
-# End-to-end test of the Harbor Workload Identity Bridge.
+# End-to-end test of the Harbor Workload Identity Bridge on kind.
 #
-# Stages (each `run` block is a separate plan+apply, sharing state):
-#   1. build_images         — `docker build` bridge + plugin from local sources
-#   2. cluster              — kind cluster (cilium + cert-manager); loads images from (1)
-#   3. harbor               — Harbor via official helm chart, exposed via NodePort 30843
-#   4. seed_image           — create the scenario projects and push alpine:3.20
-#                             into each (your-project, project-alpha/beta/gamma,
-#                             beta-1/2/3)
-#   5. bridge_install       — our chart (creates ClusterIssuer, CRD, Deployment, DaemonSet)
-#   6. harbor_access        — apply HarborAccess CRs: the baseline SA, two
-#                             collision-prone SAs (ADR-0018), one CR authored in
-#                             the tenant's own namespace (cluster-wide pickup), and
-#                             one multi-project pull,push CR (beta-1/2/3)
-#   7. pull_pod*            — one Job per scenario; each success = end-to-end works.
-#                             pull_pod / _alpha / _beta / _gamma / _multi plus
-#                             robot_push_test exercise multi-tenancy, the
-#                             dot-delimited naming fix, cluster-wide CR matching,
-#                             multi-project robots, and the pull,push action.
-#   8. bridge_upgrade       — helm upgrade widening plugin.matchImages to the
-#                             upgrade-only project, then pull_pod_upgrade pulls
-#                             from it. Succeeds ONLY if the installer detected
-#                             the config-content change and restarted kubelet
-#                             (ADR-0021 — the old grep-guard never restarted).
-#                             The restart-iff-changed / never-flap semantics are
-#                             pinned by the installer unit tests; this stage
-#                             proves the end-to-end convergence on real kubelet.
-#   9. file_sleep (opt-in)  — pause AFTER all assertions for kubectl-poke on a
-#                             fully-populated cluster; off in CI, on via
-#                             `make e2e-pause` / TF_VAR_pause_after_pull=true
+# Stages (each `run` block is a separate plan+apply; runs that use the same
+# module source share one OpenTofu state):
+#   1. build_images         — `docker build` bridge + plugin + seed images
+#   2. cluster              — kind cluster (cilium + cert-manager); loads images
+#   3. harbor               — Harbor via the official chart, NodePort 30843
+#   4. containerd_trust     — Harbor's cert into every node's containerd
+#   5. coredns_rewrite      — harbor.e2e resolvable cluster-wide
+#   6. seed_image           — create the scenario projects, push the test
+#                             image into each, and WAIT until that finished
+#   7. bridge_install       — our chart (2 bridge replicas, like the default)
+#   8. harbor_access        — scenario phase "initial" (modules/harbor-access-scenario)
+#   9. pull_pod*            — one Job per scenario; success = end-to-end works
+#  10. robot_push_test      — the minted pull,push robot really can push
+#  11. bridge_upgrade       — helm upgrade widening matchImages; the installer
+#                             must restart kubelet (ADR-0021) …
+#  12. pull_pod_upgrade     — … or this pull of the new project fails
+#  13. harbor_access_update — scenario phase "updated": a permission grant
+#                             and a ServiceAccount change, applied in place
+#  14. pull_pod_granted     — the newly granted project pulls (the grant
+#                             reached Harbor; audit C1)
+#  15. pull_pod_renamed     — the new ServiceAccount pulls
+#  16. pull_pod_revoked     — the OLD ServiceAccount must now be refused
+#  17. robot_check_update   — Harbor itself: old robot gone, new one present
+#                             (audit H2 — revocation, not just a data-plane 403)
+#  18. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
+#  19. harbor_access_teardown — scenario phase "none": every HarborAccess and
+#                             tenant namespace deleted WHILE the bridge runs;
+#                             tofu waits for each finalizer
+#  20. robot_check_teardown — Harbor itself: not one robot of this cluster left
 #
-# Multi-tenant / collision coverage (stage 6 + 8):
-#   - team-a/svc-b → project-alpha and team/a-svc-b → project-beta are two
-#     DISTINCT identities whose robot names would have COLLIDED under the old
-#     hyphen-joined scheme (both bridge-dev-team-a-svc-b) but are distinct under
-#     ADR-0018's dot-joined scheme (bridge-dev.team-a.svc-b vs
-#     bridge-dev.team.a-svc-b). Each pulls only its own project, so a naming
-#     regression makes exactly one of the two pulls fail (or the second CR never
-#     goes Ready and stage 6 times out).
-#   - app-ns/runner's HarborAccess lives in app-ns, NOT the bridge namespace,
-#     proving the data plane matches CRs cluster-wide.
-#   - beta-ns/beta-runner has ONE HarborAccess granting pull,push on MULTIPLE
-#     projects (beta-1/2/3). pull_pod_multi pulls one of them via the credential
-#     provider; robot_push_test then uses the minted robot's creds to push to a
-#     second project and pull a third — exercising multi-project scope AND the
-#     pull,push action (a pull-only robot would 403 on the push).
+# Teardown order. tofu test destroys the states in reverse order of the
+# LAST run that touched each. Stages 13 and 19 re-use the harbor_access
+# state after bridge_upgrade, and stage 19 empties it, so at cleanup time
+# no HarborAccess (and no finalizer) is left for an already-uninstalled
+# bridge to release. Before this, bridge_upgrade (the last run using the
+# bridge state) made cleanup uninstall the bridge FIRST, and deleting the
+# CRs then hung on finalizers nobody could remove.
+#
+# Multi-tenant / collision coverage:
+#   - team-a/svc-b → project-alpha and team/a-svc-b → project-beta collide
+#     under the old hyphen-joined robot names but are distinct under
+#     ADR-0018's dot-joined scheme; each pulls only its own project.
+#   - app-ns/runner's HarborAccess lives in app-ns: cluster-wide CR pickup.
+#   - beta-ns/beta-runner: one robot, pull,push on beta-1/2/3.
 #
 # Image refs use `harbor.e2e:30843` so that:
-#   - go-containerregistry (crane in seed_image) accepts the realm host
-#     in Harbor's www-authenticate response — it hard-rejects loopback /
-#     RFC1918-private hosts.
-#   - Containerd on kind nodes routes via /etc/containerd/certs.d/
-#     harbor.e2e:30843/hosts.toml to https://127.0.0.1:30843 (NodePort)
-#     with skip_verify for the self-signed cert.
-#   - Kind nodes also have `127.0.0.1 harbor.e2e` in /etc/hosts so any
-#     auth-realm follow on a 401 resolves locally.
-#   - The seed pod inside the cluster resolves harbor.e2e via a
-#     hostAlias mapping it to a kind node's docker-network IP
-#     (run.harbor.kind_node_ip), and trusts Harbor's self-signed cert
-#     via a CA bundle replicated from the harbor namespace.
+#   - go-containerregistry (crane) accepts the realm host in Harbor's
+#     www-authenticate response — it rejects loopback / RFC1918 hosts.
+#   - containerd on the kind nodes routes via certs.d/harbor.e2e:30843 to
+#     the NodePort, trusting Harbor's self-signed cert (containerd_trust).
+#   - kind nodes map harbor.e2e to 127.0.0.1 in /etc/hosts; pods resolve it
+#     through CoreDNS (coredns_rewrite).
 #
-# The last stage is the load-bearing assertion. If the kubelet
-# silent-abort bug from docs/PHASES.md still bites, the Job will fail
-# with ImagePullBackOff and the test fails.
+# A failing pull stage leaves diagnostics (pod events, bridge + installer
+# logs, kubelet journal, HarborAccess state) under
+# test/e2e/.diag/<job>/ before the cluster is destroyed.
 
 # Build bridge + plugin images directly from the repo's Dockerfiles.
 # Paths are relative to test/e2e (the CWD when `tofu test` is invoked),
-# so ../.. is the repo root. Each rebuild is gated by a Dockerfile
-# content hash inside the module; docker BuildKit caching handles
-# unchanged source trees, so re-runs are fast.
+# so ../.. is the repo root.
 run "build_images" {
   command = apply
   module {
@@ -85,9 +77,7 @@ run "build_images" {
         dockerfile = "Dockerfile.plugin"
         context    = "../.."
       }
-      # alpine + curl + jq + crane — used by the seed_image Job.
-      # `gcr.io/go-containerregistry/crane` is distroless (no shell, no
-      # curl) so we COPY the crane binary into a tiny alpine base.
+      # alpine + curl + jq + openssl + crane — the seed and check Jobs.
       seed = {
         tag        = "e2e-seed:e2e"
         dockerfile = "Dockerfile"
@@ -102,18 +92,22 @@ run "cluster" {
     source = "./modules/kind-cluster"
   }
   variables {
-    name                        = "bridge-e2e"
-    worker_count                = 2
-    http_port                   = 8080
-    https_port                  = 8443
-    api_server_port             = 6443
-    enable_cert_manager         = true
-    registry_insecure_hostnames = ["harbor.e2e:30843"]
-    extra_etc_hosts             = ["127.0.0.1 harbor.e2e"]
-    # `kind load docker-image` for each tag, after the cluster is up.
-    # Reference into run.build_images establishes the dependency edge
-    # (build_images runs first) and means we never drift on image tag.
-    images_to_load = run.build_images.image_tags_list
+    name         = "bridge-e2e"
+    worker_count = 2
+    # Host-side ports kind binds. Overridable (TF_VAR_host_*) so the
+    # harness can run next to another local kind cluster that already
+    # holds the defaults. try(): inside a run block `var` holds only the
+    # CLI/TF_VAR values, never the root module's defaults.
+    http_port           = try(var.host_http_port, 8080)
+    https_port          = try(var.host_https_port, 8443)
+    api_server_port     = try(var.host_api_server_port, 6443)
+    enable_cert_manager = true
+    # No registry_insecure_hostnames: containerd_trust writes the
+    # hosts.toml for harbor.e2e (with the real CA) before anything pulls
+    # from Harbor; a skip_verify file here was overwritten immediately and
+    # cost one extra containerd restart per node.
+    extra_etc_hosts = ["127.0.0.1 harbor.e2e"]
+    images_to_load  = run.build_images.image_tags_list
   }
 }
 
@@ -127,18 +121,14 @@ run "harbor" {
     https_node_port   = 30843
     http_node_port    = 30880
     # null on a normal run → the harbor module's renovate-pinned default.
-    # The harbor-compat matrix sets TF_VAR_version_harbor to walk the
-    # supported chart range (ADR-0020).
-    version_harbor = var.version_harbor
+    # The harbor-compat matrix sets TF_VAR_version_harbor (ADR-0020).
+    version_harbor = try(var.version_harbor, null)
   }
 }
 
-# Pull Harbor's self-signed leaf cert and install it into each kind
-# node's containerd certs.d/<host:port>/ca.crt + write hosts.toml
-# pointing at it. We don't rely on `skip_verify = true` (containerd
-# v2.x has been observed to silently ignore that even when hosts.toml
-# is otherwise loaded). Must run after harbor (cert exists) and
-# before any pod whose image kubelet would pull from harbor.e2e.
+# Harbor's self-signed leaf cert into each node's containerd certs.d, so
+# containerd verifies Harbor instead of relying on skip_verify (which
+# containerd v2.x has been observed to ignore).
 run "containerd_trust" {
   command = apply
   module {
@@ -152,11 +142,6 @@ run "containerd_trust" {
   }
 }
 
-# Make harbor.e2e resolvable for every pod in the cluster (not just
-# seed_image's pod). CoreDNS gets a hosts-plugin entry mapping
-# harbor.e2e to the kind node IP — same as what we put in kind nodes'
-# /etc/hosts, but at the cluster DNS layer so debug pods can also
-# `curl harbor.e2e:30843` without bespoke hostAliases.
 run "coredns_rewrite" {
   command = apply
   module {
@@ -170,142 +155,17 @@ run "coredns_rewrite" {
   }
 }
 
-# Seed the test image into Harbor. The Job runs crane inside the
-# cluster, talking to harbor-core via service DNS over HTTP:80.
 run "seed_image" {
   command = apply
   module {
-    source = "./modules/k8s-yaml"
+    source = "./modules/harbor-seed"
   }
   variables {
-    kubeconfig = run.cluster.kubeconfig
-    manifests = [
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: e2e-seed }
-        YAML
-      },
-      {
-        # `data` (base64) rather than `stringData` (plaintext): the
-        # hashicorp/kubernetes_manifest provider can't re-read
-        # stringData — the API converts it to data on write, so the
-        # post-apply read returns null and the provider errors with
-        # "produced an unexpected new value: .object.stringData ... now null".
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: harbor-admin
-            namespace: e2e-seed
-          data:
-            username: ${base64encode("admin")}
-            password: ${base64encode(run.harbor.admin_password)}
-          type: Opaque
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: project-bootstrap
-            namespace: e2e-seed
-          data:
-            run.sh: |
-              #!/bin/sh
-              set -e
-              # Grab Harbor's self-signed leaf cert off the wire and
-              # add to the system trust store. Chart secret naming for
-              # the cert is fragile across versions; reading from the
-              # actual TLS endpoint is always right.
-              # `update-ca-certificates` then folds it into the bundle
-              # both crane (alpine pull from docker.io + harbor push)
-              # and any other Go HTTP client read by default — keeps
-              # docker.io's public-CA verification intact too.
-              openssl s_client -connect harbor.e2e:30843 -servername harbor.e2e \
-                </dev/null 2>/dev/null \
-                | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
-                > /usr/local/share/ca-certificates/harbor-e2e.crt
-              test -s /usr/local/share/ca-certificates/harbor-e2e.crt || {
-                echo "failed to fetch Harbor cert via openssl s_client"
-                exit 1
-              }
-              update-ca-certificates 2>/dev/null
-
-              # Create every project the e2e scenarios pull from. In-cluster
-              # service URL — no DNS gymnastics needed for plain REST. 409s on
-              # re-run are swallowed by || true.
-              for proj in your-project project-alpha project-beta project-gamma beta-1 beta-2 beta-3 upgrade-only; do
-                curl -sv -u "admin:$(cat /admin/password)" -X POST \
-                  -H "Content-Type: application/json" \
-                  http://harbor-core.harbor.svc.cluster.local/api/v2.0/projects \
-                  -d '{"project_name":"'"$proj"'","metadata":{"public":"false"}}' || true
-              done
-
-              # Push via the external hostname so the realm crane sees
-              # in www-authenticate matches what we connect to. The
-              # pod hostAlias (set on the Job spec below) maps
-              # harbor.e2e to a kind node's docker-network IP; the cert
-              # just installed makes Go's default TLS verify pass.
-              crane auth login harbor.e2e:30843 \
-                -u admin -p "$(cat /admin/password)"
-              # Baseline image, kept for the original pull_pod assertion.
-              crane copy alpine:3.20 \
-                harbor.e2e:30843/your-project/alpine:test3
-              # Fan the same image into each scenario project via intra-Harbor
-              # copy (one docker.io pull total; avoids Docker Hub rate limits).
-              for proj in project-alpha project-beta project-gamma beta-1 beta-2 beta-3 upgrade-only; do
-                crane copy harbor.e2e:30843/your-project/alpine:test3 \
-                  "harbor.e2e:30843/$proj/app:v1"
-              done
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: seed-image
-            namespace: e2e-seed
-          spec:
-            backoffLimit: 2
-            template:
-              spec:
-                restartPolicy: Never
-                # No hostAliases needed — the coredns_rewrite run made
-                # harbor.e2e resolvable cluster-wide via CoreDNS's
-                # hosts plugin, so this pod (and any ad-hoc debug pod)
-                # gets the same answer via DNS.
-                containers:
-                  - name: seed
-                    image: e2e-seed:e2e
-                    # IfNotPresent so kubelet uses the kind-loaded copy
-                    # instead of trying to pull `e2e-seed:e2e` from a
-                    # registry (it only exists locally on the kind nodes).
-                    imagePullPolicy: IfNotPresent
-                    command: [sh, /scripts/run.sh]
-                    volumeMounts:
-                      - name: scripts
-                        mountPath: /scripts
-                      - name: admin
-                        mountPath: /admin
-                        readOnly: true
-                volumes:
-                  - name: scripts
-                    configMap:
-                      name: project-bootstrap
-                      # 493 decimal = 0o755 octal. yamldecode in HCL
-                      # parses `0755` as decimal 755, which the K8s
-                      # API rejects ("must be between 0 and 0777
-                      # octal"). Stick to the explicit decimal value.
-                      defaultMode: 493
-                  - name: admin
-                    secret:
-                      secretName: harbor-admin
-        YAML
-      },
+    kubeconfig     = run.cluster.kubeconfig
+    admin_password = run.harbor.admin_password
+    projects = [
+      "your-project", "project-alpha", "project-beta", "project-gamma",
+      "beta-1", "beta-2", "beta-3", "upgrade-only",
     ]
   }
 }
@@ -320,15 +180,10 @@ run "bridge_install" {
     harbor_url            = run.harbor.internal_api_url
     harbor_admin_password = run.harbor.admin_password
     audience              = "harbor-bridge"
-    # No path glob — kubelet's matchImages doesn't support globs in
-    # the path component (only in the domain), so `harbor.e2e:30843/*`
-    # was being interpreted as a literal `/*` path prefix and silently
-    # failed to match `harbor.e2e:30843/your-project/alpine:test3`.
-    # LITERAL path prefixes are supported though ("gcr.io/my-project"
-    # style): scope the initial install to the per-project prefixes and
-    # deliberately leave `upgrade-only` out — the bridge_upgrade stage
-    # below adds it and asserts kubelet actually picked the change up
-    # (ADR-0021 content-hash restart).
+    # No path glob — kubelet's matchImages supports globs in the domain
+    # only. LITERAL path prefixes are supported ("host/project"): scope the
+    # initial install to the per-project prefixes and leave upgrade-only
+    # out — bridge_upgrade adds it and asserts kubelet picked it up.
     match_images = [
       "harbor.e2e:30843/your-project",
       "harbor.e2e:30843/project-alpha",
@@ -338,10 +193,6 @@ run "bridge_install" {
       "harbor.e2e:30843/beta-2",
       "harbor.e2e:30843/beta-3",
     ]
-    # Use the images we just built in build_images, not the install
-    # module's defaults. Establishes the dependency edge explicitly
-    # and guarantees the test exercises the working tree's Dockerfiles
-    # rather than a stale tag that happens to match.
     bridge_image = run.build_images.image_refs.bridge
     plugin_image = run.build_images.image_refs.plugin
   }
@@ -350,302 +201,18 @@ run "bridge_install" {
 run "harbor_access" {
   command = apply
   module {
-    source = "./modules/k8s-yaml"
+    source = "./modules/harbor-access-scenario"
   }
   variables {
-    kubeconfig = run.cluster.kubeconfig
-    manifests = [
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: test-pull }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: image-puller
-            namespace: test-pull
-        YAML
-      },
-      {
-        # Block on the bridge controller's umbrella condition (Ready=True),
-        # which only flips true once both RobotProvisioned=True and
-        # TrustPolicyApplied=True. If Harbor's robot creation fails or
-        # the trust policy is malformed, this wait surfaces it
-        # synchronously instead of letting pull_pod race past with
-        # a not-yet-reconciled CR.
-        yaml = <<-YAML
-          apiVersion: harbor.aetherize.io/v1alpha1
-          kind: HarborAccess
-          metadata:
-            name: test-access
-            namespace: ${run.bridge_install.namespace}
-          spec:
-            serviceAccountRef:
-              namespace: test-pull
-              name: image-puller
-            trustPolicy:
-              issuer: https://kubernetes.default.svc.cluster.local
-              audience: harbor-bridge
-            permissions:
-              - project: your-project
-                action: pull
-            # Use the canonical Go time.Duration form upfront. The
-            # CRD's tokenTTL is unmarshaled via metav1.Duration, which
-            # re-serialises "1h" → "1h0m0s". hashicorp/kubernetes_manifest
-            # then trips its "inconsistent result after apply" guard
-            # comparing the two. Sending the post-normalisation form
-            # bypasses the round-trip drift entirely.
-            tokenTTL: 1h0m0s
-        YAML
-        wait = {
-          conditions = [
-            { type = "Ready", status = "True" },
-          ]
-        }
-      },
-
-      # ── ADR-0018 collision-resistance: two distinct identities that would
-      # have produced the SAME robot name under the old hyphen-joined scheme.
-      #   ns=team-a sa=svc-b   → old bridge-dev-team-a-svc-b
-      #   ns=team   sa=a-svc-b → old bridge-dev-team-a-svc-b   (collision!)
-      # Dot-joined (ADR-0018) they are distinct: bridge-dev.team-a.svc-b vs
-      # bridge-dev.team.a-svc-b. Each is granted a DIFFERENT project; the two
-      # pull_pod_alpha/beta runs below then prove the robots stayed distinct.
-      # A naming regression makes the second CR's reconcile hit the robot-name
-      # collision guard so its Ready never flips true and THIS wait times out.
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: team-a }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: team }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata: { name: svc-b, namespace: team-a }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata: { name: a-svc-b, namespace: team }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: harbor.aetherize.io/v1alpha1
-          kind: HarborAccess
-          metadata:
-            name: collide-one
-            namespace: ${run.bridge_install.namespace}
-          spec:
-            serviceAccountRef:
-              namespace: team-a
-              name: svc-b
-            trustPolicy:
-              issuer: https://kubernetes.default.svc.cluster.local
-              audience: harbor-bridge
-            permissions:
-              - project: project-alpha
-                action: pull
-            tokenTTL: 1h0m0s
-        YAML
-        wait = {
-          conditions = [
-            { type = "Ready", status = "True" },
-          ]
-        }
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: harbor.aetherize.io/v1alpha1
-          kind: HarborAccess
-          metadata:
-            name: collide-two
-            namespace: ${run.bridge_install.namespace}
-          spec:
-            serviceAccountRef:
-              namespace: team
-              name: a-svc-b
-            trustPolicy:
-              issuer: https://kubernetes.default.svc.cluster.local
-              audience: harbor-bridge
-            permissions:
-              - project: project-beta
-                action: pull
-            tokenTTL: 1h0m0s
-        YAML
-        wait = {
-          conditions = [
-            { type = "Ready", status = "True" },
-          ]
-        }
-      },
-
-      # ── Cluster-wide CR pickup: this HarborAccess lives in the tenant's OWN
-      # namespace (app-ns), not the bridge namespace. The bridge watches/lists
-      # HarborAccess cluster-wide, so it still reconciles and the robot Secret
-      # is written to the bridge namespace. pull_pod_gamma proves it end-to-end.
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: app-ns }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata: { name: runner, namespace: app-ns }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: harbor.aetherize.io/v1alpha1
-          kind: HarborAccess
-          metadata:
-            name: tenant-access
-            namespace: app-ns
-          spec:
-            serviceAccountRef:
-              namespace: app-ns
-              name: runner
-            trustPolicy:
-              issuer: https://kubernetes.default.svc.cluster.local
-              audience: harbor-bridge
-            permissions:
-              - project: project-gamma
-                action: pull
-            tokenTTL: 1h0m0s
-        YAML
-        wait = {
-          conditions = [
-            { type = "Ready", status = "True" },
-          ]
-        }
-      },
-
-      # ── Multi-project robot with pull,push. One HarborAccess grants pull,push
-      # on SEVERAL projects (beta-1/2/3) — so the robot's scope spans more than
-      # one project and carries the write action. pull_pod_multi pulls one of
-      # them via the credential provider; robot_push_test then uses the minted
-      # robot's creds to push to a second project and pull a third. This also
-      # exercises the action expansion in harbor.toHarborPermissions, which
-      # splits "pull,push" into two Access entries per project.
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: beta-ns }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata: { name: beta-runner, namespace: beta-ns }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: harbor.aetherize.io/v1alpha1
-          kind: HarborAccess
-          metadata:
-            name: multi-access
-            namespace: ${run.bridge_install.namespace}
-          spec:
-            serviceAccountRef:
-              namespace: beta-ns
-              name: beta-runner
-            trustPolicy:
-              issuer: https://kubernetes.default.svc.cluster.local
-              audience: harbor-bridge
-            permissions:
-              - project: beta-1
-                action: pull,push
-              - project: beta-2
-                action: pull,push
-              - project: beta-3
-                action: pull,push
-            tokenTTL: 1h0m0s
-        YAML
-        wait = {
-          conditions = [
-            { type = "Ready", status = "True" },
-          ]
-        }
-      },
-
-      # ── Upgrade-convergence prep (ADR-0021). The CR (and its robot) exist
-      # from the start; the ONLY thing missing pre-upgrade is the kubelet-side
-      # matchImages entry for upgrade-only. bridge_upgrade adds it; the
-      # subsequent pull can therefore only succeed if the installer detected
-      # the config-content change and restarted kubelet.
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: Namespace
-          metadata: { name: upgrade-ns }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata: { name: upgrade-runner, namespace: upgrade-ns }
-        YAML
-      },
-      {
-        yaml = <<-YAML
-          apiVersion: harbor.aetherize.io/v1alpha1
-          kind: HarborAccess
-          metadata:
-            name: upgrade-access
-            namespace: ${run.bridge_install.namespace}
-          spec:
-            serviceAccountRef:
-              namespace: upgrade-ns
-              name: upgrade-runner
-            trustPolicy:
-              issuer: https://kubernetes.default.svc.cluster.local
-              audience: harbor-bridge
-            permissions:
-              - project: upgrade-only
-                action: pull
-            tokenTTL: 1h0m0s
-        YAML
-        wait = {
-          conditions = [
-            { type = "Ready", status = "True" },
-          ]
-        }
-      },
-    ]
+    kubeconfig       = run.cluster.kubeconfig
+    phase            = "initial"
+    bridge_namespace = run.bridge_install.namespace
+    audience         = "harbor-bridge"
   }
 }
 
-# Load-bearing assertion. Image ref uses harbor.e2e:30843 — containerd
-# resolves via the kind node's /etc/hosts entry to 127.0.0.1 and the
-# hosts.toml directive routes to https://127.0.0.1:30843 (NodePort)
-# with skip_verify for Harbor's self-signed cert.
-# Success = kubelet fork+execs the plugin AND the plugin returns valid
-# Harbor robot credentials AND containerd accepts them.
+# Load-bearing assertion: kubelet execs the plugin, the plugin gets robot
+# credentials from the bridge, containerd pulls with them.
 run "pull_pod" {
   command = apply
   module {
@@ -660,15 +227,13 @@ run "pull_pod" {
     command              = ["sh", "-c"]
     args                 = ["echo bridge-pull-test pulled successfully; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "kubelet silent-abort bug: see docs/PHASES.md §kubelet-exec-blocker"
+    fail_message         = "baseline pull failed: kubelet → plugin → bridge → Harbor chain broken"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 
-# Collision-resistance assertion (half 1 of 2). team-a/svc-b pulls
-# project-alpha via robot bridge-dev.team-a.svc-b. Paired with pull_pod_beta:
-# under the old hyphen-joined naming both SAs mapped to the SAME robot name, so
-# the two robots collided and exactly one of these two pulls would fail. Both
-# green proves ADR-0018's dot-delimited naming keeps the identities distinct.
+# Collision-resistance (half 1 of 2): team-a/svc-b pulls project-alpha via
+# robot bridge-dev.team-a.svc-b.
 run "pull_pod_alpha" {
   command = apply
   module {
@@ -683,12 +248,13 @@ run "pull_pod_alpha" {
     command              = ["sh", "-c"]
     args                 = ["echo team-a/svc-b pulled project-alpha; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "ADR-0018 collision regression or isolation break: team-a/svc-b could not pull project-alpha (its robot may have been overwritten by team/a-svc-b's)"
+    fail_message         = "ADR-0018 collision regression or isolation break: team-a/svc-b could not pull project-alpha"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 
-# Collision-resistance assertion (half 2 of 2). team/a-svc-b pulls project-beta
-# via robot bridge-dev.team.a-svc-b. See pull_pod_alpha for the rationale.
+# Collision-resistance (half 2 of 2): team/a-svc-b pulls project-beta via
+# robot bridge-dev.team.a-svc-b.
 run "pull_pod_beta" {
   command = apply
   module {
@@ -703,14 +269,12 @@ run "pull_pod_beta" {
     command              = ["sh", "-c"]
     args                 = ["echo team/a-svc-b pulled project-beta; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "ADR-0018 collision regression or isolation break: team/a-svc-b could not pull project-beta (its robot may have been overwritten by team-a/svc-b's)"
+    fail_message         = "ADR-0018 collision regression or isolation break: team/a-svc-b could not pull project-beta"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 
-# Cluster-wide CR pickup assertion. app-ns/runner pulls project-gamma using a
-# HarborAccess authored in app-ns (the tenant's own namespace), not the bridge
-# namespace. Success proves the data plane matches CRs cluster-wide and the
-# robot Secret resolves from the bridge namespace regardless of CR location.
+# Cluster-wide CR pickup: the HarborAccess lives in app-ns.
 run "pull_pod_gamma" {
   command = apply
   module {
@@ -725,14 +289,12 @@ run "pull_pod_gamma" {
     command              = ["sh", "-c"]
     args                 = ["echo app-ns/runner pulled project-gamma; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "cluster-wide CR pickup broke: app-ns/runner could not pull project-gamma from a HarborAccess authored outside the bridge namespace"
+    fail_message         = "cluster-wide CR pickup broke: app-ns/runner could not pull project-gamma"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 
-# Multi-project pull assertion. beta-ns/beta-runner pulls beta-1 via the
-# credential provider. Its HarborAccess (multi-access) grants pull,push on
-# beta-1/2/3, so a single robot serves more than one project; this proves the
-# credential-issuance path works for a multi-project, multi-action CR.
+# Multi-project robot (pull,push on beta-1/2/3) serves a pull.
 run "pull_pod_multi" {
   command = apply
   module {
@@ -747,61 +309,54 @@ run "pull_pod_multi" {
     command              = ["sh", "-c"]
     args                 = ["echo beta-ns/beta-runner pulled beta-1 via multi-project robot; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "multi-project pull broke: beta-ns/beta-runner could not pull beta-1 (CR grants pull,push on beta-1/2/3)"
+    fail_message         = "multi-project pull broke: beta-ns/beta-runner could not pull beta-1"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 
-# pull,push assertion. A Job in the bridge namespace mounts the multi-access
-# robot's credential Secret (via envFrom) and uses crane to PUSH a new tag into
-# beta-2 (manifest PUT requires the push grant) and PULL beta-3 (a different
-# project). A pull-only robot would 403 on the push, failing this run — so this
-# is the load-bearing check that "pull,push" actually expands to write access on
-# every listed project. Uses the kind-loaded e2e-seed image (crane + trust
-# tooling), pulled IfNotPresent because it exists only on the nodes.
-#run "robot_push_test" {
-#  command = apply
-#  module {
-#    source = "./modules/test-exec-pod"
-#  }
-#  variables {
-#    kubeconfig           = run.cluster.kubeconfig
-#    name                 = "robot-push-test"
-#    namespace            = run.bridge_install.namespace
-#    service_account_name = "default"
-#    image                = "e2e-seed:e2e"
-#    image_pull_policy    = "IfNotPresent"
-#    env_from_secret      = "robot-harbor-bridge-system.multi-access"
-#    command              = ["sh", "-c"]
-#    args = [<<-SH
-#      set -eu
-#      # Trust Harbor's self-signed cert (same approach as seed_image).
-#      openssl s_client -connect harbor.e2e:30843 -servername harbor.e2e </dev/null 2>/dev/null \
-#        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
-#        > /usr/local/share/ca-certificates/harbor-e2e.crt
-#      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
-#      update-ca-certificates 2>/dev/null
-#      # Authenticate as the bridge-minted robot (username/password from the
-#      # mounted Secret, exposed as env vars via envFrom).
-#      crane auth login harbor.e2e:30843 -u "$username" -p "$password"
-#      # PUSH: copy app:v1 to a new tag in beta-2 (the manifest PUT needs push).
-#      crane copy harbor.e2e:30843/beta-2/app:v1 harbor.e2e:30843/beta-2/pushed-by-robot:v1
-#      # PULL on a second project: read beta-2's manifest (needs pull).
-#      crane manifest harbor.e2e:30843/beta-2/app:v1 >/dev/null
-#      echo "robot verified: push to beta-2, pull from beta-2"
-#    SH
-#    ]
-#    timeout_seconds = 300
-#    fail_message    = "pull,push robot failed: could not push to beta-2 (or pull beta-2) with the multi-access robot credentials"
-#  }
-#}
+# pull,push assertion: a Job in the bridge namespace uses the multi-access
+# robot's credentials (the Secret the bridge wrote, via envFrom) to PUSH a
+# new tag into beta-2 — a manifest PUT that needs the push grant — and to
+# read beta-3. A pull-only robot is refused on the push.
+run "robot_push_test" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "robot-push-test"
+    namespace            = run.bridge_install.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = "robot-${run.bridge_install.namespace}.multi-access"
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      openssl s_client -connect harbor.e2e:30843 -servername harbor.e2e </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+        > /usr/local/share/ca-certificates/harbor-e2e.crt
+      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
+      update-ca-certificates 2>/dev/null
+      crane auth login harbor.e2e:30843 -u "$username" -p "$password"
+      crane copy harbor.e2e:30843/beta-2/app:v1 harbor.e2e:30843/beta-2/pushed-by-robot:v1
+      crane digest harbor.e2e:30843/beta-2/pushed-by-robot:v1 >/dev/null
+      crane digest harbor.e2e:30843/beta-3/app:v1 >/dev/null
+      echo "robot verified: push to beta-2, pull from beta-3"
+    SH
+    ]
+    timeout_seconds  = 300
+    fail_message     = "pull,push robot failed: could not push to beta-2 (or read beta-3) with the multi-access robot credentials"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
 
 # ── ADR-0021 upgrade convergence. Re-apply the bridge install (same helm
 # release → in-place `helm upgrade`) with matchImages widened by the
 # upgrade-only project. The rendered credential-provider ConfigMap changes →
-# the DaemonSet's config-checksum annotation changes → pods re-roll → the
-# installer sees different effective config content → restarts kubelet on
-# every node. Under the pre-ADR-0021 grep guard, kubelet would have kept the
-# old config and pull_pod_upgrade below would fail with an anonymous 401.
+# the DaemonSet re-rolls → the installer sees different effective config
+# content → restarts kubelet on every node.
 run "bridge_upgrade" {
   module {
     source = "./modules/harbor-bridge-install"
@@ -827,12 +382,9 @@ run "bridge_upgrade" {
   }
 }
 
-# The load-bearing upgrade assertion: this image was NOT covered by the
-# initial matchImages, its HarborAccess/robot existed all along, and the seed
-# pushed the image before the bridge was even installed — the one variable is
-# whether kubelet runs the upgraded credential-provider config. helm waited
-# for the DaemonSet rollout in bridge_upgrade, so every node's installer has
-# finished (and restarted kubelet) before this pull starts.
+# This image was NOT covered by the initial matchImages; its HarborAccess
+# and robot existed all along. The one variable is whether kubelet runs
+# the upgraded credential-provider config.
 run "pull_pod_upgrade" {
   command = apply
   module {
@@ -847,23 +399,185 @@ run "pull_pod_upgrade" {
     command              = ["sh", "-c"]
     args                 = ["echo upgrade-ns/upgrade-runner pulled upgrade-only after helm upgrade; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "ADR-0021 regression: helm upgrade changed matchImages but kubelet kept the old credential-provider config — the installer failed to detect the content change and restart kubelet"
+    fail_message         = "ADR-0021 regression: helm upgrade changed matchImages but kubelet kept the old credential-provider config"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 
-# Pause-for-inspection AFTER all the pull/push assertions have run, so you can
-# kubectl-poke a fully-populated cluster (robots, Secrets, pushed tags all
-# present). Off by default (CI never pauses); flip on for local dev with
-# `make e2e-pause` (or `TF_VAR_pause_after_pull=true tofu test`). A file appears
-# at test/e2e/.tofu-sleep and the apply blocks until you `rm` it.
+# ── Lifecycle: edit two HarborAccess objects in place. The wait inside the
+# scenario module blocks until each is Ready at its NEW generation.
+# (From here on the install module's outputs come from run.bridge_upgrade:
+# a run that re-uses a state replaces the earlier run's outputs.)
+run "harbor_access_update" {
+  command = apply
+  module {
+    source = "./modules/harbor-access-scenario"
+  }
+  variables {
+    kubeconfig       = run.cluster.kubeconfig
+    phase            = "updated"
+    bridge_namespace = run.bridge_upgrade.namespace
+    audience         = "harbor-bridge"
+  }
+}
+
+# The grant added to test-access must reach Harbor. image-puller may still
+# have its credentials cached by kubelet from pull_pod: the password must
+# not have changed (no rotation on a spec edit), only the robot's grants.
+run "pull_pod_granted" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-granted-gamma"
+    namespace            = "test-pull"
+    service_account_name = "image-puller"
+    image                = "harbor.e2e:30843/project-gamma/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo test-pull/image-puller pulled newly granted project-gamma; exit 0"]
+    timeout_seconds      = 300
+    fail_message         = "permission update did not take effect in Harbor (audit C1), or a rotation broke kubelet-cached credentials"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# collide-one now names team-a/svc-renamed: the new identity pulls.
+run "pull_pod_renamed" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-renamed-alpha"
+    namespace            = "team-a"
+    service_account_name = "svc-renamed"
+    image                = "harbor.e2e:30843/project-alpha/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo team-a/svc-renamed pulled project-alpha; exit 0"]
+    timeout_seconds      = 300
+    fail_message         = "serviceAccountRef change: the new ServiceAccount could not pull"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# … and the old identity must be refused. kubelet on the node that ran
+# pull_pod_alpha may still cache the OLD robot's credentials for up to the
+# tokenTTL — this passes only if that robot was revoked in Harbor (a
+# data-plane 403 alone would not stop a cached password).
+run "pull_pod_revoked" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-revoked-alpha"
+    namespace            = "team-a"
+    service_account_name = "svc-b"
+    image                = "harbor.e2e:30843/project-alpha/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "revocation failed: team-a/svc-b could still pull project-alpha after its HarborAccess moved to another ServiceAccount (audit H2)"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# Ask Harbor directly (admin credentials from the seed namespace): the old
+# robot is gone, the new one exists.
+run "robot_check_update" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "robot-check-update"
+    namespace            = run.seed_image.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = run.seed_image.admin_secret_name
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      count() { curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D$1" | jq 'length'; }
+      old=$(count bridge-dev.team-a.svc-b); new=$(count bridge-dev.team-a.svc-renamed)
+      echo "old robot: $old, new robot: $new"
+      test "$old" = 0
+      test "$new" = 1
+    SH
+    ]
+    timeout_seconds  = 120
+    fail_message     = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted and the new one present"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# Pause-for-inspection on a fully populated cluster (before the teardown
+# stages empty it). Off by default; `make e2e-pause` turns it on.
 run "file_sleep" {
   command = apply
   module {
     source = "./modules/test-sleep"
   }
   variables {
-    enabled = var.pause_after_pull
+    enabled = try(var.pause_after_pull, false)
   }
 }
 
-#...
+# ── Lifecycle: delete every HarborAccess (and the tenant namespaces) while
+# the bridge runs. Each deletion blocks on the bridge's finalizer, so this
+# run passes only if every finalizer is released.
+run "harbor_access_teardown" {
+  command = apply
+  module {
+    source = "./modules/harbor-access-scenario"
+  }
+  variables {
+    kubeconfig       = run.cluster.kubeconfig
+    phase            = "none"
+    bridge_namespace = run.bridge_upgrade.namespace
+    audience         = "harbor-bridge"
+  }
+}
+
+# The finalizers must have REVOKED the robots, not just let the CRs go:
+# not one robot of cluster "dev" may remain in Harbor.
+run "robot_check_teardown" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "robot-check-teardown"
+    namespace            = run.seed_image.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = run.seed_image.admin_secret_name
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      # Poll briefly: the finalizer deletes the robot before the CR goes
+      # away, but give Harbor's list a moment to reflect the delete.
+      for i in $(seq 1 30); do
+        left=$(curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev." | jq -r '.[].name')
+        if [ -z "$left" ]; then echo "no robots of cluster dev left in Harbor"; exit 0; fi
+        sleep 3
+      done
+      echo "robots left behind:"; echo "$left"; exit 1
+    SH
+    ]
+    timeout_seconds  = 120
+    fail_message     = "finalizer cleanup incomplete: robots of cluster dev are still in Harbor after every HarborAccess was deleted"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}

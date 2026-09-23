@@ -78,3 +78,9 @@ variable "images_to_load" {
     bridge install can use them without a registry.
   EOT
 }
+
+variable "kubeconfig_path" {
+  type        = string
+  default     = null
+  description = "Where kind writes the cluster's kubeconfig. Default: <cwd>/.gen/<name>.kubeconfig, i.e. test/e2e/.gen/ (gitignored). Deliberately never ~/.kube/config — see the kind_cluster resource."
+}

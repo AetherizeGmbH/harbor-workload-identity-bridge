@@ -13,6 +13,10 @@ terraform {
       source  = "alekc/kubectl"
       version = "~> 2.1"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -99,6 +103,30 @@ variable "plugin_image" {
     tag        = string
   })
   description = "Plugin container image. Required. See bridge_image."
+}
+
+variable "oidc_issuer" {
+  type        = string
+  default     = "https://kubernetes.default.svc.cluster.local"
+  description = "bridge.oidcIssuer — the cluster's ServiceAccount token issuer (kind: the in-cluster default; GKE: the container.googleapis.com URL)."
+}
+
+variable "oidc_jwks_url" {
+  type        = string
+  default     = ""
+  description = "bridge.oidcJWKSURL — set to https://kubernetes.default.svc/openid/v1/jwks when the issuer is not the in-cluster apiserver."
+}
+
+variable "token_command" {
+  type        = string
+  default     = ""
+  description = "Shell command printing a fresh API token for the teardown guard (GKE: `gcloud auth print-access-token`). Empty = use the kubeconfig credentials captured at install."
+}
+
+variable "bridge_replicas" {
+  type        = number
+  default     = 2
+  description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (audit H1)."
 }
 
 variable "issuer_name" {
@@ -222,10 +250,12 @@ resource "helm_release" "bridge" {
       var.bridge_endpoint != "" ? { bridgeEndpoint = var.bridge_endpoint } : {},
     )
     bridge = {
-      replicas  = 1
-      logLevel  = "debug"
-      image     = var.bridge_image
-      resources = var.bridge_resources
+      oidcIssuer  = var.oidc_issuer
+      oidcJWKSURL = var.oidc_jwks_url
+      replicas    = var.bridge_replicas
+      logLevel    = "debug"
+      image       = var.bridge_image
+      resources   = var.bridge_resources
     }
     tls = {
       enabled = true
@@ -245,6 +275,85 @@ output "namespace" {
   value = kubernetes_namespace_v1.this.metadata[0].name
 }
 
-output "bridge_release" {
-  value = helm_release.bridge.id
+# Teardown guard. HarborAccess objects carry the bridge's finalizer, which
+# only a running bridge releases. tofu test destroys states in reverse
+# order of the LAST run that touched each, so after a failure (or with any
+# stage order that ends on an install/upgrade run) the bridge used to be
+# uninstalled while HarborAccess objects still existed — their deletion,
+# and that of their namespaces, then hung until the cleanup timed out.
+#
+# This resource depends on the release, so tofu destroys it FIRST: its
+# destroy-time provisioner deletes every HarborAccess while the bridge is
+# still up (the finalizers revoke the robots, as they would for a user),
+# and only then does helm uninstall the chart. If the bridge cannot
+# release them in time (e.g. Harbor already gone), the finalizers are
+# dropped so the throwaway cluster can be torn down — the test run is
+# ending anyway, and a real deletion path is asserted by the scenario's
+# teardown stage while everything is healthy.
+#
+# Ordering comes from depends_on, NOT from a trigger on the release: a
+# trigger that is unknown while helm plans an in-place upgrade replaced
+# this resource mid-run and its destroy step deleted every HarborAccess
+# during bridge_upgrade. For the same reason trigger changes are ignored
+# (the GKE access token differs on every plan); the destroy step refreshes
+# a token through token_command when one is configured.
+resource "null_resource" "release_harboraccess_finalizers" {
+  depends_on = [helm_release.bridge]
+
+  lifecycle {
+    ignore_changes = [triggers]
+  }
+
+  triggers = {
+    token_command = var.token_command
+    k8s_host      = var.kubeconfig.host
+    k8s_ca        = var.kubeconfig.cluster_ca_certificate
+    k8s_cert      = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+    k8s_key       = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+    k8s_token     = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["bash", "-c"]
+    command     = <<-BASH
+      set -uo pipefail
+      d="$(mktemp -d)"
+      trap 'rm -rf "$d"' EXIT
+      chmod 700 "$d"
+      printf '%s' "$K8S_CA" > "$d/ca.crt"
+      args=(--kubeconfig=/dev/null --server="$K8S_HOST" --certificate-authority="$d/ca.crt")
+      if [ -n "$TOKEN_COMMAND" ]; then
+        K8S_TOKEN="$(bash -c "$TOKEN_COMMAND")"
+      fi
+      if [ -n "$K8S_TOKEN" ]; then
+        args+=(--token="$K8S_TOKEN")
+      else
+        printf '%s' "$K8S_CERT" > "$d/tls.crt"
+        printf '%s' "$K8S_KEY" > "$d/tls.key"
+        args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
+      fi
+      k() { kubectl "$${args[@]}" "$@"; }
+      if ! k get crd harboraccesses.harbor.aetherize.io >/dev/null 2>&1; then
+        echo "no HarborAccess CRD reachable (or no API access); nothing to release" >&2
+        exit 0
+      fi
+      if k delete harboraccesses.harbor.aetherize.io --all -A --wait=true --timeout=180s; then
+        exit 0
+      fi
+      echo "HarborAccess deletion did not finish; dropping finalizers so teardown can proceed" >&2
+      for o in $(k get harboraccesses.harbor.aetherize.io -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{end}'); do
+        k -n "$${o%/*}" patch harboraccess "$${o#*/}" --type=merge -p '{"metadata":{"finalizers":null}}' || true
+      done
+      exit 0
+    BASH
+    environment = {
+      K8S_HOST      = self.triggers.k8s_host
+      K8S_CA        = self.triggers.k8s_ca
+      K8S_CERT      = self.triggers.k8s_cert
+      K8S_KEY       = self.triggers.k8s_key
+      K8S_TOKEN     = self.triggers.k8s_token
+      TOKEN_COMMAND = self.triggers.token_command
+    }
+  }
 }

@@ -1,6 +1,8 @@
 # Root module for the GKE e2e harness (ADR-0022). Orchestration lives
 # in tests/02-gke.tftest.hcl; this file only declares the file-scope
-# variables the tftest consumes. Reuses ../e2e/modules/* wherever the
+# variables the tftest consumes. The `default`s are documentation only:
+# inside a run block `var` holds just CLI/TF_VAR values, so the test file
+# reads every optional variable with try(var.x, <same default>). Reuses ../e2e/modules/* wherever the
 # kind harness's modules are cluster-agnostic (docker-build, harbor,
 # k8s-yaml, test-exec-pod, harbor-bridge-install, test-sleep); the
 # GKE-specific modules live in ./modules.

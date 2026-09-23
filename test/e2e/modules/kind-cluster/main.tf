@@ -1,4 +1,6 @@
 locals {
+  kubeconfig_path = coalesce(var.kubeconfig_path, abspath("${path.cwd}/.gen/${var.name}.kubeconfig"))
+
   # NodePorts the kind cluster exposes via extra_port_mapping. Fixed
   # so the harbor module and any caller can construct image refs of
   # the form host:30843. Harbor binds here directly via its own
@@ -7,8 +9,8 @@ locals {
   http_node_port_internal  = 30880
 
   # Containerd hosts.toml content for each insecure registry. Written
-  # to the host via `docker exec` after kind is up — see docs/E2E-MANUAL-SETUP.md
-  # §4 for why this is needed.
+  # to the host via `docker exec` after kind is up (see the NOTE below for
+  # why extra_mounts cannot deliver them).
   containerd_hosts_files = {
     for host in var.registry_insecure_hostnames :
     host => <<-TOML
@@ -31,8 +33,13 @@ resource "kind_cluster" "this" {
   # Cannot wait for nodes Ready — Cilium (installed below) is the CNI
   # and it needs the apiserver responding, which only happens after
   # kind reports the cluster as "up but unready".
-  wait_for_ready  = false
-  kubeconfig_path = pathexpand("~/.kube/config")
+  wait_for_ready = false
+  # Never write into the operator's ~/.kube/config: kind would switch the
+  # current context to this throwaway cluster (and drop it again on
+  # destroy), and anything that later trusts "the current context" could
+  # hit an unrelated — possibly production — cluster. Every consumer in
+  # this harness gets explicit connection info via the kubeconfig output.
+  kubeconfig_path = local.kubeconfig_path
   node_image      = var.node_image
 
   kind_config {
