@@ -17,7 +17,7 @@ per-namespace token-distribution chores.**
 </p>
 
 > Status: **alpha — Phases 1 through 6 complete, end-to-end verified
-> on kind v1.35 + Harbor 2.x**. `make e2e` brings up a fresh kind
+> on kind (Kubernetes v1.36) + Harbor 2.x**. `make e2e` brings up a fresh kind
 > cluster, installs Harbor + the chart, seeds a private image, and
 > the load-bearing `pull_pod` assertion passes: kubelet exec's the
 > plugin, the plugin reaches the bridge over a NodePort, the bridge
@@ -70,8 +70,13 @@ For the operator:
   namespace get two robots with separate Harbor projects. Least
   privilege replaces the over-broad namespace-wide secret.
 - **One rotation point.** The bridge rotates every robot's password
-  every 24h. The whole cluster's blast-radius window is 24h, no
-  matter how many namespaces.
+  every 24h, without breaking a single cached credential (kubelet is
+  never told to cache past the next rotation). The whole cluster's
+  blast-radius window is 24h, no matter how many namespaces.
+- **Revocation you can rely on.** Editing a `HarborAccess` changes the
+  robot's grants in Harbor on the next reconcile (and reverts edits made
+  in the Harbor UI); pointing it at another ServiceAccount or deleting it
+  deletes the old robot. Nothing with a valid password is left behind.
 - **New nodes self-provision.** The plugin DaemonSet installs the
   binary, config, and CA on every new node and patches kubelet. No
   node-image rebuilds, no cloud-init scripts to ship.
@@ -101,7 +106,11 @@ For the workload:
 - A Helm chart that installs both: bridge as a Deployment in the
   release namespace, plugin as a DaemonSet that copies the binary +
   kubelet config + bridge CA onto every node's filesystem. Required
-  values fail-fast with action-oriented errors at template time.
+  values fail-fast with action-oriented errors at template time. Nodes
+  that get the plugin another way (Talos system extension, baked images)
+  set `plugin.enabled=false` — see
+  [docs/install-external-plugin.md](docs/install-external-plugin.md) and
+  [docs/platforms.md](docs/platforms.md).
 
 When upstream Harbor lands #17520, you delete the HTTPS server and
 the plugin; the CRD and reconciler survive as a thin declarative
@@ -216,13 +225,15 @@ helm install harbor-bridge \
 #    on managed nodes (EKS / GKE / AKS) whose node image already runs
 #    kubelet with --image-credential-provider-* flags, it MERGES our
 #    provider entry into the existing config (foreign providers are
-#    preserved); on self-managed nodes (kind, kubeadm, k3s) it PATCHES
+#    preserved); on self-managed nodes (kind, kubeadm) it PATCHES
 #    /etc/default/kubelet, preserving your KUBELET_EXTRA_ARGS. Either
 #    way kubelet restarts once per node when — and only when — the
-#    effective config content changed; running containers survive the
-#    restart. `plugin.install.mode=none` drops files only (you own the
-#    kubelet flags; least privilege — no hostPID, no privileged pod).
-#    Bottlerocket nodes are unsupported (locked filesystem).
+#    effective config content changed, and the installer verifies it
+#    came back healthy; running containers survive the restart.
+#    `plugin.install.mode=none` drops files only (you own the kubelet
+#    flags; least privilege — no hostPID, no privileged pod).
+#    Talos, k3s, RKE2: see docs/platforms.md. Bottlerocket and GKE
+#    Autopilot are unsupported.
 
 # 5. Apply a HarborAccess CR. The audience MUST match plugin.audience above.
 cat <<'YAML' | kubectl apply -f -
@@ -241,7 +252,7 @@ spec:
   permissions:
     - project: production
       action: pull
-  tokenTTL: 1h0m0s   # canonical Go time.Duration form — see ADR-0016 §test fixtures
+  tokenTTL: 1h0m0s   # canonical Go time.Duration form (kubernetes_manifest-friendly)
 YAML
 ```
 
@@ -253,9 +264,12 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
 **Testing.** Two paths in [HOW-TO-TEST.md](HOW-TO-TEST.md):
 
 - **§1 `tofu test` (recommended)** — `make e2e` brings up a fresh
-  kind cluster, installs Harbor + the chart, seeds a private image,
-  asserts the pull end-to-end. `make e2e-pause` halts before the
-  load-bearing pull so you can `kubectl` around the cluster. ~5 min.
+  kind cluster, installs Harbor + the chart (two bridge replicas),
+  seeds private images, and asserts pulls end-to-end — then edits and
+  deletes HarborAccess objects and checks in Harbor that grants changed,
+  the old identity is refused, and no robot is left behind.
+  `make e2e-pause` halts after the assertions so you can `kubectl`
+  around the populated cluster. ~15 min.
 - **§2 Remote / manual cluster** — drive the bridge as a `go run`
   process against an existing Kubernetes + Harbor by hand, with
   `kubectl proxy` for OIDC discovery. Useful when iterating on the
@@ -264,6 +278,16 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
   `install.mode=auto` → merge on managed nodes and that GKE's own
   Artifact Registry provider survives the merge (ADR-0022). Creates
   **billed** resources in `$GOOGLE_PROJECT`; never runs in CI.
+
+### Uninstalling
+
+Delete your `HarborAccess` objects **before** `helm uninstall`. Each one
+carries a finalizer that revokes its Harbor robot, and only a running
+bridge can release it — after the bridge is gone, deleting those objects
+(or their namespaces) waits forever. If that already happened, reinstall
+the bridge, or remove the `harbor.aetherize.io/robot` finalizer by hand and
+delete the leftover `robot$bridge-<clusterName>.*` robots in Harbor. Helm
+keeps the CRD (`crds/`); delete it yourself when you are done.
 
 ### How the node install works — modes and upgrades (ADR-0021)
 
@@ -274,8 +298,9 @@ The DaemonSet runs the `harbor-bridge-installer` binary on every node.
 | --- | --- | --- |
 | `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch` | Almost always the right choice |
 | `merge` | Injects our provider entry into the node's **existing** `CredentialProviderConfig` (JSON or YAML — EKS/GKE/AKS formats both work; foreign providers and unknown fields round-trip untouched) and drops the binary into the existing bin dir. Kubelet flags untouched. | Managed nodes (EKS AL2023, GKE, AKS) |
-| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of `/etc/default/kubelet` — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm, k3s |
-| `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | Baked node images, strict-privilege environments |
+| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of `/etc/default/kubelet` — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet that sources `/etc/default/kubelet`) |
+| `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | k3s/RKE2 (flags via their kubelet args), strict-privilege environments |
+| `plugin.enabled=false` | No DaemonSet at all; NOTES print the provider entry to install | Talos (system extension), baked node images |
 
 Kubelet reads the credential-provider config **once at boot** (no hot
 reload), but execs the plugin *binary* per pull. The installer therefore
@@ -389,6 +414,7 @@ contract, not individually run.
 | 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
 | 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, GKE e2e harness, ADRs 0021–0022 | ✅ Code + kind e2e complete; first `make e2e-gke` run against a real project still outstanding |
+| 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, optional plugin (Talos), ADRs 0023–0025 | ✅ Code + kind e2e (lifecycle stages) complete |
 
 ### Next
 

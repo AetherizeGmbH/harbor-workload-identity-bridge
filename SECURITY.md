@@ -83,8 +83,10 @@ strings disagree. The kubelet always projects tokens with the cluster's
 own issuer; this can't be tricked.
 
 The audience (`aud`) claim must match the `trustPolicy.audience` on the
-matching `HarborAccess`. Operators choose this — convention is to use
-the Harbor hostname (`harbor.example.com`).
+matching `HarborAccess`. Operators choose this — the convention is
+`harbor-bridge-<clusterName>`, one audience per cluster, so a token
+minted for one cluster's bridge is refused by every other cluster's
+bridge even where the issuers happen to agree.
 
 ### Cross-cluster robot manipulation
 
@@ -259,12 +261,21 @@ container:
   into whatever paths the node's kubelet flags point at — those are
   discovered at runtime from `/proc/<kubelet>/cmdline` and cannot be
   narrowed at chart-render time.
-- restarts kubelet via `nsenter -t 1 … systemctl restart` — but only
-  when the effective credential-provider config content (or the
-  kubelet flags) actually changed, tracked by a content hash in
-  `/var/lib/harbor-bridge/installer-state.json`. Running containers
-  survive the restart (containerd owns them). Binary drops and
-  CA/mTLS rotation never restart kubelet.
+- finds kubelet through `/proc`, and accepts only a process named
+  `kubelet` whose parent is PID 1 and that does not run in a pod cgroup.
+  Any pod can name its process `kubelet` and fake a command line; before
+  this check such a pod could steer where the privileged installer wrote
+  a root-owned binary. With several candidates left, it refuses to guess.
+  Discovered paths must be absolute and clean.
+- restarts kubelet via `nsenter -t 1 … systemctl restart <unit>` — no
+  shell; the unit name is validated against the systemd character set —
+  but only when the effective credential-provider config content (or
+  the kubelet flags) actually changed, tracked by a content hash in
+  `/var/lib/harbor-bridge/installer-state.json`. It then waits until the
+  unit is stably active (and, in patch mode, until the running kubelet
+  carries the flags) before it records success; otherwise the pod fails
+  loudly. Running containers survive the restart (containerd owns them).
+  Binary drops and CA/mTLS rotation never restart kubelet.
 - in `patch` mode parse-merges `/etc/default/kubelet`, preserving
   operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
   node's existing `CredentialProviderConfig`, preserving foreign
@@ -287,8 +298,14 @@ Operator choices:
   RBAC accordingly.
 - The DaemonSet's long-running container is the installer in `--sync`
   mode: root (it refreshes the on-host CA/mTLS files when
-  cert-manager rotates them) but never privileged, never nsenter, no
-  kubelet interaction.
+  cert-manager rotates them) but never privileged, no capabilities,
+  `seccompProfile: RuntimeDefault`, read-only root filesystem, and a
+  single hostPath mount: `plugin.hostConfigDir`. It never sees the host
+  root, never uses nsenter, never touches kubelet.
+- The DaemonSet pods get no ServiceAccount token (they never call the
+  Kubernetes API).
+- `plugin.enabled: false` removes the DaemonSet entirely, for nodes
+  that get the plugin out of band ([docs/install-external-plugin.md](docs/install-external-plugin.md)).
 
 ### Audience-scoped RBAC
 
@@ -324,14 +341,42 @@ Operators who want to bind to specific nodes via a custom admission
 webhook can set `plugin.audienceRBAC.create: false` and provide
 their own RBAC.
 
+## Credential lifetime, rotation, and revocation
+
+([ADR-0023](docs/adr/0023-level-triggered-robot-lifecycle.md))
+
+- **Rotation.** Each robot password rotates every 24h. The bridge stamps
+  the robot Secret with the instant before which it will not rotate
+  (`harbor.aetherize.io/rotation-not-before`) and never lets kubelet
+  cache the credentials past it, so a rotation invalidates no cached
+  credentials. A permission change does not rotate: Harbor applies it to
+  the existing robot.
+- **Permission changes reach Harbor and stay there.** Every reconcile
+  compares the robot's grants in Harbor with the HarborAccess spec and
+  rewrites them on any difference, including changes made in the Harbor
+  UI. A robot an administrator disabled stays disabled and is reported
+  as `Ready=False, reason=RobotDisabled`.
+- **Revocation.** Deleting a HarborAccess deletes every robot it owns
+  (also robots of an earlier `serviceAccountRef` and dash-named robots
+  from 0.2.x) and its Secret before the finalizer is released. Changing
+  `serviceAccountRef` deletes the previous identity's robot as soon as
+  the new one is in place. The janitor sweeps for anything left behind
+  every 5 minutes. While Harbor is unreachable, the finalizer holds and
+  the HarborAccess reports `reason=DeletionBlocked`.
+- **Residual window.** kubelet can keep cached credentials of a revoked
+  identity for up to the CR's `tokenTTL`, but they stop working the moment
+  the robot is deleted in Harbor. They keep working only while the
+  deletion is blocked (Harbor unreachable) — keep `tokenTTL` short and
+  alert on `reason=DeletionBlocked`.
+
 ## Hardening the bridge
 
 | Lever | Default | Recommendation |
 | --- | --- | --- |
-| `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor system robot scoped to robot-account management |
+| `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
-| `plugin.patchKubelet` | `true` | Set `false` on EKS / GKE / AKS / baked AMIs so the DaemonSet drops `hostPID` and the nsenter / kubelet-restart block |
+| `plugin.install.mode` | `auto` | `none` for the least privilege (no `hostPID`, no privileged container, two narrow hostPath mounts; you wire the kubelet flags). `plugin.enabled: false` for no node agent at all |
 | `plugin.audienceRBAC.create` | `true` | Keep `true` unless you're providing a tighter binding via admission webhook; the chart's binding is audience-narrow but `system:nodes`-broad |
 | Pod security (bridge) | hardened by default (`runAsNonRoot`, `runAsUser: 65532`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drops `ALL` capabilities, `seccompProfile: RuntimeDefault`) | Keep the defaults; relax only if a sidecar genuinely requires it |
 | Bridge namespace RBAC | unset | Restrict `secrets` get/list/watch to the bridge ServiceAccount only |
@@ -339,9 +384,10 @@ their own RBAC.
 | Network exposure | NodePort `:31443` | Cluster-local only; firewall the NodePort to the cluster network. With Cilium kube-proxy replacement, socketLB intercepts host-netns `127.0.0.1:31443` from kubelet without exposing the port externally |
 | `HarborAccess` authorship | any principal RBAC-granted `create harboraccesses` | **Cluster-privileged** — whoever authors a CR grants any project to any SA identity. Restrict to the platform team; gate any tenant-writable path behind an admission policy constraining projects / `serviceAccountRef` per namespace. See *Unauthorized HarborAccess authorship* above |
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`repository@sha256:…`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
-| `/metrics` endpoint | unauthenticated on the NodePort TLS port | Enable mTLS (it gates the whole port) or firewall the NodePort. The series are aggregate counts only — no secrets, subjects, robots, or images — so the leak is a recon oracle, not credentials |
-| `tls.enabled` | `true` | Leave it `true`. `false` does **not** serve plaintext (the bridge has no HTTP listener); it only removes the serving cert and breaks startup |
-| Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go.mod` pins `toolchain go1.26.4` for the GO-2026-5037/5038/5039 stdlib fixes; Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
+| `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
+| `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`; otherwise the janitor cannot recognise the bridge's robots |
+| Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release; Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
 

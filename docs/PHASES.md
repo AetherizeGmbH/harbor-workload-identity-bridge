@@ -44,7 +44,7 @@ Read these before touching code in any phase.
 
 | Var | Required | Notes |
 | --- | --- | --- |
-| `BRIDGE_CLUSTER_NAME` | yes | DNS-label regex `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, max 63 chars. Fail-fast on invalid. **Must not be a hyphen-prefix of any other cluster's name** sharing the same Harbor (operator responsibility per ADR-0009). |
+| `BRIDGE_CLUSTER_NAME` | yes | DNS-label regex `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, max 63 chars. Fail-fast on invalid. Must be unique among the clusters sharing one Harbor; the dot-terminated ownership prefix (ADR-0018) makes distinct names collision-free. |
 | `BRIDGE_NAMESPACE` | yes | Where robot-password Secrets live. Same DNS-label validation. |
 | `BRIDGE_OIDC_ISSUER` | yes | Cluster's service-account issuer, e.g. `https://kubernetes.default.svc`. Must match the `iss` claim of incoming SA tokens byte-for-byte. |
 | `BRIDGE_HARBOR_URL` | yes | Base URL of the Harbor instance. |
@@ -148,7 +148,7 @@ ADRs 0001–0008, `HarborAccess` v1alpha1 types, generated manifests, Makefile, 
 
 ### Known operator burden
 
-- Cluster names must not be hyphen-prefixes of each other across bridges sharing one Harbor (ADR-0009 caveat).
+- Cluster names must be unique across bridges sharing one Harbor (the hyphen-prefix caveat of ADR-0009 was retired by ADR-0018).
 - A `BRIDGE_CLUSTER_NAME` change orphans the prior `bridge-<oldname>-...` robots in Harbor; cleanup is manual.
 
 ## Phase 3 — Data Plane
@@ -284,18 +284,18 @@ Originally-planned section (kept for archaeology):
 
 ### Delivered
 
-- [charts/harbor-bridge/Chart.yaml](../chart/Chart.yaml) (`harbor-workload-identity-bridge` v0.1.0, kubeVersion `>=1.34.0-0` for KEP-4412 beta).
-- [charts/harbor-bridge/values.yaml](../chart/values.yaml) — 7 REQUIRED fields gated at template time (`clusterName`, `harbor.url`, `harbor.adminCredsSecret.name`, `plugin.matchImages`, `plugin.audience`, `tls.issuerRef.name` when `tls.enabled`, `bridge.mTLS.clientIssuerRef.name` when mTLS enabled); everything else defaulted with comments explaining each knob.
-- [charts/harbor-bridge/templates/_helpers.tpl](../chart/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide, leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
+- [charts/harbor-bridge/Chart.yaml](../charts/harbor-bridge/Chart.yaml) (`harbor-workload-identity-bridge` v0.1.0, kubeVersion `>=1.34.0-0` for KEP-4412 beta).
+- [charts/harbor-bridge/values.yaml](../charts/harbor-bridge/values.yaml) — 7 REQUIRED fields gated at template time (`clusterName`, `harbor.url`, `harbor.adminCredsSecret.name`, `plugin.matchImages`, `plugin.audience`, `tls.issuerRef.name` when `tls.enabled`, `bridge.mTLS.clientIssuerRef.name` when mTLS enabled); everything else defaulted with comments explaining each knob.
+- [charts/harbor-bridge/templates/_helpers.tpl](../charts/harbor-bridge/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide, leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
 - Bridge templates: `bridge-serviceaccount.yaml`, `bridge-rbac.yaml` (ClusterRole for HarborAccess cluster-wide, Role for Secrets + Lease in release namespace — tightened from the over-broad kubebuilder markers), `bridge-deployment.yaml` (2 replicas with pod-anti-affinity, distroless `nonroot` security context, projected admin-creds and TLS volumes, TLS-cert-checksum annotation for cert-rotation reload), `bridge-service.yaml` (NodePort 31443 per ADR-0008), `bridge-certificate.yaml` (cert-manager Certificate with optional client-cert when mTLS enabled), `bridge-servicemonitor.yaml` (optional, only when `metrics.serviceMonitor.enabled`).
 - Plugin templates: `plugin-serviceaccount.yaml` (`automountServiceAccountToken: false` — plugin pods don't talk to the K8s API), `plugin-configmap.yaml` (kubelet `CredentialProviderConfig` with `cacheType: ServiceAccount`, `defaultCacheDuration`, `matchImages` from values, `HARBOR_BRIDGE_*` env including CA path), `plugin-daemonset.yaml` (privileged init container that copies binary + config + CA + optional mTLS client cert into `/etc/kubernetes/credential-provider*` hostPaths, then a `registry.k8s.io/pause:3.10` main container so the DaemonSet stays "running" and `kubectl logs` surfaces the install output; `priorityClassName: system-node-critical`, `tolerations: [{operator: Exists}]` so the plugin lands on control-plane nodes).
-- [charts/harbor-bridge/crds/harbor.aetherize.io_harboraccesses.yaml](../chart/crds/harbor.aetherize.io_harboraccesses.yaml) — CRD copied from `config/crd/bases`. Helm's `crds/` directory installs it but does not upgrade it; CRD changes are an explicit operator step.
-- [charts/harbor-bridge/templates/NOTES.txt](../chart/templates/NOTES.txt) — prints `clusterName`, the unique prefix, the audience the operator must set on every CR, and the kubelet flags the chart cannot set (`--image-credential-provider-{bin-dir,config}` must already be on the node).
+- [charts/harbor-bridge/crds/harbor.aetherize.io_harboraccesses.yaml](../charts/harbor-bridge/crds/harbor.aetherize.io_harboraccesses.yaml) — CRD copied from `config/crd/bases`. Helm's `crds/` directory installs it but does not upgrade it; CRD changes are an explicit operator step.
+- [charts/harbor-bridge/templates/NOTES.txt](../charts/harbor-bridge/templates/NOTES.txt) — prints `clusterName`, the unique prefix, the audience the operator must set on every CR, and the kubelet flags the chart cannot set (`--image-credential-provider-{bin-dir,config}` must already be on the node).
 
 ### Validation
 
 - `make chart-lint` — `helm lint` clean on both test values files (`values-complete.yaml`, `values-mtls.yaml`).
-- `make chart-test-required` — [charts/harbor-bridge/tests/test-required-values.sh](../chart/tests/test-required-values.sh) verifies all 7 required-value gates fire with the expected error substring. `plugin.matchImages` (an empty list, not a missing key) is tested via a values overlay because `--set foo=[]` doesn't reproduce the empty-list path.
+- `make chart-test-required` — [charts/harbor-bridge/tests/test-required-values.sh](../charts/harbor-bridge/tests/test-required-values.sh) verifies all 7 required-value gates fire with the expected error substring. `plugin.matchImages` (an empty list, not a missing key) is tested via a values overlay because `--set foo=[]` doesn't reproduce the empty-list path.
 - `make chart-golden` — diff current render against `charts/harbor-bridge/tests/golden/{default,mtls}.yaml`. CI fails on unintended template drift; `make chart-golden-update` re-captures after intentional changes.
 - `make chart-test` — full suite (lint + required-value + golden), used as the chart's gate.
 - Server-side dry-run against the 2026-05-31 kind cluster accepted all 11 resources for the default variant and all 12 for the mTLS variant (the ServiceMonitor's CRD wasn't installed; YAML structurally fine).
