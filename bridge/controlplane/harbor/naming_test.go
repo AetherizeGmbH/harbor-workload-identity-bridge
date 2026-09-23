@@ -246,3 +246,24 @@ func TestIsValidHarborRobotName(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnsLegacyRobot(t *testing.T) {
+	cases := []struct {
+		cluster, name string
+		want          bool
+	}{
+		{"prod", "bridge-prod-ns-sa", true},
+		{"prod", "robot$bridge-prod-ns-sa", true},
+		{"prod", "bridge-prod-eu-ns-sa", true}, // weak by design: the description tag must decide
+		{"prod", "bridge-prod.ns.sa", false},   // current scheme, not legacy
+		{"prod", "bridge-prod-eu.ns.sa", false},
+		{"prod", "bridge-prod-", false},
+		{"prod", "bridge-staging-ns-sa", false},
+		{"", "bridge--ns-sa", false},
+	}
+	for _, tc := range cases {
+		if got := OwnsLegacyRobot(tc.cluster, tc.name); got != tc.want {
+			t.Errorf("OwnsLegacyRobot(%q, %q) = %v, want %v", tc.cluster, tc.name, got, tc.want)
+		}
+	}
+}

@@ -147,6 +147,29 @@ func OwnsRobot(cluster, robotName string) bool {
 	return strings.HasPrefix(n, ClusterPrefix(cluster))
 }
 
+// OwnsLegacyRobot reports whether robotName is a robot this cluster's
+// bridge created under the pre-ADR-0018 dash-delimited scheme
+// ("bridge-<cluster>-<ns>-<sa>", shipped in releases up to 0.2.x). Those
+// robots are never adopted — only recognised so the janitor and the
+// deletion path can revoke them instead of leaking them with valid
+// passwords after an upgrade.
+//
+// The dash prefix is NOT injective ("bridge-prod-" also prefixes every
+// robot of a cluster named "prod-eu"), so this is deliberately a weak
+// first filter: a legacy name never contains a dot (the old scheme had
+// none, and every current name has one right after the cluster field),
+// and callers MUST additionally require the description's cluster tag
+// to equal cluster exactly (RobotBelongsToCluster). That tag is what
+// tells "prod"'s legacy robots apart from "prod-eu"'s.
+func OwnsLegacyRobot(cluster, robotName string) bool {
+	if cluster == "" {
+		return false
+	}
+	n := strings.TrimPrefix(robotName, HarborRobotPrefix)
+	rest, ok := strings.CutPrefix(n, robotNamePrefix+cluster+"-")
+	return ok && rest != "" && !strings.Contains(rest, ".")
+}
+
 // IsValidHarborRobotName reports whether the given name would be accepted
 // by Harbor's server-side validateName check. Exposed for tests and for
 // defensive checks inside the Harbor client wrapper.

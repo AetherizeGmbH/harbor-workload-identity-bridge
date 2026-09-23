@@ -36,12 +36,19 @@ type fakeHarbor struct {
 	expectedUser string
 	expectedPass string
 
-	// addRobotDollarPrefix mimics real Harbor's behaviour of prepending
-	// "robot$" to system-level robot names on GET paths even though POST
-	// /robots accepts (and we send) the un-prefixed form. Off by default
-	// to keep older tests untouched; the prefix-asymmetry regression
-	// test below toggles it on.
-	addRobotDollarPrefix bool
+	// prefix mimics Harbor's robot_name_prefix: names are STORED without
+	// it and RENDERED with it on every read path and in the Create
+	// response (goharbor/harbor src/controller/robot/controller.go
+	// populate). Defaults to Harbor's "robot$".
+	prefix string
+
+	// ignoreQuery makes GET /robots ignore the q filter, modelling a
+	// Harbor build whose query filtering behaves differently, so the
+	// client's full-scan fallback is exercised.
+	ignoreQuery bool
+
+	// queries records every q value GET /robots received.
+	queries []string
 }
 
 type fakeHarborState struct {
@@ -56,9 +63,19 @@ type recordedRequest struct {
 
 func newFakeHarbor(t *testing.T) *fakeHarbor {
 	return &fakeHarbor{
-		t:  t,
-		mu: &fakeHarborState{robots: map[int64]*models.Robot{}, nextID: 100},
+		t:      t,
+		mu:     &fakeHarborState{robots: map[int64]*models.Robot{}, nextID: 100},
+		prefix: "robot$",
 	}
+}
+
+// render returns the read-path view of a stored robot (prefixed name, no
+// secret — Harbor never returns secrets on read paths).
+func (f *fakeHarbor) render(r *models.Robot) *models.Robot {
+	out := *r
+	out.Name = f.prefix + r.Name
+	out.Secret = ""
+	return &out
 }
 
 func (f *fakeHarbor) server() *httptest.Server {
@@ -101,11 +118,19 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		id := f.mu.nextID
 		f.mu.nextID++
+		for _, existing := range f.mu.robots {
+			if existing.Name == body.Name {
+				writeHarborError(w, http.StatusConflict, "CONFLICT", "robot already exists")
+				return
+			}
+		}
 		stored := &models.Robot{
 			ID:          id,
 			Name:        body.Name,
 			Description: body.Description,
 			Level:       body.Level,
+			ExpiresAt:   -1,
+			Editable:    true,
 			Secret:      "generated-secret-for-" + body.Name,
 			Permissions: body.Permissions,
 		}
@@ -114,7 +139,7 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(models.RobotCreated{
 			ID:     id,
-			Name:   body.Name,
+			Name:   f.prefix + body.Name,
 			Secret: stored.Secret,
 		})
 	case http.MethodGet:
@@ -128,6 +153,20 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			ids = append(ids, id)
 		}
 		sortInt64s(ids)
+		// q=name=<exact> filters on the STORED (un-prefixed) name, like
+		// Harbor's ORM filter on the robot.name column.
+		if q := r.URL.Query().Get("q"); q != "" {
+			f.queries = append(f.queries, q)
+			if want, ok := strings.CutPrefix(q, "name="); ok && !f.ignoreQuery {
+				kept := ids[:0]
+				for _, id := range ids {
+					if f.mu.robots[id].Name == want {
+						kept = append(kept, id)
+					}
+				}
+				ids = kept
+			}
+		}
 		start := (page - 1) * size
 		end := start + size
 		out := make([]*models.Robot, 0, size)
@@ -138,18 +177,7 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			if int64(i) >= end {
 				break
 			}
-			r := f.mu.robots[id]
-			if f.addRobotDollarPrefix && !strings.HasPrefix(r.Name, "robot$") {
-				// Mimic Harbor: render names on read paths with the
-				// "robot$" prefix. Construct a fresh value to avoid
-				// mutating the canonical store (Create + GetByID still
-				// use the un-prefixed form).
-				display := *r
-				display.Name = "robot$" + r.Name
-				out = append(out, &display)
-			} else {
-				out = append(out, r)
-			}
+			out = append(out, f.render(f.mu.robots[id]))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
@@ -176,15 +204,30 @@ func (f *fakeHarbor) handleItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(robot)
+		_ = json.NewEncoder(w).Encode(f.render(robot))
 	case http.MethodPut:
 		var body models.Robot
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 			return
 		}
+		// Harbor's updateV2Robot: the name (on-wire form) and level are
+		// immutable and must be echoed verbatim, and the disable flag is
+		// overwritten with whatever the body carries.
+		if body.Level != robot.Level || body.Name != f.prefix+robot.Name {
+			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "cannot update the level or name of robot")
+			return
+		}
+		if len(body.Permissions) == 0 {
+			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "Permission list cannot be empty")
+			return
+		}
 		robot.Description = body.Description
 		robot.Permissions = body.Permissions
+		robot.Disable = body.Disable
+		if body.Duration != nil && *body.Duration == -1 {
+			robot.ExpiresAt = -1
+		}
 		w.WriteHeader(http.StatusOK)
 	case http.MethodPatch:
 		// Harbor uses PATCH /robots/{id} as the password-refresh endpoint
@@ -306,21 +349,6 @@ func TestClient_Create_SendsBasicAuth(t *testing.T) {
 	}
 }
 
-func TestClient_GetByID_NotFoundIsTyped(t *testing.T) {
-	fake := newFakeHarbor(t)
-	srv := fake.server()
-	defer srv.Close()
-	c := newClientFor(t, srv, "", "")
-
-	_, err := c.GetByID(context.Background(), 99999)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !errors.Is(err, ErrRobotNotFound) {
-		t.Errorf("expected ErrRobotNotFound, got %v", err)
-	}
-}
-
 func TestClient_GetByName_FilteringWorks(t *testing.T) {
 	fake := newFakeHarbor(t)
 	srv := fake.server()
@@ -347,32 +375,97 @@ func TestClient_GetByName_FilteringWorks(t *testing.T) {
 	}
 }
 
-// TestClient_GetByName_ToleratesHarborRobotDollarPrefix locks in the
-// regression discovered during the first manual e2e: Harbor's
-// GET /robots renders system-level robot names as "robot$<name>" even
-// though POST /robots stores them under the un-prefixed name we sent.
-// Before the fix, GetByName looked for "bridge-..." in a List that
-// reported "robot$bridge-...", missed it on every reconcile, and
-// looped on the 409-on-create path. This test fails (NotFound) without
-// the matcher tolerating the prefix.
-func TestClient_GetByName_ToleratesHarborRobotDollarPrefix(t *testing.T) {
+// TestClient_ReadPathsStripRobotPrefix locks in ADR-0014: Harbor stores
+// robot names without its robot prefix but renders them WITH it on every
+// read path and in the Create response. The client must hand callers the
+// internal name (so comparisons against RobotName work) while keeping the
+// on-wire form for Basic Auth and updates.
+func TestClient_ReadPathsStripRobotPrefix(t *testing.T) {
+	for _, prefix := range []string{"robot$", "robot_"} {
+		t.Run(prefix, func(t *testing.T) {
+			fake := newFakeHarbor(t)
+			fake.prefix = prefix
+			srv := fake.server()
+			defer srv.Close()
+			u, _ := url.Parse(srv.URL)
+			c, err := NewClient(u, "", "", srv.Client().Transport, WithRobotPrefix(prefix))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			const internalName = "bridge-dev.test-pull.image-puller"
+			created, err := c.Create(context.Background(), internalName, "",
+				[]ProjectPermission{{Project: "p", Action: "pull"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if created.Name != internalName || created.WireName != prefix+internalName {
+				t.Errorf("Create: Name=%q WireName=%q", created.Name, created.WireName)
+			}
+
+			got, err := c.GetByName(context.Background(), internalName)
+			if err != nil {
+				t.Fatalf("GetByName: %v", err)
+			}
+			if got.Name != internalName || got.WireName != prefix+internalName {
+				t.Errorf("GetByName: Name=%q WireName=%q", got.Name, got.WireName)
+			}
+		})
+	}
+}
+
+// TestClient_GetByName_UsesExactNameQuery pins the O(1) lookup: the client
+// asks Harbor for q=name=<internal name> instead of paging every robot.
+func TestClient_GetByName_UsesExactNameQuery(t *testing.T) {
 	fake := newFakeHarbor(t)
-	fake.addRobotDollarPrefix = true
 	srv := fake.server()
 	defer srv.Close()
 	c := newClientFor(t, srv, "", "")
 
-	const internalName = "bridge-dev-test-pull-image-puller"
-	if _, err := c.Create(context.Background(), internalName, "", nil); err != nil {
-		t.Fatalf("Create: %v", err)
+	if _, err := c.Create(context.Background(), "bridge-a.b.c", "", []ProjectPermission{{Project: "p", Action: "pull"}}); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := c.GetByName(context.Background(), "bridge-a.b.c"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.queries) != 1 || fake.queries[0] != "name=bridge-a.b.c" {
+		t.Errorf("queries = %q, want exactly [name=bridge-a.b.c]", fake.queries)
+	}
+}
 
-	got, err := c.GetByName(context.Background(), internalName)
-	if err != nil {
-		t.Fatalf("GetByName: %v (expected match against the robot$-prefixed entry)", err)
+// TestClient_GetByName_FallsBackToFullScan covers a Harbor whose q filter
+// does not behave as expected: the client must still find the robot (and
+// must not report NotFound, which would drive a create/409 loop).
+func TestClient_GetByName_FallsBackToFullScan(t *testing.T) {
+	fake := newFakeHarbor(t)
+	fake.ignoreQuery = true
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+
+	for _, n := range []string{"bridge-a.b.c", "bridge-a.b.d"} {
+		if _, err := c.Create(context.Background(), n, "", []ProjectPermission{{Project: "p", Action: "pull"}}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got.Name != "robot$"+internalName {
-		t.Errorf("Robot.Name = %q, want the on-wire form %q", got.Name, "robot$"+internalName)
+	got, err := c.GetByName(context.Background(), "bridge-a.b.d")
+	if err != nil || got.Name != "bridge-a.b.d" {
+		t.Fatalf("GetByName = %+v, %v", got, err)
+	}
+}
+
+func TestClient_Create_409IsAlreadyExists(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	perms := []ProjectPermission{{Project: "p", Action: "pull"}}
+	if _, err := c.Create(context.Background(), "bridge-a.b.c", "", perms); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Create(context.Background(), "bridge-a.b.c", "", perms)
+	if !errors.Is(err, ErrRobotAlreadyExists) {
+		t.Fatalf("second Create: got %v, want ErrRobotAlreadyExists", err)
 	}
 }
 
@@ -394,8 +487,8 @@ func TestClient_Delete_IsIdempotent(t *testing.T) {
 	if err := c.Delete(context.Background(), created.ID); err != nil {
 		t.Errorf("second Delete returned error: %v", err)
 	}
-	if _, err := c.GetByID(context.Background(), created.ID); !errors.Is(err, ErrRobotNotFound) {
-		t.Errorf("after Delete, GetByID should be ErrRobotNotFound; got %v", err)
+	if _, err := c.GetByName(context.Background(), "bridge-x-y-z"); !errors.Is(err, ErrRobotNotFound) {
+		t.Errorf("after Delete, GetByName should be ErrRobotNotFound; got %v", err)
 	}
 }
 
@@ -419,27 +512,165 @@ func TestClient_RefreshSecret_ReturnsNewValue(t *testing.T) {
 	}
 }
 
-func TestClient_UpdatePermissions(t *testing.T) {
+// TestClient_Update_EchoesWireNameAndPreservesDisable is the regression
+// test for audit C1: Harbor rejects every PUT /robots/{id} whose name is
+// not the stored on-wire name, so an update that omits (or un-prefixes)
+// the name fails with 400 and permission changes never reach Harbor. It
+// also pins that an administrator's "disable" survives the update.
+func TestClient_Update_EchoesWireNameAndPreservesDisable(t *testing.T) {
 	fake := newFakeHarbor(t)
 	srv := fake.server()
 	defer srv.Close()
 	c := newClientFor(t, srv, "", "")
 
-	created, err := c.Create(context.Background(), "bridge-x-y-z", "old-desc",
+	created, err := c.Create(context.Background(), "bridge-x.y.z", "old-desc",
 		[]ProjectPermission{{Project: "production", Action: "pull"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.UpdatePermissions(context.Background(), created.ID, "new-desc",
-		[]ProjectPermission{{Project: "production", Action: "pull,push"}}); err != nil {
+	fake.mu.robots[created.ID].Disable = true // an admin disabled it in the UI
+
+	current, err := c.GetByName(context.Background(), "bridge-x.y.z")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !current.Disabled {
+		t.Fatal("read path lost the disable flag")
+	}
+	if err := c.Update(context.Background(), current, "new-desc",
+		[]ProjectPermission{{Project: "production", Action: "pull,push"}}); err != nil {
+		t.Fatalf("Update: %v", err)
 	}
 	stored := fake.mu.robots[created.ID]
 	if stored.Description != "new-desc" {
 		t.Errorf("Description not updated: %q", stored.Description)
 	}
-	if len(stored.Permissions[0].Access) != 2 {
-		t.Errorf("permissions not updated; got %d Access entries", len(stored.Permissions[0].Access))
+	if len(stored.Permissions) != 1 || len(stored.Permissions[0].Access) != 2 {
+		t.Errorf("permissions not updated: %+v", stored.Permissions)
+	}
+	if !stored.Disable {
+		t.Error("Update re-enabled a robot an administrator disabled")
+	}
+
+	after, err := c.GetByName(context.Background(), "bridge-x.y.z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !PermissionsMatch(after, []ProjectPermission{{Project: "production", Action: "pull,push"}}) {
+		t.Errorf("read-back permissions %+v do not match what was written", after.Permissions)
+	}
+}
+
+// TestClient_Update_WithoutWireNameIsRejectedByHarbor proves the fake
+// enforces Harbor's name immutability, i.e. that the test above would
+// fail if the client sent the internal name.
+func TestClient_Update_WithoutWireNameIsRejectedByHarbor(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+
+	created, err := c.Create(context.Background(), "bridge-x.y.z", "",
+		[]ProjectPermission{{Project: "production", Action: "pull"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := *created
+	bad.WireName = created.Name // un-prefixed: what the pre-fix client effectively sent
+	err = c.Update(context.Background(), &bad, "", []ProjectPermission{{Project: "production", Action: "push"}})
+	if err == nil || !strings.Contains(err.Error(), "cannot update the level or name") {
+		t.Fatalf("Update with un-prefixed name: got %v, want Harbor 400", err)
+	}
+	if err := c.Update(context.Background(), &Robot{ID: created.ID}, "", nil); err == nil {
+		t.Fatal("Update without a WireName must fail before calling Harbor")
+	}
+}
+
+func TestPermissionsMatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		robot   Robot
+		desired []ProjectPermission
+		want    bool
+	}{
+		{"equal", Robot{Permissions: []ProjectPermission{{Project: "a", Action: "pull"}}}, []ProjectPermission{{Project: "a", Action: "pull"}}, true},
+		{"order and split insensitive",
+			Robot{Permissions: []ProjectPermission{{Project: "b", Action: "push,pull"}, {Project: "a", Action: "pull"}}},
+			[]ProjectPermission{{Project: "a", Action: "pull"}, {Project: "b", Action: "pull"}, {Project: "b", Action: "push"}}, true},
+		{"missing project", Robot{Permissions: []ProjectPermission{{Project: "a", Action: "pull"}}}, []ProjectPermission{{Project: "a", Action: "pull"}, {Project: "b", Action: "pull"}}, false},
+		{"revoked action", Robot{Permissions: []ProjectPermission{{Project: "a", Action: "pull,push"}}}, []ProjectPermission{{Project: "a", Action: "pull"}}, false},
+		{"foreign access", Robot{ForeignAccess: true, Permissions: []ProjectPermission{{Project: "a", Action: "pull"}}}, []ProjectPermission{{Project: "a", Action: "pull"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PermissionsMatch(&tc.robot, tc.desired); got != tc.want {
+				t.Errorf("PermissionsMatch = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFromHarborRobot_FlagsForeignAccess(t *testing.T) {
+	c := &goClient{robotPrefix: "robot$"}
+	r := c.fromHarborRobot(&models.Robot{
+		Name: "robot$bridge-a.b.c",
+		Permissions: []*models.RobotPermission{
+			{Kind: "project", Namespace: "p", Access: []*models.Access{
+				{Resource: "repository", Action: "pull"},
+				{Resource: "artifact", Action: "delete"},
+			}},
+		},
+	})
+	if !r.ForeignAccess {
+		t.Error("an artifact:delete grant must be flagged as foreign access")
+	}
+	if r.Name != "bridge-a.b.c" {
+		t.Errorf("Name = %q", r.Name)
+	}
+	r = c.fromHarborRobot(&models.Robot{
+		Name:        "robot$bridge-a.b.c",
+		Permissions: []*models.RobotPermission{{Kind: "system", Namespace: "/", Access: []*models.Access{{Resource: "robot", Action: "create"}}}},
+	})
+	if !r.ForeignAccess {
+		t.Error("a system-kind grant must be flagged as foreign access")
+	}
+}
+
+func TestToHarborPermissions_MergesDuplicateProjects(t *testing.T) {
+	got := toHarborPermissions([]ProjectPermission{
+		{Project: "b", Action: "push"}, {Project: "a", Action: "pull"}, {Project: "b", Action: "pull"},
+	})
+	if len(got) != 2 || got[0].Namespace != "a" || got[1].Namespace != "b" {
+		t.Fatalf("got %+v, want one entry per project, sorted", got)
+	}
+	if len(got[1].Access) != 2 || got[1].Access[0].Action != "pull" || got[1].Access[1].Action != "push" {
+		t.Errorf("project b accesses = %+v, want pull then push", got[1].Access)
+	}
+}
+
+// TestNewClient_BasePathHandling pins that every documented spelling of
+// BRIDGE_HARBOR_URL reaches /api/v2.0/robots exactly once — a trailing
+// slash used to defeat the suffix check and double the base path.
+func TestNewClient_BasePathHandling(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+	for _, suffix := range []string{"", "/", "/api/v2.0", "/api/v2.0/"} {
+		u, _ := url.Parse(srv.URL + suffix)
+		c, err := NewClient(u, "", "", srv.Client().Transport)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.List(context.Background()); err != nil {
+			t.Fatalf("%q: List: %v", suffix, err)
+		}
+		if gotPath != "/api/v2.0/robots" {
+			t.Errorf("URL suffix %q: request path %q, want /api/v2.0/robots", suffix, gotPath)
+		}
 	}
 }
 
@@ -470,32 +701,6 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 	}
 }
 
-func TestFilterOwned_PrefixFilter(t *testing.T) {
-	robots := []Robot{
-		{Name: "bridge-prod.flux"},
-		{Name: "bridge-prod.system"},
-		{Name: "bridge-staging.flux"},
-		{Name: "robot-foo"},
-		{Name: "bridge-prod-eu.thing"}, // prod-eu's robot — must NOT be owned by prod
-	}
-	got := FilterOwned(robots, "prod")
-	// ADR-0018: the dot-terminated prefix "bridge-prod." excludes
-	// "bridge-prod-eu.thing" (cluster prod-eu), fixing the ADR-0009
-	// hyphen-prefix false positive. Only prod's own robots are owned.
-	wantNames := map[string]bool{
-		"bridge-prod.flux":   true,
-		"bridge-prod.system": true,
-	}
-	if len(got) != len(wantNames) {
-		t.Errorf("FilterOwned returned %d, want %d", len(got), len(wantNames))
-	}
-	for _, r := range got {
-		if !wantNames[r.Name] {
-			t.Errorf("FilterOwned included unexpected robot %q", r.Name)
-		}
-	}
-}
-
 func parseInt64Default(raw string, def int64) int64 {
 	if raw == "" {
 		return def
@@ -512,14 +717,6 @@ func sortInt64s(s []int64) {
 		for j := i; j > 0 && s[j-1] > s[j]; j-- {
 			s[j-1], s[j] = s[j], s[j-1]
 		}
-	}
-}
-
-func TestFilterOwned_EmptyClusterReturnsNothing(t *testing.T) {
-	robots := []Robot{{Name: "bridge-prod-flux"}, {Name: "bridge-anything"}}
-	got := FilterOwned(robots, "")
-	if len(got) != 0 {
-		t.Errorf("empty cluster name should match nothing; got %d", len(got))
 	}
 }
 

@@ -6,12 +6,10 @@ package controlplane
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,8 +19,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -63,26 +63,19 @@ func setupEnvtest(t *testing.T) *rest.Config {
 	return cfg
 }
 
-// flakyHarbor is a thread-safe harbor.Client that fails the first
-// failuresBefore Create/GetByName calls with a transient error, then
-// behaves like the in-memory mock for the rest of the test. Used to
-// verify controller-runtime's retry semantics: markTransientError
-// must return the error from Reconcile so the manager schedules a
-// requeue, not just log and move on.
+// flakyHarbor wraps the in-memory mockHarbor and fails the first
+// failuresBefore Create/GetByName calls with a transient error. Used to
+// verify controller-runtime's retry semantics: markTransientError must
+// return the error from Reconcile so the manager schedules a requeue, not
+// just log and move on.
 type flakyHarbor struct {
-	mu            sync.Mutex
+	*mockHarbor
 	failuresLeft  int32 // atomic
 	totalAttempts int32 // atomic
-	robots        map[int64]*harbor.Robot
-	nextID        int64
 }
 
 func newFlakyHarbor(failures int) *flakyHarbor {
-	return &flakyHarbor{
-		failuresLeft: int32(failures),
-		robots:       map[int64]*harbor.Robot{},
-		nextID:       200,
-	}
+	return &flakyHarbor{mockHarbor: newMockHarbor(), failuresLeft: int32(failures)}
 }
 
 // Attempts returns the total number of GetByName + Create attempts so
@@ -98,84 +91,18 @@ func (f *flakyHarbor) maybeFail() error {
 	return nil
 }
 
-func (f *flakyHarbor) Create(_ context.Context, name, description string, perms []harbor.ProjectPermission) (*harbor.Robot, error) {
+func (f *flakyHarbor) Create(ctx context.Context, name, description string, perms []harbor.ProjectPermission) (*harbor.Robot, error) {
 	if err := f.maybeFail(); err != nil {
 		return nil, err
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	id := f.nextID
-	f.nextID++
-	r := &harbor.Robot{
-		ID:          id,
-		Name:        name,
-		Description: description,
-		Secret:      fmt.Sprintf("envtest-secret-%d", id),
-	}
-	f.robots[id] = r
-	return &harbor.Robot{ID: r.ID, Name: r.Name, Description: r.Description, Secret: r.Secret}, nil
+	return f.mockHarbor.Create(ctx, name, description, perms)
 }
 
-func (f *flakyHarbor) GetByName(_ context.Context, name string) (*harbor.Robot, error) {
+func (f *flakyHarbor) GetByName(ctx context.Context, name string) (*harbor.Robot, error) {
 	if err := f.maybeFail(); err != nil {
 		return nil, err
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, r := range f.robots {
-		if r.Name == name {
-			return &harbor.Robot{ID: r.ID, Name: r.Name, Description: r.Description}, nil
-		}
-	}
-	return nil, harbor.ErrRobotNotFound
-}
-
-// Stub methods the reconciler does not exercise in the happy path; pass
-// through cleanly so test failures don't get attributed to these.
-func (f *flakyHarbor) Delete(_ context.Context, id int64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.robots, id)
-	return nil
-}
-
-func (f *flakyHarbor) List(_ context.Context) ([]harbor.Robot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]harbor.Robot, 0, len(f.robots))
-	for _, r := range f.robots {
-		out = append(out, *r)
-	}
-	return out, nil
-}
-
-func (f *flakyHarbor) GetByID(_ context.Context, id int64) (*harbor.Robot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if r, ok := f.robots[id]; ok {
-		return &harbor.Robot{ID: r.ID, Name: r.Name, Description: r.Description}, nil
-	}
-	return nil, harbor.ErrRobotNotFound
-}
-
-func (f *flakyHarbor) RefreshSecret(_ context.Context, id int64) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	r, ok := f.robots[id]
-	if !ok {
-		return "", harbor.ErrRobotNotFound
-	}
-	r.Secret = fmt.Sprintf("refreshed-%d-%d", id, time.Now().UnixNano())
-	return r.Secret, nil
-}
-
-func (f *flakyHarbor) UpdatePermissions(_ context.Context, id int64, description string, perms []harbor.ProjectPermission) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if r, ok := f.robots[id]; ok {
-		r.Description = description
-	}
-	return nil
+	return f.mockHarbor.GetByName(ctx, name)
 }
 
 // TestEnvtest_TransientHarborError_RetriesUntilReady proves the
@@ -202,6 +129,9 @@ func TestEnvtest_TransientHarborError_RetriesUntilReady(t *testing.T) {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  testScheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		// Several envtest managers share this process; the controller
+		// name is registered globally for metrics.
+		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)

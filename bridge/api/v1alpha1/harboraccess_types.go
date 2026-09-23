@@ -91,8 +91,11 @@ type HarborAccessSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	Permissions []ProjectPermission `json:"permissions"`
 
-	// TokenTTL bounds how long a docker token issued via this HarborAccess lives.
-	// Min 5m, max 24h. Defaults to 1h.
+	// TokenTTL is the longest time kubelet may cache the robot credentials
+	// the bridge returns for this HarborAccess (the credential provider's
+	// cacheDuration). The bridge shortens it further so no cache outlives
+	// the next scheduled password rotation (ADR-0023). Min 5m, max 24h.
+	// Defaults to 1h.
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:Format=duration
 	// +kubebuilder:default="1h"
@@ -102,7 +105,8 @@ type HarborAccessSpec struct {
 
 // RobotRef references the Harbor robot account managed for this HarborAccess.
 type RobotRef struct {
-	// Name is the Harbor robot name (typically bridge-<namespace>-<serviceaccount>).
+	// Name is the Harbor robot name as Harbor reports it, i.e. with Harbor's
+	// robot prefix: robot$bridge-<cluster>.<saNamespace>.<saName> (ADR-0018).
 	Name string `json:"name,omitempty"`
 
 	// ID is the Harbor numeric ID of the robot.
@@ -164,6 +168,7 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ha,categories={harbor}
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters: it is stamped as a label value on the robot Secret"
 // +kubebuilder:printcolumn:name="SA",type="string",JSONPath=".spec.serviceAccountRef.name"
 // +kubebuilder:printcolumn:name="SA-Namespace",type="string",JSONPath=".spec.serviceAccountRef.namespace",priority=1
 // +kubebuilder:printcolumn:name="Robot",type="string",JSONPath=".status.robot.name"
