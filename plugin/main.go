@@ -102,6 +102,12 @@ func run(stdin io.Reader, stdout io.Writer, fetcher bridgeFetcher) error {
 	if err := json.NewDecoder(stdin).Decode(&req); err != nil {
 		return fmt.Errorf("decode CredentialProviderRequest from stdin: %w", err)
 	}
+	// kubelet always sends a typed v1 request. Anything else is not a
+	// request this plugin understands — refuse instead of guessing.
+	if req.APIVersion != credentialProviderAPIVersion || req.Kind != requestKind {
+		return fmt.Errorf("unsupported request %q/%q, want %s/%s",
+			req.APIVersion, req.Kind, credentialProviderAPIVersion, requestKind)
+	}
 	if req.Image == "" {
 		return errors.New("request image field is empty")
 	}
@@ -174,7 +180,7 @@ func imageHost(image string) string {
 // env stanza.
 type config struct {
 	Endpoint   string // HARBOR_BRIDGE_ENDPOINT, required, base URL of the bridge.
-	CABundle   string // HARBOR_BRIDGE_CA_BUNDLE, optional, either a path to a PEM file or the PEM body itself.
+	CABundle   string // HARBOR_BRIDGE_CA_BUNDLE, optional, a path to a PEM file or the PEM body itself (inline PEM suits hand-written provider configs, e.g. Talos).
 	ClientCert string // HARBOR_BRIDGE_CLIENT_CERT, optional, path to mTLS client cert (ADR-0008).
 	ClientKey  string // HARBOR_BRIDGE_CLIENT_KEY, optional, path to mTLS client key.
 }

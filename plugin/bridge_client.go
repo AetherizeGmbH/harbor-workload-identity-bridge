@@ -35,6 +35,12 @@ const (
 	requestTimeout    = 15 * time.Second
 	retryBackoff      = 1 * time.Second
 	maxBodySnippetLen = 256
+
+	// maxResponseBytes bounds how much of a bridge response the plugin
+	// reads. A credential response is a few hundred bytes; the bound keeps
+	// a misbehaving or impersonated endpoint from ballooning the memory
+	// of a process that runs inside kubelet's image-pull path.
+	maxResponseBytes = 1 << 20
 )
 
 // bridgeResponse mirrors bridge/dataplane.Response. Duplicated rather than
@@ -53,6 +59,10 @@ type bridgeResponse struct {
 type bridgeClient struct {
 	url  string
 	http *http.Client
+
+	// sleep waits before the 503 retry. A field so tests do not have to
+	// sleep for real.
+	sleep func(time.Duration)
 }
 
 func newBridgeClient(cfg *config) (*bridgeClient, error) {
@@ -93,8 +103,9 @@ func newBridgeClient(cfg *config) (*bridgeClient, error) {
 // at httptest.NewTLSServer (whose Client() already trusts the test cert).
 func newBridgeClientWithHTTPClient(endpoint string, hc *http.Client) *bridgeClient {
 	return &bridgeClient{
-		url:  strings.TrimRight(endpoint, "/") + credentialsPath,
-		http: hc,
+		url:   strings.TrimRight(endpoint, "/") + credentialsPath,
+		http:  hc,
+		sleep: time.Sleep,
 	}
 }
 
@@ -116,7 +127,7 @@ func (c *bridgeClient) fetch(image, token string) (*bridgeResponse, error) {
 	// rotating the robot Secret. Any second-attempt outcome is final.
 	if status == http.StatusServiceUnavailable {
 		fmt.Fprintln(os.Stderr, "harbor-bridge-plugin: bridge returned 503; retrying once after 1s")
-		time.Sleep(retryBackoff)
+		c.sleep(retryBackoff)
 		resp, status, err = c.do(body, token)
 		if err != nil {
 			return nil, fmt.Errorf("%w: retry failed: %w", errBridgeUnavailable, err)
@@ -164,9 +175,12 @@ func (c *bridgeClient) do(body []byte, token string) ([]byte, int, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read response body: %w", err)
+	}
+	if len(respBody) > maxResponseBytes {
+		return nil, resp.StatusCode, fmt.Errorf("bridge response exceeds %d bytes", maxResponseBytes)
 	}
 	return respBody, resp.StatusCode, nil
 }
