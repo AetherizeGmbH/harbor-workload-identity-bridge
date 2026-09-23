@@ -93,6 +93,14 @@ jobs:
           printf '{"chart":"%s","app":"%s","status":"%s","date":"%s"}\n' \
             "$CHART" "$app" "$status" "$run_date" | tee compat-result/result.json
           echo "status_code=$status_code" >> "$GITHUB_OUTPUT"
+      - name: Upload e2e diagnostics
+        if: steps.e2e.outputs.status_code != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: compat-diagnostics-${{ matrix.chart }}
+          path: test/e2e/.diag/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -126,9 +134,20 @@ jobs:
           set -euo pipefail
           python3 hack/render-compat-table.py \
             'compat-artifacts/compat-result-*/result.json' README.md
+      # A PR opened with GITHUB_TOKEN does not trigger workflows, so the
+      # table PR would carry zero checks and become unmergeable once
+      # required checks are enforced. Open it as the Renovate App instead
+      # (same App and secrets as release.yml).
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.RENOVATE_APP_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
       - name: Open PR with refreshed table
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
+          token: ${{ steps.app-token.outputs.token }}
           commit-message: "docs: refresh Harbor compatibility matrix from e2e runs"
           title: "docs: refresh Harbor compatibility matrix"
           body: >-

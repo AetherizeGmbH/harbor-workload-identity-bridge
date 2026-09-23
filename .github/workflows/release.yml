@@ -52,10 +52,6 @@ jobs:
           private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with: { node-version: 22 }
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-          cache: true
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.2.3 }  # semantic-release prepareCmd regenerates chart goldens
       # cycjimmy/semantic-release-action exposes `new_release_published`
@@ -66,16 +62,21 @@ jobs:
         id: semrel
         with:
           semantic_version: 24
-          # Unpinned — old majors (notably conventionalcommits@7) ship
-          # the `Date.prototype.toString called on incompatible receiver`
-          # crash in conventional-changelog-writer. Let npm resolve to
-          # the latest compatible majors; Renovate's npm manager keeps
-          # them current.
+          # Exact pins. Floating these broke the release on 2026-09-22:
+          # conventional-changelog-conventionalcommits 10.4.0 (a MINOR
+          # bump) started requiring conventional-changelog-writer@9, but
+          # semantic-release 24's release-notes-generator@14 ships
+          # writer@8 ("Missing helper: conventional-changelog-
+          # conventionalcommits requires conventional-changelog-writer@9").
+          # These are the versions the last green release (0.3.7) used.
+          # Renovate tracks them via the release.yml custom manager and
+          # never automerges them (renovate.json) — the release job only
+          # runs on main, so a PR cannot prove a bump safe.
           extra_plugins: |
-            @semantic-release/changelog
-            @semantic-release/git
-            @semantic-release/exec
-            conventional-changelog-conventionalcommits
+            @semantic-release/changelog@7.0.0
+            @semantic-release/git@11.0.1
+            @semantic-release/exec@7.1.0
+            conventional-changelog-conventionalcommits@10.2.1
         env:
           # App token (not GITHUB_TOKEN): semantic-release uses GH_TOKEN/
           # GITHUB_TOKEN both for the GitHub API and to build the

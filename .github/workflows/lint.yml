@@ -26,11 +26,14 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          # v2 series of golangci-lint is built with newer Go (the v1
-          # series was stuck on go1.23/1.24, refused to load our go1.26
-          # source). Action v7 is the first to accept linter v2.
-          # Renovate's github-actions manager will bump both deterministically.
-          version: v2.12.2
+          # golangci-lint refuses to load code whose go.mod targets a newer
+          # Go than the one it was BUILT with ("the Go language version
+          # (go1.26) used to build golangci-lint is lower than the targeted
+          # Go version"). The targeted version includes the `toolchain`
+          # directive, so a toolchain bump (Renovate gomod PRs) needs a
+          # linter built with at least that Go. v2.13.x is built with
+          # go1.27.0. Renovate's github-actions manager bumps this.
+          version: v2.13.2
           args: --timeout=5m
 
   gofmt:
@@ -56,8 +59,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.2.3 }
-      - run: helm lint charts/harbor-bridge -f charts/harbor-bridge/tests/values-complete.yaml
-      - run: helm lint charts/harbor-bridge -f charts/harbor-bridge/tests/values-mtls.yaml
+      # The Makefile owns the list of values files (CHART_CASES); a
+      # hand-written list here already drifted once.
+      - run: make chart-lint
 
   terraform-fmt:
     name: terraform fmt
@@ -67,7 +71,7 @@ jobs:
       - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
         # Match e2e.yml's pin: same major fmt rules, no laptop/CI drift.
         with: { tofu_version: 1.12.0 }
-      - run: tofu fmt -check -recursive test/e2e || (echo "run 'tofu fmt -recursive test/e2e' locally" && exit 1)
+      - run: tofu fmt -check -recursive test/e2e test/e2e-gke || (echo "run 'tofu fmt -recursive test/e2e test/e2e-gke' locally" && exit 1)
 
   yamllint:
     name: yamllint

@@ -2,18 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
 CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
+# Matches the controller-gen.kubebuilder.io/version stamped in the CRDs.
+CONTROLLER_GEN_VERSION ?= v0.21.0
 PROJECT_DIR := $(shell pwd)
 
 .PHONY: all
 all: generate manifests vet build build-plugin build-installer
 
+$(CONTROLLER_GEN):
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
 .PHONY: generate
-generate: ## Generate deepcopy methods for API types
+generate: $(CONTROLLER_GEN) ## Generate deepcopy methods for API types
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./bridge/api/...
 
 .PHONY: manifests
-manifests: ## Generate CRD manifests under config/crd/bases
+manifests: $(CONTROLLER_GEN) ## Generate CRD manifests under config/crd/bases (and the chart's copy)
 	$(CONTROLLER_GEN) crd paths=./bridge/api/... output:crd:dir=config/crd/bases
+	cp config/crd/bases/harbor.aetherize.io_harboraccesses.yaml $(PROJECT_DIR)/charts/harbor-bridge/crds/
 
 .PHONY: tidy
 tidy: ## Resolve module dependencies
@@ -50,7 +56,7 @@ build-all: ## Compile-check every package
 test: ## Run unit tests (envtest tests skip cleanly when KUBEBUILDER_ASSETS is unset)
 	go test ./...
 
-ENVTEST_K8S_VERSION ?= 1.30.x
+ENVTEST_K8S_VERSION ?= 1.34.x
 SETUP_ENVTEST ?= $(shell go env GOPATH)/bin/setup-envtest
 
 $(SETUP_ENVTEST):
@@ -78,7 +84,7 @@ e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/pus
 	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose
 
 .PHONY: e2e-pause
-e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep` to continue
+e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep-*` to continue
 	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose
 
 .PHONY: e2e-gke
@@ -87,7 +93,7 @@ e2e-gke: ## Run the GKE e2e harness (ADR-0022). CREATES BILLED GCP RESOURCES in 
 	cd test/e2e-gke && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_gcp_project=$$GOOGLE_PROJECT TF_VAR_pause_after_pull=false tofu test -verbose
 
 .PHONY: e2e-gke-pause
-e2e-gke-pause: ## GKE e2e, but pause AFTER the assertions — `rm test/e2e-gke/.tofu-sleep` to continue
+e2e-gke-pause: ## GKE e2e, but pause AFTER the assertions — `rm test/e2e-gke/.tofu-sleep-*` to continue
 	@test -n "$$GOOGLE_PROJECT" || (echo "set GOOGLE_PROJECT to the GCP project the harness may bill" && exit 1)
 	cd test/e2e-gke && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_gcp_project=$$GOOGLE_PROJECT TF_VAR_pause_after_pull=true tofu test -verbose
 
@@ -142,6 +148,11 @@ verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sig
 		exit 1; \
 	fi
 
+.PHONY: verify-generated
+verify-generated: generate manifests ## Fail if the CRDs / deepcopy code drift from the Go API types
+	@git diff --exit-code -- bridge/api config/crd charts/harbor-bridge/crds || \
+		{ echo "generated files are stale — run 'make generate manifests' and commit the result"; exit 1; }
+
 .PHONY: verify-installer-isolation
 verify-installer-isolation: ## Enforce ADR-0021: installer may pull sigs.k8s.io/yaml (+ go.yaml.in) but nothing else from k8s.io / sigs.k8s.io
 	@bad=$$(go list -deps ./installer/... 2>/dev/null | grep -E '^(k8s\.io|sigs\.k8s\.io)' | grep -v '^sigs\.k8s\.io/yaml$$' || true); \
@@ -159,32 +170,32 @@ CHART_DIR ?= charts/harbor-bridge
 CHART_TESTS_DIR ?= $(CHART_DIR)/tests
 GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 
+# Each golden case is <values file suffix>:<golden file>. The single list
+# drives lint, golden diff, and golden update so they cannot drift; the
+# release config (.releaserc.json) commits every tests/golden/*.yaml.
+CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled
+HELM_TEMPLATE = helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 --namespace harbor-bridge-system
+
 .PHONY: chart-lint
 chart-lint: ## helm lint the chart against every test values file
-	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml || exit 1
-	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml || exit 1
-	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-install-none.yaml || exit 1
-
-.PHONY: chart-render
-chart-render: ## Render the chart with the complete-values test file to stdout
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system
+	@set -e; for c in $(CHART_CASES); do \
+		helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-$${c%%:*}.yaml; \
+	done
 
 .PHONY: chart-golden
 chart-golden: ## Diff current render against the checked-in golden files
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > /tmp/render-complete.yaml
-	@diff -u $(GOLDEN_DIR)/default.yaml /tmp/render-complete.yaml || { echo "golden mismatch for values-complete.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > /tmp/render-mtls.yaml
-	@diff -u $(GOLDEN_DIR)/mtls.yaml /tmp/render-mtls.yaml || { echo "golden mismatch for values-mtls.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-install-none.yaml --namespace harbor-bridge-system > /tmp/render-install-none.yaml
-	@diff -u $(GOLDEN_DIR)/none.yaml /tmp/render-install-none.yaml || { echo "golden mismatch for values-install-none.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
-	@echo "golden render unchanged"
+	@set -e; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	for c in $(CHART_CASES); do \
+		v=$${c%%:*}; g=$${c##*:}; \
+		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$$v.yaml > "$$tmp/$$g.yaml"; \
+		diff -u -B $(GOLDEN_DIR)/$$g.yaml "$$tmp/$$g.yaml" || { echo "golden mismatch for values-$$v.yaml — run 'make chart-golden-update' if intentional"; exit 1; }; \
+	done; echo "golden render unchanged"
 
 .PHONY: chart-golden-update
 chart-golden-update: ## Re-capture golden files after intentional template changes
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/default.yaml
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/mtls.yaml
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-install-none.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/none.yaml
-	@echo "golden files refreshed; commit them after review"
+	@set -e; for c in $(CHART_CASES); do \
+		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$${c%%:*}.yaml > $(GOLDEN_DIR)/$${c##*:}.yaml; \
+	done; echo "golden files refreshed; commit them after review"
 
 .PHONY: chart-test-required
 chart-test-required: ## Verify each required value gates install
