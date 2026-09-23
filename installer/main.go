@@ -8,7 +8,9 @@
 //
 //   - auto:  inspect the live kubelet command line; merge if the
 //     --image-credential-provider-* flags are already set (managed
-//     clouds), patch otherwise (kind, kubeadm, k3s).
+//     clouds), patch otherwise (kind, kubeadm). Distributions that embed
+//     or supervise kubelet themselves (k3s, RKE2, Talos) are not
+//     supported by auto/merge/patch — use none, or plugin.enabled=false.
 //   - merge: inject our provider entry into the node's existing
 //     CredentialProviderConfig and drop the binary into the existing
 //     bin dir. Foreign providers and unknown fields are preserved.
@@ -28,8 +30,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -39,7 +46,9 @@ func main() {
 		os.Exit(1)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--sync" {
-		if err := runSync(cfg); err != nil {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := runSync(ctx, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "harbor-bridge-installer: sync error: %v\n", err)
 			os.Exit(1)
 		}
@@ -60,14 +69,16 @@ const (
 )
 
 // config is what the installer reads from the environment. The chart's
-// plugin DaemonSet plumbs these through the init/sync container env.
+// plugin DaemonSet plumbs these through the init/sync container env; the
+// remaining fields are fixed paths inside the plugin image and pod, set
+// to their defaults by loadConfig and overridden only by tests.
 type config struct {
 	Mode string // INSTALL_MODE: auto|merge|patch|none.
 
 	// HostRoot is where the node's / is mounted inside the container.
-	// In none mode only the two narrow host dirs are mounted, at
-	// HostRoot+HostBinDir / HostRoot+HostConfigDir, so all node paths
-	// are uniformly addressed as HostRoot+<node path>.
+	// In none mode (and for the sync container) only the narrow host dirs
+	// are mounted, at HostRoot+HostBinDir / HostRoot+HostConfigDir, so all
+	// node paths are uniformly addressed as HostRoot+<node path>.
 	HostRoot string // HOST_ROOT, default /host.
 
 	HostBinDir    string // HOST_BIN_DIR: node path for the plugin binary (patch/none).
@@ -78,20 +89,23 @@ type config struct {
 	MergeBinDir     string // INSTALL_MERGE_BIN_DIR, optional.
 	MergeConfigFile string // INSTALL_MERGE_CONFIG_FILE, optional.
 
-	SourcePlugin     string // SOURCE_PLUGIN, default /plugin/harbor-bridge-plugin.
-	SourceConfig     string // SOURCE_CONFIG, default /config/credential-provider-config.yaml.
-	SourceCA         string // SOURCE_CA, default /tls/ca.crt.
-	MTLSEnabled      bool   // MTLS_ENABLED == "true".
-	SourceClientCert string // SOURCE_CLIENT_CERT, default /mtls/tls.crt.
-	SourceClientKey  string // SOURCE_CLIENT_KEY, default /mtls/tls.key.
+	MTLSEnabled bool   // MTLS_ENABLED == "true".
+	KubeletUnit string // KUBELET_UNIT, default kubelet.
+	StateDir    string // STATE_DIR: node path, default /var/lib/harbor-bridge.
+	NodeIP      string // NODE_IP: substituted for the literal $(NODE_IP) in the rendered config.
 
-	ProviderName string // PROVIDER_NAME, default harbor-bridge-plugin.
-	KubeletUnit  string // KUBELET_UNIT, default kubelet.
-	StateDir     string // STATE_DIR: node path, default /var/lib/harbor-bridge.
-	NodeIP       string // NODE_IP: substituted for the literal $(NODE_IP) in the rendered config.
-	ProcRoot     string // PROC_ROOT, default /proc. Overridden only by tests.
+	// Fixed locations inside the plugin image / pod.
+	SourcePlugin     string
+	SourceConfig     string
+	SourceCA         string
+	SourceClientCert string
+	SourceClientKey  string
+	ProviderName     string
+	ProcRoot         string
+	SyncInterval     time.Duration
 
-	SyncInterval string // SYNC_INTERVAL, default 60s (Go duration).
+	kubelet kubeletControl
+	verify  verifyTiming
 }
 
 func loadConfig(getenv func(string) string) (*config, error) {
@@ -108,18 +122,20 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		HostConfigDir:    getenv("HOST_CONFIG_DIR"),
 		MergeBinDir:      getenv("INSTALL_MERGE_BIN_DIR"),
 		MergeConfigFile:  getenv("INSTALL_MERGE_CONFIG_FILE"),
-		SourcePlugin:     def("SOURCE_PLUGIN", "/plugin/harbor-bridge-plugin"),
-		SourceConfig:     def("SOURCE_CONFIG", "/config/credential-provider-config.yaml"),
-		SourceCA:         def("SOURCE_CA", "/tls/ca.crt"),
 		MTLSEnabled:      getenv("MTLS_ENABLED") == "true",
-		SourceClientCert: def("SOURCE_CLIENT_CERT", "/mtls/tls.crt"),
-		SourceClientKey:  def("SOURCE_CLIENT_KEY", "/mtls/tls.key"),
-		ProviderName:     def("PROVIDER_NAME", "harbor-bridge-plugin"),
 		KubeletUnit:      def("KUBELET_UNIT", "kubelet"),
 		StateDir:         def("STATE_DIR", "/var/lib/harbor-bridge"),
 		NodeIP:           getenv("NODE_IP"),
-		ProcRoot:         def("PROC_ROOT", "/proc"),
-		SyncInterval:     def("SYNC_INTERVAL", "60s"),
+		SourcePlugin:     "/plugin/harbor-bridge-plugin",
+		SourceConfig:     "/config/credential-provider-config.yaml",
+		SourceCA:         "/tls/ca.crt",
+		SourceClientCert: "/mtls/tls.crt",
+		SourceClientKey:  "/mtls/tls.key",
+		ProviderName:     "harbor-bridge-plugin",
+		ProcRoot:         "/proc",
+		SyncInterval:     60 * time.Second,
+		kubelet:          nsenterControl{},
+		verify:           defaultVerifyTiming,
 	}
 	switch c.Mode {
 	case modeAuto, modeMerge, modePatch, modeNone:
@@ -135,13 +151,37 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	if (c.MergeBinDir == "") != (c.MergeConfigFile == "") {
 		return nil, fmt.Errorf("INSTALL_MERGE_BIN_DIR and INSTALL_MERGE_CONFIG_FILE must be set together")
 	}
+	for name, v := range map[string]string{
+		"HOST_BIN_DIR": c.HostBinDir, "HOST_CONFIG_DIR": c.HostConfigDir, "STATE_DIR": c.StateDir,
+		"INSTALL_MERGE_BIN_DIR": c.MergeBinDir, "INSTALL_MERGE_CONFIG_FILE": c.MergeConfigFile,
+	} {
+		if v == "" {
+			continue
+		}
+		if err := validNodePath(v); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	if err := validUnitName(c.KubeletUnit); err != nil {
+		return nil, fmt.Errorf("KUBELET_UNIT: %w", err)
+	}
 	return c, nil
+}
+
+// validNodePath accepts only absolute, already-clean node paths. They are
+// joined under HostRoot, so a relative or ".."-carrying value would
+// address something other than what it names.
+func validNodePath(p string) error {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p {
+		return fmt.Errorf("path %q must be absolute and clean", p)
+	}
+	return nil
 }
 
 // hostPath maps a node path to the path the container reads/writes it
 // at, under the HostRoot mount.
 func (c *config) hostPath(nodePath string) string {
-	return c.HostRoot + nodePath
+	return filepath.Join(c.HostRoot, filepath.Clean("/"+nodePath))
 }
 
 func logf(format string, args ...any) {

@@ -101,3 +101,40 @@ func TestMergeExtraArgs_MultipleLinesRefused(t *testing.T) {
 		t.Fatal("expected refusal on multiple KUBELET_EXTRA_ARGS lines")
 	}
 }
+
+// TestMergeExtraArgs_QuoteHandling pins audit M5: exactly one matching
+// outer quote pair is stripped, and values the installer cannot rewrite
+// faithfully are refused instead of mangled (a mangled line can keep
+// kubelet from starting after the restart).
+func TestMergeExtraArgs_QuoteHandling(t *testing.T) {
+	ok := map[string]string{
+		`KUBELET_EXTRA_ARGS="--max-pods=42"`: "--max-pods=42",
+		`KUBELET_EXTRA_ARGS='--max-pods=42'`: "--max-pods=42",
+		`KUBELET_EXTRA_ARGS=--max-pods=42`:   "--max-pods=42",
+		`KUBELET_EXTRA_ARGS=`:                "",
+	}
+	for in, keep := range ok {
+		out, err := mergeExtraArgs([]byte(in+"\n"), "/b", "/c.yaml")
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", in, err)
+			continue
+		}
+		if keep != "" && !strings.Contains(string(out), keep) {
+			t.Errorf("%s: lost %q:\n%s", in, keep, out)
+		}
+		if strings.Count(string(out), `"`) != 2 {
+			t.Errorf("%s: output is not one balanced double-quoted value:\n%s", in, out)
+		}
+	}
+	for _, in := range []string{
+		`KUBELET_EXTRA_ARGS="--register-with-taints="x:NoSchedule""`, // what strings.Trim used to unbalance
+		`KUBELET_EXTRA_ARGS="--node-labels='a=b'"`,
+		`KUBELET_EXTRA_ARGS="--root-dir=\"/var/lib/k\""`,
+		`KUBELET_EXTRA_ARGS="--max-pods=$PODS"`,
+		`KUBELET_EXTRA_ARGS="--x=1'`, // mismatched outer quotes
+	} {
+		if _, err := mergeExtraArgs([]byte(in+"\n"), "/b", "/c.yaml"); err == nil {
+			t.Errorf("%s: accepted, want a refusal", in)
+		}
+	}
+}

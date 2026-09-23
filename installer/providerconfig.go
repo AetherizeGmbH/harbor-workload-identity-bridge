@@ -84,16 +84,8 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 	}
 	cfg["providers"] = providers
 
-	if isJSON(existing) {
-		// Match the typical cloud-provider layout (EKS writes indented
-		// JSON); stable output keeps the change detection meaningful.
-		out, err = json.MarshalIndent(cfg, "", "  ")
-		if err == nil {
-			out = append(out, '\n')
-		}
-	} else {
-		out, err = yaml.Marshal(cfg)
-	}
+	jsonDoc := isJSON(existing)
+	out, err = marshalMatching(cfg, jsonDoc)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal merged credential-provider config: %w", err)
 	}
@@ -105,19 +97,26 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 	if err := yaml.Unmarshal(existing, &orig); err != nil {
 		return nil, false, fmt.Errorf("reparse node credential-provider config: %w", err)
 	}
-	var origOut []byte
-	if isJSON(existing) {
-		origOut, err = json.MarshalIndent(orig, "", "  ")
-		if err == nil {
-			origOut = append(origOut, '\n')
-		}
-	} else {
-		origOut, err = yaml.Marshal(orig)
-	}
+	origOut, err := marshalMatching(orig, jsonDoc)
 	if err != nil {
 		return nil, false, fmt.Errorf("re-marshal node credential-provider config: %w", err)
 	}
 	return out, !bytes.Equal(out, origOut), nil
+}
+
+// marshalMatching renders cfg in the format the node file uses, so a
+// cloud provider's JSON file stays JSON. JSON output is indented like the
+// typical cloud layout (EKS) and newline-terminated; stable output keeps
+// the change detection meaningful.
+func marshalMatching(cfg map[string]any, asJSON bool) ([]byte, error) {
+	if !asJSON {
+		return yaml.Marshal(cfg)
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // providerList returns cfg's providers slice (empty when absent).

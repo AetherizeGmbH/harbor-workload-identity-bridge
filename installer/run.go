@@ -15,6 +15,11 @@ const configFileName = "credential-provider-config.yaml"
 
 const defaultKubeletPath = "/etc/default/kubelet"
 
+// ownConfigPath is where patch mode writes the provider config.
+func (c *config) ownConfigPath() string {
+	return filepath.Join(c.HostConfigDir, configFileName)
+}
+
 // run performs one install pass. See ADR-0021 for the mode semantics
 // and the restart policy.
 func run(cfg *config) error {
@@ -35,10 +40,18 @@ func run(cfg *config) error {
 		if err != nil {
 			return fmt.Errorf("mode auto: %w", err)
 		}
-		if wiring.wired() {
-			mode = modeMerge
-		} else {
+		switch {
+		case !wiring.wired():
 			mode = modePatch
+		case wiring.BinDir == cfg.HostBinDir && wiring.ConfigFile == cfg.ownConfigPath():
+			// The flags point at OUR patch-mode paths: this is our own
+			// earlier patch install, not a cloud-provisioned config to
+			// merge into. Resolving to merge here flipped every re-roll
+			// after the first install to merge mode and restarted
+			// kubelet for nothing (audit H3).
+			mode = modePatch
+		default:
+			mode = modeMerge
 		}
 		logf("mode auto resolved to %s", mode)
 	case modeMerge:
@@ -82,8 +95,7 @@ func runNone(cfg *config, rendered []byte) error {
 	if err := installPluginBinary(cfg, cfg.HostBinDir); err != nil {
 		return err
 	}
-	configPath := filepath.Join(cfg.HostConfigDir, configFileName)
-	changed, err := writeFileAtomic(cfg.hostPath(configPath), rendered, 0o644)
+	changed, err := writeFileAtomic(cfg.hostPath(cfg.ownConfigPath()), rendered, 0o644)
 	if err != nil {
 		return err
 	}
@@ -95,16 +107,10 @@ func runNone(cfg *config, rendered []byte) error {
 // /etc/default/kubelet, restarting kubelet when restart-relevant
 // content changed.
 func runPatch(cfg *config, rendered []byte) error {
-	if err := installPluginBinary(cfg, cfg.HostBinDir); err != nil {
-		return err
-	}
+	configPath := cfg.ownConfigPath()
 
-	configPath := filepath.Join(cfg.HostConfigDir, configFileName)
-	configChanged, err := writeFileAtomic(cfg.hostPath(configPath), rendered, 0o644)
-	if err != nil {
-		return err
-	}
-
+	// Compute everything that can be refused BEFORE touching the host,
+	// so a refusal never leaves a half-install behind.
 	existingEnv, err := os.ReadFile(cfg.hostPath(defaultKubeletPath))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", defaultKubeletPath, err)
@@ -113,23 +119,43 @@ func runPatch(cfg *config, rendered []byte) error {
 	if err != nil {
 		return err
 	}
+
+	if err := installPluginBinary(cfg, cfg.HostBinDir); err != nil {
+		return err
+	}
+	configChanged, err := writeFileAtomic(cfg.hostPath(configPath), rendered, 0o644)
+	if err != nil {
+		return err
+	}
 	envChanged, err := writeFileAtomic(cfg.hostPath(defaultKubeletPath), desiredEnv, 0o644)
 	if err != nil {
 		return err
 	}
 
+	want := kubeletWiring{BinDir: cfg.HostBinDir, ConfigFile: configPath}
+	verify := func() error {
+		// The flags only reach kubelet if its unit actually sources
+		// /etc/default/kubelet; confirm on the live process.
+		got, err := discoverKubelet(cfg.ProcRoot)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("running kubelet has bin-dir=%q config=%q, want %q/%q — does the %s unit source %s?",
+				got.BinDir, got.ConfigFile, want.BinDir, want.ConfigFile, cfg.KubeletUnit, defaultKubeletPath)
+		}
+		return nil
+	}
 	hash := contentHash(rendered, desiredEnv)
-	return finishWithRestart(cfg, modePatch, cfg.HostBinDir, configPath, hash, configChanged || envChanged)
+	return finishWithRestart(cfg, modePatch, cfg.HostBinDir, configPath, hash, configChanged || envChanged, verify)
 }
 
 // runMerge injects our provider entry into the node's existing
 // credential-provider config and drops the binary into the existing
 // bin dir; kubelet's flags are not touched.
 func runMerge(cfg *config, rendered []byte, wiring kubeletWiring) error {
-	if err := installPluginBinary(cfg, wiring.BinDir); err != nil {
-		return err
-	}
-
+	// Read, validate, and merge first: an unknown schema or a missing file
+	// is refused before anything is written (no half-install).
 	existing, err := os.ReadFile(cfg.hostPath(wiring.ConfigFile))
 	if err != nil {
 		// Kubelet refuses to start when the flag points at a missing
@@ -144,6 +170,10 @@ func runMerge(cfg *config, rendered []byte, wiring kubeletWiring) error {
 	if err != nil {
 		return err
 	}
+
+	if err := installPluginBinary(cfg, wiring.BinDir); err != nil {
+		return err
+	}
 	written, err := writeFileAtomic(cfg.hostPath(wiring.ConfigFile), merged, 0o644)
 	if err != nil {
 		return err
@@ -153,16 +183,18 @@ func runMerge(cfg *config, rendered []byte, wiring kubeletWiring) error {
 	}
 
 	hash := contentHash(merged)
-	return finishWithRestart(cfg, modeMerge, wiring.BinDir, wiring.ConfigFile, hash, mergeChanged || written)
+	return finishWithRestart(cfg, modeMerge, wiring.BinDir, wiring.ConfigFile, hash, mergeChanged || written, nil)
 }
 
 // finishWithRestart applies the ADR-0021 restart policy: restart iff
 // restart-relevant content changed on this pass OR the state file does
 // not record a successful restart for exactly this content (covers the
 // crash window between write and restart). The state is persisted only
-// after a successful restart.
-func finishWithRestart(cfg *config, mode, binDir, configFile, hash string, changedNow bool) error {
-	st, err := loadState(cfg.hostPath(cfg.StateDir))
+// after the restart is VERIFIED (unit stably active and, when verify is
+// set, the running kubelet wired as intended).
+func finishWithRestart(cfg *config, mode, binDir, configFile, hash string, changedNow bool, verify func() error) error {
+	stateDir := cfg.hostPath(cfg.StateDir)
+	st, err := loadState(stateDir)
 	if err != nil {
 		return err
 	}
@@ -170,11 +202,20 @@ func finishWithRestart(cfg *config, mode, binDir, configFile, hash string, chang
 		logf("kubelet wiring is current; not restarting")
 		return nil
 	}
+	// Prove the state can be recorded BEFORE restarting: otherwise a
+	// persistently unwritable state dir would restart kubelet on every
+	// single re-roll.
+	if err := ensureWritableDir(stateDir); err != nil {
+		return fmt.Errorf("state dir %s: %w", cfg.StateDir, err)
+	}
 	logf("restarting kubelet unit %q (config or flags changed)", cfg.KubeletUnit)
-	if err := restartKubelet(cfg.KubeletUnit); err != nil {
+	if err := cfg.kubelet.restart(cfg.KubeletUnit); err != nil {
 		return err
 	}
-	if err := saveState(cfg.hostPath(cfg.StateDir), &state{
+	if err := waitKubeletHealthy(cfg.kubelet, cfg.KubeletUnit, cfg.verify, verify); err != nil {
+		return err
+	}
+	if err := saveState(stateDir, &state{
 		Mode:        mode,
 		BinDir:      binDir,
 		ConfigFile:  configFile,
@@ -182,7 +223,7 @@ func finishWithRestart(cfg *config, mode, binDir, configFile, hash string, chang
 	}); err != nil {
 		return err
 	}
-	logf("install complete (mode %s)", mode)
+	logf("install complete (mode %s); kubelet verified healthy", mode)
 	return nil
 }
 

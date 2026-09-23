@@ -4,10 +4,8 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 )
 
@@ -16,21 +14,14 @@ import (
 // kubelet updates in place when cert-manager rotates the certificates.
 // It never touches kubelet — the plugin re-reads these files on every
 // exec (ADR-0021). It also keeps the pod alive so `kubectl logs`
-// surfaces the install output per node.
-func runSync(cfg *config) error {
-	interval, err := time.ParseDuration(cfg.SyncInterval)
-	if err != nil {
-		return fmt.Errorf("SYNC_INTERVAL is not a duration: %w", err)
+// surfaces the install output per node. Returns when ctx is cancelled
+// (SIGTERM/SIGINT in production).
+func runSync(ctx context.Context, cfg *config) error {
+	if cfg.SyncInterval <= 0 {
+		return fmt.Errorf("sync interval must be positive (got %s)", cfg.SyncInterval)
 	}
-	if interval <= 0 {
-		return fmt.Errorf("SYNC_INTERVAL must be positive (got %s)", interval)
-	}
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-
-	logf("sync loop started (interval %s)", interval)
-	ticker := time.NewTicker(interval)
+	logf("sync loop started (interval %s)", cfg.SyncInterval)
+	ticker := time.NewTicker(cfg.SyncInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -40,8 +31,8 @@ func runSync(cfg *config) error {
 				// crash-loop the DaemonSet; log and retry next tick.
 				logf("sync pass failed (will retry): %v", err)
 			}
-		case sig := <-stop:
-			logf("received %s; exiting", sig)
+		case <-ctx.Done():
+			logf("sync loop stopping: %v", context.Cause(ctx))
 			return nil
 		}
 	}

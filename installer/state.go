@@ -87,8 +87,9 @@ func contentHash(parts ...[]byte) string {
 	for _, p := range parts {
 		// Length-prefix each part so concatenation ambiguity cannot
 		// produce hash collisions between different part splits.
-		fmt.Fprintf(h, "%d:", len(p))
-		h.Write(p)
+		// hash.Hash.Write never returns an error.
+		_, _ = fmt.Fprintf(h, "%d:", len(p))
+		_, _ = h.Write(p)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -46,7 +46,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) (changed bool, 
 		return false, fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op after successful rename
+	defer func() { _ = os.Remove(tmpName) }() // no-op after successful rename
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
@@ -56,13 +56,54 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) (changed bool, 
 		_ = tmp.Close()
 		return false, fmt.Errorf("chmod %s: %w", tmpName, err)
 	}
+	// fsync the data before the rename and the directory after it: these
+	// files decide whether kubelet starts. Without the syncs a power loss
+	// right after the install can leave an empty or truncated config that
+	// kubelet refuses at boot.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, fmt.Errorf("sync %s: %w", tmpName, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return false, fmt.Errorf("close %s: %w", tmpName, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return false, fmt.Errorf("rename %s → %s: %w", tmpName, path, err)
 	}
+	if err := syncDir(dir); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s for sync: %w", dir, err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", dir, err)
+	}
+	return nil
+}
+
+// ensureWritableDir creates dir if needed and proves a file can be
+// created in it.
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	f, err := os.CreateTemp(dir, ".write-probe-*")
+	if err != nil {
+		return fmt.Errorf("not writable: %w", err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("remove write probe: %w", err)
+	}
+	return nil
 }
 
 // copyFile copies src to dst atomically, returning whether dst changed.

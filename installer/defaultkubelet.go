@@ -38,8 +38,10 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 			return nil, fmt.Errorf("multiple KUBELET_EXTRA_ARGS lines in /etc/default/kubelet — refusing to guess which one kubelet uses")
 		}
 		found = true
-		val := strings.TrimPrefix(trimmed, prefix)
-		val = strings.Trim(val, `"'`)
+		val, err := unquoteExtraArgs(strings.TrimPrefix(trimmed, prefix))
+		if err != nil {
+			return nil, err
+		}
 		args := stripCredentialProviderFlags(strings.Fields(val))
 		args = append(args, ours...)
 		lines[i] = prefix + `"` + strings.Join(args, " ") + `"`
@@ -48,6 +50,25 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 		lines = append(lines, prefix+`"`+strings.Join(ours, " ")+`"`)
 	}
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
+}
+
+// unquoteExtraArgs strips exactly one matching pair of outer quotes. The
+// value is an EnvironmentFile assignment that the kubelet unit expands as
+// unquoted $KUBELET_EXTRA_ARGS (whitespace-split into argv). The installer
+// re-renders it as a double-quoted, space-joined list, which is only
+// faithful when no argument carries quotes, escapes, or embedded spaces of
+// its own. Anything else is refused rather than rewritten: a mangled line
+// can keep kubelet from starting after the restart (audit M5). The old
+// strings.Trim stripped ANY number of quote characters from both ends,
+// unbalancing a value like --register-with-taints="x:NoSchedule".
+func unquoteExtraArgs(val string) (string, error) {
+	if n := len(val); n >= 2 && (val[0] == '"' || val[0] == '\'') && val[n-1] == val[0] {
+		val = val[1 : n-1]
+	}
+	if strings.ContainsAny(val, "\"'\\$`") {
+		return "", fmt.Errorf("KUBELET_EXTRA_ARGS in /etc/default/kubelet contains quoting, escapes, or expansions (%q) the installer cannot rewrite safely; add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", val)
+	}
+	return val, nil
 }
 
 // stripCredentialProviderFlags removes both the "--flag=value" and

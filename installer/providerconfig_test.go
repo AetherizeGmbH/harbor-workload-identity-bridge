@@ -63,6 +63,74 @@ providers:
       - --v=3
 `
 
+// aksConfig is shaped like the out-of-tree ACR provider config AKS nodes
+// point kubelet at (/var/lib/kubelet/credential-provider-config.yaml).
+const aksConfig = `apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+providers:
+  - name: acr-credential-provider
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+    matchImages:
+      - "*.azurecr.io"
+      - "*.azurecr.cn"
+      - "*.azurecr.de"
+      - "*.azurecr.us"
+    defaultCacheDuration: 10m
+    args:
+      - /etc/kubernetes/azure.json
+`
+
+// TestMergeProvider_ManagedCloudShapes: on every managed cloud the merge
+// keeps the cloud's own provider intact (image pulls from ECR/GAR/ACR
+// depend on it), keeps the file format, adds ours, and converges — a
+// second merge must report no change, or every re-roll would restart
+// kubelet.
+func TestMergeProvider_ManagedCloudShapes(t *testing.T) {
+	entry, err := renderedProvider([]byte(renderedConfig), "harbor-bridge-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		doc, cloudProvider string
+		json               bool
+	}{
+		"EKS (AL2023, JSON)": {eksConfig, "ecr-credential-provider", true},
+		"GKE (YAML)":         {gkeConfig, "auth-provider-gcp", false},
+		"AKS (YAML)":         {aksConfig, "acr-credential-provider", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			merged, changed, err := mergeProvider([]byte(tc.doc), entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatal("first merge reported no change")
+			}
+			if isJSON(merged) != tc.json {
+				t.Fatalf("format changed (json=%v):\n%s", isJSON(merged), merged)
+			}
+			var cfg map[string]any
+			if err := yaml.Unmarshal(merged, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			names := map[string]bool{}
+			for _, p := range cfg["providers"].([]any) {
+				names[p.(map[string]any)["name"].(string)] = true
+			}
+			if !names[tc.cloudProvider] || !names["harbor-bridge-plugin"] || len(names) != 2 {
+				t.Fatalf("providers after merge = %v", names)
+			}
+			again, changed, err := mergeProvider(merged, entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed || string(again) != string(merged) {
+				t.Fatal("second merge is not a no-op")
+			}
+		})
+	}
+}
+
 func TestRenderedProvider(t *testing.T) {
 	entry, err := renderedProvider([]byte(renderedConfig), "harbor-bridge-plugin")
 	if err != nil {
