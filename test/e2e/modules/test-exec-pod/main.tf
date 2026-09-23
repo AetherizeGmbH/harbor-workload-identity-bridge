@@ -11,9 +11,12 @@ terraform {
 variable "kubeconfig" {
   type = object({
     host                   = string
-    client_certificate     = string
-    client_key             = string
     cluster_ca_certificate = string
+    # Client-cert auth (kind) and token auth (GKE) are alternatives;
+    # exactly one pair/field is expected to be set.
+    client_certificate = optional(string)
+    client_key         = optional(string)
+    token              = optional(string)
   })
   sensitive = true
 }
@@ -88,6 +91,7 @@ provider "kubernetes" {
   host                   = var.kubeconfig.host
   client_certificate     = var.kubeconfig.client_certificate
   client_key             = var.kubeconfig.client_key
+  token                  = var.kubeconfig.token
   cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
 }
 

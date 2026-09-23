@@ -17,7 +17,15 @@
 #                             robot_push_test exercise multi-tenancy, the
 #                             dot-delimited naming fix, cluster-wide CR matching,
 #                             multi-project robots, and the pull,push action.
-#   8. file_sleep (opt-in)  — pause AFTER all assertions for kubectl-poke on a
+#   8. bridge_upgrade       — helm upgrade widening plugin.matchImages to the
+#                             upgrade-only project, then pull_pod_upgrade pulls
+#                             from it. Succeeds ONLY if the installer detected
+#                             the config-content change and restarted kubelet
+#                             (ADR-0021 — the old grep-guard never restarted).
+#                             The restart-iff-changed / never-flap semantics are
+#                             pinned by the installer unit tests; this stage
+#                             proves the end-to-end convergence on real kubelet.
+#   9. file_sleep (opt-in)  — pause AFTER all assertions for kubectl-poke on a
 #                             fully-populated cluster; off in CI, on via
 #                             `make e2e-pause` / TF_VAR_pause_after_pull=true
 #
@@ -229,7 +237,7 @@ run "seed_image" {
               # Create every project the e2e scenarios pull from. In-cluster
               # service URL — no DNS gymnastics needed for plain REST. 409s on
               # re-run are swallowed by || true.
-              for proj in your-project project-alpha project-beta project-gamma beta-1 beta-2 beta-3; do
+              for proj in your-project project-alpha project-beta project-gamma beta-1 beta-2 beta-3 upgrade-only; do
                 curl -sv -u "admin:$(cat /admin/password)" -X POST \
                   -H "Content-Type: application/json" \
                   http://harbor-core.harbor.svc.cluster.local/api/v2.0/projects \
@@ -248,7 +256,7 @@ run "seed_image" {
                 harbor.e2e:30843/your-project/alpine:test3
               # Fan the same image into each scenario project via intra-Harbor
               # copy (one docker.io pull total; avoids Docker Hub rate limits).
-              for proj in project-alpha project-beta project-gamma beta-1 beta-2 beta-3; do
+              for proj in project-alpha project-beta project-gamma beta-1 beta-2 beta-3 upgrade-only; do
                 crane copy harbor.e2e:30843/your-project/alpine:test3 \
                   "harbor.e2e:30843/$proj/app:v1"
               done
@@ -316,8 +324,20 @@ run "bridge_install" {
     # the path component (only in the domain), so `harbor.e2e:30843/*`
     # was being interpreted as a literal `/*` path prefix and silently
     # failed to match `harbor.e2e:30843/your-project/alpine:test3`.
-    # The bare host:port form matches any image from that registry.
-    match_images = ["harbor.e2e:30843"]
+    # LITERAL path prefixes are supported though ("gcr.io/my-project"
+    # style): scope the initial install to the per-project prefixes and
+    # deliberately leave `upgrade-only` out — the bridge_upgrade stage
+    # below adds it and asserts kubelet actually picked the change up
+    # (ADR-0021 content-hash restart).
+    match_images = [
+      "harbor.e2e:30843/your-project",
+      "harbor.e2e:30843/project-alpha",
+      "harbor.e2e:30843/project-beta",
+      "harbor.e2e:30843/project-gamma",
+      "harbor.e2e:30843/beta-1",
+      "harbor.e2e:30843/beta-2",
+      "harbor.e2e:30843/beta-3",
+    ]
     # Use the images we just built in build_images, not the install
     # module's defaults. Establishes the dependency edge explicitly
     # and guarantees the test exercises the working tree's Dockerfiles
@@ -571,6 +591,51 @@ run "harbor_access" {
           ]
         }
       },
+
+      # ── Upgrade-convergence prep (ADR-0021). The CR (and its robot) exist
+      # from the start; the ONLY thing missing pre-upgrade is the kubelet-side
+      # matchImages entry for upgrade-only. bridge_upgrade adds it; the
+      # subsequent pull can therefore only succeed if the installer detected
+      # the config-content change and restarted kubelet.
+      {
+        yaml = <<-YAML
+          apiVersion: v1
+          kind: Namespace
+          metadata: { name: upgrade-ns }
+        YAML
+      },
+      {
+        yaml = <<-YAML
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata: { name: upgrade-runner, namespace: upgrade-ns }
+        YAML
+      },
+      {
+        yaml = <<-YAML
+          apiVersion: harbor.aetherize.io/v1alpha1
+          kind: HarborAccess
+          metadata:
+            name: upgrade-access
+            namespace: ${run.bridge_install.namespace}
+          spec:
+            serviceAccountRef:
+              namespace: upgrade-ns
+              name: upgrade-runner
+            trustPolicy:
+              issuer: https://kubernetes.default.svc.cluster.local
+              audience: harbor-bridge
+            permissions:
+              - project: upgrade-only
+                action: pull
+            tokenTTL: 1h0m0s
+        YAML
+        wait = {
+          conditions = [
+            { type = "Ready", status = "True" },
+          ]
+        }
+      },
     ]
   }
 }
@@ -729,6 +794,62 @@ run "pull_pod_multi" {
 #    fail_message    = "pull,push robot failed: could not push to beta-2 (or pull beta-2) with the multi-access robot credentials"
 #  }
 #}
+
+# ── ADR-0021 upgrade convergence. Re-apply the bridge install (same helm
+# release → in-place `helm upgrade`) with matchImages widened by the
+# upgrade-only project. The rendered credential-provider ConfigMap changes →
+# the DaemonSet's config-checksum annotation changes → pods re-roll → the
+# installer sees different effective config content → restarts kubelet on
+# every node. Under the pre-ADR-0021 grep guard, kubelet would have kept the
+# old config and pull_pod_upgrade below would fail with an anonymous 401.
+run "bridge_upgrade" {
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    kubeconfig            = run.cluster.kubeconfig
+    cluster_name          = "dev"
+    harbor_url            = run.harbor.internal_api_url
+    harbor_admin_password = run.harbor.admin_password
+    audience              = "harbor-bridge"
+    match_images = [
+      "harbor.e2e:30843/your-project",
+      "harbor.e2e:30843/project-alpha",
+      "harbor.e2e:30843/project-beta",
+      "harbor.e2e:30843/project-gamma",
+      "harbor.e2e:30843/beta-1",
+      "harbor.e2e:30843/beta-2",
+      "harbor.e2e:30843/beta-3",
+      "harbor.e2e:30843/upgrade-only",
+    ]
+    bridge_image = run.build_images.image_refs.bridge
+    plugin_image = run.build_images.image_refs.plugin
+  }
+}
+
+# The load-bearing upgrade assertion: this image was NOT covered by the
+# initial matchImages, its HarborAccess/robot existed all along, and the seed
+# pushed the image before the bridge was even installed — the one variable is
+# whether kubelet runs the upgraded credential-provider config. helm waited
+# for the DaemonSet rollout in bridge_upgrade, so every node's installer has
+# finished (and restarted kubelet) before this pull starts.
+run "pull_pod_upgrade" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-upgrade-only"
+    namespace            = "upgrade-ns"
+    service_account_name = "upgrade-runner"
+    image                = "harbor.e2e:30843/upgrade-only/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo upgrade-ns/upgrade-runner pulled upgrade-only after helm upgrade; exit 0"]
+    timeout_seconds      = 300
+    fail_message         = "ADR-0021 regression: helm upgrade changed matchImages but kubelet kept the old credential-provider config — the installer failed to detect the content change and restart kubelet"
+  }
+}
 
 # Pause-for-inspection AFTER all the pull/push assertions have run, so you can
 # kubectl-poke a fully-populated cluster (robots, Secrets, pushed tags all

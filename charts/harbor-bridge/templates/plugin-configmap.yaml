@@ -29,9 +29,11 @@ data:
         defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
         env:
           - name: HARBOR_BRIDGE_ENDPOINT
-            # Plugin runs on the node; reach the bridge via the
-            # NodePort on the node's own loopback. ADR-0008.
-            value: "https://127.0.0.1:{{ .Values.service.nodePort }}"
+            # Plugin runs on the node; default reaches the bridge via
+            # the NodePort on the node's own loopback (ADR-0008),
+            # overridable through plugin.bridgeEndpoint. A literal
+            # $(NODE_IP) is substituted by the installer.
+            value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
           - name: HARBOR_BRIDGE_CA_BUNDLE
             value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-ca.crt"
           {{- if .Values.bridge.mTLS.enabled }}

@@ -150,36 +150,65 @@ plugin:
     tag: ""
     pullPolicy: IfNotPresent
 
-  # Where on each node the plugin binary and config are written. These
-  # MUST match the kubelet's --image-credential-provider-bin-dir and
-  # --image-credential-provider-config flags. When patchKubelet=true
-  # (the default below) the DaemonSet patches and restarts kubelet
-  # itself, so these paths just need to be writable. When
-  # patchKubelet=false the operator owns the kubelet flags — set
-  # these to whatever the node image / cluster module configured.
+  # Where on each node the plugin binary and config are written in
+  # patch/none modes. In every mode hostConfigDir also carries the
+  # bridge CA (and mTLS client pair) — the provider entry references
+  # them by absolute path. In merge mode the binary and provider entry
+  # instead go into the paths discovered from kubelet's own flags, so
+  # hostBinaryDir is unused there.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 
-  # Whether the install init container should patch the host's
-  # /etc/default/kubelet to add --image-credential-provider-*
-  # flags and restart kubelet.service via nsenter into PID 1.
-  #
-  # Set to FALSE when the node image / cluster module already
-  # configures kubelet for credential providers (EKS / GKE / AKS
-  # nodes, baked images, or a kind/kubeadm setup that pre-stages
-  # the flags). The DaemonSet will then only refresh the binary,
-  # config, and CA — no kubelet restart, no hostPID, no nsenter.
-  #
-  # Set to TRUE for self-managed clusters where the operator does
-  # not control the node image (kind, vanilla kubeadm, k3s on
-  # commodity hosts). The DaemonSet does the wiring once per node;
-  # kubelet restarts on first install, then idempotency keeps it
-  # untouched on every subsequent reschedule.
-  #
-  # Default true matches the "no upstream pattern for this exists,
-  # so the chart handles it" reality. If you know your environment
-  # bakes it in, flip to false.
-  patchKubelet: true
+  # How the DaemonSet's installer wires the plugin into kubelet
+  # (ADR-0021). Replaces the removed plugin.patchKubelet toggle.
+  install:
+    # auto  — inspect the live kubelet command line: if the node
+    #         already runs kubelet with --image-credential-provider-*
+    #         flags (EKS / GKE / AKS node images), behave as `merge`;
+    #         otherwise behave as `patch`. The right default almost
+    #         everywhere.
+    # merge — inject our provider entry into the node's EXISTING
+    #         CredentialProviderConfig (JSON or YAML; foreign providers
+    #         and unknown fields are preserved) and drop the binary
+    #         into the existing bin dir. Kubelet flags are not touched.
+    # patch — own dirs (hostBinaryDir/hostConfigDir) plus a parse-merge
+    #         of /etc/default/kubelet's KUBELET_EXTRA_ARGS (operator-set
+    #         args are preserved). For kind, vanilla kubeadm, k3s.
+    # none  — copy files only; the operator owns the kubelet flags.
+    #         Least privilege: no hostPID, no privileged container, no
+    #         host-root mount.
+    #
+    # In every mode except none, kubelet is restarted ONLY when the
+    # effective credential-provider config content (or the kubelet
+    # flags) actually changed — a `helm upgrade` that changes
+    # matchImages/audience converges without operator action, and no-op
+    # re-rolls never restart kubelet. Kubelet restarts do not disturb
+    # running containers. CA/mTLS rotation and plugin binary updates
+    # never restart kubelet.
+    mode: auto
+    # Merge-mode target overrides. Leave empty to use the paths
+    # discovered from kubelet's --image-credential-provider-* flags.
+    binDir: ""
+    configFile: ""
+    # Systemd unit the installer restarts.
+    kubeletUnit: kubelet
+    # Node directory holding the installer's idempotency state file.
+    stateDir: /var/lib/harbor-bridge
+
+  # URL the on-node plugin uses to reach the bridge. Empty renders the
+  # ADR-0008 default: https://127.0.0.1:<service.nodePort> (node-local
+  # loopback NodePort). The literal $(NODE_IP) is substituted with the
+  # node's IP by the installer — use e.g. "https://$(NODE_IP):31443" on
+  # dataplanes that do not route loopback NodePorts.
+  bridgeEndpoint: ""
+
+  # The plugin can only run after its own image was pulled, so the
+  # plugin/bridge images must come from a registry that does NOT match
+  # plugin.matchImages. The chart fails at template time when the image
+  # registry host exactly equals a matchImages entry. Set true only for
+  # air-gapped mirrors that accept the bootstrap ordering (first pull
+  # of the bridge images must not need the bridge).
+  allowSelfMatchImages: false
 
   # How long kubelet may cache credentials returned by the plugin.
   # Bounded above by the HarborAccess CR's spec.tokenTTL; this is just

@@ -19,9 +19,12 @@ terraform {
 variable "kubeconfig" {
   type = object({
     host                   = string
-    client_certificate     = string
-    client_key             = string
     cluster_ca_certificate = string
+    # Client-cert auth (kind) and token auth (GKE) are alternatives;
+    # exactly one pair/field is expected to be set.
+    client_certificate = optional(string)
+    client_key         = optional(string)
+    token              = optional(string)
   })
   sensitive = true
 }
@@ -54,6 +57,23 @@ variable "audience" {
 variable "match_images" {
   type        = list(string)
   description = "kubelet matchImages glob patterns (full registry host:port form)."
+}
+
+variable "install_mode" {
+  type        = string
+  default     = "auto"
+  description = "plugin.install.mode (ADR-0021): auto | merge | patch | none. On kind, auto resolves to patch (no pre-wired kubelet flags); on GKE it resolves to merge."
+
+  validation {
+    condition     = contains(["auto", "merge", "patch", "none"], var.install_mode)
+    error_message = "install_mode must be one of auto, merge, patch, none."
+  }
+}
+
+variable "bridge_endpoint" {
+  type        = string
+  default     = ""
+  description = "plugin.bridgeEndpoint override — escape hatch for dataplanes where the loopback NodePort doesn't route (risk R4, ADR-0022); supports the literal $(NODE_IP). Empty keeps the chart default https://127.0.0.1:<service.nodePort>."
 }
 
 variable "chart_path" {
@@ -120,6 +140,7 @@ provider "helm" {
     host                   = var.kubeconfig.host
     client_certificate     = var.kubeconfig.client_certificate
     client_key             = var.kubeconfig.client_key
+    token                  = var.kubeconfig.token
     cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
   }
 }
@@ -128,6 +149,7 @@ provider "kubernetes" {
   host                   = var.kubeconfig.host
   client_certificate     = var.kubeconfig.client_certificate
   client_key             = var.kubeconfig.client_key
+  token                  = var.kubeconfig.token
   cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
 }
 
@@ -135,6 +157,7 @@ provider "kubectl" {
   host                   = var.kubeconfig.host
   client_certificate     = var.kubeconfig.client_certificate
   client_key             = var.kubeconfig.client_key
+  token                  = var.kubeconfig.token
   cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
   load_config_file       = false
 }
@@ -187,12 +210,17 @@ resource "helm_release" "bridge" {
         name = kubernetes_secret_v1.admin.metadata[0].name
       }
     }
-    plugin = {
-      matchImages  = var.match_images
-      audience     = var.audience
-      patchKubelet = true
-      image        = var.plugin_image
-    }
+    plugin = merge(
+      {
+        matchImages = var.match_images
+        audience    = var.audience
+        install = {
+          mode = var.install_mode
+        }
+        image = var.plugin_image
+      },
+      var.bridge_endpoint != "" ? { bridgeEndpoint = var.bridge_endpoint } : {},
+    )
     bridge = {
       replicas  = 1
       logLevel  = "debug"

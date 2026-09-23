@@ -187,6 +187,51 @@ The pull errors you may hit and what they mean:
 
 ---
 
+# §1b — GKE e2e (`make e2e-gke`, ADR-0022)
+
+Same assertions as §1 but on a **real GKE cluster**, proving what kind
+cannot: `plugin.install.mode=auto` resolves to **merge** on managed
+nodes (GKE's node image pre-wires the kubelet credential-provider
+flags), and GKE's own Artifact Registry provider keeps working after
+the merge (the coexistence assertion).
+
+**⚠ Cost + billing.** This creates real, billed resources in your
+project: a zonal GKE cluster (2× `e2-standard-4` **spot** nodes), an
+Artifact Registry repo, and a static external IP. `tofu test` destroys
+everything at the end; an aborted run can leave resources behind —
+check `gcloud container clusters list` and
+`gcloud artifacts repositories list` afterwards. Never wired into CI.
+
+Prerequisites:
+
+```bash
+gcloud auth application-default login   # terraform google provider
+gcloud auth login                       # docker push to Artifact Registry
+gcloud services enable container.googleapis.com artifactregistry.googleapis.com
+export GOOGLE_PROJECT=<your-project-id>
+```
+
+Run:
+
+```bash
+make e2e-gke          # full run, auto-destroy (~25-35 min, dominated by cluster create)
+make e2e-gke-pause    # pause after the assertions; rm test/e2e-gke/.tofu-sleep to continue
+```
+
+Differences from the kind harness (details in
+[`test/e2e-gke/tests/02-gke.tftest.hcl`](test/e2e-gke/tests/02-gke.tftest.hcl)):
+images are pushed to an ephemeral Artifact Registry repo instead of
+`kind load`; Harbor is exposed via a LoadBalancer on a pre-allocated IP
+and addressed as `harbor.<ip>.sslip.io` (no CoreDNS surgery — GKE runs
+kube-dns); containerd trust for the self-signed cert is installed by a
+test-only privileged DaemonSet. The first run should record the runtime
+findings flagged in [ADR-0022](docs/adr/0022-gke-e2e-harness.md)
+(discovered GKE provider-config path/format, containerd `config_path`,
+loopback-NodePort behaviour under Dataplane V2 — escape hatch:
+`bridge_endpoint` variable on the install module).
+
+---
+
 # §2 — Remote / manual cluster
 
 Use when you want to validate the bridge binary against a Harbor and a

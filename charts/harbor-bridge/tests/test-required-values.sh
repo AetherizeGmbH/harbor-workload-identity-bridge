@@ -17,6 +17,10 @@ cases=(
   "plugin.audience|--set|plugin.audience=|plugin.audience is REQUIRED"
   "tls.issuerRef.name when tls.enabled|--set|tls.issuerRef.name=|tls.issuerRef.name is REQUIRED"
   "clusterName must be a DNS label|--set|clusterName=NotADnsLabel|does not match DNS label regex"
+  "plugin.patchKubelet tombstone|--set|plugin.patchKubelet=true|plugin.patchKubelet was removed"
+  "plugin.install.mode enum|--set|plugin.install.mode=yolo|is invalid. Must be one of"
+  "plugin.install.binDir without configFile|--set|plugin.install.binDir=/x|must be set together"
+  "matchImages covering own image registry|--set|plugin.matchImages={ghcr.io}|chicken-and-egg"
 )
 
 failed=0
@@ -60,6 +64,18 @@ if echo "${out}" | grep -q "plugin.matchImages is REQUIRED"; then
 else
   echo "FAIL  plugin.matchImages (empty list)"
   echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# Inverse case: the chicken-and-egg guard must be bypassable for
+# air-gapped mirrors (plugin.allowSelfMatchImages=true → render succeeds).
+if helm template harbor-bridge "${CHART_DIR}" --kube-version 1.34.0 -f "${COMPLETE}" \
+     --namespace harbor-bridge-system \
+     --set 'plugin.matchImages={ghcr.io}' \
+     --set plugin.allowSelfMatchImages=true > /dev/null 2>&1; then
+  echo "PASS  allowSelfMatchImages bypasses the chicken-and-egg guard"
+else
+  echo "FAIL  allowSelfMatchImages bypasses the chicken-and-egg guard"
   failed=$((failed+1))
 fi
 

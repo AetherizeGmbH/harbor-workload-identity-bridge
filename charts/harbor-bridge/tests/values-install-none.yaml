@@ -1,0 +1,23 @@
+# values-complete plus plugin.install.mode=none — the least-privilege
+# install path (no hostPID, no privileged container, no host-root
+# mount). Golden-rendered to pin exactly that privilege drop.
+clusterName: prod-eu-west
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+
+plugin:
+  matchImages:
+    - "harbor.example.com/*"
+    - "*.harbor.example.com/*"
+  audience: harbor-bridge-prod-eu-west
+  install:
+    mode: none
+
+tls:
+  enabled: true
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer

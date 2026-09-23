@@ -5,7 +5,7 @@ CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
 PROJECT_DIR := $(shell pwd)
 
 .PHONY: all
-all: generate manifests vet build build-plugin
+all: generate manifests vet build build-plugin build-installer
 
 .PHONY: generate
 generate: ## Generate deepcopy methods for API types
@@ -36,6 +36,11 @@ build: ## Build the bridge binary into bin/bridge
 build-plugin: ## Build the kubelet credential-provider plugin into bin/harbor-bridge-plugin
 	mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-plugin ./plugin
+
+.PHONY: build-installer
+build-installer: ## Build the node installer into bin/harbor-bridge-installer
+	mkdir -p bin
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-installer ./installer
 
 .PHONY: build-all
 build-all: ## Compile-check every package
@@ -75,6 +80,16 @@ e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/pus
 .PHONY: e2e-pause
 e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep` to continue
 	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose
+
+.PHONY: e2e-gke
+e2e-gke: ## Run the GKE e2e harness (ADR-0022). CREATES BILLED GCP RESOURCES in $$GOOGLE_PROJECT (zonal spot GKE cluster, Artifact Registry repo, static IP); destroyed at the end of the run. Needs gcloud auth (application-default + docker) and docker. Never runs in CI.
+	@test -n "$$GOOGLE_PROJECT" || (echo "set GOOGLE_PROJECT to the GCP project the harness may bill" && exit 1)
+	cd test/e2e-gke && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_gcp_project=$$GOOGLE_PROJECT TF_VAR_pause_after_pull=false tofu test -verbose
+
+.PHONY: e2e-gke-pause
+e2e-gke-pause: ## GKE e2e, but pause AFTER the assertions — `rm test/e2e-gke/.tofu-sleep` to continue
+	@test -n "$$GOOGLE_PROJECT" || (echo "set GOOGLE_PROJECT to the GCP project the harness may bill" && exit 1)
+	cd test/e2e-gke && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_gcp_project=$$GOOGLE_PROJECT TF_VAR_pause_after_pull=true tofu test -verbose
 
 .PHONY: proxy
 proxy: ## Expose the cluster's apiserver at http://localhost:8001 so the bridge can fetch the JWKS off-cluster
@@ -127,6 +142,15 @@ verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sig
 		exit 1; \
 	fi
 
+.PHONY: verify-installer-isolation
+verify-installer-isolation: ## Enforce ADR-0021: installer may pull sigs.k8s.io/yaml (+ go.yaml.in) but nothing else from k8s.io / sigs.k8s.io
+	@bad=$$(go list -deps ./installer/... 2>/dev/null | grep -E '^(k8s\.io|sigs\.k8s\.io)' | grep -v '^sigs\.k8s\.io/yaml$$' || true); \
+	if [ -n "$$bad" ]; then \
+		echo "ERROR: installer imports k8s.io / sigs.k8s.io packages beyond sigs.k8s.io/yaml (violates ADR-0021):"; \
+		echo "$$bad"; \
+		exit 1; \
+	fi
+
 # ====================================================================
 # Helm chart targets (Phase 5)
 # ====================================================================
@@ -139,6 +163,7 @@ GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 chart-lint: ## helm lint the chart against every test values file
 	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml || exit 1
 	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml || exit 1
+	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-install-none.yaml || exit 1
 
 .PHONY: chart-render
 chart-render: ## Render the chart with the complete-values test file to stdout
@@ -150,12 +175,15 @@ chart-golden: ## Diff current render against the checked-in golden files
 	@diff -u $(GOLDEN_DIR)/default.yaml /tmp/render-complete.yaml || { echo "golden mismatch for values-complete.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
 	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > /tmp/render-mtls.yaml
 	@diff -u $(GOLDEN_DIR)/mtls.yaml /tmp/render-mtls.yaml || { echo "golden mismatch for values-mtls.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-install-none.yaml --namespace harbor-bridge-system > /tmp/render-install-none.yaml
+	@diff -u $(GOLDEN_DIR)/none.yaml /tmp/render-install-none.yaml || { echo "golden mismatch for values-install-none.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
 	@echo "golden render unchanged"
 
 .PHONY: chart-golden-update
 chart-golden-update: ## Re-capture golden files after intentional template changes
 	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/default.yaml
 	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/mtls.yaml
+	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-install-none.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/none.yaml
 	@echo "golden files refreshed; commit them after review"
 
 .PHONY: chart-test-required

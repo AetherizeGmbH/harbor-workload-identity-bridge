@@ -28,7 +28,7 @@ jobs:
       - run: go test -race -count=1 ./...
 
   go-isolation:
-    name: Package isolation (ADR-0002 + ADR-0015)
+    name: Package isolation (ADR-0002 + ADR-0015 + ADR-0021)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -38,6 +38,7 @@ jobs:
           cache: true
       - run: make verify-package-isolation
       - run: make verify-plugin-isolation
+      - run: make verify-installer-isolation
 
   chart-test:
     name: Helm chart test

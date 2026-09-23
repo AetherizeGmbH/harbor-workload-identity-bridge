@@ -248,35 +248,47 @@ Mitigations:
 
 ### Privilege of the install DaemonSet
 
-The plugin DaemonSet is the system's most privileged workload. Its
-install init container:
+The plugin DaemonSet is the system's most privileged workload. In
+every `plugin.install.mode` except `none`
+([ADR-0021](docs/adr/0021-node-installer-modes.md)) its install init
+container:
 
-- runs as root (`runAsUser: 0`).
-- bind-mounts the node's `/etc/kubernetes/credential-provider*`
-  hostPaths so it can write the binary, config, and CA bundle.
-- when `plugin.patchKubelet: true` (default), runs with
-  `hostPID: true` and `nsenter`s into PID 1 to patch
-  `/etc/default/kubelet` with `--image-credential-provider-{bin-dir,config}`
-  flags and runs `systemctl restart kubelet` on the host; once per
-  node, idempotency-guarded.
+- runs as root (`runAsUser: 0`) and `privileged: true`.
+- runs with `hostPID: true` and mounts the host's `/` read-write at
+  `/host`. The broad mount is required because `merge` mode writes
+  into whatever paths the node's kubelet flags point at — those are
+  discovered at runtime from `/proc/<kubelet>/cmdline` and cannot be
+  narrowed at chart-render time.
+- restarts kubelet via `nsenter -t 1 … systemctl restart` — but only
+  when the effective credential-provider config content (or the
+  kubelet flags) actually changed, tracked by a content hash in
+  `/var/lib/harbor-bridge/installer-state.json`. Running containers
+  survive the restart (containerd owns them). Binary drops and
+  CA/mTLS rotation never restart kubelet.
+- in `patch` mode parse-merges `/etc/default/kubelet`, preserving
+  operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
+  node's existing `CredentialProviderConfig`, preserving foreign
+  provider entries and unknown fields.
 
-This privilege model is non-negotiable for installing a credential
-provider on nodes the operator doesn't control the image of (kind,
-kubeadm, k3s). Cloud-managed clusters (EKS, GKE, AKS) bake the
-binary + config + kubelet flags into the node image instead.
+This privilege model is what installing a credential provider on
+nodes requires — managed node images (EKS, GKE, AKS) pre-wire their
+own providers exactly this way, just at image-build time. Bottlerocket
+exposes no writable host filesystem and is unsupported.
 
 Operator choices:
 
-- `plugin.patchKubelet: false`: disables the nsenter + kubelet
-  restart block; use when the node image already wires kubelet.
-  The init container also drops `hostPID` in this mode.
+- `plugin.install.mode: none` is the least-privilege configuration:
+  files only, no `hostPID`, no privileged container, and only the two
+  narrow `plugin.hostBinaryDir`/`hostConfigDir` hostPath mounts. The
+  operator owns the kubelet flags.
 - The Helm release is the install boundary. Anyone who can
   `helm upgrade` this chart can swap the plugin binary that kubelet
   on every node will exec next pull. Restrict the helm caller's
   RBAC accordingly.
-- The DaemonSet's runtime container after install is a `sleep` loop
-  with no special privileges. The init container only runs at pod
-  start.
+- The DaemonSet's long-running container is the installer in `--sync`
+  mode: root (it refreshes the on-host CA/mTLS files when
+  cert-manager rotates them) but never privileged, never nsenter, no
+  kubelet interaction.
 
 ### Audience-scoped RBAC
 

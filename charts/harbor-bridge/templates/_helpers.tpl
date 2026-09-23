@@ -141,6 +141,40 @@ errors surface during `helm install` with the message text intact.
 {{- fail "bridge.mTLS.clientIssuerRef.name is REQUIRED when bridge.mTLS.enabled=true." -}}
 {{- end -}}
 {{- end -}}
+{{- if hasKey .Values.plugin "patchKubelet" -}}
+{{- fail "plugin.patchKubelet was removed (ADR-0021). Use plugin.install.mode instead: patchKubelet=true → mode: auto (or patch), patchKubelet=false → mode: none. See MIGRATION.md." -}}
+{{- end -}}
+{{- if not (has .Values.plugin.install.mode (list "auto" "merge" "patch" "none")) -}}
+{{- fail (printf "plugin.install.mode=%q is invalid. Must be one of: auto, merge, patch, none (ADR-0021)." .Values.plugin.install.mode) -}}
+{{- end -}}
+{{- if ne (empty .Values.plugin.install.binDir) (empty .Values.plugin.install.configFile) -}}
+{{- fail "plugin.install.binDir and plugin.install.configFile must be set together (both name merge-mode targets)." -}}
+{{- end -}}
+{{- if not .Values.plugin.allowSelfMatchImages -}}
+{{- $pluginHost := include "harbor-bridge.registryHost" .Values.plugin.image.repository -}}
+{{- $bridgeHost := include "harbor-bridge.registryHost" .Values.bridge.image.repository -}}
+{{- range .Values.plugin.matchImages -}}
+{{- if or (eq . $pluginHost) (eq . $bridgeHost) -}}
+{{- fail (printf "plugin.matchImages entry %q matches the registry of the plugin/bridge images — the plugin cannot authenticate the pull of its own image (chicken-and-egg). Pull these images from a registry outside matchImages, or set plugin.allowSelfMatchImages=true if you accept the bootstrap ordering. ADR-0021." .) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+registryHost extracts the registry host from an image repository
+string: the first path segment when it looks like a host (contains a
+dot or colon, or is "localhost"), else docker.io — mirroring the
+container-runtime convention. Takes the repository string as its
+context (not the root context).
+*/}}
+{{- define "harbor-bridge.registryHost" -}}
+{{- $first := splitList "/" . | first -}}
+{{- if or (contains "." $first) (contains ":" $first) (eq $first "localhost") -}}
+{{- $first -}}
+{{- else -}}
+docker.io
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -176,4 +210,17 @@ false
 
 {{- define "harbor-bridge.mTLSClientSecretName" -}}
 {{- printf "%s-mtls-client" (include "harbor-bridge.plugin.fullname" .) -}}
+{{- end -}}
+
+{{/*
+bridgeEndpoint is the URL the on-node plugin calls. Default is the
+ADR-0008 loopback NodePort; plugin.bridgeEndpoint overrides it (the
+installer substitutes a literal $(NODE_IP) with the node's IP).
+*/}}
+{{- define "harbor-bridge.plugin.bridgeEndpoint" -}}
+{{- if .Values.plugin.bridgeEndpoint -}}
+{{- .Values.plugin.bridgeEndpoint -}}
+{{- else -}}
+https://127.0.0.1:{{ .Values.service.nodePort }}
+{{- end -}}
 {{- end -}}

@@ -1,3 +1,21 @@
+## Chart value migrations
+
+### `plugin.patchKubelet` → `plugin.install.mode` (pre-release, ADR-0021)
+
+The boolean was replaced by an install-mode enum; the chart fails at
+template time if `plugin.patchKubelet` is still set.
+
+| Before | After |
+| --- | --- |
+| `plugin.patchKubelet: true` (default) | `plugin.install.mode: auto` (new default; resolves to `patch` on self-managed nodes and to `merge` on managed EKS/GKE/AKS nodes) — or pin `patch` explicitly |
+| `plugin.patchKubelet: false` | `plugin.install.mode: none` |
+
+Behavioural upgrades that come with the change: `helm upgrade`s that
+alter `matchImages`/`audience` now restart kubelet automatically
+(content-hash idempotency — the old flag-presence guard required a
+manual restart), `/etc/default/kubelet` is parse-merged instead of
+overwritten, and managed clouds get first-class support via `merge`.
+
 ## Migration Path
 
 The HarborAccess CRD is a Kubernetes-native declarative interface for "this SA gets these Harbor permissions". It is NOT expected to become an upstream Harbor API directly. Upstream Harbor will define its own configuration model for OIDC Trust (likely server-native, configured via Harbor REST API or UI). Our Bridge translates between the two.
