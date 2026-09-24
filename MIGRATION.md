@@ -1,6 +1,13 @@
 ## Chart value migrations
 
-### Unreleased: HarborAccess project names
+### Unreleased: one audience per bridge, HarborAccess selector (ADR-0026)
+
+| Change | What to do |
+| --- | --- |
+| The bridge serves only `plugin.audience` (`BRIDGE_AUDIENCE`, now required). A HarborAccess whose `spec.trustPolicy.audience` differs gets `Ready=False`, `reason=AudienceMismatch`, and its robot is not created | Set every HarborAccess's audience to `plugin.audience`. With the chart nothing else changes; `make run-local` needs `BRIDGE_AUDIENCE`. |
+| New `bridge.harborAccessSelector` and `bridge.instance` | Only for several bridges on one cluster. Each bridge serves the HarborAccess objects its selector matches and uses the finalizer `harbor.aetherize.io/robot-<instance>`. Bridges that share a Harbor need different `clusterName` values. |
+
+### 0.5.5: HarborAccess project names
 
 | Change | What to do |
 | --- | --- |

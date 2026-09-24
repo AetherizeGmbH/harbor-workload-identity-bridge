@@ -87,6 +87,15 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: BRIDGE_OIDC_ISSUER
               value: {{ .Values.bridge.oidcIssuer | quote }}
+            # The only token audience the bridge serves (ADR-0026).
+            - name: BRIDGE_AUDIENCE
+              value: {{ .Values.plugin.audience | quote }}
+            {{- with .Values.bridge.harborAccessSelector }}
+            - name: BRIDGE_HARBORACCESS_SELECTOR
+              value: {{ include "harbor-bridge.harborAccessSelector" $ | quote }}
+            - name: BRIDGE_INSTANCE
+              value: {{ include "harbor-bridge.instance" $ | quote }}
+            {{- end }}
             {{- with .Values.bridge.oidcJWKSURL }}
             - name: BRIDGE_OIDC_JWKS_URL
               value: {{ . | quote }}

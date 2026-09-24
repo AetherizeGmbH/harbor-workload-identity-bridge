@@ -34,6 +34,7 @@ func newJanitor(t *testing.T, mh harbor.Client, objects ...client.Object) *Janit
 			OIDCIssuer:     issuer,
 			HarborURL:      harborURL,
 			HarborAdminDir: "/dev/null",
+			Audience:       "harbor.example.com",
 		},
 	}
 }

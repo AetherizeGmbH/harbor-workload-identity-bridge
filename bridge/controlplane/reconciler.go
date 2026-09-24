@@ -37,6 +37,7 @@ const (
 	ReasonRobotConflict      = "RobotConflict"
 	ReasonRobotDisabled      = "RobotDisabled"
 	ReasonInvalidSpec        = "InvalidSpec"
+	ReasonAudienceMismatch   = "AudienceMismatch"
 	ReasonHarborError        = "HarborError"
 	ReasonDeletionBlocked    = "DeletionBlocked"
 	ReasonEnforcedByBridge   = "EnforcedByBridge"
@@ -115,17 +116,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, req.NamespacedName, ha); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// The cache holds only selected objects (ADR-0026); this guards a
+	// stale cache entry right after a label change. The janitor releases
+	// objects that stopped matching.
+	if !r.Config.Selects(ha) {
+		return ctrl.Result{}, nil
+	}
 
 	if !ha.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, ha)
 	}
 
-	if !controllerutil.ContainsFinalizer(ha, FinalizerName) {
+	finalizer := r.Config.Finalizer()
+	if !controllerutil.ContainsFinalizer(ha, finalizer) {
 		// Optimistic-lock merge patch: a JSON merge patch replaces the
 		// whole finalizers list, so without the resourceVersion guard a
 		// finalizer another controller added concurrently could be lost.
 		patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
-		controllerutil.AddFinalizer(ha, FinalizerName)
+		controllerutil.AddFinalizer(ha, finalizer)
 		if err := r.Patch(ctx, ha, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
@@ -143,6 +151,15 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		return r.markNotReady(ctx, ha, ReasonIssuerMismatch,
 			fmt.Sprintf("CR trustPolicy.issuer %q does not match cluster issuer %q",
 				ha.Spec.TrustPolicy.Issuer, r.Config.OIDCIssuer.String()))
+	}
+
+	// The bridge serves one audience (ADR-0026). Another audience would
+	// make every token of that ServiceAccount minted for it, e.g. the
+	// apiserver's default audience, redeemable for Harbor credentials.
+	if ha.Spec.TrustPolicy.Audience != r.Config.Audience {
+		return r.markNotReady(ctx, ha, ReasonAudienceMismatch,
+			fmt.Sprintf("CR trustPolicy.audience %q is not the audience this bridge serves (%q)",
+				ha.Spec.TrustPolicy.Audience, r.Config.Audience))
 	}
 
 	// 2. The HarborAccess name becomes a label value on the robot Secret.
@@ -433,7 +450,19 @@ func (r *Reconciler) deleteStaleRobots(ctx context.Context, ha *harborv1alpha1.H
 func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.HarborAccess) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if !controllerutil.ContainsFinalizer(ha, FinalizerName) {
+	// With a selector the bridge owns its per-instance finalizer, and also
+	// the shared one, which only this bridge's pre-selector installation
+	// can have set (a CR can be deleted before the instance finalizer was
+	// added).
+	finalizers := []string{r.Config.Finalizer()}
+	if r.Config.Finalizer() != FinalizerName {
+		finalizers = append(finalizers, FinalizerName)
+	}
+	held := false
+	for _, f := range finalizers {
+		held = held || controllerutil.ContainsFinalizer(ha, f)
+	}
+	if !held {
 		return ctrl.Result{}, nil
 	}
 
@@ -469,7 +498,9 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 	}
 
 	patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	controllerutil.RemoveFinalizer(ha, FinalizerName)
+	for _, f := range finalizers {
+		controllerutil.RemoveFinalizer(ha, f)
+	}
 	if err := r.Patch(ctx, ha, patch); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(fmt.Errorf("remove finalizer: %w", err))
 	}
@@ -483,7 +514,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 func (r *Reconciler) blockDeletion(ctx context.Context, ha *harborv1alpha1.HarborAccess, cause error) (ctrl.Result, error) {
 	msg := fmt.Sprintf("cannot revoke the Harbor robot yet, deletion is waiting: %v. "+
 		"If Harbor is gone for good, remove the %q finalizer by hand; the janitor deletes the orphaned robot once Harbor is reachable",
-		cause, FinalizerName)
+		cause, r.Config.Finalizer())
 	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, ReasonDeletionBlocked, msg); err != nil {
 		log.FromContext(ctx).V(1).Info("could not record deletion-blocked status", "err", err.Error())
 	}

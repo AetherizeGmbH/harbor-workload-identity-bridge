@@ -26,7 +26,7 @@ func clearAllEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
-		EnvForceLocalValidation, EnvLogLevel,
+		EnvForceLocalValidation, EnvLogLevel, EnvAudience, EnvHarborAccessSelector, EnvInstance,
 	} {
 		t.Setenv(k, "")
 		// t.Setenv with empty string doesn't actually unset on every Go
@@ -43,6 +43,7 @@ func TestLoadFromEnv_HappyPath(t *testing.T) {
 		EnvOIDCIssuer:           "https://kubernetes.default.svc",
 		EnvHarborURL:            "https://harbor.example.com",
 		EnvHarborAdminDir:       "/var/run/secrets/harbor-admin",
+		EnvAudience:             "harbor-bridge-prod",
 		EnvForceLocalValidation: "true",
 		EnvLogLevel:             "debug",
 	})
@@ -76,6 +77,7 @@ func TestLoadFromEnv_AppliesDefaults(t *testing.T) {
 		EnvOIDCIssuer:     "https://kubernetes.default.svc",
 		EnvHarborURL:      "https://harbor.example.com",
 		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		EnvAudience:       "harbor-bridge-prod",
 	})
 
 	cfg, err := LoadFromEnv()
@@ -148,6 +150,7 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 				EnvOIDCIssuer:           "https://k",
 				EnvHarborURL:            "https://h",
 				EnvHarborAdminDir:       "/d",
+				EnvAudience:             "harbor-bridge-prod",
 				EnvForceLocalValidation: "maybe",
 			},
 			mustHave: "must be a boolean",
@@ -160,6 +163,7 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 				EnvOIDCIssuer:     "https://k",
 				EnvHarborURL:      "https://h",
 				EnvHarborAdminDir: "/d",
+				EnvAudience:       "harbor-bridge-prod",
 				EnvLogLevel:       "trace",
 			},
 			mustHave: "must be one of",
@@ -191,6 +195,7 @@ func TestLoadFromEnv_ReportsAllErrorsAtOnce(t *testing.T) {
 		EnvOIDCIssuer:           "not-a-url",
 		EnvHarborURL:            "",
 		EnvHarborAdminDir:       "",
+		EnvAudience:             "harbor-bridge-prod",
 		EnvForceLocalValidation: "perhaps",
 		EnvLogLevel:             "loud",
 	})
@@ -218,6 +223,7 @@ func TestSanitized_DoesNotIncludeCredentials(t *testing.T) {
 		EnvOIDCIssuer:     "https://kubernetes.default.svc",
 		EnvHarborURL:      "https://harbor.example.com",
 		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		EnvAudience:       "harbor-bridge-prod",
 	})
 	cfg, err := LoadFromEnv()
 	if err != nil {

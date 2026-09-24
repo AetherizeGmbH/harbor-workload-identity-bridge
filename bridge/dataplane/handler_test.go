@@ -135,6 +135,7 @@ func newHandlerFixture(t *testing.T, extras ...client.Object) *handlerFixture {
 			Config: HandlerConfig{
 				BridgeNamespace:      hTestBridgeNS,
 				ForceLocalValidation: true,
+				Audience:             hTestAudience,
 			},
 		},
 	}
@@ -329,7 +330,7 @@ func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
 			items: []harborv1alpha1.HarborAccess{mk("zzz-dup", "pull,push"), mk("aaa-dup", "pull")},
 		},
 		Validator: &stubValidator{claims: newTestClaims()},
-		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
 	}
 	for i := 0; i < 5; i++ {
 		matched, aud, err := h.findHarborAccess(context.Background(), newTestClaims())
@@ -400,7 +401,7 @@ func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 			h := &Handler{
 				K8sClient: k8s,
 				Validator: &stubValidator{},
-				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
 			}
 			claims := &Claims{Subject: hTestSubject, Audience: tc.claimsAud, Issuer: tc.claimsIssuer}
 			matched, _, err := h.findHarborAccess(context.Background(), claims)
@@ -428,6 +429,7 @@ func TestHandler_MissingRobotSecret_503(t *testing.T) {
 		Config: HandlerConfig{
 			BridgeNamespace:      hTestBridgeNS,
 			ForceLocalValidation: true,
+			Audience:             hTestAudience,
 		},
 	}
 	w := httptest.NewRecorder()
@@ -461,6 +463,7 @@ func TestHandler_SecretInWrongNamespace_503(t *testing.T) {
 		Config: HandlerConfig{
 			BridgeNamespace:      hTestBridgeNS,
 			ForceLocalValidation: true,
+			Audience:             hTestAudience,
 		},
 	}
 	w := httptest.NewRecorder()
@@ -619,7 +622,7 @@ func TestHandler_CacheNeverOutlivesTheRotationPromise(t *testing.T) {
 			h := &Handler{
 				K8sClient: k8s,
 				Validator: &stubValidator{claims: newTestClaims()},
-				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
 				Now:       func() time.Time { return now },
 			}
 			w := httptest.NewRecorder()
@@ -673,5 +676,50 @@ func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), hTestRobotPass) {
 		t.Fatal("response body leaked the robot password on an owner mismatch")
+	}
+}
+
+// ADR-0026: a CR naming another audience is never served, even when the
+// token carries exactly that audience (e.g. the apiserver's default one).
+func TestHandler_ForeignAudienceCR_NotServed(t *testing.T) {
+	const foreign = "https://kubernetes.default.svc"
+	ha := newTestHA()
+	ha.Spec.TrustPolicy.Audience = foreign
+	claims := newTestClaims()
+	claims.Audience = []string{foreign}
+	k8s := fake.NewClientBuilder().
+		WithScheme(handlerTestScheme).
+		WithObjects(ha, newTestRobotSecret()).
+		Build()
+	h := &Handler{
+		K8sClient: k8s,
+		Validator: &stubValidator{claims: claims},
+		Config: HandlerConfig{
+			BridgeNamespace:      hTestBridgeNS,
+			ForceLocalValidation: true,
+			Audience:             hTestAudience,
+		},
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestHandler_UnsetAudienceServesNothing(t *testing.T) {
+	k8s := fake.NewClientBuilder().
+		WithScheme(handlerTestScheme).
+		WithObjects(newTestHA(), newTestRobotSecret()).
+		Build()
+	h := &Handler{
+		K8sClient: k8s,
+		Validator: &stubValidator{claims: newTestClaims()},
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true},
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (fail closed without a configured audience)", w.Code)
 	}
 }

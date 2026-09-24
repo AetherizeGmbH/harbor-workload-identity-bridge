@@ -109,6 +109,22 @@ errors surface during `helm install` with the message text intact.
 =====================================================================
 */}}
 
+{{/*
+harborAccessSelector renders bridge.harborAccessSelector as a label
+selector string (sorted k=v pairs); the bridge validates the syntax.
+*/}}
+{{- define "harbor-bridge.harborAccessSelector" -}}
+{{- $pairs := list -}}
+{{- range $k, $v := .Values.bridge.harborAccessSelector -}}
+{{- $pairs = append $pairs (printf "%s=%s" $k $v) -}}
+{{- end -}}
+{{- join "," $pairs -}}
+{{- end -}}
+
+{{- define "harbor-bridge.instance" -}}
+{{- default .Release.Name .Values.bridge.instance -}}
+{{- end -}}
+
 {{- define "harbor-bridge.validateRequiredValues" -}}
 {{- if not .Values.clusterName -}}
 {{- fail "clusterName is REQUIRED. Set --set clusterName=<dns-label> or values.yaml. Must be unique across clusters sharing one Harbor (ADR-0009)." -}}
@@ -124,6 +140,12 @@ errors surface during `helm install` with the message text intact.
 {{- end -}}
 {{- if not .Values.harbor.adminCredsSecret.name -}}
 {{- fail "harbor.adminCredsSecret.name is REQUIRED. Pre-create a Secret in the release namespace holding Harbor admin {username,password}." -}}
+{{- end -}}
+{{- if .Values.bridge.harborAccessSelector -}}
+{{- $instance := include "harbor-bridge.instance" . -}}
+{{- if or (gt (len $instance) 50) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $instance)) -}}
+{{- fail (printf "bridge.instance %q (default: the release name) must be a DNS label of at most 50 characters; it names this bridge's HarborAccess finalizer (ADR-0026)." $instance) -}}
+{{- end -}}
 {{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}

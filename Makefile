@@ -108,6 +108,7 @@ run-local: ## Run the bridge against $KUBECONFIG with a self-signed cert in /tmp
 	@test -n "$$BRIDGE_CLUSTER_NAME" || (echo "set BRIDGE_CLUSTER_NAME" && exit 1)
 	@test -n "$$BRIDGE_NAMESPACE" || (echo "set BRIDGE_NAMESPACE" && exit 1)
 	@test -n "$$BRIDGE_OIDC_ISSUER" || (echo "set BRIDGE_OIDC_ISSUER" && exit 1)
+	@test -n "$$BRIDGE_AUDIENCE" || (echo "set BRIDGE_AUDIENCE (the audience your HarborAccess objects name)" && exit 1)
 	@test -n "$$BRIDGE_HARBOR_URL" || (echo "set BRIDGE_HARBOR_URL" && exit 1)
 	@test -n "$$BRIDGE_HARBOR_ADMIN_DIR" || (echo "set BRIDGE_HARBOR_ADMIN_DIR" && exit 1)
 	@if echo "$$BRIDGE_OIDC_ISSUER" | grep -q cluster.local && [ -z "$$BRIDGE_OIDC_JWKS_URL" ]; then \

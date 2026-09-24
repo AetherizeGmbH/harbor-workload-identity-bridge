@@ -114,6 +114,20 @@ bridge:
 
   logLevel: info  # debug | info | warn | error
 
+  # Several bridges on one cluster (e.g. one per Harbor instance): each
+  # serves only the HarborAccess objects whose labels match this map
+  # (ADR-0026). Empty = every HarborAccess. Bridges that share a Harbor
+  # must use different clusterName values. The bridge only ever serves
+  # plugin.audience, whatever a CR names.
+  # harborAccessSelector:
+  #   harbor.aetherize.io/bridge: harbor-eu
+  harborAccessSelector: {}
+
+  # Names this bridge among several (its HarborAccess finalizer is
+  # harbor.aetherize.io/robot-<instance>). Used only with a selector.
+  # Empty = the release name. DNS label, at most 50 characters.
+  instance: ""
+
   # mTLS between plugin and bridge — optional defense-in-depth on top
   # of SA-token validation (ADR-0008). When enabled, the plugin
   # presents a chart-issued client cert; the bridge rejects connections
