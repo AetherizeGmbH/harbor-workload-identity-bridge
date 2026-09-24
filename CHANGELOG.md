@@ -1,3 +1,10 @@
+## [0.5.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.4...v0.5.5) (2026-09-24)
+
+### Bug Fixes
+
+* **api:** accept only real Harbor project names in HarborAccess grants ([#102](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/102)) ([2021a2a](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/2021a2adcc3a2903720b4a36b85363fa9d289590))
+* **installer:** leave an already-merged provider config byte-identical; add gosec and fuzzing ([#105](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/105)) ([39fb04a](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/39fb04ace2b762770247fe06a8fb5bacd5ac3da6))
+
 ## [0.5.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.3...v0.5.4) (2026-09-24)
 
 ### Bug Fixes
