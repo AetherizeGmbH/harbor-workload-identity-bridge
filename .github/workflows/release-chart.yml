@@ -22,7 +22,6 @@ on:
 
 permissions:
   contents: read
-  packages: write  # OCI push to ghcr.io
 
 concurrency:
   # Per-version so backfills don't queue against each other.
@@ -33,7 +32,15 @@ jobs:
   push:
     name: helm OCI push
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # OCI push to ghcr.io
     steps:
+      - name: Validate version input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version '$VERSION' is not x.y.z"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.3.0 }
@@ -49,13 +56,15 @@ jobs:
       - name: Login to ghcr.io
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
         # Lowercased owner: ghcr.io is case-insensitive at the registry
         # layer but the OCI spec mandates lowercase for namespaces.
         run: |
-          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
           echo "OWNER_LC=$OWNER_LC" >> "$GITHUB_ENV"
           echo "$GITHUB_TOKEN" | helm registry login ghcr.io \
-            --username "${{ github.actor }}" --password-stdin
+            --username "$ACTOR" --password-stdin
       - name: Push to OCI
         env:
           VERSION: ${{ inputs.version }}

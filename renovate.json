@@ -16,6 +16,8 @@
   "prConcurrentLimit": 20,
   "prHourlyLimit": 0,
   "rebaseWhen": "behind-base-branch",
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
   "ignorePaths": ["**/node_modules/**", "**/vendor/**"],
   "lockFileMaintenance": {
     "enabled": true,
@@ -44,6 +46,7 @@
     {
       "description": "Group GitHub Actions",
       "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
       "groupName": "GitHub Actions",
       "groupSlug": "github-actions",
       "automerge": true

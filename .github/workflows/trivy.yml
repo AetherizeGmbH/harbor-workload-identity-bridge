@@ -9,9 +9,6 @@ on:
 
 permissions:
   contents: read
-  # Required to publish the SARIF report to the repo's Security tab
-  # (code scanning). Free for this public repo; no GHAS needed.
-  security-events: write
 
 concurrency:
   group: trivy-${{ github.ref }}
@@ -21,18 +18,25 @@ jobs:
   scan:
     name: Trivy code scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to publish the SARIF report to the repo's Security tab
+      # (code scanning). Free for this public repo; no GHAS needed.
+      security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Filesystem (repo) scan: dependency vulns (go.mod/go.sum),
       # misconfigurations (Dockerfiles, Helm charts, OpenTofu) and
-      # leaked secrets. `version: latest` tracks the newest Trivy
-      # release; the action SHA itself is digest-pinned and bumped by
-      # Renovate's github-actions manager.
+      # leaked secrets. The Trivy binary is pinned like the action (the
+      # scanner runs with this job's token). Renovate tracks both, but the
+      # aquasecurity org's IP allow list currently blocks its lookups from
+      # GitHub runners: bump them by hand until that changes.
       - name: Run Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: latest
+          # renovate: datasource=github-releases depName=aquasecurity/trivy
+          version: v0.74.0
           scan-type: fs
           scanners: vuln,secret,misconfig
           format: sarif

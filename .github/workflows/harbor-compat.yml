@@ -37,6 +37,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$INPUT_CHARTS" ]; then
+            # Each entry becomes a job name and a shell argument.
+            echo "$INPUT_CHARTS" | jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' >/dev/null \
+              || { echo "::error::charts must be a JSON array of x.y.z chart versions"; exit 1; }
             echo "charts=$INPUT_CHARTS" >> "$GITHUB_OUTPUT"
           else
             # floor candidate + two mid + ceiling (chart 1.N -> Harbor 2.(N-4)):
@@ -112,9 +115,11 @@ jobs:
           if-no-files-found: error
       - name: Flag red run
         if: steps.e2e.outputs.status_code != '0'
+        env:
+          CHART: ${{ matrix.chart }}
+          STATUS: ${{ steps.e2e.outputs.status_code }}
         run: |
-          echo "::error::Harbor chart ${{ matrix.chart }} e2e failed" \
-            "(status ${{ steps.e2e.outputs.status_code }})"
+          echo "::error::Harbor chart $CHART e2e failed (status $STATUS)"
           exit 1
 
   aggregate:
@@ -122,9 +127,9 @@ jobs:
     needs: matrix
     if: always()
     runs-on: ubuntu-latest
+    # The PR is opened with the App token; GITHUB_TOKEN only reads.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

@@ -5,11 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The release itself runs with the App token below; GITHUB_TOKEN only
+# checks out (read) and dispatches the follow-up workflows (actions:
+# write, granted to those two jobs alone).
 permissions:
-  contents: write       # tag + release
-  issues: write         # semantic-release adds release-note comments
-  pull-requests: write  # ditto
-  actions: write        # createWorkflowDispatch for trigger-{chart-release,release-images}
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -19,6 +19,8 @@ jobs:
   release:
     name: semantic-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # semantic-release pushes the `chore(release)` commit back to main as
     # the GitHub App (see the token step below). Unlike GITHUB_TOKEN, an
     # App-authored push is NOT suppressed by GitHub's recursion guard, so
@@ -99,17 +101,25 @@ jobs:
     needs: release
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
       - name: Dispatch chart-release workflow
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
         with:
           script: |
+            const version = process.env.VERSION;
+            if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
+              throw new Error(`refusing to dispatch: version ${JSON.stringify(version)} is not x.y.z`);
+            }
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'release-chart.yml',
               ref: 'main',
-              inputs: { version: '${{ needs.release.outputs.version }}' },
+              inputs: { version: version },
             });
 
   trigger-images-release:
@@ -117,15 +127,23 @@ jobs:
     needs: release
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
       - name: Dispatch release-images workflow
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
         with:
           script: |
+            const version = process.env.VERSION;
+            if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
+              throw new Error(`refusing to dispatch: version ${JSON.stringify(version)} is not x.y.z`);
+            }
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'release-images.yml',
               ref: 'main',
-              inputs: { tag: '${{ needs.release.outputs.version }}' },
+              inputs: { tag: version },
             });

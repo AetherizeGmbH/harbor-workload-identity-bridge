@@ -18,8 +18,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
 
 concurrency:
   # Group by tag so independent versions don't queue against each other.
@@ -32,6 +30,10 @@ jobs:
   build:
     name: build + push
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # keyless cosign signing
     strategy:
       fail-fast: false
       # Matrix carries (component, image) per row. The bridge image is
@@ -52,11 +54,15 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Resolve tag + lowercase owner
         id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+          OWNER: ${{ github.repository_owner }}
         run: |
-          echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not x.y.z"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           # OCI namespaces must be lowercase per spec; org name "AetherizeGmbH"
           # would 404 on `docker pull` for case-sensitive clients.
-          echo "owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -117,7 +123,9 @@ jobs:
       - name: Generate SBOM with Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: latest
+          # Pinned: this job holds signing and push rights.
+          # renovate: datasource=github-releases depName=aquasecurity/trivy
+          version: v0.74.0
           scan-type: image
           image-ref: ghcr.io/${{ steps.tag.outputs.owner_lc }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
           format: cyclonedx
