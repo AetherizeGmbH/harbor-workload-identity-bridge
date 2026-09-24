@@ -5,12 +5,14 @@ package harbor
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	httptransport "github.com/go-openapi/runtime/client"
 	v2client "github.com/goharbor/go-client/pkg/sdk/v2.0/client"
@@ -27,6 +29,19 @@ const (
 	// robot list. Harbor's default is small; 100 keeps round-trip count low
 	// without hammering memory on huge fleets.
 	pageSize int64 = 100
+
+	// maxPages bounds one robot listing (maxPages*pageSize robots). A
+	// Harbor or proxy that ignores the page parameter would otherwise
+	// make the walk loop forever and grow memory without bound.
+	maxPages = 1000
+
+	// DefaultCallTimeout bounds one Harbor API call. The generated SDK
+	// params set a request timeout of 0 (none), and the reconcile and
+	// janitor contexts carry no deadline, so without it one Harbor that
+	// accepts the connection and never answers blocks the only reconcile
+	// worker: rotation, revocation and deletion stop for every
+	// HarborAccess, and DeletionBlocked is never reported.
+	DefaultCallTimeout = 30 * time.Second
 
 	// robotLevelSystem is the value Harbor expects in RobotCreate.Level for
 	// system-scope robots (which can hold permissions across multiple
@@ -138,16 +153,49 @@ func WithRobotPrefix(prefix string) Option {
 	return func(c *goClient) { c.robotPrefix = prefix }
 }
 
+// WithCallTimeout overrides DefaultCallTimeout (tests).
+func WithCallTimeout(d time.Duration) Option {
+	return func(c *goClient) { c.callTimeout = d }
+}
+
 // goClient is the production Client implementation, backed by
 // github.com/goharbor/go-client.
 type goClient struct {
 	api         *v2client.HarborAPI
 	robotPrefix string
+	callTimeout time.Duration
 }
+
+// call derives the context for one Harbor API call.
+func (c *goClient) call(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, c.callTimeout)
+}
+
+// defaultTransport is http.DefaultTransport with the timeouts it lacks
+// (a response that never starts would otherwise hold the call until the
+// per-call deadline) and TLS 1.2 as the floor.
+func defaultTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	t := base.Clone()
+	t.TLSHandshakeTimeout = 10 * time.Second
+	t.ResponseHeaderTimeout = DefaultCallTimeout
+	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	return t
+}
+
+// noLogger discards the SDK runtime's debug output.
+type noLogger struct{}
+
+func (noLogger) Printf(string, ...any) {}
+func (noLogger) Debugf(string, ...any) {}
 
 // NewClient builds a Client connected to harborURL using HTTP Basic Auth.
 // transport is optional; pass non-nil to override the default (httptest
-// servers, custom TLS, mTLS, instrumented round-trippers, etc.).
+// servers, custom TLS, mTLS, instrumented round-trippers, etc.). nil
+// selects defaultTransport.
 func NewClient(harborURL *url.URL, username, password string, transport http.RoundTripper, opts ...Option) (Client, error) {
 	if harborURL == nil {
 		return nil, errors.New("harborURL is nil")
@@ -162,12 +210,29 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 		u.Path += harborBasePath
 	}
 
+	if transport == nil {
+		transport = defaultTransport()
+	}
 	cfg := v2client.Config{
 		URL:       &u,
 		Transport: transport,
 		AuthInfo:  httptransport.BasicAuth(username, password),
 	}
-	c := &goClient{api: v2client.New(cfg), robotPrefix: HarborRobotPrefix}
+	api := v2client.New(cfg)
+	// The go-openapi runtime turns on full request/response dumps when
+	// DEBUG or SWAGGER_DEBUG is set in the environment: every call's
+	// Authorization header (the Harbor admin credentials) and every
+	// create/refresh response (robot passwords) would go to stdout.
+	// Those variable names are generic enough to be set for unrelated
+	// reasons, so the dumps are switched off unconditionally.
+	rt, ok := api.Transport.(*httptransport.Runtime)
+	if !ok {
+		return nil, fmt.Errorf("harbor SDK transport is %T, want *client.Runtime (wire dumps could not be disabled)", api.Transport)
+	}
+	rt.SetDebug(false)
+	rt.SetLogger(noLogger{})
+
+	c := &goClient{api: api, robotPrefix: HarborRobotPrefix, callTimeout: DefaultCallTimeout}
 	for _, o := range opts {
 		o(c)
 	}
@@ -182,10 +247,17 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 		Duration:    robotDurationNeverExpires,
 		Permissions: toHarborPermissions(perms),
 	}
+	ctx, cancel := c.call(ctx)
+	defer cancel()
 	params := sdkrobot.NewCreateRobotParamsWithContext(ctx).WithRobot(body)
 	resp, err := c.api.Robot.CreateRobot(ctx, params)
 	if err != nil {
 		return nil, wrapHarborOp(fmt.Sprintf("create robot %q", name), err)
+	}
+	if resp.Payload == nil || resp.Payload.Secret == "" {
+		// Storing an empty password would fail every pull until the
+		// next scheduled rotation, 24h later.
+		return nil, fmt.Errorf("create robot %q: Harbor returned no secret", name)
 	}
 	wire := resp.Payload.Name
 	if wire == "" {
@@ -203,6 +275,8 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 }
 
 func (c *goClient) Delete(ctx context.Context, id int64) error {
+	ctx, cancel := c.call(ctx)
+	defer cancel()
 	params := sdkrobot.NewDeleteRobotParamsWithContext(ctx).WithRobotID(id)
 	if _, err := c.api.Robot.DeleteRobot(ctx, params); err != nil {
 		if isNotFound(err) {
@@ -224,12 +298,8 @@ func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
 	page := int64(1)
 	size := pageSize
 	var out []Robot
-	for {
-		params := sdkrobot.NewListRobotParamsWithContext(ctx).
-			WithPage(&page).
-			WithPageSize(&size).
-			WithQ(q)
-		resp, err := c.api.Robot.ListRobot(ctx, params)
+	for ; page <= maxPages; page++ {
+		resp, err := c.listPage(ctx, page, size, q)
 		if err != nil {
 			return nil, wrapHarborOp(fmt.Sprintf("list robots (page %d)", page), err)
 		}
@@ -242,8 +312,18 @@ func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
 		if int64(len(resp.Payload)) < size {
 			return out, nil
 		}
-		page++
 	}
+	return nil, fmt.Errorf("list robots: more than %d pages of %d; refusing to continue (does the Harbor endpoint ignore the page parameter?)", maxPages, size)
+}
+
+func (c *goClient) listPage(ctx context.Context, page, size int64, q *string) (*sdkrobot.ListRobotOK, error) {
+	ctx, cancel := c.call(ctx)
+	defer cancel()
+	params := sdkrobot.NewListRobotParamsWithContext(ctx).
+		WithPage(&page).
+		WithPageSize(&size).
+		WithQ(q)
+	return c.api.Robot.ListRobot(ctx, params)
 }
 
 // GetByName looks the robot up by its internal name. It asks Harbor for
@@ -282,6 +362,8 @@ func matchName(robots []Robot, name string) *Robot {
 }
 
 func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) {
+	ctx, cancel := c.call(ctx)
+	defer cancel()
 	params := sdkrobot.NewRefreshSecParamsWithContext(ctx).
 		WithRobotID(id).
 		WithRobotSec(&models.RobotSec{})
@@ -310,6 +392,8 @@ func (c *goClient) Update(ctx context.Context, current *Robot, description strin
 		Disable:     current.Disabled,
 		Permissions: toHarborPermissions(perms),
 	}
+	ctx, cancel := c.call(ctx)
+	defer cancel()
 	params := sdkrobot.NewUpdateRobotParamsWithContext(ctx).
 		WithRobotID(current.ID).
 		WithRobot(body)
