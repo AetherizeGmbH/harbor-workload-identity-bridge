@@ -222,13 +222,27 @@ Derived values that don't fit cleanly inline.
 */}}
 
 {{- define "harbor-bridge.bridge.image" -}}
+{{- with .Values.bridge.image.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .) -}}
+{{- fail (printf "bridge.image.digest %q must be sha256:<64 hex characters>" .) -}}
+{{- end -}}
+{{- printf "%s@%s" $.Values.bridge.image.repository . -}}
+{{- else -}}
 {{- $tag := .Values.bridge.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.bridge.image.repository $tag -}}
 {{- end -}}
+{{- end -}}
 
 {{- define "harbor-bridge.plugin.image" -}}
+{{- with .Values.plugin.image.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .) -}}
+{{- fail (printf "plugin.image.digest %q must be sha256:<64 hex characters>" .) -}}
+{{- end -}}
+{{- printf "%s@%s" $.Values.plugin.image.repository . -}}
+{{- else -}}
 {{- $tag := .Values.plugin.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.plugin.image.repository $tag -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Leader election is auto-enabled when replicas > 1 unless forced. */}}
