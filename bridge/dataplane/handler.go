@@ -5,8 +5,6 @@ package dataplane
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -22,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
 // CredentialsPath is the HTTP path the plugin POSTs to.
@@ -95,6 +95,17 @@ type Handler struct {
 	// instrumenting requests — tests that do not care about metrics
 	// keep their fixtures slim. main.go always sets this.
 	Metrics *Metrics
+
+	// Now is the time source used to bound the credential cache duration.
+	// nil means time.Now.
+	Now func() time.Time
+}
+
+func (h *Handler) now() time.Time {
+	if h.Now != nil {
+		return h.Now()
+	}
+	return time.Now()
 }
 
 // ServeHTTP implements http.Handler.
@@ -221,15 +232,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Tell kubelet how long it may cache these credentials. We use the
-	// CR's spec.tokenTTL: if shorter than the reconciler's 24h rotation
-	// interval, this bounds the staleness window after a rotation. If
-	// longer, a rotation can render kubelet's cached creds stale until
-	// the cache expires (the operator chose this tolerance via the spec).
-	ttl := matched.Spec.TokenTTL.Duration
-	if ttl <= 0 {
-		ttl = time.Hour
-	}
+	// 4. Tell kubelet how long it may cache these credentials: the CR's
+	// spec.tokenTTL, cut short so no cache outlives the password. The
+	// control plane promises (rotation-not-before) not to rotate before a
+	// given instant; caching past it would hand containerd a dead password
+	// after the scheduled rotation until the cache expired (ADR-0023).
+	ttl := cacheDuration(matched.Spec.TokenTTL.Duration, creds.rotationNotBefore, creds.hasRotationNotBefore, h.now())
 
 	h.writeResponse(w, creds, ttl)
 	auditIssuance(logger, claims, matched, audMatched, &req, creds.username, ttl)
@@ -348,84 +356,67 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 type robotCreds struct {
 	username string
 	password string
+
+	rotationNotBefore    time.Time
+	hasRotationNotBefore bool
+}
+
+// cacheDuration bounds tokenTTL by the rotation promise. A Secret without
+// the promise (written by an older bridge) keeps the plain tokenTTL; a
+// promise that has already passed yields 0, which tells kubelet not to
+// cache at all until the control plane rotates.
+func cacheDuration(tokenTTL time.Duration, notBefore time.Time, hasNotBefore bool, now time.Time) time.Duration {
+	ttl := tokenTTL
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	if !hasNotBefore {
+		return ttl
+	}
+	remaining := notBefore.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < ttl {
+		// Round DOWN to whole seconds: the wire field is seconds, and
+		// rounding up could overshoot the promise by up to a second.
+		return remaining.Truncate(time.Second)
+	}
+	return ttl
 }
 
 func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.HarborAccess) (*robotCreds, error) {
-	name := robotSecretName(ha)
+	name := robotsecret.Name(ha.Namespace, ha.Name)
 	secret := &corev1.Secret{}
 	if err := h.K8sClient.Get(ctx,
 		types.NamespacedName{Namespace: h.Config.BridgeNamespace, Name: name},
 		secret); err != nil {
 		return nil, err
 	}
-	// Read-path collision backstop (AUDIT.md F2). If the Secret carries the
+	// Read-path collision backstop (audit F2). If the Secret carries the
 	// bridge's ownership labels and they name a DIFFERENT HarborAccess than
-	// the one matched for this token, two CRs have collided on the
-	// dash-joined Secret name. Refuse rather than hand one workload's SA the
-	// other workload's robot password.
-	if secret.Labels[labelManagedBy] == labelManagedByValue &&
-		(secret.Labels[labelHarborAccessNamespace] != ha.Namespace ||
-			secret.Labels[labelHarborAccessName] != ha.Name) {
+	// the one matched for this token, two CRs have collided on one Secret
+	// name. Refuse rather than hand one workload's SA the other workload's
+	// robot password.
+	if robotsecret.StampedForOther(secret, ha.Namespace, ha.Name) {
 		return nil, fmt.Errorf("%w: Secret %s/%s is stamped for HarborAccess %s/%s, not %s/%s",
 			errSecretOwnerMismatch, h.Config.BridgeNamespace, name,
-			secret.Labels[labelHarborAccessNamespace], secret.Labels[labelHarborAccessName],
+			secret.Labels[robotsecret.LabelHarborAccessNamespace], secret.Labels[robotsecret.LabelHarborAccessName],
 			ha.Namespace, ha.Name)
 	}
-	user := string(secret.Data["username"])
-	pass := string(secret.Data["password"])
-	if user == "" || pass == "" {
-		return nil, fmt.Errorf("robot Secret %s/%s missing username and/or password keys",
-			h.Config.BridgeNamespace, name)
+	user, pass, err := robotsecret.Credentials(secret)
+	if err != nil {
+		return nil, err
 	}
-	return &robotCreds{username: user, password: pass}, nil
+	nb, ok := robotsecret.RotationNotBefore(secret)
+	return &robotCreds{username: user, password: pass, rotationNotBefore: nb, hasRotationNotBefore: ok}, nil
 }
-
-// robotSecretName mirrors controlplane.robotSecretNameFor — kept here as a
-// local helper so the data plane does not import the control plane
-// (ADR-0002). The format ("robot-<haNs>.<haName>", dot-joined for injectivity
-// — ADR-0018, with hash-truncation when it would exceed the 253-char k8s name
-// limit) is the cross-package contract; this MUST stay byte-identical to the
-// control-plane helper (pinned by TestRobotSecretName_ContractPinned here and
-// TestRobotSecretNameFor_* in controlplane).
-func robotSecretName(ha *harborv1alpha1.HarborAccess) string {
-	const (
-		secretNameMax     = 253
-		secretNameHashLen = 16
-	)
-	full := "robot-" + ha.Namespace + "." + ha.Name
-	if len(full) <= secretNameMax {
-		return full
-	}
-	sum := sha256.Sum256([]byte(ha.Namespace + "\x00" + ha.Name))
-	digest := hex.EncodeToString(sum[:])[:secretNameHashLen]
-	budget := secretNameMax - len("robot-") - 1 - secretNameHashLen
-	mid := ha.Namespace + "." + ha.Name
-	if len(mid) > budget {
-		mid = mid[:budget]
-	}
-	mid = strings.TrimRight(mid, "-._")
-	if mid == "" {
-		return "robot-" + digest
-	}
-	return "robot-" + mid + "." + digest
-}
-
-// Robot-Secret ownership label keys. Mirrored from controlplane/labels.go —
-// the data plane does not import the control plane (ADR-0002), the same way
-// robotSecretName mirrors secretNameFor. The reconciler stamps these on every
-// robot Secret it writes.
-const (
-	labelManagedBy             = "harbor.aetherize.io/managed-by"
-	labelManagedByValue        = "harbor-workload-identity-bridge"
-	labelHarborAccessNamespace = "harbor.aetherize.io/harboraccess-namespace"
-	labelHarborAccessName      = "harbor.aetherize.io/harboraccess-name"
-)
 
 // errSecretOwnerMismatch is returned by readRobotSecret when the robot Secret
 // found at the expected name is stamped as belonging to a different
 // HarborAccess than the one matched for this request. This is the read-path
-// backstop for the Secret-name collision class (AUDIT.md F2). The Secret name
-// is now dot-joined ("robot-<haNs>.<haName>", ADR-0018) and therefore
+// backstop for the Secret-name collision class (audit F2). The Secret name
+// is dot-joined ("robot-<haNs>.<haName>", ADR-0018) and therefore
 // injective, so this never fires in normal operation; it remains so that even
 // if two distinct CRs ever collapsed to the same Secret name (an invariant
 // regression), a token matched to CR A is never handed a Secret stamped for CR B.
@@ -433,6 +424,9 @@ var errSecretOwnerMismatch = errors.New("robot Secret owner mismatch")
 
 func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl time.Duration) {
 	w.Header().Set("Content-Type", "application/json")
+	// The body carries a live registry password: no intermediary may
+	// store it.
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(Response{
 		Username:      creds.username,
 		Password:      creds.password,
@@ -447,9 +441,7 @@ func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl ti
 // name, TTL, and image. logr's WithValues keeps the line greppable by
 // any single field.
 func auditIssuance(
-	logger interface {
-		Info(msg string, kv ...any)
-	},
+	logger logr.Logger,
 	claims *Claims,
 	matched *harborv1alpha1.HarborAccess,
 	audienceMatched string,

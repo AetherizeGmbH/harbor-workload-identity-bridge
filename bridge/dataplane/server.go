@@ -4,6 +4,7 @@
 package dataplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -48,15 +50,26 @@ type ServerConfig struct {
 	// ShutdownTimeout bounds graceful shutdown when ctx cancels.
 	// Defaults to 10 seconds.
 	ShutdownTimeout time.Duration
+
+	// ReloadInterval is how often the serving key pair and the client CA
+	// bundle are re-read from disk (in addition to file-change events), so
+	// cert-manager rotations take effect without a restart. Defaults to
+	// 10 seconds.
+	ReloadInterval time.Duration
 }
 
 // Server is a manager.Runnable HTTPS server. The manager calls Start with
 // a context tied to SIGTERM; Start blocks until the context cancels, then
 // performs a graceful Shutdown bounded by ShutdownTimeout.
 type Server struct {
-	cfg     ServerConfig
-	srv     *http.Server
-	tlsConf *tls.Config
+	cfg  ServerConfig
+	srv  *http.Server
+	cert *certwatcher.CertWatcher
+	ca   *caBundle // nil when mTLS is off
+
+	// listening flips true once the listener is bound; readiness keys off
+	// it so a replica that cannot serve credentials never receives them.
+	listening atomic.Bool
 
 	// boundAddr is set once by Start after net.Listen resolves any `:0`
 	// placeholder, then read by Addr(). The atomic.Pointer crossing
@@ -68,6 +81,16 @@ type Server struct {
 // Compile-time interface check. controller-runtime's manager.Add takes
 // any Runnable; this guarantees we satisfy it.
 var _ manager.Runnable = (*Server)(nil)
+
+// The data plane must serve on EVERY replica. A Runnable that does not
+// implement LeaderElectionRunnable is started on the leader only, so with
+// the default two replicas the follower never bound :8443 while passing
+// readiness — the Service sent half of all credential requests to a closed
+// port (audit H1).
+var _ manager.LeaderElectionRunnable = (*Server)(nil)
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable.
+func (s *Server) NeedLeaderElection() bool { return false }
 
 // NewServer validates cfg and constructs a Server. Returns an error when
 // the cert/key/CA files cannot be loaded — fail at startup, not on first
@@ -86,42 +109,46 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.ShutdownTimeout = 10 * time.Second
 	}
 
-	// Load the cert once at construction so a bad path fails fast. The
-	// GetCertificate hook below re-reads on each handshake so cert-manager
-	// can rotate the underlying files without a pod restart.
-	if _, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile); err != nil {
+	if cfg.ReloadInterval <= 0 {
+		cfg.ReloadInterval = 10 * time.Second
+	}
+
+	// The watcher loads the pair once here (a bad path fails fast) and
+	// then keeps a cached copy fresh on file events and on a timer. It
+	// only swaps in a cert and key that parse as a MATCHING pair, so a
+	// Secret-volume update caught half-way (new cert, old key) never
+	// produces a failed handshake; and handshakes no longer cost two file
+	// reads each on an unauthenticated, NodePort-reachable listener.
+	cw, err := certwatcher.New(cfg.CertFile, cfg.KeyFile)
+	if err != nil {
 		return nil, fmt.Errorf("server: load TLS keypair: %w", err)
 	}
+	cw = cw.WithWatchInterval(cfg.ReloadInterval)
 
 	tlsConf := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			// Re-read on every handshake. This is cheap (a few-KB file
-			// read) and means cert-manager's renewal of the mounted
-			// Secret takes effect on the next handshake without
-			// requiring a pod restart.
-			c, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
-			if err != nil {
-				return nil, err
-			}
-			return &c, nil
-		},
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: cw.GetCertificate,
 	}
 
+	var ca *caBundle
 	if cfg.ClientCAFile != "" {
-		caPEM, err := os.ReadFile(cfg.ClientCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("server: read client CA bundle: %w", err)
+		ca = &caBundle{path: cfg.ClientCAFile}
+		if err := ca.reload(); err != nil {
+			return nil, fmt.Errorf("server: %w", err)
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("server: client CA bundle %q contained no PEM-encoded certificates", cfg.ClientCAFile)
-		}
-		tlsConf.ClientCAs = pool
 		tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
+		// The client CA is resolved per handshake from the reloadable
+		// bundle, so a rotated issuing CA is honoured without a restart.
+		base := tlsConf.Clone()
+		tlsConf.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			c := base.Clone()
+			c.ClientCAs = ca.pool.Load()
+			return c, nil
+		}
+		tlsConf.ClientCAs = ca.pool.Load()
 	}
 
-	s := &Server{cfg: cfg, tlsConf: tlsConf}
+	s := &Server{cfg: cfg, cert: cw, ca: ca}
 	s.srv = &http.Server{
 		Addr:      cfg.ListenAddr,
 		Handler:   cfg.Handler,
@@ -164,6 +191,21 @@ func (s *Server) Start(ctx context.Context) error {
 	addr := ln.Addr().String()
 	s.boundAddr.Store(&addr)
 
+	// Keep the serving pair and the client CA fresh for the lifetime of
+	// the listener.
+	reloadCtx, stopReload := context.WithCancel(ctx)
+	defer stopReload()
+	go func() {
+		if err := s.cert.Start(reloadCtx); err != nil {
+			logger.Error(err, "certificate watcher stopped")
+		}
+	}()
+	if s.ca != nil {
+		go s.ca.watch(reloadCtx, s.cfg.ReloadInterval, logger.Error)
+	}
+	s.listening.Store(true)
+	defer s.listening.Store(false)
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("data-plane server listening", "addr", addr, "mtls", s.cfg.ClientCAFile != "")
@@ -195,5 +237,56 @@ func (s *Server) Start(ctx context.Context) error {
 		// TLS handshake setup failure, etc.). Return so the manager
 		// can shut everything down.
 		return err
+	}
+}
+
+// ReadyCheck is a healthz.Checker: ready once the credential listener is
+// bound. Wire it into the manager's readyz so a replica that cannot serve
+// never receives traffic.
+func (s *Server) ReadyCheck(_ *http.Request) error {
+	if !s.listening.Load() {
+		return errors.New("data-plane listener not bound")
+	}
+	return nil
+}
+
+// caBundle is a client-CA pool that can be reloaded from disk. The last
+// good pool stays in use when a reload reads an empty or unparseable file
+// (e.g. mid-rotation).
+type caBundle struct {
+	path string
+	pem  []byte
+	pool atomic.Pointer[x509.CertPool]
+}
+
+func (c *caBundle) reload() error {
+	raw, err := os.ReadFile(c.path)
+	if err != nil {
+		return fmt.Errorf("read client CA bundle: %w", err)
+	}
+	if c.pool.Load() != nil && bytes.Equal(raw, c.pem) {
+		return nil
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(raw) {
+		return fmt.Errorf("client CA bundle %q contained no PEM-encoded certificates", c.path)
+	}
+	c.pem = raw
+	c.pool.Store(pool)
+	return nil
+}
+
+func (c *caBundle) watch(ctx context.Context, interval time.Duration, logErr func(error, string, ...any)) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := c.reload(); err != nil {
+				logErr(err, "client CA reload failed; keeping the previous bundle")
+			}
+		}
 	}
 }

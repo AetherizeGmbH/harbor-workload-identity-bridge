@@ -2,18 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
 CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
+# Matches the controller-gen.kubebuilder.io/version stamped in the CRDs.
+CONTROLLER_GEN_VERSION ?= v0.21.0
 PROJECT_DIR := $(shell pwd)
 
 .PHONY: all
 all: generate manifests vet build build-plugin
 
+$(CONTROLLER_GEN):
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
 .PHONY: generate
-generate: ## Generate deepcopy methods for API types
+generate: $(CONTROLLER_GEN) ## Generate deepcopy methods for API types
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./bridge/api/...
 
 .PHONY: manifests
-manifests: ## Generate CRD manifests under config/crd/bases
+manifests: $(CONTROLLER_GEN) ## Generate CRD manifests under config/crd/bases (and the chart's copy)
 	$(CONTROLLER_GEN) crd paths=./bridge/api/... output:crd:dir=config/crd/bases
+	cp config/crd/bases/harbor.aetherize.io_harboraccesses.yaml $(PROJECT_DIR)/charts/harbor-bridge/crds/
 
 .PHONY: tidy
 tidy: ## Resolve module dependencies
@@ -45,7 +51,7 @@ build-all: ## Compile-check every package
 test: ## Run unit tests (envtest tests skip cleanly when KUBEBUILDER_ASSETS is unset)
 	go test ./...
 
-ENVTEST_K8S_VERSION ?= 1.30.x
+ENVTEST_K8S_VERSION ?= 1.34.x
 SETUP_ENVTEST ?= $(shell go env GOPATH)/bin/setup-envtest
 
 $(SETUP_ENVTEST):
@@ -117,6 +123,11 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 		echo "ERROR: bridge/controlplane imports bridge/dataplane (violates ADR-0002)"; \
 		exit 1; \
 	fi
+
+.PHONY: verify-generated
+verify-generated: generate manifests ## Fail if the CRDs / deepcopy code drift from the Go API types
+	@git diff --exit-code -- bridge/api config/crd charts/harbor-bridge/crds || \
+		{ echo "generated files are stale — run 'make generate manifests' and commit the result"; exit 1; }
 
 .PHONY: verify-plugin-isolation
 verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sigs.k8s.io packages

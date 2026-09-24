@@ -1,4 +1,27 @@
 ---
+# Source: harbor-workload-identity-bridge/templates/bridge-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.3.8
+    app.kubernetes.io/version: "0.3.8"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-workload-identity-bridge
+      app.kubernetes.io/instance: harbor-bridge
+      app.kubernetes.io/component: bridge
+
+---
 # Source: harbor-workload-identity-bridge/templates/bridge-serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -94,6 +117,7 @@ rules:
   - apiGroups: [""]
     verbs:     ["request-serviceaccounts-token-audience"]
     resources: ["harbor-bridge-prod-eu-west"]
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -119,6 +143,7 @@ rules:
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/finalizers]
     verbs: [update]
+
 ---
 # Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -161,6 +186,7 @@ subjects:
   - kind: ServiceAccount
     name: harbor-bridge
     namespace: harbor-bridge-system
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -189,6 +215,7 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -212,6 +239,34 @@ subjects:
   - kind: ServiceAccount
     name: harbor-bridge
     namespace: harbor-bridge-system
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-metrics-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-bridge-metrics
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.3.8
+    app.kubernetes.io/version: "0.3.8"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+    harbor.aetherize.io/service: metrics
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
 
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-service.yaml
@@ -466,10 +521,11 @@ spec:
         app.kubernetes.io/instance: harbor-bridge
         app.kubernetes.io/component: bridge
       annotations:
-        # Force pod restart on TLS Secret rotation. cert-manager renews
-        # the Secret in place; without this annotation the deployment
-        # keeps serving the cached cert until the pod is restarted.
-        bridge.harbor.aetherize.io/tls-cert-checksum: 3e593f32d31b45ade61d22bea7f40729550c782ba3f3ccca1a81b5ee34277017
+        # Re-roll when the TLS wiring changes (which Secret; chart- vs
+        # operator-managed). Certificate ROTATION needs no restart: the
+        # bridge reloads the serving pair and client CA from the mounted
+        # Secret on its own.
+        bridge.harbor.aetherize.io/tls-cert-checksum: 315530593d5c0a99d6e050b75b77101e8a76404a2b98a629ff7e739e09e76868
     spec:
       serviceAccountName: harbor-bridge
       automountServiceAccountToken: true
@@ -505,6 +561,9 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
           env:
             - name: BRIDGE_CLUSTER_NAME
               value: "prod-eu-west"
@@ -529,6 +588,8 @@ spec:
               value: "https://harbor.example.com"
             - name: BRIDGE_HARBOR_ADMIN_DIR
               value: /etc/bridge/harbor-admin
+            - name: BRIDGE_HARBOR_ROBOT_PREFIX
+              value: "robot$"
             - name: BRIDGE_FORCE_LOCAL_VALIDATION
               value: "true"
             - name: BRIDGE_LOG_LEVEL
@@ -543,6 +604,8 @@ spec:
               value: ":8443"
             - name: BRIDGE_HEALTH_ADDR
               value: ":8081"
+            - name: BRIDGE_METRICS_ADDR
+              value: ":8080"
             - name: BRIDGE_ENABLE_LEADER_ELECTION
               value: "true"
           volumeMounts:
@@ -552,6 +615,9 @@ spec:
             - name: tls
               mountPath: /etc/bridge/tls
               readOnly: true
+          # Ready = the credential listener is bound (it binds only after
+          # the informer caches synced) — so every replica the Service
+          # routes to can actually serve.
           readinessProbe:
             httpGet:
               path: /readyz
@@ -636,6 +702,7 @@ spec:
     name: harbor-bridge-ca
     kind: ClusterIssuer
     group: cert-manager.io
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-certificate.yaml
 apiVersion: cert-manager.io/v1
@@ -688,17 +755,13 @@ spec:
       app.kubernetes.io/name: harbor-workload-identity-bridge
       app.kubernetes.io/instance: harbor-bridge
       app.kubernetes.io/component: bridge
+      harbor.aetherize.io/service: metrics
   namespaceSelector:
     matchNames:
       - harbor-bridge-system
   endpoints:
-    - port: https
-      scheme: https
+    - port: metrics
+      scheme: http
       path: /metrics
       interval: 30s
       scrapeTimeout: 10s
-      tlsConfig:
-        # Prometheus reaches the bridge by Service DNS, which the cert
-        # covers. Operator configures the CA out-of-band.
-        serverName: harbor-bridge.harbor-bridge-system.svc
-        insecureSkipVerify: false

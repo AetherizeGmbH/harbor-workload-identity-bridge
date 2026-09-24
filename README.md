@@ -70,8 +70,13 @@ For the operator:
   namespace get two robots with separate Harbor projects. Least
   privilege replaces the over-broad namespace-wide secret.
 - **One rotation point.** The bridge rotates every robot's password
-  every 24h. The whole cluster's blast-radius window is 24h, no
-  matter how many namespaces.
+  every 24h, without breaking a single cached credential (kubelet is
+  never told to cache past the next rotation). The whole cluster's
+  blast-radius window is 24h, no matter how many namespaces.
+- **Revocation you can rely on.** Editing a `HarborAccess` changes the
+  robot's grants in Harbor on the next reconcile (and reverts edits made
+  in the Harbor UI); pointing it at another ServiceAccount or deleting it
+  deletes the old robot. Nothing with a valid password is left behind.
 - **New nodes self-provision.** The plugin DaemonSet installs the
   binary, config, and CA on every new node and patches kubelet. No
   node-image rebuilds, no cloud-init scripts to ship.
@@ -256,6 +261,16 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
   process against an existing Kubernetes + Harbor by hand, with
   `kubectl proxy` for OIDC discovery. Useful when iterating on the
   bridge binary against real-world infra.
+
+### Uninstalling
+
+Delete your `HarborAccess` objects **before** `helm uninstall`. Each one
+carries a finalizer that revokes its Harbor robot, and only a running
+bridge can release it — after the bridge is gone, deleting those objects
+(or their namespaces) waits forever. If that already happened, reinstall
+the bridge, or remove the `harbor.aetherize.io/robot` finalizer by hand and
+delete the leftover `robot$bridge-<clusterName>.*` robots in Harbor. Helm
+keeps the CRD (`crds/`); delete it yourself when you are done.
 
 ### Helm upgrade caveat — kubelet restart on config changes
 

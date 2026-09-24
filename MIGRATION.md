@@ -1,3 +1,19 @@
+## Chart value migrations
+
+### Unreleased: robot lifecycle and data plane (ADR-0023, ADR-0025)
+
+No action is needed for a default install. Check these if they apply:
+
+| Change | What to do |
+| --- | --- |
+| `/metrics` moved from `https://<bridge>:8443/metrics` to plain HTTP on port `metrics.port` (8080) behind a new ClusterIP Service `<release>-metrics` | The chart's ServiceMonitor follows automatically. Update custom scrape configs. |
+| New `harbor.robotNamePrefix` (default `robot$`) | Set it if your Harbor's `robot_name_prefix` is not `robot$`. |
+| New `bridge.oidcJWKSURL` | Set it to `https://kubernetes.default.svc/openid/v1/jwks` when `bridge.oidcIssuer` is a cloud issuer URL (GKE, EKS, AKS with OIDC issuer). |
+| HarborAccess `metadata.name` is limited to 63 characters (CRD validation) | Longer names could never be reconciled (the robot Secret could not be labelled). Recreate such objects under a shorter name. Helm does not upgrade CRDs from `crds/`: apply the new CRD yourself — `kubectl apply -f charts/harbor-bridge/crds/` (the bridge also reports such objects as `InvalidSpec` without the CRD update). |
+| Robot passwords no longer rotate on a spec change; the daily rotation is announced to the data plane | Nothing to do. Existing Secrets get the new annotations on the first reconcile, without a rotation. |
+| Leftover robots are revoked: robots of a previous `serviceAccountRef` and dash-named robots from 0.2.x | Nothing to do. Expect the janitor to delete such robots on its first sweep; their passwords were still valid. |
+| Before `helm uninstall`, delete your HarborAccess objects | Their finalizers revoke the robots and need the running bridge. |
+
 ## Migration Path
 
 The HarborAccess CRD is a Kubernetes-native declarative interface for "this SA gets these Harbor permissions". It is NOT expected to become an upstream Harbor API directly. Upstream Harbor will define its own configuration model for OIDC Trust (likely server-native, configured via Harbor REST API or UI). Our Bridge translates between the two.

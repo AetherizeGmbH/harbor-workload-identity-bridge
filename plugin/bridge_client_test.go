@@ -25,7 +25,9 @@ func newTestBridge(t *testing.T, handler http.HandlerFunc) (*bridgeClient, *http
 	t.Cleanup(srv.Close)
 	hc := srv.Client()
 	hc.Timeout = 5 * time.Second // tests must never block on default timeouts
-	return newBridgeClientWithHTTPClient(srv.URL, hc), srv
+	bc := newBridgeClientWithHTTPClient(srv.URL, hc)
+	bc.sleep = func(time.Duration) {} // never sleep for real in tests
+	return bc, srv
 }
 
 func TestFetch_OK(t *testing.T) {
@@ -92,7 +94,8 @@ func TestFetch_503ThenOK_RetriesOnce(t *testing.T) {
 		})
 	})
 
-	start := time.Now()
+	var slept []time.Duration
+	bc.sleep = func(d time.Duration) { slept = append(slept, d) }
 	resp, err := bc.fetch("harbor.example.com/x:1", "tok")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -103,8 +106,8 @@ func TestFetch_503ThenOK_RetriesOnce(t *testing.T) {
 	if got := calls.Load(); got != 2 {
 		t.Errorf("server hit %d times, want 2", got)
 	}
-	if elapsed := time.Since(start); elapsed < retryBackoff {
-		t.Errorf("retry happened too fast (%v), expected >= %v sleep", elapsed, retryBackoff)
+	if len(slept) != 1 || slept[0] != retryBackoff {
+		t.Errorf("backoff before retry = %v, want exactly one %v", slept, retryBackoff)
 	}
 }
 
@@ -188,5 +191,15 @@ func TestBodySnippet(t *testing.T) {
 	}
 	if got := bodySnippet([]byte("  short  ")); got != "short" {
 		t.Errorf("trim failed: %q", got)
+	}
+}
+
+func TestFetch_OversizedResponse_IsRejected(t *testing.T) {
+	bc, _ := newTestBridge(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxResponseBytes+10)))
+	})
+	_, err := bc.fetch("harbor.example.com/x:1", "tok")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("got %v, want an oversized-response error", err)
 	}
 }

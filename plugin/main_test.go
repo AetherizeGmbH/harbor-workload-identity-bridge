@@ -16,15 +16,15 @@ import (
 // fixed response (or a fixed error) keeps the protocol assertions
 // independent of any HTTP wire detail.
 type fakeFetcher struct {
-	wantImage string
-	wantToken string
-	resp      *bridgeResponse
-	err       error
+	gotImage string
+	gotToken string
+	resp     *bridgeResponse
+	err      error
 }
 
 func (f *fakeFetcher) fetch(image, token string) (*bridgeResponse, error) {
-	f.wantImage = image
-	f.wantToken = token
+	f.gotImage = image
+	f.gotToken = token
 	return f.resp, f.err
 }
 
@@ -51,9 +51,9 @@ func TestRun_HappyPath(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	if fetcher.wantImage != req.Image || fetcher.wantToken != req.ServiceAccountToken {
+	if fetcher.gotImage != req.Image || fetcher.gotToken != req.ServiceAccountToken {
 		t.Fatalf("fetcher called with image=%q token=%q; want image=%q token=%q",
-			fetcher.wantImage, fetcher.wantToken, req.Image, req.ServiceAccountToken)
+			fetcher.gotImage, fetcher.gotToken, req.Image, req.ServiceAccountToken)
 	}
 
 	var resp credentialProviderResponse
@@ -80,6 +80,8 @@ func TestRun_HappyPath(t *testing.T) {
 
 func TestRun_HostWithPort(t *testing.T) {
 	req := credentialProviderRequest{
+		APIVersion:          credentialProviderAPIVersion,
+		Kind:                requestKind,
 		Image:               "harbor.example.com:8443/p/r:tag",
 		ServiceAccountToken: "tok",
 	}
@@ -101,6 +103,8 @@ func TestRun_HostWithPort(t *testing.T) {
 
 func TestRun_BridgeRefused_WritesEmptyAuth(t *testing.T) {
 	req := credentialProviderRequest{
+		APIVersion:          credentialProviderAPIVersion,
+		Kind:                requestKind,
 		Image:               "harbor.example.com/x:1",
 		ServiceAccountToken: "tok",
 	}
@@ -129,6 +133,8 @@ func TestRun_BridgeRefused_WritesEmptyAuth(t *testing.T) {
 
 func TestRun_BridgeUnavailable_PropagatesError(t *testing.T) {
 	req := credentialProviderRequest{
+		APIVersion:          credentialProviderAPIVersion,
+		Kind:                requestKind,
 		Image:               "harbor.example.com/x:1",
 		ServiceAccountToken: "tok",
 	}
@@ -154,7 +160,7 @@ func TestRun_InvalidJSON(t *testing.T) {
 }
 
 func TestRun_MissingImage(t *testing.T) {
-	body, _ := json.Marshal(credentialProviderRequest{ServiceAccountToken: "tok"})
+	body, _ := json.Marshal(credentialProviderRequest{APIVersion: credentialProviderAPIVersion, Kind: requestKind, ServiceAccountToken: "tok"})
 	err := run(bytes.NewReader(body), &bytes.Buffer{}, &fakeFetcher{})
 	if err == nil || !strings.Contains(err.Error(), "image") {
 		t.Fatalf("want image-missing error, got %v", err)
@@ -162,7 +168,7 @@ func TestRun_MissingImage(t *testing.T) {
 }
 
 func TestRun_MissingToken(t *testing.T) {
-	body, _ := json.Marshal(credentialProviderRequest{Image: "harbor.example.com/x:1"})
+	body, _ := json.Marshal(credentialProviderRequest{APIVersion: credentialProviderAPIVersion, Kind: requestKind, Image: "harbor.example.com/x:1"})
 	err := run(bytes.NewReader(body), &bytes.Buffer{}, &fakeFetcher{})
 	if err == nil || !strings.Contains(err.Error(), "serviceAccountToken") {
 		t.Fatalf("want token-missing error, got %v", err)
@@ -249,4 +255,26 @@ func keysOf(m map[string]authConfig) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestRun_RejectsForeignRequestTypes: kubelet always sends a typed v1
+// CredentialProviderRequest; anything else must not reach the bridge.
+func TestRun_RejectsForeignRequestTypes(t *testing.T) {
+	for name, req := range map[string]credentialProviderRequest{
+		"untyped":      {Image: "h/x:1", ServiceAccountToken: "tok"},
+		"wrong kind":   {APIVersion: credentialProviderAPIVersion, Kind: "CredentialProviderResponse", Image: "h/x:1", ServiceAccountToken: "tok"},
+		"v1alpha1 api": {APIVersion: "credentialprovider.kubelet.k8s.io/v1alpha1", Kind: requestKind, Image: "h/x:1", ServiceAccountToken: "tok"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, _ := json.Marshal(req)
+			fetcher := &fakeFetcher{}
+			err := run(bytes.NewReader(body), &bytes.Buffer{}, fetcher)
+			if err == nil || !strings.Contains(err.Error(), "unsupported request") {
+				t.Fatalf("got %v, want unsupported-request error", err)
+			}
+			if fetcher.gotToken != "" {
+				t.Error("the SA token was sent to the bridge for an unsupported request")
+			}
+		})
+	}
 }
