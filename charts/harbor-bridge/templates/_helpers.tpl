@@ -180,8 +180,8 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- fail (printf "plugin.install.kubeletUnit=%q is not a valid systemd unit name." (toString $install.kubeletUnit)) -}}
 {{- end -}}
 {{- range $k, $v := dict "plugin.hostBinaryDir" .Values.plugin.hostBinaryDir "plugin.hostConfigDir" .Values.plugin.hostConfigDir "plugin.install.stateDir" $install.stateDir "plugin.install.binDir" $install.binDir "plugin.install.configFile" $install.configFile -}}
-{{- if and $v (or (not (hasPrefix "/" (toString $v))) (contains "/../" (printf "%s/" $v)) (hasSuffix "/" (toString $v))) -}}
-{{- fail (printf "%s=%q must be an absolute, clean node path." $k (toString $v)) -}}
+{{- if and $v (or (not (regexMatch "^/[A-Za-z0-9._/-]+$" (toString $v))) (contains "/../" (printf "%s/" $v)) (contains "/./" (printf "%s/" $v)) (contains "//" (toString $v)) (hasSuffix "/" (toString $v))) -}}
+{{- fail (printf "%s=%q must be an absolute, clean node path (letters, digits and . _ - / only)." $k (toString $v)) -}}
 {{- end -}}
 {{- end -}}
 {{- if not .Values.plugin.allowSelfMatchImages -}}
