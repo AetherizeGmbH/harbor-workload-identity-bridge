@@ -68,15 +68,18 @@ jobs:
           # semantic-release 24's release-notes-generator@14 ships
           # writer@8 ("Missing helper: conventional-changelog-
           # conventionalcommits requires conventional-changelog-writer@9").
-          # These are the versions the last green release (0.3.7) used.
-          # Renovate tracks them via the release.yml custom manager and
-          # never automerges them (renovate.json) — the release job only
-          # runs on main, so a PR cannot prove a bump safe.
+          # conventionalcommits stays on 9.x, the version
+          # release-notes-generator@14 is tested against: 10.x moved its
+          # templates to @conventional-changelog/template, and writer@8
+          # rendered every release from 0.3.2 to 0.4.0 with an empty body.
+          # `make verify-release-notes` (test.yml) proves on every PR that
+          # these pins render notes; Renovate tracks them via the
+          # release.yml custom manager and never automerges them.
           extra_plugins: |
             @semantic-release/changelog@7.0.0
             @semantic-release/git@11.0.1
             @semantic-release/exec@7.1.0
-            conventional-changelog-conventionalcommits@10.2.1
+            conventional-changelog-conventionalcommits@9.3.1
         env:
           # App token (not GITHUB_TOKEN): semantic-release uses GH_TOKEN/
           # GITHUB_TOKEN both for the GitHub API and to build the

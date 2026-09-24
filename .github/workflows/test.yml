@@ -63,6 +63,17 @@ jobs:
         with: { version: v4.2.3 }
       - run: make chart-test
 
+  release-notes:
+    # The release job runs only on main; this proves on every PR that the
+    # semantic-release plugins pinned in release.yml still render notes.
+    name: Release notes (pinned plugins)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with: { node-version: 22 }
+      - run: make verify-release-notes
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
