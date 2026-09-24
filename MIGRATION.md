@@ -1,6 +1,12 @@
 ## Chart value migrations
 
-### Unreleased: lifecycle, metrics, and plugin changes (ADR-0023/0024/0025)
+### Unreleased: HarborAccess project names
+
+| Change | What to do |
+| --- | --- |
+| `spec.permissions[].project` must be a valid Harbor project name (`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`); wildcards such as `*` are rejected | Such names never matched a real project, except `*`, which Harbor reads as "every project". The bridge reports affected objects as `Ready=False`, `reason=InvalidSpec`. Helm does not upgrade CRDs from `crds/`: apply the new CRD with `kubectl apply -f charts/harbor-bridge/crds/`. |
+
+### 0.4.0 and 0.5.0: lifecycle, metrics, and plugin changes (ADR-0023/0024/0025)
 
 No action is needed for a default install. Check these if they apply:
 

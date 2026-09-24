@@ -46,9 +46,12 @@ const (
 
 // ProjectPermission grants an action on a single Harbor project.
 type ProjectPermission struct {
-	// Project is the Harbor project name (case-sensitive, no leading slash).
+	// Project is the Harbor project name, following Harbor's own rule:
+	// lower-case letters and digits, separated by single '.', '_' or '-'.
+	// Wildcards such as "*" (every project) are rejected.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`
 	Project string `json:"project"`
 
 	// Action is the permission granted on the project.

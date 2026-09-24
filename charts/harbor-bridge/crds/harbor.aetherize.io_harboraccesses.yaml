@@ -81,10 +81,13 @@ spec:
                       - pull,push
                       type: string
                     project:
-                      description: Project is the Harbor project name (case-sensitive,
-                        no leading slash).
+                      description: |-
+                        Project is the Harbor project name, following Harbor's own rule:
+                        lower-case letters and digits, separated by single '.', '_' or '-'.
+                        Wildcards such as "*" (every project) are rejected.
                       maxLength: 255
                       minLength: 1
+                      pattern: ^[a-z0-9]+(?:[._-][a-z0-9]+)*$
                       type: string
                   required:
                   - action

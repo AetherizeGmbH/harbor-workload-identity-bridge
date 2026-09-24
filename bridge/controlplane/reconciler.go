@@ -154,6 +154,14 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 			len(ha.Name), HarborAccessNameMaxLen))
 	}
 
+	// The CRD enforces Harbor's project-name rule; this guards objects
+	// admitted before it existed. "*" would grant every project.
+	for _, p := range ha.Spec.Permissions {
+		if err := harbor.ValidateProjectName(p.Project); err != nil {
+			return r.markNotReady(ctx, ha, ReasonInvalidSpec, "spec.permissions: "+err.Error())
+		}
+	}
+
 	// 3. Compute desired robot identity.
 	robotName, err := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
 	if err != nil {
