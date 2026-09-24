@@ -85,6 +85,12 @@ func findKubelet(procRoot string) (int, []string, error) {
 	if err != nil {
 		return 0, nil, fmt.Errorf("read %s: %w", procRoot, err)
 	}
+	// The host kubelet shares init's mount namespace; a process in any pod
+	// does not, whatever it calls itself or whoever its parent is.
+	hostMnt, err := os.Readlink(filepath.Join(procRoot, "1", "ns", "mnt"))
+	if err != nil {
+		return 0, nil, fmt.Errorf("read init's mount namespace under %s (needs hostPID and a privileged container): %w", procRoot, err)
+	}
 	type candidate struct {
 		pid     int
 		cmdline []string
@@ -110,8 +116,19 @@ func findKubelet(procRoot string) (int, []string, error) {
 			rejected = append(rejected, fmt.Sprintf("pid %d: parent is pid %d, not init", pid, ppid))
 			continue
 		}
-		if cg, err := os.ReadFile(filepath.Join(dir, "cgroup")); err == nil && bytes.Contains(cg, []byte("kubepods")) {
+		// Fail closed: a candidate whose cgroup or mount namespace cannot
+		// be read is not the host kubelet as far as the installer knows.
+		cg, err := os.ReadFile(filepath.Join(dir, "cgroup"))
+		if err != nil {
+			rejected = append(rejected, fmt.Sprintf("pid %d: cannot read cgroup: %v", pid, err))
+			continue
+		}
+		if bytes.Contains(cg, []byte("kubepods")) {
 			rejected = append(rejected, fmt.Sprintf("pid %d: runs in a pod cgroup", pid))
+			continue
+		}
+		if mnt, err := os.Readlink(filepath.Join(dir, "ns", "mnt")); err != nil || mnt != hostMnt {
+			rejected = append(rejected, fmt.Sprintf("pid %d: not in the host mount namespace", pid))
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(dir, "cmdline"))
@@ -184,14 +201,17 @@ func splitCmdline(raw []byte) []string {
 
 // flagValue extracts a flag's value from an argv slice, handling both
 // the "--flag=value" and "--flag value" forms. Returns "" when absent.
+// The last occurrence wins, as it does for kubelet's own flag parser
+// (a drop-in can repeat a flag); taking the first would wire a file
+// kubelet does not read.
 func flagValue(argv []string, flag string) string {
+	value := ""
 	for i, arg := range argv {
 		if v, ok := strings.CutPrefix(arg, flag+"="); ok {
-			return v
-		}
-		if arg == flag && i+1 < len(argv) {
-			return argv[i+1]
+			value = v
+		} else if arg == flag && i+1 < len(argv) {
+			value = argv[i+1]
 		}
 	}
-	return ""
+	return value
 }

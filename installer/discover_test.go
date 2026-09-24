@@ -18,7 +18,10 @@ type procEntry struct {
 	cmdline []string
 	ppid    int    // 0 = default: 1 (a child of init), or 0 for pid 1 itself
 	cgroup  string // "" = default: 0::/system.slice/<comm>.service
+	mntns   string // "" = default: the host's mount namespace
 }
+
+const hostMntNS = "mnt:[4026531841]"
 
 // writeProcEntry (re)writes one fake /proc/<pid> directory.
 func writeProcEntry(t *testing.T, root string, pid int, p procEntry) {
@@ -48,12 +51,27 @@ func writeProcEntry(t *testing.T, root string, pid int, p procEntry) {
 			t.Fatal(err)
 		}
 	}
+	mntns := p.mntns
+	if mntns == "" {
+		mntns = hostMntNS
+	}
+	nsDir := filepath.Join(dir, "ns")
+	if err := os.MkdirAll(nsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(nsDir, "mnt"))
+	if err := os.Symlink(mntns, filepath.Join(nsDir, "mnt")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // fakeProc builds a /proc-shaped tree with the given processes.
 func fakeProc(t *testing.T, procs map[int]procEntry) string {
 	t.Helper()
 	root := t.TempDir()
+	if _, ok := procs[1]; !ok {
+		writeProcEntry(t, root, 1, procEntry{comm: "systemd", cmdline: []string{"/sbin/init"}})
+	}
 	for pid, p := range procs {
 		writeProcEntry(t, root, pid, p)
 	}
@@ -188,5 +206,58 @@ func TestReadPPID_CommWithParens(t *testing.T) {
 	}
 	if ppid, err := readPPID(root); err != nil || ppid != 77 {
 		t.Fatalf("readPPID = %d, %v; want 77", ppid, err)
+	}
+}
+
+// A pod whose fake kubelet is re-parented to init and escapes the
+// "kubepods" match (cgroup namespaces show a pod's cgroup without that
+// word) is still in its own mount namespace.
+func TestFindKubelet_RejectsProcessOutsideHostMountNamespace(t *testing.T) {
+	real := []string{"/usr/bin/kubelet", "--image-credential-provider-config=/real/cfg.yaml", "--image-credential-provider-bin-dir=/real/bin"}
+	spoof := []string{"kubelet", "--image-credential-provider-config=/etc/evil.yaml", "--image-credential-provider-bin-dir=/etc/cron.d"}
+	root := fakeProc(t, map[int]procEntry{
+		100: {comm: "kubelet", cmdline: spoof, ppid: 1, cgroup: "0::/../../pod1234/abcdef", mntns: "mnt:[4026532999]"},
+		777: {comm: "kubelet", cmdline: real},
+	})
+	w, err := discoverKubelet(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.ConfigFile != "/real/cfg.yaml" {
+		t.Fatalf("discovery was steered by a process outside the host mount namespace: %+v", w)
+	}
+}
+
+// Fail closed: a candidate whose cgroup cannot be read is rejected, not
+// accepted.
+func TestFindKubelet_RejectsUnreadableCgroup(t *testing.T) {
+	root := fakeProc(t, map[int]procEntry{
+		777: {comm: "kubelet", cmdline: []string{"/usr/bin/kubelet"}},
+	})
+	if err := os.Remove(filepath.Join(root, "777", "cgroup")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := findKubelet(root); err == nil || !strings.Contains(err.Error(), "cannot read cgroup") {
+		t.Fatalf("err = %v, want a rejection for the unreadable cgroup", err)
+	}
+}
+
+func TestFlagValue_LastOccurrenceWins(t *testing.T) {
+	argv := []string{"kubelet", "--image-credential-provider-config=/first.yaml", "--image-credential-provider-config", "/last.yaml"}
+	if v := flagValue(argv, "--image-credential-provider-config"); v != "/last.yaml" {
+		t.Fatalf("flagValue = %q, want the last occurrence like kubelet", v)
+	}
+}
+
+func TestValidNodePath_RejectsShellAndEnvCharacters(t *testing.T) {
+	for _, ok := range []string{"/etc/kubernetes/credential-provider", "/var/lib/harbor-bridge", "/opt/a_b.c-d"} {
+		if err := validNodePath(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"/etc/kube config", `/etc/"x"`, "/etc/$HOME", "/etc/a;b", "/", "etc/x", "/etc/../x", "/etc//x"} {
+		if err := validNodePath(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

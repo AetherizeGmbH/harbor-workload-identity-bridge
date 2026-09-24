@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"time"
 )
@@ -168,12 +169,18 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	return c, nil
 }
 
-// validNodePath accepts only absolute, already-clean node paths. They are
-// joined under HostRoot, so a relative or ".."-carrying value would
-// address something other than what it names.
+// nodePathChars is the character set of node paths. The paths are written
+// unquoted into KUBELET_EXTRA_ARGS in /etc/default/kubelet (an
+// EnvironmentFile) and into the provider config, where a space, quote or
+// "$" would split or expand them.
+var nodePathChars = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+
+// validNodePath accepts only absolute, already-clean node paths from a
+// restricted character set. They are joined under HostRoot, so a relative
+// or ".."-carrying value would address something other than what it names.
 func validNodePath(p string) error {
-	if !filepath.IsAbs(p) || filepath.Clean(p) != p {
-		return fmt.Errorf("path %q must be absolute and clean", p)
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p || !nodePathChars.MatchString(p) {
+		return fmt.Errorf("path %q must be absolute, clean, and use only letters, digits and . _ - /", p)
 	}
 	return nil
 }

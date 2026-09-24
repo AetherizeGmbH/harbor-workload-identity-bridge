@@ -262,7 +262,10 @@ container:
   discovered at runtime from `/proc/<kubelet>/cmdline` and cannot be
   narrowed at chart-render time.
 - finds kubelet through `/proc`, and accepts only a process named
-  `kubelet` whose parent is PID 1 and that does not run in a pod cgroup.
+  `kubelet` whose parent is PID 1, whose cgroup it can read and that is
+  not a pod cgroup, and that shares init's mount namespace (no pod
+  does, whatever its cgroup path looks like under a cgroup namespace).
+  When a flag repeats, the last value wins, as in kubelet.
   Any pod can name its process `kubelet` and fake a command line; before
   this check such a pod could steer where the privileged installer wrote
   a root-owned binary. With several candidates left, it refuses to guess.
