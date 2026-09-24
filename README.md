@@ -274,6 +274,10 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
   process against an existing Kubernetes + Harbor by hand, with
   `kubectl proxy` for OIDC discovery. Useful when iterating on the
   bridge binary against real-world infra.
+- **GKE (`make e2e-gke`)** — same flow on a real GKE cluster, proving
+  `install.mode=auto` → merge on managed nodes and that GKE's own
+  Artifact Registry provider survives the merge (ADR-0022). Creates
+  **billed** resources in `$GOOGLE_PROJECT`; never runs in CI.
 
 ### Uninstalling
 
@@ -367,6 +371,10 @@ workloads and recent pulls.
     restart policy (kubelet restarts only on real config changes);
     why merge round-trips foreign providers as `map[string]any`.
     (Mechanised via `make verify-installer-isolation`.)
+  - [ADR-0022](docs/adr/0022-gke-e2e-harness.md) — the GKE e2e harness:
+    Artifact Registry image delivery, sslip.io + LoadBalancer instead
+    of DNS surgery, and the AR-coexistence assertion that pins merge
+    mode's "don't break the cloud's own provider" guarantee.
 
 ## Harbor compatibility
 
@@ -405,19 +413,19 @@ contract, not individually run.
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
 | 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
-| 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), ADRs 0021 and 0024 | ✅ Code + kind e2e complete; merge mode not yet run on a managed cluster |
+| 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), GKE e2e harness, ADRs 0021, 0022 and 0024 | ✅ Code + kind e2e complete; first `make e2e-gke` run against a real project still outstanding |
 | 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, ADRs 0023 and 0025 | ✅ Code + kind e2e (lifecycle stages) complete |
 
 ### Next
 
 In order.
 
-1. **Verify merge mode on a managed cluster.** The installer merges
-   into the node's existing credential-provider config on EKS, GKE, and
-   AKS (unit-tested with each format), but no e2e has run it on a real
-   managed node yet. GKE comes first; the run must confirm the provider
-   config path and format, and that the cloud's own registry provider
-   still works after the merge.
+1. **Run the GKE e2e against a real project.** The harness exists
+   (`make e2e-gke`, ADR-0022) but has not been executed yet — the first
+   run validates the merge-mode runtime findings (GKE provider config
+   path/format, containerd `config_path`, loopback NodePort under
+   Dataplane V2) and folds them back into ADR-0022. EKS/AKS harnesses
+   can follow the same module split.
 
 2. **Label-selected `HarborAccess` CRs.** A bridge owns every
    `HarborAccess` in its namespace. Add a label selector so one

@@ -87,6 +87,16 @@ e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/pus
 e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep-*` to continue
 	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose
 
+.PHONY: e2e-gke
+e2e-gke: ## Run the GKE e2e harness (ADR-0022). CREATES BILLED GCP RESOURCES in $$GOOGLE_PROJECT (zonal spot GKE cluster, Artifact Registry repo, static IP); destroyed at the end of the run. Needs gcloud auth (application-default + docker) and docker. Never runs in CI.
+	@test -n "$$GOOGLE_PROJECT" || (echo "set GOOGLE_PROJECT to the GCP project the harness may bill" && exit 1)
+	cd test/e2e-gke && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_gcp_project=$$GOOGLE_PROJECT TF_VAR_pause_after_pull=false tofu test -verbose
+
+.PHONY: e2e-gke-pause
+e2e-gke-pause: ## GKE e2e, but pause AFTER the assertions — `rm test/e2e-gke/.tofu-sleep-*` to continue
+	@test -n "$$GOOGLE_PROJECT" || (echo "set GOOGLE_PROJECT to the GCP project the harness may bill" && exit 1)
+	cd test/e2e-gke && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_gcp_project=$$GOOGLE_PROJECT TF_VAR_pause_after_pull=true tofu test -verbose
+
 .PHONY: proxy
 proxy: ## Expose the cluster's apiserver at http://localhost:8001 so the bridge can fetch the JWKS off-cluster
 	@echo "Run this in a separate terminal; leave it running while \`make run-local\` is active."
