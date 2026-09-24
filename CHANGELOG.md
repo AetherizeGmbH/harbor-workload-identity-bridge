@@ -1,3 +1,5 @@
+## [0.3.8](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.7...v0.3.8) (2026-09-24)
+
 ## [0.3.7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.6...v0.3.7) (2026-07-27)
 
 ## [0.3.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.5...v0.3.6) (2026-07-24)
