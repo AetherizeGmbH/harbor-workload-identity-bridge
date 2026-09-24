@@ -1,3 +1,15 @@
+## [0.8.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.7.0...v0.8.0) (2026-09-24)
+
+### ⚠ BREAKING CHANGES
+
+* **bridge:** harbor.url must use https, or set
+harbor.allowInsecureHTTP: true.
+
+### Bug Fixes
+
+* **bridge:** require https to Harbor, serve only bridge-written Secrets, trim RBAC ([#112](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/112)) ([1d5f7fd](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/1d5f7fdc47fd2ec96f332fe64d8c0fe59a448545))
+* **plugin:** never follow redirects and refuse unusable bridge responses ([#111](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/111)) ([73d63bf](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/73d63bf7eadb2a3640df52a13e45c5f8c91e7ae2))
+
 ## [0.7.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.6.0...v0.7.0) (2026-09-24)
 
 ### Features
