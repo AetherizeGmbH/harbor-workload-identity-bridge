@@ -96,6 +96,10 @@ spec:
             - name: BRIDGE_INSTANCE
               value: {{ include "harbor-bridge.instance" $ | quote }}
             {{- end }}
+            - name: BRIDGE_RATE_LIMIT_PER_SOURCE
+              value: {{ .Values.bridge.rateLimit.perSource | quote }}
+            - name: BRIDGE_RATE_LIMIT_BURST
+              value: {{ .Values.bridge.rateLimit.burst | quote }}
             {{- with .Values.bridge.oidcJWKSURL }}
             - name: BRIDGE_OIDC_JWKS_URL
               value: {{ . | quote }}

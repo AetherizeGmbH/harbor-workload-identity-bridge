@@ -55,6 +55,13 @@ type Claims struct {
 	// Expiry is the exp claim as a wall-clock time. go-oidc has already
 	// rejected expired tokens; exposed for logging and tests.
 	Expiry time.Time
+
+	// Pod, PodUID and Node come from the kubernetes.io claim of a bound
+	// ServiceAccount token (empty for unbound tokens). They are for the
+	// audit log only, never for a trust decision.
+	Pod    string
+	PodUID string
+	Node   string
 }
 
 // ErrInvalidToken wraps every Validate failure so callers can branch on
@@ -193,6 +200,9 @@ func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claim
 		Audience: []string(raw.Aud),
 		Issuer:   idToken.Issuer,
 		Expiry:   idToken.Expiry,
+		Pod:      raw.K8s.Pod.Name,
+		PodUID:   raw.K8s.Pod.UID,
+		Node:     raw.K8s.Node.Name,
 	}, nil
 }
 
@@ -201,6 +211,15 @@ func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claim
 type rawClaims struct {
 	Sub string       `json:"sub"`
 	Aud jsonAudience `json:"aud"`
+	K8s struct {
+		Pod struct {
+			Name string `json:"name"`
+			UID  string `json:"uid"`
+		} `json:"pod"`
+		Node struct {
+			Name string `json:"name"`
+		} `json:"node"`
+	} `json:"kubernetes.io"`
 }
 
 // jsonAudience handles the OIDC quirk that aud may be either a string or

@@ -1,6 +1,13 @@
 ## Chart value migrations
 
-### Unreleased: one audience per bridge, HarborAccess selector (ADR-0026)
+### Unreleased: audit log and rate limit
+
+| Change | What to do |
+| --- | --- |
+| Audit lines moved to the `audit` logger at fixed info level. The issuance line's `image` field is now `requested_image` (truncated to 512 characters), and new fields `source`, `client_cert`, `pod`, `pod_uid`, `node` were added. Denials are logged as `credential denied` with a `reason` | Update log queries that match `image=` or expect denials only at debug level. |
+| New per-source limit on the credential endpoint (`bridge.rateLimit.perSource: 20`, `burst: 100`); beyond it the bridge answers `429` and counts `bridge_credential_issuances_total{result="rate_limited"}` | Nothing for normal kubelet traffic. Raise the limit if one source legitimately sends more (e.g. a proxy in front of the NodePort); `perSource: 0` disables it. |
+
+### 0.6.0: one audience per bridge, HarborAccess selector (ADR-0026)
 
 | Change | What to do |
 | --- | --- |
