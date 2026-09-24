@@ -13,8 +13,6 @@ on:
 
 permissions:
   contents: read
-  # Lets CodeQL publish findings to the repo's Security tab.
-  security-events: write
 
 concurrency:
   group: codeql-${{ github.ref }}
@@ -24,6 +22,10 @@ jobs:
   analyze:
     name: CodeQL (go)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets CodeQL publish findings to the repo's Security tab.
+      security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # Pin the toolchain to go.mod so autobuild uses the same Go (go1.26)

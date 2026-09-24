@@ -23,11 +23,10 @@ jobs:
         with: { node-version: 22 }
       - run: npm install --no-save @commitlint/cli @commitlint/config-conventional
       - name: Lint commit messages
-        run: |
-          npx commitlint \
-            --from ${{ github.event.pull_request.base.sha }} \
-            --to ${{ github.event.pull_request.head.sha }} \
-            --verbose
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
       - name: Lint PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
