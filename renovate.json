@@ -76,6 +76,20 @@
       "groupName": "Kubernetes Go modules",
       "groupSlug": "k8s-gomod"
     }
+,
+    {
+      "description": "semantic-release plugins (release.yml extra_plugins): never automerge. The release job only runs on main, so no PR check exercises them; a floating conventionalcommits minor already broke one release.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["npm"],
+      "automerge": false,
+      "addLabels": ["release-tooling"]
+    },
+    {
+      "description": "The go.mod `go` directive is a deliberate security FLOOR (CVE fixes on OIDC/x509 paths), not a version to chase: raising it forces every consumer and tool (e.g. the Go that golangci-lint was built with) up with it. Toolchain bumps stay enabled.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["golang"],
+      "enabled": false
+    }
   ],
   "gomod": {
     "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"]
@@ -88,6 +102,15 @@
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+?)(?:\\s+versioning=(?<versioning>\\S+))?(?:\\s+registryUrl=(?<registryUrl>\\S+))?\\s*\\n\\s*[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\"(?:[^\"\\n]*:)?(?<currentValue>[^\":\\n]+)\""
       ]
+    },
+    {
+      "description": "semantic-release extra_plugins in release.yml are `name@version` lines no native manager sees. Exact-pinned since a floating minor broke the release (see the release.yml comment).",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/release\\.yml$/"],
+      "matchStrings": [
+        "\\s(?<depName>@semantic-release/[a-z-]+|conventional-changelog-[a-z-]+)@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "npm"
     }
   ],
   "vulnerabilityAlerts": {
