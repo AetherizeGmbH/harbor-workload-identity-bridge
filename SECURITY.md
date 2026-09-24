@@ -440,6 +440,35 @@ A non-zero rate on `result=unauthorized` or
 `oidc_validation_failures_total{reason=wrong_issuer}` is worth a page;
 both indicate someone is trying tokens the bridge does not trust.
 
+## Verifying release artifacts
+
+Every release image and the Helm chart are signed keyless with Sigstore
+by the release workflows, and carry a signed SLSA build provenance
+attestation. The images also carry a signed CycloneDX SBOM. All of it is
+bound to the artifact digest. Kubelet runs the plugin binary as root on
+every node, so verify before you deploy, and pin by digest.
+
+```bash
+IMAGE=ghcr.io/aetherizegmbh/harbor-workload-identity-bridge   # or ...-plugin
+cosign verify "$IMAGE@sha256:<digest>" \
+  --certificate-identity 'https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/.github/workflows/release-images.yml@refs/heads/main' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify-attestation --type cyclonedx "$IMAGE@sha256:<digest>" \
+  --certificate-identity 'https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/.github/workflows/release-images.yml@refs/heads/main' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify "oci://$IMAGE@sha256:<digest>" --owner AetherizeGmbH
+```
+
+The chart is signed by `release-chart.yml` (same command with
+`.github/workflows/release-chart.yml@refs/heads/main` as identity, on
+`ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge@sha256:<digest>`).
+Charts and provenance attestations from releases before the one that
+introduced them are not signed; the images are signed since 0.3.1.
+
+The release workflows build from the release tag, not from `main`,
+without a build cache, and generate the SBOM in a job without any
+token.
+
 ## Reporting a vulnerability
 
 Email security@aetherize.com with the issue and a reproduction. We
