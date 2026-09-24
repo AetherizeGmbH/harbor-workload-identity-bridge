@@ -139,6 +139,33 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 		exit 1; \
 	fi
 
+# Every Go fuzz target, as <package>:<function>. `make fuzz` fails when a
+# Fuzz function exists that this list does not name.
+FUZZ_TARGETS ?= \
+	./installer:FuzzMergeProvider \
+	./installer:FuzzMergeExtraArgs \
+	./installer:FuzzKubeletCmdline \
+	./bridge/controlplane/harbor:FuzzRobotName_Injective \
+	./bridge/internal/robotsecret:FuzzName_Injective \
+	./bridge/dataplane:FuzzJSONAudience
+FUZZTIME ?= 10s
+
+.PHONY: fuzz
+fuzz: ## Run every fuzz target for FUZZTIME each (default 10s); plain `go test` runs only their seed corpora
+	@set -e; \
+	listed=$$(for t in $(FUZZ_TARGETS); do echo "$${t##*:}"; done | sort); \
+	found=$$(grep -rhoE '^func Fuzz[A-Za-z0-9_]+' --include='*_test.go' . | sed 's/^func //' | sort); \
+	if [ "$$listed" != "$$found" ]; then \
+		echo "FUZZ_TARGETS does not match the Fuzz functions in the tree."; \
+		echo "listed:"; echo "$$listed"; echo "found:"; echo "$$found"; \
+		exit 1; \
+	fi; \
+	for t in $(FUZZ_TARGETS); do \
+		pkg=$${t%%:*}; fn=$${t##*:}; \
+		echo "== $$fn ($$pkg, $(FUZZTIME))"; \
+		go test -run='^$$' -fuzz="^$$fn$$" -fuzztime=$(FUZZTIME) "$$pkg"; \
+	done
+
 .PHONY: verify-release-notes
 verify-release-notes: ## Prove the semantic-release plugins pinned in release.yml render release notes (needs npm)
 	./hack/check-release-notes.sh
