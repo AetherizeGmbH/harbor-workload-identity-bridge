@@ -1,3 +1,15 @@
+## [0.5.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.4.0...v0.5.0) (2026-09-24)
+
+### ⚠ BREAKING CHANGES
+
+* **installer:** plugin.patchKubelet is removed; setting it fails
+templating. Use plugin.install.mode (auto replaces true, none replaces
+false). tls.enabled=false now requires tls.existingSecret.
+
+### Features
+
+* **installer:** node installer modes and an optional plugin DaemonSet ([#89](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/89)) ([7fb4962](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/7fb4962f93afe1e5933c6a5a3fae3b4473d05aca)), closes [#46](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/46)
+
 ## [0.4.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.8...v0.4.0) (2026-09-24)
 
 ### ⚠ BREAKING CHANGES
