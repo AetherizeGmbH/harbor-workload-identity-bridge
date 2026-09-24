@@ -1,14 +1,15 @@
 output "name" {
-  value       = kind_cluster.this.name
+  value       = var.name
+  depends_on  = [null_resource.cluster]
   description = "kind cluster name"
 }
 
 output "kubeconfig" {
   value = {
-    host                   = kind_cluster.this.endpoint
-    client_certificate     = kind_cluster.this.client_certificate
-    client_key             = kind_cluster.this.client_key
-    cluster_ca_certificate = kind_cluster.this.cluster_ca_certificate
+    host                   = local.cluster_conn.host
+    client_certificate     = local.cluster_conn.client_certificate
+    client_key             = local.cluster_conn.client_key
+    cluster_ca_certificate = local.cluster_conn.cluster_ca_certificate
   }
   description = "Connection info that other modules use to talk to the cluster."
   sensitive   = true

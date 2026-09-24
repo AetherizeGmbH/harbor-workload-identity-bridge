@@ -17,7 +17,7 @@ per-namespace token-distribution chores.**
 </p>
 
 > Status: **alpha — Phases 1 through 6 complete, end-to-end verified
-> on kind (Kubernetes v1.36) + Harbor 2.x**. `make e2e` brings up a fresh kind
+> on kind (Kubernetes v1.37) + Harbor 2.x**. `make e2e` brings up a fresh kind
 > cluster, installs Harbor + the chart, seeds a private image, and
 > the load-bearing `pull_pod` assertion passes: kubelet exec's the
 > plugin, the plugin reaches the bridge over a NodePort, the bridge

@@ -28,92 +28,142 @@ locals {
   # files in place.
 }
 
-resource "kind_cluster" "this" {
-  name = var.name
-  # Cannot wait for nodes Ready — Cilium (installed below) is the CNI
-  # and it needs the apiserver responding, which only happens after
-  # kind reports the cluster as "up but unready".
-  wait_for_ready = false
-  # Never write into the operator's ~/.kube/config: kind would switch the
-  # current context to this throwaway cluster (and drop it again on
-  # destroy), and anything that later trusts "the current context" could
-  # hit an unrelated — possibly production — cluster. Every consumer in
-  # this harness gets explicit connection info via the kubeconfig output.
-  kubeconfig_path = local.kubeconfig_path
-  node_image      = var.node_image
-
-  kind_config {
-    kind        = "Cluster"
-    api_version = "kind.x-k8s.io/v1alpha4"
-
-    networking {
-      kube_proxy_mode     = "none"
-      disable_default_cni = true
-      api_server_address  = "127.0.0.1"
-      api_server_port     = var.api_server_port
+# The cluster is created with the kind CLI, not with the tehcyx/kind
+# provider: its latest release (0.11.0) embeds kind v0.31, which writes the
+# kubeadm v1beta3 config that kubeadm 1.37 no longer accepts, so the harness
+# could not follow kindest/node past v1.36. The CLI version is pinned where
+# the binary is installed (CI: kind-action `version`, tracked by Renovate)
+# and must support var.node_image (kind v0.33+ for Kubernetes 1.37).
+locals {
+  kind_config = yamlencode({
+    kind       = "Cluster"
+    apiVersion = "kind.x-k8s.io/v1alpha4"
+    networking = {
+      kubeProxyMode     = "none"
+      disableDefaultCNI = true
+      apiServerAddress  = "127.0.0.1"
+      apiServerPort     = var.api_server_port
     }
-
-    feature_gates = {
+    featureGates = {
       KubeletServiceAccountTokenForCredentialProviders = true
       ServiceAccountNodeAudienceRestriction            = true
     }
-
     # Tell containerd to read per-registry overrides from certs.d.
-    # Individual hosts.toml files are mounted in below.
+    # Individual hosts.toml files are written in below.
     # Patch BOTH plugin paths so this works regardless of containerd
     # major version:
     #   - v1.x lives at plugins."io.containerd.grpc.v1.cri".registry
     #   - v2.x lives at plugins."io.containerd.cri.v1.images".registry
-    # The unused path is silently ignored. kindest/node:v1.35.0 ships
+    # The unused path is silently ignored. kindest/node:v1.35.0+ ships
     # containerd 2.x — v1 path alone is no-op there and TLS skip_verify
     # never reaches the image pull.
-    containerd_config_patches = [
+    containerdConfigPatches = [
       <<-TOML
       [plugins."io.containerd.grpc.v1.cri".registry]
         config_path = "/etc/containerd/certs.d"
-
       [plugins."io.containerd.cri.v1.images".registry]
         config_path = "/etc/containerd/certs.d"
       TOML
     ]
+    nodes = concat(
+      [{
+        role  = "control-plane"
+        image = var.node_image
+        kubeadmConfigPatches = [
+          <<-EOT
+            kind: InitConfiguration
+            nodeRegistration:
+              kubeletExtraArgs:
+                node-labels: "ingress-ready=true"
+          EOT
+          ,
+          <<-EOT
+            kind: ClusterConfiguration
+            apiServer:
+              extraArgs:
+                enable-admission-plugins: NodeRestriction,MutatingAdmissionWebhook,ValidatingAdmissionWebhook
+          EOT
+        ]
+        extraPortMappings = [
+          {
+            hostPort      = var.http_port
+            containerPort = local.http_node_port_internal
+            listenAddress = "127.0.0.1"
+            protocol      = "TCP"
+          },
+          {
+            hostPort      = var.https_port
+            containerPort = local.https_node_port_internal
+            listenAddress = "127.0.0.1"
+            protocol      = "TCP"
+          },
+        ]
+      }],
+      [for i in range(var.worker_count) : { role = "worker", image = var.node_image }],
+    )
+  })
+}
 
-    node {
-      role = "control-plane"
-      kubeadm_config_patches = [
-        <<-EOT
-          kind: InitConfiguration
-          nodeRegistration:
-            kubeletExtraArgs:
-              node-labels: "ingress-ready=true"
-        EOT
-        ,
-        <<-EOT
-          kind: ClusterConfiguration
-          apiServer:
-            extraArgs:
-              enable-admission-plugins: NodeRestriction,MutatingAdmissionWebhook,ValidatingAdmissionWebhook
-        EOT
-      ]
-      extra_port_mappings {
-        host_port      = var.http_port
-        container_port = local.http_node_port_internal
-        listen_address = "127.0.0.1"
-        protocol       = "TCP"
-      }
-      extra_port_mappings {
-        host_port      = var.https_port
-        container_port = local.https_node_port_internal
-        listen_address = "127.0.0.1"
-        protocol       = "TCP"
-      }
-    }
+resource "null_resource" "cluster" {
+  triggers = {
+    name            = var.name
+    kind_config     = local.kind_config
+    kubeconfig_path = local.kubeconfig_path
+  }
 
-    dynamic "node" {
-      for_each = toset([for i in range(var.worker_count) : tostring(i)])
-      content {
-        role = "worker"
-      }
+  # Never write into the operator's ~/.kube/config: kind would switch the
+  # current context to this throwaway cluster (and drop it again on
+  # destroy), and anything that later trusts "the current context" could
+  # hit an unrelated — possibly production — cluster. --kubeconfig makes
+  # kind write ONLY the harness file; every consumer gets explicit
+  # connection info via the kubeconfig output.
+  #
+  # No --wait: nodes stay NotReady until Cilium (installed below) provides
+  # the CNI, and Cilium only needs the apiserver, which kind waits for.
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-BASH
+      set -euo pipefail
+      kind version
+      if kind get clusters | grep -qxF "$NAME"; then
+        echo "a kind cluster named $NAME already exists (a paused or crashed run?); delete it with: kind delete cluster --name $NAME" >&2
+        exit 1
+      fi
+      mkdir -p "$(dirname "$KUBECONFIG_PATH")"
+      printf '%s' "$KIND_CONFIG" | kind create cluster --name "$NAME" --kubeconfig "$KUBECONFIG_PATH" --config -
+    BASH
+    environment = {
+      NAME            = self.triggers.name
+      KIND_CONFIG     = self.triggers.kind_config
+      KUBECONFIG_PATH = self.triggers.kubeconfig_path
     }
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["bash", "-c"]
+    command     = "kind delete cluster --name \"$NAME\" --kubeconfig \"$KUBECONFIG_PATH\""
+    environment = {
+      NAME            = self.triggers.name
+      KUBECONFIG_PATH = self.triggers.kubeconfig_path
+    }
+  }
+}
+
+# Read back the credentials kind wrote. Deferred to apply (depends on the
+# cluster), like the provider's computed attributes were.
+data "local_sensitive_file" "kubeconfig" {
+  filename   = local.kubeconfig_path
+  depends_on = [null_resource.cluster]
+}
+
+locals {
+  kubeconfig_doc = yamldecode(data.local_sensitive_file.kubeconfig.content)
+  cluster_conn = {
+    host                   = local.kubeconfig_doc.clusters[0].cluster.server
+    cluster_ca_certificate = base64decode(local.kubeconfig_doc.clusters[0].cluster["certificate-authority-data"])
+    client_certificate     = base64decode(local.kubeconfig_doc.users[0].user["client-certificate-data"])
+    client_key             = base64decode(local.kubeconfig_doc.users[0].user["client-key-data"])
   }
 }
 
@@ -148,7 +198,7 @@ resource "null_resource" "containerd_hosts" {
     node          = each.value.node
     host          = each.value.host
     content_sha   = sha256(each.value.body)
-    cluster_token = kind_cluster.this.name # re-create if cluster is replaced
+    cluster_token = null_resource.cluster.id # re-create if cluster is replaced
   }
 
   provisioner "local-exec" {
@@ -163,7 +213,7 @@ EOF
     BASH
   }
 
-  depends_on = [kind_cluster.this]
+  depends_on = [null_resource.cluster]
 }
 
 # Append /etc/hosts entries on every node. Containerd reads /etc/hosts
@@ -186,7 +236,7 @@ resource "null_resource" "etc_hosts" {
   triggers = {
     node          = each.value.node
     entry         = each.value.entry
-    cluster_token = kind_cluster.this.name
+    cluster_token = null_resource.cluster.id
   }
 
   provisioner "local-exec" {
@@ -200,7 +250,7 @@ resource "null_resource" "etc_hosts" {
     BASH
   }
 
-  depends_on = [kind_cluster.this]
+  depends_on = [null_resource.cluster]
 }
 
 # Load locally-built docker images into the kind cluster so the test
@@ -212,12 +262,12 @@ resource "null_resource" "kind_load" {
 
   triggers = {
     image_ref     = each.value
-    cluster_token = kind_cluster.this.name
+    cluster_token = null_resource.cluster.id
   }
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
-    command     = "kind load docker-image '${each.value}' --name '${kind_cluster.this.name}'"
+    command     = "kind load docker-image '${each.value}' --name '${var.name}'"
   }
 
   # Must wait for containerd_hosts: that resource restarts containerd
@@ -226,7 +276,7 @@ resource "null_resource" "kind_load" {
   # detect containerd snapshotter" and aborts the load. Slower CI
   # runners lose this race; local runs typically finish the restart in
   # time. Cilium has the same dep below for the same reason.
-  depends_on = [kind_cluster.this, null_resource.containerd_hosts]
+  depends_on = [null_resource.cluster, null_resource.containerd_hosts]
 }
 
 # Cilium replaces kube-proxy and provides the CNI. Wait for the
@@ -256,7 +306,7 @@ resource "helm_release" "cilium" {
     image                = { pullPolicy = "IfNotPresent" }
   })]
 
-  depends_on = [kind_cluster.this, null_resource.containerd_hosts]
+  depends_on = [null_resource.cluster, null_resource.containerd_hosts]
 }
 
 resource "helm_release" "cert_manager" {
