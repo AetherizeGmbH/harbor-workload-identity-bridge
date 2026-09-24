@@ -1,3 +1,10 @@
+## [0.5.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.2...v0.5.3) (2026-09-24)
+
+### Bug Fixes
+
+* **harbor:** never dump credentials and bound every Harbor call ([#100](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/100)) ([fbddc42](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/fbddc42d65dea5ac3edb0ab86ec12d4b10f7a413))
+* **installer:** never follow symlinks when reading or replacing host files ([#99](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/99)) ([52d185c](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/52d185c800ed6514afe65b4c5d8c2ddcb52b2356))
+
 ## [0.5.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.1...v0.5.2) (2026-09-24)
 
 ### Bug Fixes
