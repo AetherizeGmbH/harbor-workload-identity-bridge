@@ -6,6 +6,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -214,5 +215,35 @@ func testReconcilerConfig() *Config {
 		HarborURL:      harborURL,
 		HarborAdminDir: "/dev/null",
 		LogLevel:       "debug",
+	}
+}
+
+// The CRD enforces Harbor's project-name rule at admission; "*" (every
+// project in Harbor) must never be stored.
+func TestEnvtest_CRDRejectsInvalidProjectNames(t *testing.T) {
+	cfg := setupEnvtest(t)
+	k8s, err := client.New(cfg, client.Options{Scheme: testScheme})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if err := k8s.Create(context.Background(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: testNS},
+	}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create namespace: %v", err)
+	}
+	for i, project := range []string{"*", "Prod", "a..b", "-x", "team/app"} {
+		ha := newHarborAccess()
+		ha.Name = fmt.Sprintf("invalid-project-%d", i)
+		ha.Spec.Permissions[0].Project = project
+		err := k8s.Create(context.Background(), ha)
+		if !apierrors.IsInvalid(err) {
+			t.Errorf("project %q: err = %v, want an Invalid admission error", project, err)
+		}
+	}
+	ok := newHarborAccess()
+	ok.Name = "valid-project"
+	ok.Spec.Permissions[0].Project = "team-a.app_1"
+	if err := k8s.Create(context.Background(), ok); err != nil {
+		t.Errorf("valid project name refused: %v", err)
 	}
 }

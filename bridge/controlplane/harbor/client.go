@@ -240,6 +240,9 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 }
 
 func (c *goClient) Create(ctx context.Context, name, description string, perms []ProjectPermission) (*Robot, error) {
+	if err := validatePermissions(perms); err != nil {
+		return nil, fmt.Errorf("create robot %q: %w", name, err)
+	}
 	body := &models.RobotCreate{
 		Name:        name,
 		Description: description,
@@ -380,6 +383,9 @@ func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) 
 func (c *goClient) Update(ctx context.Context, current *Robot, description string, perms []ProjectPermission) error {
 	if current == nil || current.WireName == "" {
 		return errors.New("update robot: current robot with its on-wire name is required")
+	}
+	if err := validatePermissions(perms); err != nil {
+		return fmt.Errorf("update robot %d: %w", current.ID, err)
 	}
 	// models.Robot.Duration is *int64 (x-nullable in swagger); take address.
 	duration := robotDurationNeverExpires

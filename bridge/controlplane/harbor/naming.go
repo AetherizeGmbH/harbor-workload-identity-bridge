@@ -181,3 +181,30 @@ func hashOf(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:hashSuffixLen]
 }
+
+// projectNamePattern is Harbor's own rule for project names
+// (goharbor/harbor src/pkg/project/manager.go: restrictedNameChars).
+var projectNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+
+// ProjectNameMaxLen is Harbor's project name length limit.
+const ProjectNameMaxLen = 255
+
+// ValidateProjectName reports whether name can be a Harbor project. It
+// rejects in particular "*", which Harbor reads in a robot permission as
+// "every project, including future ones": a HarborAccess must name the
+// projects it grants.
+func ValidateProjectName(name string) error {
+	if len(name) == 0 || len(name) > ProjectNameMaxLen || !projectNamePattern.MatchString(name) {
+		return fmt.Errorf("project %q is not a Harbor project name (lower-case letters and digits, separated by single '.', '_' or '-'; at most %d characters)", name, ProjectNameMaxLen)
+	}
+	return nil
+}
+
+func validatePermissions(perms []ProjectPermission) error {
+	for _, p := range perms {
+		if err := ValidateProjectName(p.Project); err != nil {
+			return err
+		}
+	}
+	return nil
+}

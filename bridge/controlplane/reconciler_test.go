@@ -1354,3 +1354,21 @@ func TestRequeueAfter(t *testing.T) {
 		t.Errorf("overdue: %s", got)
 	}
 }
+
+func TestReconcile_RejectsWildcardProject(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.Permissions = append(ha.Spec.Permissions, harborv1alpha1.ProjectPermission{Project: "*", Action: harborv1alpha1.ActionPullPush})
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.createCalls) != 0 {
+		t.Error("robot created with a wildcard project grant")
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
+}

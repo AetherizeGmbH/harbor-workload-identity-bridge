@@ -267,3 +267,16 @@ func TestOwnsLegacyRobot(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateProjectName(t *testing.T) {
+	for _, ok := range []string{"a", "production", "team-a", "team_a", "team.a", "a1-b2.c3_d4", strings.Repeat("a", ProjectNameMaxLen)} {
+		if err := ValidateProjectName(ok); err != nil {
+			t.Errorf("%q: unexpected error %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "*", "prod*", "Prod", "a..b", "-a", "a-", "a/b", "a b", strings.Repeat("a", ProjectNameMaxLen+1)} {
+		if err := ValidateProjectName(bad); err == nil {
+			t.Errorf("%q: accepted, want an error", bad)
+		}
+	}
+}
