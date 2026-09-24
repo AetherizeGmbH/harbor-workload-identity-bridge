@@ -250,35 +250,62 @@ Mitigations:
 
 ### Privilege of the install DaemonSet
 
-The plugin DaemonSet is the system's most privileged workload. Its
-install init container:
+The plugin DaemonSet is the system's most privileged workload. In
+every `plugin.install.mode` except `none`
+([ADR-0021](docs/adr/0021-node-installer-modes.md)) its install init
+container:
 
-- runs as root (`runAsUser: 0`).
-- bind-mounts the node's `/etc/kubernetes/credential-provider*`
-  hostPaths so it can write the binary, config, and CA bundle.
-- when `plugin.patchKubelet: true` (default), runs with
-  `hostPID: true` and `nsenter`s into PID 1 to patch
-  `/etc/default/kubelet` with `--image-credential-provider-{bin-dir,config}`
-  flags and runs `systemctl restart kubelet` on the host; once per
-  node, idempotency-guarded.
+- runs as root (`runAsUser: 0`) and `privileged: true`.
+- runs with `hostPID: true` and mounts the host's `/` read-write at
+  `/host`. The broad mount is required because `merge` mode writes
+  into whatever paths the node's kubelet flags point at — those are
+  discovered at runtime from `/proc/<kubelet>/cmdline` and cannot be
+  narrowed at chart-render time.
+- finds kubelet through `/proc`, and accepts only a process named
+  `kubelet` whose parent is PID 1 and that does not run in a pod cgroup.
+  Any pod can name its process `kubelet` and fake a command line; before
+  this check such a pod could steer where the privileged installer wrote
+  a root-owned binary. With several candidates left, it refuses to guess.
+  Discovered paths must be absolute and clean.
+- restarts kubelet via `nsenter -t 1 … systemctl restart <unit>` — no
+  shell; the unit name is validated against the systemd character set —
+  but only when the effective credential-provider config content (or
+  the kubelet flags) actually changed, tracked by a content hash in
+  `/var/lib/harbor-bridge/installer-state.json`. It then waits until the
+  unit is stably active (and, in patch mode, until the running kubelet
+  carries the flags) before it records success; otherwise the pod fails
+  loudly. Running containers survive the restart (containerd owns them).
+  Binary drops and CA/mTLS rotation never restart kubelet.
+- in `patch` mode parse-merges `/etc/default/kubelet`, preserving
+  operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
+  node's existing `CredentialProviderConfig`, preserving foreign
+  provider entries and unknown fields.
 
-This privilege model is non-negotiable for installing a credential
-provider on nodes the operator doesn't control the image of (kind,
-kubeadm, k3s). Cloud-managed clusters (EKS, GKE, AKS) bake the
-binary + config + kubelet flags into the node image instead.
+This privilege model is what installing a credential provider on
+nodes requires — managed node images (EKS, GKE, AKS) pre-wire their
+own providers exactly this way, just at image-build time. Bottlerocket
+exposes no writable host filesystem and is unsupported.
 
 Operator choices:
 
-- `plugin.patchKubelet: false`: disables the nsenter + kubelet
-  restart block; use when the node image already wires kubelet.
-  The init container also drops `hostPID` in this mode.
+- `plugin.install.mode: none` is the least-privilege configuration:
+  files only, no `hostPID`, no privileged container, and only the two
+  narrow `plugin.hostBinaryDir`/`hostConfigDir` hostPath mounts. The
+  operator owns the kubelet flags.
 - The Helm release is the install boundary. Anyone who can
   `helm upgrade` this chart can swap the plugin binary that kubelet
   on every node will exec next pull. Restrict the helm caller's
   RBAC accordingly.
-- The DaemonSet's runtime container after install is a `sleep` loop
-  with no special privileges. The init container only runs at pod
-  start.
+- The DaemonSet's long-running container is the installer in `--sync`
+  mode: root (it refreshes the on-host CA/mTLS files when
+  cert-manager rotates them) but never privileged, no capabilities,
+  `seccompProfile: RuntimeDefault`, read-only root filesystem, and a
+  single hostPath mount: `plugin.hostConfigDir`. It never sees the host
+  root, never uses nsenter, never touches kubelet.
+- The DaemonSet pods get no ServiceAccount token (they never call the
+  Kubernetes API).
+- `plugin.enabled: false` removes the DaemonSet entirely, for nodes
+  that get the plugin out of band ([docs/install-external-plugin.md](docs/install-external-plugin.md)).
 
 ### Audience-scoped RBAC
 
@@ -349,7 +376,7 @@ their own RBAC.
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
-| `plugin.patchKubelet` | `true` | Set `false` on EKS / GKE / AKS / baked AMIs so the DaemonSet drops `hostPID` and the nsenter / kubelet-restart block |
+| `plugin.install.mode` | `auto` | `none` for the least privilege (no `hostPID`, no privileged container, two narrow hostPath mounts; you wire the kubelet flags). `plugin.enabled: false` for no node agent at all |
 | `plugin.audienceRBAC.create` | `true` | Keep `true` unless you're providing a tighter binding via admission webhook; the chart's binding is audience-narrow but `system:nodes`-broad |
 | Pod security (bridge) | hardened by default (`runAsNonRoot`, `runAsUser: 65532`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drops `ALL` capabilities, `seccompProfile: RuntimeDefault`) | Keep the defaults; relax only if a sidecar genuinely requires it |
 | Bridge namespace RBAC | unset | Restrict `secrets` get/list/watch to the bridge ServiceAccount only |
@@ -358,8 +385,8 @@ their own RBAC.
 | `HarborAccess` authorship | any principal RBAC-granted `create harboraccesses` | **Cluster-privileged** — whoever authors a CR grants any project to any SA identity. Restrict to the platform team; gate any tenant-writable path behind an admission policy constraining projects / `serviceAccountRef` per namespace. See *Unauthorized HarborAccess authorship* above |
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`repository@sha256:…`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
+| `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
 | `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`; otherwise the janitor cannot recognise the bridge's robots |
-| `tls.enabled` | `true` | Leave it `true`. `false` does **not** serve plaintext (the bridge has no HTTP listener); it only removes the serving cert and breaks startup |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release; Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape

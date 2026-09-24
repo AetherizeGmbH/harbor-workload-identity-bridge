@@ -106,7 +106,11 @@ For the workload:
 - A Helm chart that installs both: bridge as a Deployment in the
   release namespace, plugin as a DaemonSet that copies the binary +
   kubelet config + bridge CA onto every node's filesystem. Required
-  values fail-fast with action-oriented errors at template time.
+  values fail-fast with action-oriented errors at template time. Nodes
+  that get the plugin another way (Talos system extension, baked images)
+  set `plugin.enabled=false` — see
+  [docs/install-external-plugin.md](docs/install-external-plugin.md) and
+  [docs/platforms.md](docs/platforms.md).
 
 When upstream Harbor lands #17520, you delete the HTTPS server and
 the plugin; the CRD and reconciler survive as a thin declarative
@@ -216,14 +220,20 @@ helm install harbor-bridge \
 #    helm install harbor-bridge ./charts/harbor-bridge -n harbor-bridge-system \
 #      ... --set flags as above ...)
 
-# 4. The chart's plugin DaemonSet does the kubelet wiring for you:
-#    init container `nsenter`s into PID 1, patches /etc/default/kubelet
-#    with --image-credential-provider-{bin-dir,config}, and runs
-#    `systemctl restart kubelet`. Once per node, idempotency-guarded.
-#    Expect a brief node-local kubelet bounce as the DaemonSet rolls
-#    out (control-plane static pods recover within seconds).
-#    Set `plugin.patchKubelet=false` when the node image already wires
-#    kubelet (EKS / GKE / AKS, baked AMIs).
+# 4. The chart's plugin DaemonSet wires kubelet for you (ADR-0021).
+#    The default `plugin.install.mode=auto` inspects the live kubelet:
+#    on managed nodes (EKS / GKE / AKS) whose node image already runs
+#    kubelet with --image-credential-provider-* flags, it MERGES our
+#    provider entry into the existing config (foreign providers are
+#    preserved); on self-managed nodes (kind, kubeadm) it PATCHES
+#    /etc/default/kubelet, preserving your KUBELET_EXTRA_ARGS. Either
+#    way kubelet restarts once per node when — and only when — the
+#    effective config content changed, and the installer verifies it
+#    came back healthy; running containers survive the restart.
+#    `plugin.install.mode=none` drops files only (you own the kubelet
+#    flags; least privilege — no hostPID, no privileged pod).
+#    Talos, k3s, RKE2: see docs/platforms.md. Bottlerocket and GKE
+#    Autopilot are unsupported.
 
 # 5. Apply a HarborAccess CR. The audience MUST match plugin.audience above.
 cat <<'YAML' | kubectl apply -f -
@@ -272,31 +282,44 @@ the bridge, or remove the `harbor.aetherize.io/robot` finalizer by hand and
 delete the leftover `robot$bridge-<clusterName>.*` robots in Harbor. Helm
 keeps the CRD (`crds/`); delete it yourself when you are done.
 
-### Helm upgrade caveat — kubelet restart on config changes
+### How the node install works — modes and upgrades (ADR-0021)
 
-The chart's idempotency guard only checks whether `/etc/default/kubelet`
-already has the credential-provider flags; it does **not** detect when
-the *config file content* changes (e.g. you change `plugin.matchImages`,
-`plugin.audience`, or rotate the bridge CA). Kubelet reads the
-credential-provider config **once at boot** — there is no hot reload
-(`DynamicKubeletConfig` was removed in 1.26). So after a `helm upgrade`
-that changes anything in the config file, you must restart kubelet on
-each node manually so the new content takes effect:
+The DaemonSet runs the `harbor-bridge-installer` binary on every node.
+`plugin.install.mode` selects how kubelet gets wired:
 
-```bash
-# After a helm upgrade that changed matchImages / audience / TLS:
-for node in $(kubectl get nodes -o name); do
-  docker exec ${node##*/} systemctl restart kubelet   # kind
-  # or: ssh ${node##*/} sudo systemctl restart kubelet
-done
-```
+| Mode | What it does | When |
+| --- | --- | --- |
+| `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch` | Almost always the right choice |
+| `merge` | Injects our provider entry into the node's **existing** `CredentialProviderConfig` (JSON or YAML — EKS/GKE/AKS formats both work; foreign providers and unknown fields round-trip untouched) and drops the binary into the existing bin dir. Kubelet flags untouched. | Managed nodes (EKS AL2023, GKE, AKS) |
+| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of `/etc/default/kubelet` — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet that sources `/etc/default/kubelet`) |
+| `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | k3s/RKE2 (flags via their kubelet args), strict-privilege environments |
+| `plugin.enabled=false` | No DaemonSet at all; NOTES print the provider entry to install | Talos (system extension), baked node images |
 
-A future chart version should make the idempotency content-aware (hash
-the config file and compare); for now this is operator-driven. The
-DaemonSet itself rolls fresh pods on `helm upgrade` (annotation
-checksums force a re-roll) — that updates the files on disk — but the
-init container's restart check shortcuts because the flags are still
-present in `/etc/default/kubelet`.
+Kubelet reads the credential-provider config **once at boot** (no hot
+reload), but execs the plugin *binary* per pull. The installer therefore
+restarts kubelet exactly when the effective config content (or the
+kubelet flags) changed — tracked via a content hash in
+`/var/lib/harbor-bridge/installer-state.json` on each node:
+
+- `helm upgrade` changing `matchImages`/`audience` **converges without
+  operator action** (the DaemonSet re-rolls, the installer detects the
+  content change, kubelet restarts once per node; running containers
+  are unaffected).
+- No-op re-rolls, plugin binary updates, and CA/mTLS rotation never
+  restart kubelet (the plugin re-reads the CA on every exec; the
+  DaemonSet's long-running container syncs rotated certs to the node).
+
+### Bootstrap ordering (chicken-and-egg)
+
+The plugin can only run after its own image was pulled — so the bridge
+and plugin images must come from a registry that `plugin.matchImages`
+does **not** cover (the public GHCR images satisfy this by default).
+The chart fails at template time if an exact `matchImages` entry equals
+the images' registry host; air-gapped mirrors that accept the bootstrap
+ordering can override with `plugin.allowSelfMatchImages=true`. A bridge
+outage only affects *new* pulls of matched images — kubelet's
+credential cache (`plugin.defaultCacheDuration`) covers running
+workloads and recent pulls.
 
 ## Architecture and decisions
 
@@ -336,6 +359,11 @@ present in `/etc/default/kubelet`.
     `plugin.audience`. Required since v1.32 default-on of
     `ServiceAccountNodeAudienceRestriction`; without it kubelet's
     `TokenRequest` for the credential provider silently fails.
+  - [ADR-0021](docs/adr/0021-node-installer-modes.md) — the Go node
+    installer and its `auto`/`merge`/`patch`/`none` modes; content-hash
+    restart policy (kubelet restarts only on real config changes);
+    why merge round-trips foreign providers as `map[string]any`.
+    (Mechanised via `make verify-installer-isolation`.)
 
 ## Harbor compatibility
 
@@ -374,20 +402,18 @@ contract, not individually run.
 | 5 | Helm chart (bridge + plugin DaemonSet + cert-manager + kubelet config) | ✅ Complete |
 | 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
+| 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), ADRs 0021 and 0024 | ✅ Code + kind e2e complete; merge mode not yet run on a managed cluster |
 
 ### Next
 
 In order.
 
-1. **Plugin installation on managed clusters.** The DaemonSet
-   `nsenter`s into PID 1 and patches `/etc/default/kubelet` (see the
-   upgrade caveat above). That fits self-managed nodes. On EKS, GKE,
-   and AKS the node image already wires the credential-provider
-   directory and kubelet config, so patching breaks them. Add install
-   modes for those three that drop the binary, config, and CA without
-   touching kubelet. Separately, hash the on-disk config so a `helm
-   upgrade` changing `matchImages`, `audience`, or the CA re-applies
-   instead of shortcutting the idempotency guard.
+1. **Verify merge mode on a managed cluster.** The installer merges
+   into the node's existing credential-provider config on EKS, GKE, and
+   AKS (unit-tested with each format), but no e2e has run it on a real
+   managed node yet. GKE comes first; the run must confirm the provider
+   config path and format, and that the cloud's own registry provider
+   still works after the merge.
 
 2. **Label-selected `HarborAccess` CRs.** A bridge owns every
    `HarborAccess` in its namespace. Add a label selector so one

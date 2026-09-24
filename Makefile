@@ -7,7 +7,7 @@ CONTROLLER_GEN_VERSION ?= v0.21.0
 PROJECT_DIR := $(shell pwd)
 
 .PHONY: all
-all: generate manifests vet build build-plugin
+all: generate manifests vet build build-plugin build-installer
 
 $(CONTROLLER_GEN):
 	go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
@@ -42,6 +42,11 @@ build: ## Build the bridge binary into bin/bridge
 build-plugin: ## Build the kubelet credential-provider plugin into bin/harbor-bridge-plugin
 	mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-plugin ./plugin
+
+.PHONY: build-installer
+build-installer: ## Build the node installer into bin/harbor-bridge-installer
+	mkdir -p bin
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-installer ./installer
 
 .PHONY: build-all
 build-all: ## Compile-check every package
@@ -124,11 +129,6 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 		exit 1; \
 	fi
 
-.PHONY: verify-generated
-verify-generated: generate manifests ## Fail if the CRDs / deepcopy code drift from the Go API types
-	@git diff --exit-code -- bridge/api config/crd charts/harbor-bridge/crds || \
-		{ echo "generated files are stale — run 'make generate manifests' and commit the result"; exit 1; }
-
 .PHONY: verify-release-notes
 verify-release-notes: ## Prove the semantic-release plugins pinned in release.yml render release notes (needs npm)
 	./hack/check-release-notes.sh
@@ -142,6 +142,20 @@ verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sig
 		exit 1; \
 	fi
 
+.PHONY: verify-generated
+verify-generated: generate manifests ## Fail if the CRDs / deepcopy code drift from the Go API types
+	@git diff --exit-code -- bridge/api config/crd charts/harbor-bridge/crds || \
+		{ echo "generated files are stale — run 'make generate manifests' and commit the result"; exit 1; }
+
+.PHONY: verify-installer-isolation
+verify-installer-isolation: ## Enforce ADR-0021: installer may pull sigs.k8s.io/yaml (+ go.yaml.in) but nothing else from k8s.io / sigs.k8s.io
+	@bad=$$(go list -deps ./installer/... 2>/dev/null | grep -E '^(k8s\.io|sigs\.k8s\.io)' | grep -v '^sigs\.k8s\.io/yaml$$' || true); \
+	if [ -n "$$bad" ]; then \
+		echo "ERROR: installer imports k8s.io / sigs.k8s.io packages beyond sigs.k8s.io/yaml (violates ADR-0021):"; \
+		echo "$$bad"; \
+		exit 1; \
+	fi
+
 # ====================================================================
 # Helm chart targets (Phase 5)
 # ====================================================================
@@ -150,30 +164,32 @@ CHART_DIR ?= charts/harbor-bridge
 CHART_TESTS_DIR ?= $(CHART_DIR)/tests
 GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 
+# Each golden case is <values file suffix>:<golden file>. The single list
+# drives lint, golden diff, and golden update so they cannot drift; the
+# release config (.releaserc.json) commits every tests/golden/*.yaml.
+CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled
+HELM_TEMPLATE = helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 --namespace harbor-bridge-system
+
 .PHONY: chart-lint
 chart-lint: ## helm lint the chart against every test values file
-	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-complete.yaml || exit 1
-	@helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-mtls.yaml || exit 1
-
-.PHONY: chart-render
-chart-render: ## Render the chart with the complete-values test file to stdout
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system
+	@set -e; for c in $(CHART_CASES); do \
+		helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-$${c%%:*}.yaml; \
+	done
 
 .PHONY: chart-golden
-# -B: Helm 4.3 emits blank lines between documents that 4.2 does not;
-# blank lines carry no meaning in YAML streams.
 chart-golden: ## Diff current render against the checked-in golden files
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > /tmp/render-complete.yaml
-	@diff -u -B $(GOLDEN_DIR)/default.yaml /tmp/render-complete.yaml || { echo "golden mismatch for values-complete.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > /tmp/render-mtls.yaml
-	@diff -u -B $(GOLDEN_DIR)/mtls.yaml /tmp/render-mtls.yaml || { echo "golden mismatch for values-mtls.yaml — run 'make chart-golden-update' if intentional"; exit 1; }
-	@echo "golden render unchanged"
+	@set -e; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	for c in $(CHART_CASES); do \
+		v=$${c%%:*}; g=$${c##*:}; \
+		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$$v.yaml > "$$tmp/$$g.yaml"; \
+		diff -u -B $(GOLDEN_DIR)/$$g.yaml "$$tmp/$$g.yaml" || { echo "golden mismatch for values-$$v.yaml — run 'make chart-golden-update' if intentional"; exit 1; }; \
+	done; echo "golden render unchanged"
 
 .PHONY: chart-golden-update
 chart-golden-update: ## Re-capture golden files after intentional template changes
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-complete.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/default.yaml
-	@helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 -f $(CHART_TESTS_DIR)/values-mtls.yaml --namespace harbor-bridge-system > $(GOLDEN_DIR)/mtls.yaml
-	@echo "golden files refreshed; commit them after review"
+	@set -e; for c in $(CHART_CASES); do \
+		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$${c%%:*}.yaml > $(GOLDEN_DIR)/$${c##*:}.yaml; \
+	done; echo "golden files refreshed; commit them after review"
 
 .PHONY: chart-test-required
 chart-test-required: ## Verify each required value gates install

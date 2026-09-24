@@ -1,20 +1,36 @@
 {{/*
-DaemonSet that installs the plugin binary, the kubelet credential-
-provider-config, and the bridge's CA cert onto every node. After
-copying, the container sleeps so the DaemonSet stays "running" —
-this lets the operator inspect the install on a per-node basis with
-`kubectl logs`.
+DaemonSet that wires the plugin into every node's kubelet via the
+harbor-bridge-installer (ADR-0021).
 
-The install step is idempotent: it runs on every container start
-(reboot, eviction, image bump). cp is destination-replace, so
-upgrades pick up automatically.
+The init container runs one install pass for plugin.install.mode
+(auto | merge | patch | none): it drops the plugin binary, provider
+config, and CA onto the host and — except in none mode — restarts
+kubelet IFF the restart-relevant content actually changed (content-
+hash idempotency; a helm upgrade changing matchImages/audience
+converges without operator action, a no-op re-roll never restarts
+kubelet).
 
-This DaemonSet does NOT change kubelet's flags. The operator must
-already have set:
-  --image-credential-provider-bin-dir=<plugin.hostBinaryDir>
-  --image-credential-provider-config=<plugin.hostConfigDir>/credential-provider-config.yaml
-on each node's kubelet, or kubelet will never exec the plugin.
+The long-running container is the same installer in --sync mode: it
+re-copies the CA/mTLS files to the host when cert-manager rotates
+them (kubelet updates the Secret volume in place; the plugin re-reads
+the files on every exec, so no kubelet interaction is needed). It also
+keeps the pod "running" so `kubectl logs` surfaces the install output
+per node.
+
+Everything except none mode needs hostPID (kubelet discovery via
+/proc + nsenter for the restart), a privileged install container, and
+the host root mounted at /host (merge-mode target paths are unknown at
+render time). none mode drops all of that and keeps two narrow
+hostPath mounts. The long-running sync container never gets more than
+the one host directory it writes (hostConfigDir), in every mode.
+
+Not rendered when plugin.enabled=false (plugin provisioned out of band,
+e.g. a Talos system extension — issue #46).
 */}}
+{{- if .Values.plugin.enabled }}
+{{- /* Validate first: this template dereferences plugin.install.*, and
+       helm may render it before any other template runs the checks. */}}
+{{- include "harbor-bridge.validateRequiredValues" . }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -38,8 +54,10 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        # Force re-roll on config or CA rotation so the on-disk copies
-        # are refreshed across the fleet.
+        # Re-roll when the rendered provider config changes (the installer
+        # then converges kubelet) or when the TLS wiring changes (which
+        # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
+        # container copies rotated files in place (ADR-0021).
         plugin.harbor.aetherize.io/config-checksum: {{ include (print $.Template.BasePath "/plugin-configmap.yaml") . | sha256sum }}
         plugin.harbor.aetherize.io/tls-checksum: {{ printf "%s|%v|%v" (include "harbor-bridge.tlsSecretName" .) .Values.tls.enabled .Values.bridge.mTLS.enabled | sha256sum }}
         {{- with .Values.plugin.podAnnotations }}
@@ -47,19 +65,19 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "harbor-bridge.plugin.serviceAccountName" . }}
+      # The installer never talks to the Kubernetes API.
+      automountServiceAccountToken: false
       hostNetwork: false
-      {{- if .Values.plugin.patchKubelet }}
-      # Required so the install container's `nsenter -t 1 ...` can
-      # reach the host's PID namespace to patch /etc/default/kubelet
-      # and signal kubelet.service. ECR / GCR / ACR sidestep this by
-      # baking everything into the cloud node image; for self-managed
-      # clusters where the operator does not control the node image
-      # (kind, kubeadm, k3s), this is the install handoff.
+      {{- if ne .Values.plugin.install.mode "none" }}
+      # Required so the installer can read kubelet's command line from
+      # /proc (auto/merge discovery) and `nsenter -t 1 ...` into the
+      # host's namespaces for the kubelet restart. none mode does
+      # neither and drops this.
       hostPID: true
       {{- end }}
       priorityClassName: system-node-critical
       securityContext:
-        runAsNonRoot: false  # need root to write into /etc/kubernetes
+        runAsNonRoot: false  # need root to write onto the host
         runAsUser: 0
       {{- with .Values.plugin.nodeSelector }}
       nodeSelector:
@@ -73,114 +91,62 @@ spec:
         - name: install
           image: {{ include "harbor-bridge.plugin.image" . }}
           imagePullPolicy: {{ .Values.plugin.image.pullPolicy }}
-          command: [/bin/sh, -c]
-          args:
-            - |
-              set -eu
-              echo "installing plugin binary → ${HOST_BIN_DIR}"
-              mkdir -p "${HOST_BIN_DIR}"
-              cp -f /plugin/harbor-bridge-plugin "${HOST_BIN_DIR}/harbor-bridge-plugin"
-              chmod 0755 "${HOST_BIN_DIR}/harbor-bridge-plugin"
-
-              echo "installing kubelet credential-provider-config → ${HOST_CONFIG_DIR}"
-              mkdir -p "${HOST_CONFIG_DIR}"
-              cp -f /config/credential-provider-config.yaml "${HOST_CONFIG_DIR}/credential-provider-config.yaml"
-              chmod 0644 "${HOST_CONFIG_DIR}/credential-provider-config.yaml"
-
-              echo "installing bridge CA → ${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
-              cp -f /tls/ca.crt "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
-              chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
-              {{- if .Values.bridge.mTLS.enabled }}
-
-              echo "installing mTLS client cert → ${HOST_CONFIG_DIR}/harbor-bridge-client.{crt,key}"
-              cp -f /mtls/tls.crt "${HOST_CONFIG_DIR}/harbor-bridge-client.crt"
-              cp -f /mtls/tls.key "${HOST_CONFIG_DIR}/harbor-bridge-client.key"
-              chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-client.crt"
-              chmod 0600 "${HOST_CONFIG_DIR}/harbor-bridge-client.key"
-              {{- end }}
-              {{- if .Values.plugin.patchKubelet }}
-
-              # Kubelet only reads --image-credential-provider-* at
-              # startup (no hot-reload — DynamicKubeletConfig was
-              # removed in 1.26), AND it fails its boot-time check if
-              # either path doesn't exist. So we add the flags AFTER
-              # the files are in place, then restart kubelet. nsenter
-              # runs the patch + restart in the host's namespaces.
-              # Idempotency marker: the bin-dir flag already present
-              # in /etc/default/kubelet. Skips on every reschedule
-              # after the first install so kubelet doesn't churn.
-              echo "checking kubelet credential-provider wiring"
-              nsenter -t 1 -m -u -i -n -p -- env \
-                NODE_BIN_DIR="${HOST_BIN_DIR#/host}" \
-                NODE_CONFIG_FILE="${HOST_CONFIG_DIR#/host}/credential-provider-config.yaml" \
-                sh -c '
-                  set -eu
-                  if grep -q image-credential-provider-bin-dir /etc/default/kubelet 2>/dev/null; then
-                    echo "kubelet already wired for credential providers; not restarting"
-                    exit 0
-                  fi
-                  echo "writing /etc/default/kubelet and restarting kubelet.service"
-                  mkdir -p /etc/default
-                  printf "KUBELET_EXTRA_ARGS=\"--image-credential-provider-bin-dir=%s --image-credential-provider-config=%s\"\n" \
-                    "${NODE_BIN_DIR}" "${NODE_CONFIG_FILE}" > /etc/default/kubelet
-                  systemctl daemon-reload
-                  systemctl restart kubelet
-                '
-              {{- end }}
-
-              echo "install complete"
+          command: [/installer/harbor-bridge-installer]
           env:
-            - name: HOST_BIN_DIR
-              value: /host{{ .Values.plugin.hostBinaryDir }}
-            - name: HOST_CONFIG_DIR
-              value: /host{{ .Values.plugin.hostConfigDir }}
+            {{- include "harbor-bridge.plugin.installerEnv" . | nindent 12 }}
           volumeMounts:
-            - name: host-bin
-              mountPath: /host{{ .Values.plugin.hostBinaryDir }}
-            - name: host-config
-              mountPath: /host{{ .Values.plugin.hostConfigDir }}
-            - name: kubelet-config
-              mountPath: /config
-              readOnly: true
-            - name: tls
-              mountPath: /tls
-              readOnly: true
-            {{- if .Values.bridge.mTLS.enabled }}
-            - name: mtls
-              mountPath: /mtls
-              readOnly: true
-            {{- end }}
+            {{- include "harbor-bridge.plugin.installerMounts" . | nindent 12 }}
           securityContext:
-            # The install container must write into /etc/kubernetes on
-            # the host; that requires privileges the main container
-            # doesn't need.
+            readOnlyRootFilesystem: true
+            {{- if ne .Values.plugin.install.mode "none" }}
+            # nsenter into PID 1 (kubelet restart) requires full
+            # privileges; the sync container below does not get them.
             privileged: true
+            {{- else }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+            {{- end }}
           resources:
             {{- toYaml .Values.plugin.resources | nindent 12 }}
       containers:
-        - name: pause
-          # Keep the DaemonSet "running" after install so `kubectl get
-          # ds` shows healthy and `kubectl logs` on this pod surfaces
-          # the install output.
-          image: registry.k8s.io/pause:3.10
-          imagePullPolicy: IfNotPresent
+        - name: sync
+          image: {{ include "harbor-bridge.plugin.image" . }}
+          imagePullPolicy: {{ .Values.plugin.image.pullPolicy }}
+          command: [/installer/harbor-bridge-installer, --sync]
+          env:
+            {{- include "harbor-bridge.plugin.installerEnv" . | nindent 12 }}
+          volumeMounts:
+            # Only the directory it writes: a compromised sync container
+            # must not be a host-root compromise (audit H6).
+            - name: host-config
+              mountPath: /host{{ .Values.plugin.hostConfigDir }}
+            {{- include "harbor-bridge.plugin.sourceMounts" . | nindent 12 }}
           securityContext:
+            # Copies CA/mTLS files as root into a root-owned host dir —
+            # no capabilities, no nsenter, no /proc, never privileged.
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
-            requests:
-              cpu: 1m
-              memory: 4Mi
-            limits:
-              cpu: 10m
-              memory: 16Mi
+            {{- toYaml .Values.plugin.resources | nindent 12 }}
       volumes:
+        {{- if ne .Values.plugin.install.mode "none" }}
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        {{- else }}
         - name: host-bin
           hostPath:
             path: {{ .Values.plugin.hostBinaryDir }}
             type: DirectoryOrCreate
+        {{- end }}
         - name: host-config
           hostPath:
             path: {{ .Values.plugin.hostConfigDir }}
@@ -202,3 +168,65 @@ spec:
             secretName: {{ include "harbor-bridge.mTLSClientSecretName" . }}
             defaultMode: 0400
         {{- end }}
+{{- end }}
+
+{{/*
+Env + mounts shared by the install and sync containers. The installer
+addresses every node path as HOST_ROOT+<node path>; in none mode the
+two narrow mounts are placed at exactly those container paths, so the
+same addressing works without a host-root mount.
+*/}}
+{{- define "harbor-bridge.plugin.installerEnv" -}}
+- name: INSTALL_MODE
+  value: {{ .Values.plugin.install.mode | quote }}
+- name: HOST_ROOT
+  value: /host
+- name: HOST_BIN_DIR
+  value: {{ .Values.plugin.hostBinaryDir | quote }}
+- name: HOST_CONFIG_DIR
+  value: {{ .Values.plugin.hostConfigDir | quote }}
+{{- if .Values.plugin.install.binDir }}
+- name: INSTALL_MERGE_BIN_DIR
+  value: {{ .Values.plugin.install.binDir | quote }}
+- name: INSTALL_MERGE_CONFIG_FILE
+  value: {{ .Values.plugin.install.configFile | quote }}
+{{- end }}
+- name: MTLS_ENABLED
+  value: {{ .Values.bridge.mTLS.enabled | quote }}
+- name: KUBELET_UNIT
+  value: {{ .Values.plugin.install.kubeletUnit | quote }}
+- name: STATE_DIR
+  value: {{ .Values.plugin.install.stateDir | quote }}
+- name: NODE_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.hostIP
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.installerMounts" -}}
+{{- if ne .Values.plugin.install.mode "none" -}}
+- name: host-root
+  mountPath: /host
+{{- else -}}
+- name: host-bin
+  mountPath: /host{{ .Values.plugin.hostBinaryDir }}
+- name: host-config
+  mountPath: /host{{ .Values.plugin.hostConfigDir }}
+{{- end }}
+{{ include "harbor-bridge.plugin.sourceMounts" . }}
+{{- end -}}
+
+{{/* Read-only inputs both containers copy from. */}}
+{{- define "harbor-bridge.plugin.sourceMounts" -}}
+- name: kubelet-config
+  mountPath: /config
+  readOnly: true
+- name: tls
+  mountPath: /tls
+  readOnly: true
+{{- if .Values.bridge.mTLS.enabled }}
+- name: mtls
+  mountPath: /mtls
+  readOnly: true
+{{- end }}
+{{- end -}}

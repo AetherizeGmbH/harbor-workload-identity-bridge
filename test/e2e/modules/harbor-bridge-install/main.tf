@@ -56,6 +56,17 @@ variable "match_images" {
   description = "kubelet matchImages glob patterns (full registry host:port form)."
 }
 
+variable "install_mode" {
+  type        = string
+  default     = "auto"
+  description = "plugin.install.mode (ADR-0021): auto | merge | patch | none. On kind, auto resolves to patch (no pre-wired kubelet flags)."
+
+  validation {
+    condition     = contains(["auto", "merge", "patch", "none"], var.install_mode)
+    error_message = "install_mode must be one of auto, merge, patch, none."
+  }
+}
+
 variable "chart_path" {
   type        = string
   default     = "../../../../charts/harbor-bridge"
@@ -194,10 +205,12 @@ resource "helm_release" "bridge" {
       }
     }
     plugin = {
-      matchImages  = var.match_images
-      audience     = var.audience
-      patchKubelet = true
-      image        = var.plugin_image
+      matchImages = var.match_images
+      audience    = var.audience
+      install = {
+        mode = var.install_mode
+      }
+      image = var.plugin_image
     }
     bridge = {
       replicas  = var.bridge_replicas

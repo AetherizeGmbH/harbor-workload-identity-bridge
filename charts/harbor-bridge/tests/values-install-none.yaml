@@ -1,5 +1,6 @@
-# Minimal complete values for golden-file render testing. All required
-# values are set; defaults handle everything else.
+# values-complete plus plugin.install.mode=none — the least-privilege
+# install path (no hostPID, no privileged container, no host-root
+# mount). Golden-rendered to pin exactly that privilege drop.
 clusterName: prod-eu-west
 
 harbor:
@@ -14,6 +15,8 @@ plugin:
     - "harbor.example.com"
     - "*.harbor.example.com"
   audience: harbor-bridge-prod-eu-west
+  install:
+    mode: none
 
 tls:
   enabled: true

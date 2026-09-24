@@ -82,12 +82,14 @@ data:
       - name: harbor-bridge-plugin
         apiVersion: credentialprovider.kubelet.k8s.io/v1
         matchImages:
-          - "harbor.example.com/*"
+          - "harbor.example.com"
         defaultCacheDuration: "1h"
         env:
           - name: HARBOR_BRIDGE_ENDPOINT
-            # Plugin runs on the node; reach the bridge via the
-            # NodePort on the node's own loopback. ADR-0008.
+            # Plugin runs on the node; default reaches the bridge via
+            # the NodePort on the node's own loopback (ADR-0008),
+            # overridable through plugin.bridgeEndpoint. A literal
+            # $(NODE_IP) is substituted by the installer.
             value: "https://127.0.0.1:31443"
           - name: HARBOR_BRIDGE_CA_BUNDLE
             value: "/etc/kubernetes/credential-provider-config/harbor-bridge-ca.crt"
@@ -117,6 +119,7 @@ rules:
   - apiGroups: [""]
     verbs:     ["request-serviceaccounts-token-audience"]
     resources: ["harbor-bridge-prod-eu-west"]
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -142,6 +145,7 @@ rules:
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/finalizers]
     verbs: [update]
+
 ---
 # Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -184,6 +188,7 @@ subjects:
   - kind: ServiceAccount
     name: harbor-bridge
     namespace: harbor-bridge-system
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -212,6 +217,7 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -328,23 +334,25 @@ spec:
         app.kubernetes.io/instance: harbor-bridge
         app.kubernetes.io/component: plugin
       annotations:
-        # Force re-roll on config or CA rotation so the on-disk copies
-        # are refreshed across the fleet.
-        plugin.harbor.aetherize.io/config-checksum: b8d8f1c13d397bf55885c882859035191fa89cc8a7afb541f37cf1d4e2026f96
+        # Re-roll when the rendered provider config changes (the installer
+        # then converges kubelet) or when the TLS wiring changes (which
+        # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
+        # container copies rotated files in place (ADR-0021).
+        plugin.harbor.aetherize.io/config-checksum: edaafae2b1ed7e731ca626f795892d410d7c85523b05d9fadf60f73a68f88d3f
         plugin.harbor.aetherize.io/tls-checksum: b84f1c25e5f65271fd9a4d3d3abf7821fc2b628c31b267eb978e29c1aff84e00
     spec:
       serviceAccountName: harbor-bridge-plugin
+      # The installer never talks to the Kubernetes API.
+      automountServiceAccountToken: false
       hostNetwork: false
-      # Required so the install container's `nsenter -t 1 ...` can
-      # reach the host's PID namespace to patch /etc/default/kubelet
-      # and signal kubelet.service. ECR / GCR / ACR sidestep this by
-      # baking everything into the cloud node image; for self-managed
-      # clusters where the operator does not control the node image
-      # (kind, kubeadm, k3s), this is the install handoff.
+      # Required so the installer can read kubelet's command line from
+      # /proc (auto/merge discovery) and `nsenter -t 1 ...` into the
+      # host's namespaces for the kubelet restart. none mode does
+      # neither and drops this.
       hostPID: true
       priorityClassName: system-node-critical
       securityContext:
-        runAsNonRoot: false  # need root to write into /etc/kubernetes
+        runAsNonRoot: false  # need root to write onto the host
         runAsUser: 0
       tolerations:
         - operator: Exists
@@ -352,66 +360,77 @@ spec:
         - name: install
           image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.4.0
           imagePullPolicy: IfNotPresent
-          command: [/bin/sh, -c]
-          args:
-            - |
-              set -eu
-              echo "installing plugin binary → ${HOST_BIN_DIR}"
-              mkdir -p "${HOST_BIN_DIR}"
-              cp -f /plugin/harbor-bridge-plugin "${HOST_BIN_DIR}/harbor-bridge-plugin"
-              chmod 0755 "${HOST_BIN_DIR}/harbor-bridge-plugin"
-
-              echo "installing kubelet credential-provider-config → ${HOST_CONFIG_DIR}"
-              mkdir -p "${HOST_CONFIG_DIR}"
-              cp -f /config/credential-provider-config.yaml "${HOST_CONFIG_DIR}/credential-provider-config.yaml"
-              chmod 0644 "${HOST_CONFIG_DIR}/credential-provider-config.yaml"
-
-              echo "installing bridge CA → ${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
-              cp -f /tls/ca.crt "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
-              chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-ca.crt"
-
-              echo "installing mTLS client cert → ${HOST_CONFIG_DIR}/harbor-bridge-client.{crt,key}"
-              cp -f /mtls/tls.crt "${HOST_CONFIG_DIR}/harbor-bridge-client.crt"
-              cp -f /mtls/tls.key "${HOST_CONFIG_DIR}/harbor-bridge-client.key"
-              chmod 0644 "${HOST_CONFIG_DIR}/harbor-bridge-client.crt"
-              chmod 0600 "${HOST_CONFIG_DIR}/harbor-bridge-client.key"
-
-              # Kubelet only reads --image-credential-provider-* at
-              # startup (no hot-reload — DynamicKubeletConfig was
-              # removed in 1.26), AND it fails its boot-time check if
-              # either path doesn't exist. So we add the flags AFTER
-              # the files are in place, then restart kubelet. nsenter
-              # runs the patch + restart in the host's namespaces.
-              # Idempotency marker: the bin-dir flag already present
-              # in /etc/default/kubelet. Skips on every reschedule
-              # after the first install so kubelet doesn't churn.
-              echo "checking kubelet credential-provider wiring"
-              nsenter -t 1 -m -u -i -n -p -- env \
-                NODE_BIN_DIR="${HOST_BIN_DIR#/host}" \
-                NODE_CONFIG_FILE="${HOST_CONFIG_DIR#/host}/credential-provider-config.yaml" \
-                sh -c '
-                  set -eu
-                  if grep -q image-credential-provider-bin-dir /etc/default/kubelet 2>/dev/null; then
-                    echo "kubelet already wired for credential providers; not restarting"
-                    exit 0
-                  fi
-                  echo "writing /etc/default/kubelet and restarting kubelet.service"
-                  mkdir -p /etc/default
-                  printf "KUBELET_EXTRA_ARGS=\"--image-credential-provider-bin-dir=%s --image-credential-provider-config=%s\"\n" \
-                    "${NODE_BIN_DIR}" "${NODE_CONFIG_FILE}" > /etc/default/kubelet
-                  systemctl daemon-reload
-                  systemctl restart kubelet
-                '
-
-              echo "install complete"
+          command: [/installer/harbor-bridge-installer]
           env:
+            - name: INSTALL_MODE
+              value: "auto"
+            - name: HOST_ROOT
+              value: /host
             - name: HOST_BIN_DIR
-              value: /host/etc/kubernetes/credential-provider
+              value: "/etc/kubernetes/credential-provider"
             - name: HOST_CONFIG_DIR
-              value: /host/etc/kubernetes/credential-provider-config
+              value: "/etc/kubernetes/credential-provider-config"
+            - name: MTLS_ENABLED
+              value: "true"
+            - name: KUBELET_UNIT
+              value: "kubelet"
+            - name: STATE_DIR
+              value: "/var/lib/harbor-bridge"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           volumeMounts:
-            - name: host-bin
-              mountPath: /host/etc/kubernetes/credential-provider
+            - name: host-root
+              mountPath: /host
+            - name: kubelet-config
+              mountPath: /config
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: mtls
+              mountPath: /mtls
+              readOnly: true
+          securityContext:
+            readOnlyRootFilesystem: true
+            # nsenter into PID 1 (kubelet restart) requires full
+            # privileges; the sync container below does not get them.
+            privileged: true
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      containers:
+        - name: sync
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.4.0
+          imagePullPolicy: IfNotPresent
+          command: [/installer/harbor-bridge-installer, --sync]
+          env:
+            - name: INSTALL_MODE
+              value: "auto"
+            - name: HOST_ROOT
+              value: /host
+            - name: HOST_BIN_DIR
+              value: "/etc/kubernetes/credential-provider"
+            - name: HOST_CONFIG_DIR
+              value: "/etc/kubernetes/credential-provider-config"
+            - name: MTLS_ENABLED
+              value: "true"
+            - name: KUBELET_UNIT
+              value: "kubelet"
+            - name: STATE_DIR
+              value: "/var/lib/harbor-bridge"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            # Only the directory it writes: a compromised sync container
+            # must not be a host-root compromise (audit H6).
             - name: host-config
               mountPath: /host/etc/kubernetes/credential-provider-config
             - name: kubelet-config
@@ -424,10 +443,14 @@ spec:
               mountPath: /mtls
               readOnly: true
           securityContext:
-            # The install container must write into /etc/kubernetes on
-            # the host; that requires privileges the main container
-            # doesn't need.
-            privileged: true
+            # Copies CA/mTLS files as root into a root-owned host dir —
+            # no capabilities, no nsenter, no /proc, never privileged.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             limits:
               cpu: 100m
@@ -435,30 +458,11 @@ spec:
             requests:
               cpu: 10m
               memory: 16Mi
-      containers:
-        - name: pause
-          # Keep the DaemonSet "running" after install so `kubectl get
-          # ds` shows healthy and `kubectl logs` on this pod surfaces
-          # the install output.
-          image: registry.k8s.io/pause:3.10
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-          resources:
-            requests:
-              cpu: 1m
-              memory: 4Mi
-            limits:
-              cpu: 10m
-              memory: 16Mi
       volumes:
-        - name: host-bin
+        - name: host-root
           hostPath:
-            path: /etc/kubernetes/credential-provider
-            type: DirectoryOrCreate
+            path: /
+            type: Directory
         - name: host-config
           hostPath:
             path: /etc/kubernetes/credential-provider-config
@@ -478,6 +482,7 @@ spec:
           secret:
             secretName: harbor-bridge-plugin-mtls-client
             defaultMode: 0400
+
 
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-deployment.yaml
@@ -698,6 +703,7 @@ spec:
     name: harbor-bridge-ca
     kind: ClusterIssuer
     group: cert-manager.io
+
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-certificate.yaml
 apiVersion: cert-manager.io/v1

@@ -10,7 +10,7 @@ harbor:
 
 plugin:
   matchImages:
-    - "harbor.example.com/*"
+    - "harbor.example.com"
   audience: harbor-bridge-prod-eu-west
 
 tls:
