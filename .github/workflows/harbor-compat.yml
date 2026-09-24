@@ -150,6 +150,10 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
           token: ${{ steps.app-token.outputs.token }}
+          # main requires signed commits: with an App token the action
+          # creates the commit through the GitHub API, which signs it as
+          # the App. Without this the table PR can never be merged.
+          sign-commits: true
           commit-message: "docs: refresh Harbor compatibility matrix from e2e runs"
           title: "docs: refresh Harbor compatibility matrix"
           body: >-
