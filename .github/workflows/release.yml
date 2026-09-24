@@ -61,7 +61,7 @@ jobs:
       - uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
         id: semrel
         with:
-          semantic_version: 24
+          semantic_version: 25
           # Exact pins. Floating these broke the release on 2026-09-22:
           # conventional-changelog-conventionalcommits 10.4.0 (a MINOR
           # bump) started requiring conventional-changelog-writer@9, but
