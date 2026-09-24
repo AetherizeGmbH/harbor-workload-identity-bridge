@@ -40,7 +40,7 @@ jobs:
         # interpolations within run-block `variables` heredocs. 1.8.5
         # rejected them with "Function calls not allowed". Pinned to
         # match what brew installs locally.
-        with: { tofu_version: 1.12.0 }
+        with: { tofu_version: v1.12.6 }
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.3.0 }
       # No separate docker build step: the tofu test harness's
