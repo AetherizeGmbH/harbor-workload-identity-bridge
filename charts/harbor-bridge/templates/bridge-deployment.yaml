@@ -119,6 +119,12 @@ spec:
               value: {{ .Values.bridge.oidcTokenFile | quote }}
             - name: BRIDGE_HARBOR_URL
               value: {{ .Values.harbor.url | quote }}
+            - name: BRIDGE_HARBOR_ALLOW_INSECURE_HTTP
+              value: {{ .Values.harbor.allowInsecureHTTP | quote }}
+            {{- if .Values.harbor.caSecret.name }}
+            - name: BRIDGE_HARBOR_CA_FILE
+              value: /etc/bridge/harbor-ca/ca.crt
+            {{- end }}
             - name: BRIDGE_HARBOR_ADMIN_DIR
               value: /etc/bridge/harbor-admin
             - name: BRIDGE_HARBOR_ROBOT_PREFIX
@@ -157,6 +163,11 @@ spec:
             - name: tls
               mountPath: /etc/bridge/tls
               readOnly: true
+            {{- if .Values.harbor.caSecret.name }}
+            - name: harbor-ca
+              mountPath: /etc/bridge/harbor-ca
+              readOnly: true
+            {{- end }}
           # Ready = the credential listener is bound (it binds only after
           # the informer caches synced) — so every replica the Service
           # routes to can actually serve.
@@ -191,6 +202,17 @@ spec:
                 path: username
               - key: {{ .Values.harbor.adminCredsSecret.keys.password }}
                 path: password
+        {{- with .Values.harbor.caSecret }}
+        {{- if .name }}
+        - name: harbor-ca
+          secret:
+            secretName: {{ .name }}
+            defaultMode: 0444
+            items:
+              - key: {{ .key }}
+                path: ca.crt
+        {{- end }}
+        {{- end }}
         - name: tls
           secret:
             secretName: {{ include "harbor-bridge.tlsSecretName" . }}

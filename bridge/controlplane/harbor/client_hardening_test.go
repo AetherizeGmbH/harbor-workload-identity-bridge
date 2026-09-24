@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +153,26 @@ func TestDefaultTransport_HasTimeoutsAndTLSFloor(t *testing.T) {
 	}
 	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion < 0x0303 {
 		t.Errorf("TLS floor not 1.2: %+v", tr.TLSClientConfig)
+	}
+}
+
+func TestNewTransport_TrustsOnlyTheGivenCA(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr, err := NewTransport(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("server signed by the given CA refused: %v", err)
+	}
+	_ = resp.Body.Close()
+	if _, err := NewTransport(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing CA file accepted")
 	}
 }

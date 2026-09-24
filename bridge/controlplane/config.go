@@ -33,6 +33,8 @@ const (
 	EnvHarborURL            = "BRIDGE_HARBOR_URL"
 	EnvHarborAdminDir       = "BRIDGE_HARBOR_ADMIN_DIR"
 	EnvHarborRobotPrefix    = "BRIDGE_HARBOR_ROBOT_PREFIX"
+	EnvHarborCAFile         = "BRIDGE_HARBOR_CA_FILE"
+	EnvHarborAllowHTTP      = "BRIDGE_HARBOR_ALLOW_INSECURE_HTTP"
 	EnvForceLocalValidation = "BRIDGE_FORCE_LOCAL_VALIDATION"
 	EnvLogLevel             = "BRIDGE_LOG_LEVEL"
 	EnvAudience             = "BRIDGE_AUDIENCE"
@@ -140,6 +142,16 @@ type Config struct {
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel string
 
+	// HarborCAFile, when set, is the only trust root for Harbor's TLS
+	// certificate (a private CA).
+	HarborCAFile string
+
+	// HarborAllowHTTP permits an http:// HarborURL. Over plain HTTP the
+	// admin credentials travel on every call and robot passwords come
+	// back in responses, so it is an explicit opt-in (e.g. an in-cluster
+	// Harbor reached over the pod network in a test cluster).
+	HarborAllowHTTP bool
+
 	// Audience is the only token audience this bridge serves (ADR-0026):
 	// the audience kubelet requests for the plugin (chart:
 	// plugin.audience). A HarborAccess naming another audience is not
@@ -233,11 +245,15 @@ func LoadFromEnv() (*Config, error) {
 		cfg.OIDCTokenFile = raw
 	}
 
+	cfg.HarborAllowHTTP = envBoolOr(EnvHarborAllowHTTP, false)
 	if v, err := requireURL(os.Getenv(EnvHarborURL), EnvHarborURL); err != nil {
 		errs = append(errs, err)
+	} else if v.Scheme == "http" && !cfg.HarborAllowHTTP {
+		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, v.String(), EnvHarborCAFile, EnvHarborAllowHTTP))
 	} else {
 		cfg.HarborURL = v
 	}
+	cfg.HarborCAFile = strings.TrimSpace(os.Getenv(EnvHarborCAFile))
 
 	cfg.HarborAdminDir = strings.TrimSpace(os.Getenv(EnvHarborAdminDir))
 	if cfg.HarborAdminDir == "" {
@@ -327,6 +343,10 @@ func (c *Config) Sanitized() map[string]string {
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
 		EnvLogLevel:             c.LogLevel,
 		EnvAudience:             c.Audience,
+		EnvHarborAllowHTTP:      strconv.FormatBool(c.HarborAllowHTTP),
+	}
+	if c.HarborCAFile != "" {
+		out[EnvHarborCAFile] = c.HarborCAFile
 	}
 	if c.selective() {
 		out[EnvHarborAccessSelector] = c.HarborAccessSelector.String()
@@ -376,4 +396,14 @@ func readSecretFile(path string) (string, error) {
 		return "", fmt.Errorf("%s is empty", path)
 	}
 	return v, nil
+}
+
+// envBoolOr parses a boolean environment variable; unset or unparsable
+// values return def.
+func envBoolOr(key string, def bool) bool {
+	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
+	if err != nil {
+		return def
+	}
+	return v
 }

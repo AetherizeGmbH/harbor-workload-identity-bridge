@@ -102,10 +102,10 @@ func (r *Reconciler) secretToHarborAccess(_ context.Context, obj client.Object) 
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}}
 }
 
-// +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses/status,verbs=update;patch
 // +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 
 // Reconcile is the entry point controller-runtime calls per HarborAccess event.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -208,6 +208,17 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
 			"robot-password Secret %q is already owned by a different HarborAccess (naming collision); refusing to overwrite",
 			robotsecret.Name(ha.Namespace, ha.Name)))
+	}
+	// A Secret at that name without the bridge's labels is adopted only
+	// when it holds this robot's credentials (a Secret from an older
+	// bridge). Anything else belongs to someone else: overwriting it would
+	// destroy it, and the data plane would otherwise serve it.
+	if secret != nil && !robotsecret.IsManaged(secret) {
+		if user, _, err := robotsecret.Credentials(secret); err != nil || user != r.Config.HarborRobotPrefix+robotName {
+			return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+				"Secret %q in %s is not managed by the bridge and does not hold this robot's credentials; refusing to adopt it. Rename or delete it",
+				robotsecret.Name(ha.Namespace, ha.Name), r.Config.Namespace))
+		}
 	}
 
 	desiredDescription := RobotDescription(cluster, ha.Namespace, ha.Name)

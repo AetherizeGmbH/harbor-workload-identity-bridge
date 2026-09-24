@@ -1378,3 +1378,32 @@ func TestReconcile_RejectsWildcardProject(t *testing.T) {
 	}
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
 }
+
+// A Secret at the robot Secret's name that the bridge did not write, and
+// that does not hold this robot's credentials, is someone else's: never
+// overwritten, never adopted.
+func TestReconcile_RefusesForeignUnmanagedSecret(t *testing.T) {
+	ha := newHarborAccess()
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: robotsecret.Name(ha.Namespace, ha.Name)},
+		Data:       map[string][]byte{"username": []byte("someone-else"), "password": []byte("theirs")},
+	}
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha, foreign)
+	r.Config.HarborRobotPrefix = "robot$"
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	got := &corev1.Secret{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: foreign.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Data["password"]) != "theirs" {
+		t.Fatal("foreign Secret overwritten")
+	}
+	status := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, status); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, status, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
+}
