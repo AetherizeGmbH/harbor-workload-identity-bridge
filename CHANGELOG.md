@@ -1,3 +1,13 @@
+## [0.9.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.8.0...v0.9.0) (2026-09-24)
+
+### Features
+
+* **chart:** optional plugin namespace with the CA delivered by trust-manager ([#110](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/110)) ([9dd46cf](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/9dd46cf1f3b29af3ae7f45a67c7ef3388e5282a3))
+
+### Bug Fixes
+
+* **chart:** pin images by digest, and correct stale security guidance ([#113](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/113)) ([3bce496](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/3bce4964bbe808d06cbded6f48f2ff3dd1bd3f23))
+
 ## [0.8.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.7.0...v0.8.0) (2026-09-24)
 
 ### ⚠ BREAKING CHANGES
