@@ -1,6 +1,12 @@
 ## Chart value migrations
 
-### Unreleased: Harbor over https, least-privilege RBAC
+### Unreleased: optional plugin namespace (ADR-0027)
+
+| Change | What to do |
+| --- | --- |
+| New `plugin.namespace`, `plugin.createNamespace`, `plugin.caBundle.source` | Optional. To run the privileged DaemonSet in its own namespace, install trust-manager, set `plugin.namespace` and point `plugin.caBundle.source` at the CA that signs the bridge certificate in trust-manager's namespace. Then label the release namespace `pod-security.kubernetes.io/enforce=restricted`. With mTLS, `bridge.mTLS.clientIssuerRef.kind` must be `ClusterIssuer`. Helm recreates the plugin objects in the new namespace; kubelet is not restarted when the rendered provider config stays the same. |
+
+### 0.8.0: Harbor over https, least-privilege RBAC
 
 | Change | What to do |
 | --- | --- |
@@ -8,7 +14,7 @@
 | The bridge serves and adopts only Secrets it labelled; a Secret at a robot Secret's name that the bridge did not write and that holds another username is reported as `RobotConflict` | Nothing, unless such a Secret exists: rename or delete it. Secrets written by older bridges are labelled on their first reconcile. |
 | Bridge RBAC lost unused verbs (`update` on harboraccesses, `patch` on Secrets, all but get/create/update on Leases) | Nothing. |
 
-### Unreleased: audit log and rate limit
+### 0.7.0: audit log and rate limit
 
 | Change | What to do |
 | --- | --- |

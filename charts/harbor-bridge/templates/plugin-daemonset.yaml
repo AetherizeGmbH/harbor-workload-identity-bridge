@@ -35,7 +35,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ include "harbor-bridge.plugin.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "harbor-bridge.plugin.namespace" . }}
   labels:
     {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
 spec:
@@ -156,12 +156,23 @@ spec:
             name: {{ include "harbor-bridge.plugin.fullname" . }}
             defaultMode: 0644
         - name: tls
+          {{- if include "harbor-bridge.plugin.split" . }}
+          # ADR-0027: the bridge's TLS Secret is in another namespace;
+          # trust-manager copies its CA here.
+          configMap:
+            name: {{ include "harbor-bridge.plugin.caBundleName" . }}
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+          {{- else }}
           secret:
             secretName: {{ include "harbor-bridge.tlsSecretName" . }}
             defaultMode: 0400
             items:
               - key: ca.crt
                 path: ca.crt
+          {{- end }}
         {{- if .Values.bridge.mTLS.enabled }}
         - name: mtls
           secret:

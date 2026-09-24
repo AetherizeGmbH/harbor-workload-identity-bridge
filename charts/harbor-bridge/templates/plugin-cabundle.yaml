@@ -1,0 +1,31 @@
+{{- if and .Values.plugin.enabled (include "harbor-bridge.plugin.split" .) }}
+{{/*
+ADR-0027: trust-manager copies the CA that signs the bridge's serving
+certificate into the plugin namespace, so the bridge needs no access there.
+The source must live in trust-manager's trust namespace.
+*/}}
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: {{ include "harbor-bridge.plugin.caBundleName" . }}
+  labels:
+    {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
+spec:
+  sources:
+    {{- with .Values.plugin.caBundle.source.secret.name }}
+    - secret:
+        name: {{ . | quote }}
+        key: {{ $.Values.plugin.caBundle.source.secret.key | quote }}
+    {{- end }}
+    {{- with .Values.plugin.caBundle.source.configMap.name }}
+    - configMap:
+        name: {{ . | quote }}
+        key: {{ $.Values.plugin.caBundle.source.configMap.key | quote }}
+    {{- end }}
+  target:
+    configMap:
+      key: ca.crt
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.plugin.namespace | quote }}
+{{- end }}

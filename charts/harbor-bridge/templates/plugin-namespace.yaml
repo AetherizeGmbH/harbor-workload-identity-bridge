@@ -1,0 +1,15 @@
+{{- if and .Values.plugin.enabled (include "harbor-bridge.plugin.split" .) .Values.plugin.createNamespace }}
+{{/*
+ADR-0027: the privileged plugin DaemonSet gets a namespace of its own, so
+the bridge namespace can enforce Pod Security "restricted".
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.plugin.namespace }}
+  labels:
+    {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+{{- end }}

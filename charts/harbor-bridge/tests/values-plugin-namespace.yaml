@@ -1,0 +1,32 @@
+# ADR-0027: the plugin in its own namespace, with the bridge CA delivered by
+# trust-manager, and mTLS (client certificate issued in the plugin namespace).
+clusterName: prod-eu-west
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+
+plugin:
+  matchImages:
+    - "harbor.example.com"
+  audience: harbor-bridge-prod-eu-west
+  namespace: harbor-bridge-plugin
+  caBundle:
+    source:
+      secret:
+        name: harbor-bridge-ca
+        key: ca.crt
+
+tls:
+  enabled: true
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer
+
+bridge:
+  mTLS:
+    enabled: true
+    clientIssuerRef:
+      name: harbor-bridge-ca
+      kind: ClusterIssuer

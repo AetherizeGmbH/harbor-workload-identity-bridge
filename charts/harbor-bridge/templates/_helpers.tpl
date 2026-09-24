@@ -150,6 +150,23 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- fail (printf "bridge.instance %q (default: the release name) must be a DNS label of at most 50 characters; it names this bridge's HarborAccess finalizer (ADR-0026)." $instance) -}}
 {{- end -}}
 {{- end -}}
+{{- if include "harbor-bridge.plugin.split" . -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .Values.plugin.namespace) -}}
+{{- fail (printf "plugin.namespace %q must be a DNS label." .Values.plugin.namespace) -}}
+{{- end -}}
+{{- if .Values.plugin.enabled -}}
+{{- $src := .Values.plugin.caBundle.source -}}
+{{- $sources := 0 -}}
+{{- if $src.secret.name -}}{{- $sources = add1 $sources -}}{{- end -}}
+{{- if $src.configMap.name -}}{{- $sources = add1 $sources -}}{{- end -}}
+{{- if ne $sources 1 -}}
+{{- fail "plugin.namespace is set, so the plugin runs in its own namespace and needs the bridge CA through trust-manager: set exactly one of plugin.caBundle.source.secret.name or plugin.caBundle.source.configMap.name (a Secret/ConfigMap in trust-manager's trust namespace holding the CA that signs the bridge's serving certificate). ADR-0027." -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.bridge.mTLS.enabled (ne .Values.bridge.mTLS.clientIssuerRef.kind "ClusterIssuer") -}}
+{{- fail "bridge.mTLS.clientIssuerRef.kind must be ClusterIssuer when plugin.namespace is set: the plugin's client certificate is issued in the plugin namespace. ADR-0027." -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
@@ -252,6 +269,22 @@ trusts: chart-managed (cert-manager) or operator-provided.
 {{- else -}}
 {{- .Values.tls.existingSecret -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Plugin namespace (ADR-0027): plugin.namespace, or the release namespace.
+split is "true" when the plugin runs in a namespace of its own.
+*/}}
+{{- define "harbor-bridge.plugin.namespace" -}}
+{{- default .Release.Namespace .Values.plugin.namespace -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.split" -}}
+{{- if and .Values.plugin.namespace (ne .Values.plugin.namespace .Release.Namespace) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.caBundleName" -}}
+{{- printf "%s-ca" (include "harbor-bridge.plugin.fullname" .) -}}
 {{- end -}}
 
 {{- define "harbor-bridge.mTLSClientSecretName" -}}

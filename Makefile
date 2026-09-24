@@ -205,7 +205,7 @@ GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 # Each golden case is <values file suffix>:<golden file>. The single list
 # drives lint, golden diff, and golden update so they cannot drift; the
 # release config (.releaserc.json) commits every tests/golden/*.yaml.
-CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled
+CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace
 HELM_TEMPLATE = helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 --namespace harbor-bridge-system
 
 .PHONY: chart-lint

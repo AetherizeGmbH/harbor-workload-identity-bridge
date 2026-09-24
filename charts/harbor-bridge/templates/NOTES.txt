@@ -8,6 +8,10 @@
   Harbor URL   : {{ .Values.harbor.url }}
   Audience     : {{ .Values.plugin.audience }}
   Namespace    : {{ .Release.Namespace }}
+{{- if include "harbor-bridge.plugin.split" . }}
+  Plugin ns    : {{ .Values.plugin.namespace }} (privileged; CA via trust-manager Bundle {{ include "harbor-bridge.plugin.caBundleName" . }})
+                 Label {{ .Release.Namespace }} with pod-security.kubernetes.io/enforce=restricted.
+{{- end }}
   Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
 {{- if .Values.plugin.enabled }}
   Plugin image : {{ include "harbor-bridge.plugin.image" . }} (install mode: {{ .Values.plugin.install.mode }})
@@ -30,8 +34,8 @@ NEXT STEPS
 
   2. Verify the plugin landed on every node:
 
-       kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "harbor-bridge.plugin.fullname" . }}
-       kubectl -n {{ .Release.Namespace }} logs ds/{{ include "harbor-bridge.plugin.fullname" . }} -c install
+       kubectl -n {{ include "harbor-bridge.plugin.namespace" . }} rollout status ds/{{ include "harbor-bridge.plugin.fullname" . }}
+       kubectl -n {{ include "harbor-bridge.plugin.namespace" . }} logs ds/{{ include "harbor-bridge.plugin.fullname" . }} -c install
 {{- if eq .Values.plugin.install.mode "auto" }}
 
      install.mode=auto: on each node the installer inspects kubelet. If kubelet

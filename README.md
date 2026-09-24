@@ -111,6 +111,9 @@ For the workload:
   set `plugin.enabled=false` — see
   [docs/install-external-plugin.md](docs/install-external-plugin.md) and
   [docs/platforms.md](docs/platforms.md).
+  With trust-manager installed, `plugin.namespace` moves the privileged
+  DaemonSet into a namespace of its own, so the bridge namespace can
+  enforce Pod Security `restricted` (ADR-0027).
 
 When upstream Harbor lands #17520, you delete the HTTPS server and
 the plugin; the CRD and reconciler survive as a thin declarative

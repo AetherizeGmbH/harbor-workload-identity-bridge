@@ -58,7 +58,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ include "harbor-bridge.mTLSClientSecretName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "harbor-bridge.plugin.namespace" . }}
   labels:
     {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
 spec:

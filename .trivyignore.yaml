@@ -37,6 +37,7 @@ misconfigurations:
     paths:
       - "charts/harbor-bridge/tests/golden/default.yaml"
       - "charts/harbor-bridge/tests/golden/mtls.yaml"
+      - "charts/harbor-bridge/tests/golden/plugin-namespace.yaml"
 
   # The e2e seed image is throwaway test scaffolding built during
   # `make e2e` to prep Harbor; it is never shipped or run in production, so
