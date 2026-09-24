@@ -1,0 +1,24 @@
+{{- if .Values.metrics.enabled }}
+{{/*
+ClusterIP Service for /metrics. Separate from the NodePort Service on
+purpose: metrics are plain HTTP on the pod network only and are never
+exposed on the node ports.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harbor-bridge.bridge.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+    harbor.aetherize.io/service: metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "harbor-bridge.bridge.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

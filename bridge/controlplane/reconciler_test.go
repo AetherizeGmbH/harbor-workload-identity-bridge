@@ -26,6 +26,7 @@ import (
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
 // ----------------------------------------------------------------------------
@@ -119,8 +120,15 @@ type fixedClock struct{ t time.Time }
 func (f fixedClock) Now() time.Time { return f.t }
 
 // ----------------------------------------------------------------------------
-// mockHarbor — in-memory harbor.Client for reconciler tests.
+// mockHarbor — in-memory harbor.Client for reconciler tests. It mirrors the
+// real Harbor behaviours the reconciler depends on (verified against
+// goharbor/harbor src/server/v2.0/handler/robot.go and
+// src/controller/robot/controller.go): names stored without the "robot$"
+// prefix but reported with it, no secrets on read paths, 409 on a duplicate
+// name, and PUT rejected unless the on-wire name is echoed verbatim.
 // ----------------------------------------------------------------------------
+
+const mockRobotPrefix = "robot$"
 
 type mockHarbor struct {
 	mu     sync.Mutex
@@ -138,6 +146,10 @@ type mockHarbor struct {
 	errOnGetByName map[string]error
 	// errOnRefresh, if non-nil, is returned from RefreshSecret.
 	errOnRefresh error
+	// errOnUpdate, if non-nil, is returned from Update.
+	errOnUpdate error
+	// errOnList, if non-nil, is returned from List.
+	errOnList error
 	// hideFromGetByName, if non-empty, is the set of robot names
 	// GetByName must report as ErrRobotNotFound on the NEXT lookup
 	// only. The flag clears after that one miss so the recovery
@@ -154,6 +166,7 @@ type mockCreateCall struct {
 
 type mockUpdateCall struct {
 	ID          int64
+	WireName    string
 	Description string
 	Perms       []harbor.ProjectPermission
 }
@@ -167,7 +180,7 @@ func newMockHarbor() *mockHarbor {
 
 // preexisting adds a robot to the mock as if it already existed in Harbor
 // before this bridge ever ran. Returns the assigned ID.
-func (m *mockHarbor) preexisting(name, description string) int64 {
+func (m *mockHarbor) preexisting(name, description string, perms ...harbor.ProjectPermission) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id := m.nextID
@@ -175,18 +188,26 @@ func (m *mockHarbor) preexisting(name, description string) int64 {
 	m.robots[id] = &harbor.Robot{
 		ID:          id,
 		Name:        name,
+		WireName:    mockRobotPrefix + name,
 		Description: description,
+		ExpiresAt:   -1,
+		Permissions: perms,
 	}
 	return id
+}
+
+// readView is what Harbor returns on read paths: everything but the secret.
+func readView(r *harbor.Robot) harbor.Robot {
+	out := *r
+	out.Secret = ""
+	out.Permissions = append([]harbor.ProjectPermission(nil), r.Permissions...)
+	return out
 }
 
 func (m *mockHarbor) Create(_ context.Context, name, description string, perms []harbor.ProjectPermission) (*harbor.Robot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createCalls = append(m.createCalls, mockCreateCall{Name: name, Description: description, Perms: perms})
-	// Mirror real Harbor: a name collision returns 409, surfaced as
-	// ErrRobotAlreadyExists. The reconciler's 409 recovery path keys
-	// off this exact sentinel.
 	for _, r := range m.robots {
 		if r.Name == name {
 			return nil, harbor.ErrRobotAlreadyExists
@@ -197,11 +218,15 @@ func (m *mockHarbor) Create(_ context.Context, name, description string, perms [
 	r := &harbor.Robot{
 		ID:          id,
 		Name:        name,
+		WireName:    mockRobotPrefix + name,
 		Description: description,
+		ExpiresAt:   -1,
+		Permissions: append([]harbor.ProjectPermission(nil), perms...),
 		Secret:      fmt.Sprintf("created-secret-%d", id),
 	}
 	m.robots[id] = r
-	return &harbor.Robot{ID: r.ID, Name: r.Name, Description: r.Description, Secret: r.Secret}, nil
+	out := *r
+	return &out, nil
 }
 
 func (m *mockHarbor) Delete(_ context.Context, id int64) error {
@@ -216,22 +241,14 @@ func (m *mockHarbor) List(_ context.Context) ([]harbor.Robot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.listCalls++
+	if m.errOnList != nil {
+		return nil, m.errOnList
+	}
 	out := make([]harbor.Robot, 0, len(m.robots))
 	for _, r := range m.robots {
-		out = append(out, *r)
+		out = append(out, readView(r))
 	}
 	return out, nil
-}
-
-func (m *mockHarbor) GetByID(_ context.Context, id int64) (*harbor.Robot, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if r, ok := m.robots[id]; ok {
-		// Harbor never returns the secret on read paths — secrets are only
-		// exposed in the Create and RefreshSec response payloads.
-		return &harbor.Robot{ID: r.ID, Name: r.Name, Description: r.Description}, nil
-	}
-	return nil, harbor.ErrRobotNotFound
 }
 
 func (m *mockHarbor) GetByName(_ context.Context, name string) (*harbor.Robot, error) {
@@ -241,15 +258,13 @@ func (m *mockHarbor) GetByName(_ context.Context, name string) (*harbor.Robot, e
 		return nil, err
 	}
 	if m.hideFromGetByName[name] {
-		// One-shot: clears after the first miss so the recovery-path
-		// GetByName observes the robot normally.
 		delete(m.hideFromGetByName, name)
 		return nil, harbor.ErrRobotNotFound
 	}
 	for _, r := range m.robots {
 		if r.Name == name {
-			// Match real Harbor: no Secret on read paths.
-			return &harbor.Robot{ID: r.ID, Name: r.Name, Description: r.Description}, nil
+			v := readView(r)
+			return &v, nil
 		}
 	}
 	return nil, harbor.ErrRobotNotFound
@@ -270,13 +285,24 @@ func (m *mockHarbor) RefreshSecret(_ context.Context, id int64) (string, error) 
 	return r.Secret, nil
 }
 
-func (m *mockHarbor) UpdatePermissions(_ context.Context, id int64, description string, perms []harbor.ProjectPermission) error {
+func (m *mockHarbor) Update(_ context.Context, current *harbor.Robot, description string, perms []harbor.ProjectPermission) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.updateCalls = append(m.updateCalls, mockUpdateCall{ID: id, Description: description, Perms: perms})
-	if r, ok := m.robots[id]; ok {
-		r.Description = description
+	m.updateCalls = append(m.updateCalls, mockUpdateCall{ID: current.ID, WireName: current.WireName, Description: description, Perms: perms})
+	if m.errOnUpdate != nil {
+		return m.errOnUpdate
 	}
+	r, ok := m.robots[current.ID]
+	if !ok {
+		return fmt.Errorf("update robot %d: 404", current.ID)
+	}
+	if current.WireName != r.WireName {
+		return fmt.Errorf("update robot %d: 400 cannot update the level or name of robot", current.ID)
+	}
+	r.Description = description
+	r.Permissions = append([]harbor.ProjectPermission(nil), perms...)
+	r.Disabled = current.Disabled
+	r.ExpiresAt = -1
 	return nil
 }
 
@@ -290,7 +316,8 @@ func TestReconcile_HappyPath_CreatesRobotAndSecret(t *testing.T) {
 	clock := fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}
 	r := newReconciler(t, mh, clock, ha)
 
-	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+	res, err := r.Reconcile(context.Background(), reqFor(ha))
+	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 
@@ -308,8 +335,8 @@ func TestReconcile_HappyPath_CreatesRobotAndSecret(t *testing.T) {
 	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Robot == nil || got.Status.Robot.Name != expectedName {
-		t.Errorf("status.robot.name = %v, want %q", got.Status.Robot, expectedName)
+	if got.Status.Robot == nil || got.Status.Robot.Name != mockRobotPrefix+expectedName {
+		t.Errorf("status.robot.name = %v, want the on-wire name %q", got.Status.Robot, mockRobotPrefix+expectedName)
 	}
 	if got.Status.TrustPolicyEnforcedBy != harborv1alpha1.EnforcedByBridge {
 		t.Errorf("trustPolicyEnforcedBy = %q, want %q", got.Status.TrustPolicyEnforcedBy, harborv1alpha1.EnforcedByBridge)
@@ -321,35 +348,41 @@ func TestReconcile_HappyPath_CreatesRobotAndSecret(t *testing.T) {
 	// Secret created in bridge namespace, contains username + password.
 	secret := &corev1.Secret{}
 	if err := r.Get(context.Background(), client.ObjectKey{
-		Namespace: testNS, Name: SecretNamePrefix + testHANamespace + "." + testHAName,
+		Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName),
 	}, secret); err != nil {
 		t.Fatalf("password Secret missing: %v", err)
 	}
-	if string(secret.Data["username"]) != expectedName {
-		t.Errorf("Secret.username = %q, want %q", secret.Data["username"], expectedName)
+	// The username is the ON-WIRE name: it is what registry clients must
+	// present as Basic Auth user.
+	if string(secret.Data["username"]) != mockRobotPrefix+expectedName {
+		t.Errorf("Secret.username = %q, want %q", secret.Data["username"], mockRobotPrefix+expectedName)
 	}
 	if len(secret.Data["password"]) == 0 {
 		t.Errorf("Secret.password is empty")
 	}
+	if id, ok := robotsecret.RobotID(secret); !ok || id != mh.createCalls0ID() {
+		t.Errorf("robot-id annotation = %d %v", id, ok)
+	}
+	nb, ok := robotsecret.RotationNotBefore(secret)
+	if !ok || !nb.Equal(clock.t.Add(PasswordRotationInterval)) {
+		t.Errorf("rotation-not-before = %s %v, want %s", nb, ok, clock.t.Add(PasswordRotationInterval))
+	}
+	if ns, name, ok := robotsecret.Owner(secret); !ok || ns != testHANamespace || name != testHAName {
+		t.Errorf("Secret owner labels = %q/%q %v", ns, name, ok)
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > ResyncInterval {
+		t.Errorf("RequeueAfter = %s, want (0, %s]", res.RequeueAfter, ResyncInterval)
+	}
 }
 
-func TestReconcile_AddsFinalizerOnFirstReconcile(t *testing.T) {
+func TestReconcile_AddsFinalizerAndProvisionsInOnePass(t *testing.T) {
 	ha := newHarborAccess()
 	ha.Finalizers = nil // no finalizer yet
 	mh := newMockHarbor()
 	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
 
-	res, err := r.Reconcile(context.Background(), reqFor(ha))
-	if err != nil {
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
 		t.Fatal(err)
-	}
-	if res.RequeueAfter == 0 {
-		t.Errorf("expected RequeueAfter>0 after adding finalizer; got %+v", res)
-	}
-	// No Harbor calls on this pass: the reconciler requeues itself to
-	// pick up the real work on the next iteration.
-	if len(mh.createCalls) != 0 {
-		t.Errorf("Create called before finalizer was set: %+v", mh.createCalls)
 	}
 	got := &harborv1alpha1.HarborAccess{}
 	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
@@ -358,6 +391,12 @@ func TestReconcile_AddsFinalizerOnFirstReconcile(t *testing.T) {
 	if !containsFinalizer(got, FinalizerName) {
 		t.Errorf("finalizer not added: %v", got.Finalizers)
 	}
+	// The finalizer is persisted BEFORE the robot is created, so a robot
+	// can never exist without the finalizer that deletes it.
+	if len(mh.createCalls) != 1 {
+		t.Errorf("create calls = %d, want 1", len(mh.createCalls))
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionTrue, ReasonReconcileSucceeded)
 }
 
 func TestReconcile_IssuerMismatch(t *testing.T) {
@@ -399,7 +438,7 @@ func TestReconcile_AdoptionDiscipline_RefusesForeignDescription(t *testing.T) {
 		t.Errorf("Delete called on a foreign robot: %+v", mh.deleteCalls)
 	}
 	if len(mh.updateCalls) != 0 {
-		t.Errorf("UpdatePermissions called on a foreign robot: %+v", mh.updateCalls)
+		t.Errorf("Update called on a foreign robot: %+v", mh.updateCalls)
 	}
 	if len(mh.refreshCalls) != 0 {
 		t.Errorf("RefreshSecret called on a foreign robot: %+v", mh.refreshCalls)
@@ -425,13 +464,8 @@ func TestReconcile_SecretNameCollision_RefusesToOverwrite(t *testing.T) {
 	foreign := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNS,
-			Name:      SecretNamePrefix + testHANamespace + "." + testHAName,
-			Labels: map[string]string{
-				LabelManagedBy:             LabelManagedByValue,
-				LabelCluster:               testCluster,
-				LabelHarborAccessNamespace: "other-ns",
-				LabelHarborAccessName:      "other-ha",
-			},
+			Name:      robotsecret.Name(testHANamespace, testHAName),
+			Labels:    robotsecret.Labels(testCluster, "other-ns", "other-ha"),
 		},
 		Data: map[string][]byte{"username": []byte("robot$other"), "password": []byte("foreign-pw")},
 	}
@@ -486,31 +520,6 @@ func TestReconcile_RobotNameCollision_RefusesForeignHarborAccess(t *testing.T) {
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
 }
 
-// TestSecretNameFor_DotDelimiterIsInjective pins ADR-0018 for the robot-Secret
-// name: HarborAccess (namespace, name) pairs that collide under a '-' join must
-// not collide under the '.' join. The HA namespace is a dot-free RFC 1123
-// label, so the first dot is an unambiguous boundary.
-func TestSecretNameFor_DotDelimiterIsInjective(t *testing.T) {
-	r := &Reconciler{}
-	pairs := []struct{ ns, name string }{
-		{"a-b", "c"}, {"a", "b-c"},
-		{"team-a", "prod"}, {"team", "a-prod"},
-		{"x-y-z", "w"}, {"x", "y-z-w"},
-	}
-	seen := map[string]string{}
-	for _, p := range pairs {
-		ha := &harborv1alpha1.HarborAccess{
-			ObjectMeta: metav1.ObjectMeta{Namespace: p.ns, Name: p.name},
-		}
-		got := r.secretNameFor(ha)
-		key := p.ns + "/" + p.name
-		if prev, ok := seen[got]; ok && prev != key {
-			t.Errorf("Secret-name collision: (%s) and (%s) both map to %q", prev, key, got)
-		}
-		seen[got] = key
-	}
-}
-
 func TestReconcile_DefenseInDepth_RejectsForeignDescriptionRobot(t *testing.T) {
 	// ADR-0018's dot delimiter removes the ADR-0009 hyphen-prefix false
 	// positive, but the description-tag check (RobotBelongsToCluster) is still
@@ -552,8 +561,13 @@ func TestReconcile_DefenseInDepth_RejectsForeignDescriptionRobot(t *testing.T) {
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
 }
 
-func TestReconcile_UpdatesPermissionsOnGenerationChange(t *testing.T) {
-	// Setup: reconcile once, then bump generation and reconcile again.
+// TestReconcile_PermissionChange_UpdatesInPlaceWithoutRotation pins two
+// fixes. (1) The update actually reaches Harbor with the on-wire name
+// (audit C1: Harbor 400s any other name, so revocations never applied).
+// (2) A spec change keeps the password: rotating it would invalidate the
+// credentials every kubelet still has cached and fail pulls for up to the
+// cache duration.
+func TestReconcile_PermissionChange_UpdatesInPlaceWithoutRotation(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()
 	clock := fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}
@@ -563,17 +577,15 @@ func TestReconcile_UpdatesPermissionsOnGenerationChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(mh.updateCalls) != 0 {
-		t.Errorf("UpdatePermissions called on first reconcile: %+v", mh.updateCalls)
+		t.Errorf("Update called on first reconcile: %+v", mh.updateCalls)
 	}
+	pwBefore := secretPassword(t, r)
 
-	// Now bump the spec's generation (simulating a permissions edit).
 	current := &harborv1alpha1.HarborAccess{}
 	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, current); err != nil {
 		t.Fatal(err)
 	}
-	current.Spec.Permissions = append(current.Spec.Permissions, harborv1alpha1.ProjectPermission{
-		Project: "shared", Action: "pull,push",
-	})
+	current.Spec.Permissions = []harborv1alpha1.ProjectPermission{{Project: "shared", Action: "pull,push"}}
 	current.Generation = 2
 	if err := r.Update(context.Background(), current); err != nil {
 		t.Fatal(err)
@@ -583,56 +595,331 @@ func TestReconcile_UpdatesPermissionsOnGenerationChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(mh.updateCalls) != 1 {
-		t.Errorf("UpdatePermissions calls after generation bump: got %d, want 1", len(mh.updateCalls))
+		t.Fatalf("Update calls after spec change: got %d, want 1", len(mh.updateCalls))
 	}
-	if len(mh.refreshCalls) != 1 {
-		t.Errorf("RefreshSecret should also fire on generation change; got %d", len(mh.refreshCalls))
+	if mh.updateCalls[0].WireName != mockRobotPrefix+"bridge-prod-eu-west.flux-system.source-controller" {
+		t.Errorf("Update sent name %q, want the on-wire name", mh.updateCalls[0].WireName)
 	}
-}
-
-func TestReconcile_RotatesPasswordOnStaleAge(t *testing.T) {
-	// First reconcile establishes LastRotated.
-	ha := newHarborAccess()
-	mh := newMockHarbor()
-	t0 := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	clock := fixedClock{t0}
-	r := newReconciler(t, mh, clock, ha)
-
-	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
-		t.Fatal(err)
+	stored := mh.robots[mh.createCalls0ID()]
+	if !harbor.PermissionsMatch(stored, []harbor.ProjectPermission{{Project: "shared", Action: "pull,push"}}) {
+		t.Errorf("Harbor robot permissions = %+v, want only shared:pull,push (production:pull revoked)", stored.Permissions)
 	}
 	if len(mh.refreshCalls) != 0 {
-		t.Errorf("RefreshSecret called on initial create: %+v", mh.refreshCalls)
+		t.Errorf("RefreshSecret fired on a spec change (%d calls); kubelet-cached passwords would break", len(mh.refreshCalls))
 	}
-
-	// Re-reconcile a few minutes later — no rotation expected.
-	r.Clock = fixedClock{t0.Add(10 * time.Minute)}
-	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
-		t.Fatal(err)
+	if got := secretPassword(t, r); got != pwBefore {
+		t.Errorf("password changed on a spec change")
 	}
-	if len(mh.refreshCalls) != 0 {
-		t.Errorf("RefreshSecret fired too early: %+v", mh.refreshCalls)
-	}
-
-	// Skip past the rotation interval — rotation expected.
-	r.Clock = fixedClock{t0.Add(PasswordRotationInterval + time.Minute)}
-	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
-		t.Fatal(err)
-	}
-	if len(mh.refreshCalls) != 1 {
-		t.Errorf("RefreshSecret calls after stale age: got %d, want 1", len(mh.refreshCalls))
-	}
-
-	// Status.LastRotated should advance.
 	got := &harborv1alpha1.HarborAccess{}
 	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Robot == nil || got.Status.Robot.LastRotated == nil {
-		t.Fatal("LastRotated nil after rotation")
+	if got.Status.ObservedGeneration != 2 {
+		t.Errorf("observedGeneration = %d, want 2", got.Status.ObservedGeneration)
 	}
-	if !got.Status.Robot.LastRotated.Time.Equal(t0.Add(PasswordRotationInterval + time.Minute)) {
-		t.Errorf("LastRotated = %v, want %v", got.Status.Robot.LastRotated.Time, t0.Add(PasswordRotationInterval+time.Minute))
+}
+
+// TestReconcile_FailedUpdate_NeverReportsReadyEarly is the regression test
+// for the silent half of audit C1: the old reconciler advanced
+// status.observedGeneration on the ERROR path, so the retry after a failed
+// permission update saw "generation unchanged", skipped the update, and
+// reported Ready=True with the old grants still live in Harbor.
+func TestReconcile_FailedUpdate_NeverReportsReadyEarly(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	current := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.Permissions = []harborv1alpha1.ProjectPermission{{Project: "other", Action: "pull"}}
+	current.Generation = 2
+	if err := r.Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+
+	mh.errOnUpdate = fmt.Errorf("simulated harbor 500")
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(context.Background(), reqFor(ha)); err == nil {
+			t.Fatalf("pass %d: expected the update error to be returned for retry", i)
+		}
+		got := &harborv1alpha1.HarborAccess{}
+		if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+			t.Fatal(err)
+		}
+		assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonHarborError)
+		if got.Status.ObservedGeneration == 2 {
+			t.Fatalf("pass %d: observedGeneration advanced to 2 while the update is failing", i)
+		}
+	}
+
+	mh.errOnUpdate = nil
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if !harbor.PermissionsMatch(mh.robots[mh.createCalls0ID()], []harbor.ProjectPermission{{Project: "other", Action: "pull"}}) {
+		t.Errorf("permissions not applied after Harbor recovered: %+v", mh.robots[mh.createCalls0ID()].Permissions)
+	}
+}
+
+// TestReconcile_RepairsDriftMadeInHarbor: the reconcile is level-triggered,
+// so a grant widened in the Harbor UI is reverted on the next pass even
+// though the CR never changed.
+func TestReconcile_RepairsDriftMadeInHarbor(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	id := mh.createCalls0ID()
+	mh.robots[id].Permissions = []harbor.ProjectPermission{{Project: "production", Action: "pull,push"}, {Project: "secret", Action: "pull"}}
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if !harbor.PermissionsMatch(mh.robots[id], []harbor.ProjectPermission{{Project: "production", Action: "pull"}}) {
+		t.Errorf("drift not repaired: %+v", mh.robots[id].Permissions)
+	}
+	if len(mh.refreshCalls) != 0 {
+		t.Errorf("drift repair rotated the password")
+	}
+}
+
+// TestReconcile_DisabledRobot_ReportsNotReadyAndStaysDisabled: an admin's
+// disable in Harbor is respected (never silently re-enabled) and surfaced.
+func TestReconcile_DisabledRobot_ReportsNotReadyAndStaysDisabled(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	id := mh.createCalls0ID()
+	mh.robots[id].Disabled = true
+	mh.robots[id].Permissions = nil // drift too, so an Update is sent while disabled
+
+	res, err := r.Reconcile(context.Background(), reqFor(ha))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.updateCalls) != 1 {
+		t.Fatalf("Update calls = %d, want 1 (drift repair)", len(mh.updateCalls))
+	}
+	if !mh.robots[id].Disabled {
+		t.Error("the reconciler re-enabled a robot an administrator disabled")
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotDisabled)
+	if res.RequeueAfter == 0 {
+		t.Error("a disabled robot must be re-checked periodically (no CR event announces re-enabling)")
+	}
+}
+
+// TestReconcile_ServiceAccountChange_RevokesOldRobot is the regression test
+// for audit H2: pointing a HarborAccess at a different ServiceAccount must
+// revoke the previous identity's robot, whose password nodes may still
+// hold. Previously the old robot survived with a valid password forever.
+func TestReconcile_ServiceAccountChange_RevokesOldRobot(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	oldID := mh.createCalls0ID()
+	// An unrelated HarborAccess's robot must survive the cleanup.
+	otherID := mh.preexisting("bridge-prod-eu-west.team.other", RobotDescription(testCluster, "team", "other"))
+
+	current := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.ServiceAccountRef.Name = "renamed-controller"
+	current.Generation = 2
+	if err := r.Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := mh.robots[oldID]; ok {
+		t.Error("old robot survived the serviceAccountRef change")
+	}
+	if _, ok := mh.robots[otherID]; !ok {
+		t.Error("stale-robot cleanup deleted another HarborAccess's robot")
+	}
+	newName := "bridge-prod-eu-west.flux-system.renamed-controller"
+	var newRobot *harbor.Robot
+	for _, rb := range mh.robots {
+		if rb.Name == newName {
+			newRobot = rb
+		}
+	}
+	if newRobot == nil {
+		t.Fatalf("new robot %q not created", newName)
+	}
+	s := &corev1.Secret{}
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName)}, s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Data["username"]) != newRobot.WireName || string(s.Data["password"]) != newRobot.Secret {
+		t.Errorf("Secret not switched to the new robot: user=%q", s.Data["username"])
+	}
+}
+
+// TestReconcile_RobotRecreatedOutOfBand_Rotates: a robot deleted and
+// re-created in Harbor under the same name has a new ID and a password the
+// Secret does not hold; the reconciler must notice and rotate.
+func TestReconcile_RobotRecreatedOutOfBand_Rotates(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	oldID := mh.createCalls0ID()
+	name := mh.robots[oldID].Name
+	delete(mh.robots, oldID)
+	newID := mh.preexisting(name, RobotDescription(testCluster, testHANamespace, testHAName),
+		harbor.ProjectPermission{Project: "production", Action: "pull"})
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.refreshCalls) != 1 || mh.refreshCalls[0] != newID {
+		t.Fatalf("refresh calls = %v, want one for the re-created robot %d", mh.refreshCalls, newID)
+	}
+	s := &corev1.Secret{}
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName)}, s); err != nil {
+		t.Fatal(err)
+	}
+	if id, _ := robotsecret.RobotID(s); id != newID {
+		t.Errorf("robot-id annotation = %d, want %d", id, newID)
+	}
+}
+
+// TestReconcile_BackfillsRotationPromiseWithoutRotating covers upgrades: a
+// Secret written by an older bridge lacks the annotations. They are
+// backfilled from status (no rotation, so cached credentials stay valid).
+func TestReconcile_BackfillsRotationPromiseWithoutRotating(t *testing.T) {
+	t0 := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	ha := newHarborAccess()
+	last := metav1.NewTime(t0.Add(-2 * time.Hour))
+	ha.Status.Robot = &harborv1alpha1.RobotRef{ID: 100, LastRotated: &last}
+	ha.Status.ObservedGeneration = ha.Generation
+	mh := newMockHarbor()
+	id := mh.preexisting("bridge-prod-eu-west.flux-system.source-controller",
+		RobotDescription(testCluster, testHANamespace, testHAName),
+		harbor.ProjectPermission{Project: "production", Action: "pull"})
+	old := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName),
+			Labels: robotsecret.Labels(testCluster, testHANamespace, testHAName)},
+		Data: map[string][]byte{"username": []byte(mockRobotPrefix + "bridge-prod-eu-west.flux-system.source-controller"), "password": []byte("old-pw")},
+	}
+	r := newReconciler(t, mh, fixedClock{t0}, ha, old)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.refreshCalls) != 0 {
+		t.Fatalf("backfill rotated the password")
+	}
+	s := &corev1.Secret{}
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: old.Name}, s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Data["password"]) != "old-pw" {
+		t.Error("password changed during backfill")
+	}
+	if got, _ := robotsecret.RobotID(s); got != id {
+		t.Errorf("robot-id not backfilled: %d", got)
+	}
+	nb, ok := robotsecret.RotationNotBefore(s)
+	if !ok || !nb.Equal(last.Add(PasswordRotationInterval)) {
+		t.Errorf("rotation-not-before = %s %v, want %s", nb, ok, last.Add(PasswordRotationInterval))
+	}
+}
+
+func TestReconcile_RejectsOverlongName(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Name = strings.Repeat("n", HarborAccessNameMaxLen+1)
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.createCalls) != 0 {
+		t.Error("robot created for an HA whose Secret can never be labelled")
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
+}
+
+// TestReconcile_RotatesOnlyAfterThePromisedInstant pins the rotation
+// schedule to the Secret's rotation-not-before promise (ADR-0023): the data
+// plane never lets kubelet cache past that instant, so rotating earlier
+// would break cached credentials.
+func TestReconcile_RotatesOnlyAfterThePromisedInstant(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	t0 := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	r := newReconciler(t, mh, fixedClock{t0}, ha)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Right at the promise, and inside the safety margin: no rotation.
+	for _, at := range []time.Time{t0.Add(10 * time.Minute), t0.Add(PasswordRotationInterval), t0.Add(PasswordRotationInterval + RotationSafetyMargin - time.Second)} {
+		r.Clock = fixedClock{at}
+		res, err := r.Reconcile(context.Background(), reqFor(ha))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mh.refreshCalls) != 0 {
+			t.Fatalf("RefreshSecret fired at %s, before promise+margin", at)
+		}
+		want := t0.Add(PasswordRotationInterval + RotationSafetyMargin).Sub(at)
+		if want < time.Second {
+			want = time.Second
+		}
+		if res.RequeueAfter > want {
+			t.Errorf("at %s RequeueAfter = %s, want <= %s (next pass must not miss the rotation)", at, res.RequeueAfter, want)
+		}
+	}
+
+	rotateAt := t0.Add(PasswordRotationInterval + RotationSafetyMargin)
+	r.Clock = fixedClock{rotateAt}
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.refreshCalls) != 1 {
+		t.Fatalf("RefreshSecret calls after promise+margin: got %d, want 1", len(mh.refreshCalls))
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Robot == nil || got.Status.Robot.LastRotated == nil || !got.Status.Robot.LastRotated.Time.Equal(rotateAt) {
+		t.Errorf("LastRotated = %v, want %v", got.Status.Robot, rotateAt)
+	}
+	s := &corev1.Secret{}
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName)}, s); err != nil {
+		t.Fatal(err)
+	}
+	if nb, _ := robotsecret.RotationNotBefore(s); !nb.Equal(rotateAt.Add(PasswordRotationInterval)) {
+		t.Errorf("new promise = %s, want %s", nb, rotateAt.Add(PasswordRotationInterval))
 	}
 }
 
@@ -673,7 +960,7 @@ func TestReconcile_DeleteWithFinalizer_RemovesRobotAndSecret(t *testing.T) {
 	// The Secret must be gone.
 	secret := &corev1.Secret{}
 	err := r.Get(context.Background(), client.ObjectKey{
-		Namespace: testNS, Name: SecretNamePrefix + testHANamespace + "." + testHAName,
+		Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName),
 	}, secret)
 	if err == nil {
 		t.Errorf("Secret should be deleted")
@@ -739,7 +1026,7 @@ func TestReconcile_RebuildsMissingSecret(t *testing.T) {
 	}
 
 	// Operator deletes the Secret out of band.
-	secretName := SecretNamePrefix + testHANamespace + "." + testHAName
+	secretName := robotsecret.Name(testHANamespace, testHAName)
 	if err := r.Delete(context.Background(), &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: secretName},
 	}); err != nil {
@@ -805,7 +1092,7 @@ func TestReconcile_409OnCreate_RecoversByAdoptingExistingRobot(t *testing.T) {
 
 	// Secret must now exist with the rotated password.
 	got := &corev1.Secret{}
-	secretName := SecretNamePrefix + testHANamespace + "." + testHAName
+	secretName := robotsecret.Name(testHANamespace, testHAName)
 	if err := r.Get(context.Background(),
 		client.ObjectKey{Namespace: testNS, Name: secretName},
 		got); err != nil {
@@ -814,8 +1101,13 @@ func TestReconcile_409OnCreate_RecoversByAdoptingExistingRobot(t *testing.T) {
 	if len(got.Data["password"]) == 0 {
 		t.Errorf("recovered Secret has empty password")
 	}
-	if string(got.Data["username"]) != robotName {
-		t.Errorf("recovered Secret username = %q, want %q", got.Data["username"], robotName)
+	if string(got.Data["username"]) != mockRobotPrefix+robotName {
+		t.Errorf("recovered Secret username = %q, want %q", got.Data["username"], mockRobotPrefix+robotName)
+	}
+	// The adopted robot is converged to the CR's permissions (audit M4):
+	// recovery used to mark Ready with whatever grants the robot had.
+	if len(mh.updateCalls) != 1 {
+		t.Errorf("adopted robot's permissions not converged: %d Update calls", len(mh.updateCalls))
 	}
 
 	// CR status must be Ready=True after recovery.
@@ -893,6 +1185,27 @@ func TestReconcile_DeleteSkipsForeignRobot(t *testing.T) {
 // helpers
 // ----------------------------------------------------------------------------
 
+// createCalls0ID returns the ID of the robot created by the first Create.
+func (m *mockHarbor) createCalls0ID() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, r := range m.robots {
+		if len(m.createCalls) > 0 && r.Name == m.createCalls[0].Name {
+			return id
+		}
+	}
+	return -1
+}
+
+func secretPassword(t *testing.T, r *Reconciler) string {
+	t.Helper()
+	s := &corev1.Secret{}
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName)}, s); err != nil {
+		t.Fatal(err)
+	}
+	return string(s.Data["password"])
+}
+
 func containsFinalizer(obj *harborv1alpha1.HarborAccess, fin string) bool {
 	for _, f := range obj.Finalizers {
 		if f == fin {
@@ -914,5 +1227,130 @@ func assertCondition(t *testing.T, obj *harborv1alpha1.HarborAccess, typ string,
 	}
 	if c.Reason != reason {
 		t.Errorf("condition %q reason = %q, want %q (msg=%q)", typ, c.Reason, reason, c.Message)
+	}
+}
+
+// TestReconcile_Delete_RevokesEveryRobotOfTheHarborAccess is the finalizer
+// cleanup fix: deletion used to revoke only the robot the CURRENT spec maps
+// to, so a robot from an earlier serviceAccountRef or a pre-ADR-0018
+// dash-named robot survived the CR with a valid password.
+func TestReconcile_Delete_RevokesEveryRobotOfTheHarborAccess(t *testing.T) {
+	ha := newHarborAccess()
+	now := metav1.NewTime(time.Now())
+	ha.DeletionTimestamp = &now
+	mh := newMockHarbor()
+	desc := RobotDescription(testCluster, testHANamespace, testHAName)
+	current := mh.preexisting("bridge-prod-eu-west.flux-system.source-controller", desc)
+	previous := mh.preexisting("bridge-prod-eu-west.flux-system.old-sa", desc)
+	legacy := mh.preexisting("bridge-prod-eu-west-flux-system-source-controller", desc)
+	sibling := mh.preexisting("bridge-prod-eu-west.team.x", RobotDescription(testCluster, "team", "x"))
+	foreign := mh.preexisting("bridge-prod-eu-west.flux-system.y", RobotDescription("other-cluster", testHANamespace, testHAName))
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName),
+		Labels: robotsecret.Labels(testCluster, testHANamespace, testHAName)}}
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha, secret)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{current, previous, legacy} {
+		if _, ok := mh.robots[id]; ok {
+			t.Errorf("robot %d of the deleted HarborAccess survived", id)
+		}
+	}
+	for _, id := range []int64{sibling, foreign} {
+		if _, ok := mh.robots[id]; !ok {
+			t.Errorf("robot %d that does not belong to this HarborAccess was deleted", id)
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Errorf("robot Secret survived: %v", err)
+	}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, &harborv1alpha1.HarborAccess{}); !apierrors.IsNotFound(err) {
+		t.Errorf("finalizer not released: %v", err)
+	}
+}
+
+// TestReconcile_Delete_BlocksAndExplainsWhenHarborIsDown: the finalizer is
+// the revocation, so it must hold while Harbor is unreachable — but the
+// user must see why the object hangs and how to force it.
+func TestReconcile_Delete_BlocksAndExplainsWhenHarborIsDown(t *testing.T) {
+	ha := newHarborAccess()
+	now := metav1.NewTime(time.Now())
+	ha.DeletionTimestamp = &now
+	mh := newMockHarbor()
+	mh.errOnList = fmt.Errorf("dial tcp: connection refused")
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err == nil {
+		t.Fatal("expected an error so the deletion is retried with backoff")
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatalf("HarborAccess vanished although its robot could not be revoked: %v", err)
+	}
+	if !containsFinalizer(got, FinalizerName) {
+		t.Error("finalizer released while Harbor was unreachable")
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonDeletionBlocked)
+	c := meta.FindStatusCondition(got.Status.Conditions, harborv1alpha1.ConditionReady)
+	if c == nil || !strings.Contains(c.Message, FinalizerName) {
+		t.Errorf("condition message does not tell the user how to force deletion: %+v", c)
+	}
+}
+
+// TestReconcile_Delete_KeepsForeignStampedSecret: the collision backstop
+// also applies on deletion — never delete another HarborAccess's Secret.
+func TestReconcile_Delete_KeepsForeignStampedSecret(t *testing.T) {
+	ha := newHarborAccess()
+	now := metav1.NewTime(time.Now())
+	ha.DeletionTimestamp = &now
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName),
+		Labels: robotsecret.Labels(testCluster, "other-ns", "other-ha")}}
+	r := newReconciler(t, newMockHarbor(), fixedClock{time.Now()}, ha, foreign)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(foreign), &corev1.Secret{}); err != nil {
+		t.Errorf("deleted a Secret stamped for another HarborAccess: %v", err)
+	}
+}
+
+func TestSecretToHarborAccess(t *testing.T) {
+	r := newReconciler(t, newMockHarbor(), fixedClock{time.Now()})
+	own := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "robot-a.b",
+		Labels: robotsecret.Labels(testCluster, "a", "b")}}
+	if got := r.secretToHarborAccess(context.Background(), own); len(got) != 1 || got[0].Namespace != "a" || got[0].Name != "b" {
+		t.Errorf("own Secret mapped to %v", got)
+	}
+	for name, s := range map[string]*corev1.Secret{
+		"other cluster":   {ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Labels: robotsecret.Labels("x", "a", "b")}},
+		"other namespace": {ObjectMeta: metav1.ObjectMeta{Namespace: "elsewhere", Labels: robotsecret.Labels(testCluster, "a", "b")}},
+		"unmanaged":       {ObjectMeta: metav1.ObjectMeta{Namespace: testNS}},
+	} {
+		if got := r.secretToHarborAccess(context.Background(), s); len(got) != 0 {
+			t.Errorf("%s: mapped to %v, want nothing", name, got)
+		}
+	}
+}
+
+func TestRequeueAfter(t *testing.T) {
+	r := &Reconciler{}
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	ha := newHarborAccess()
+	ha.UID = "0b2f6a4e-uid"
+	// Far rotation: bounded by the resync interval (minus <=10% jitter).
+	got := r.requeueAfter(ha, now.Add(20*time.Hour), now)
+	if got > ResyncInterval || got < ResyncInterval*9/10 {
+		t.Errorf("far rotation: %s, want within [%s, %s]", got, ResyncInterval*9/10, ResyncInterval)
+	}
+	// Near rotation: exactly promise + margin.
+	if got := r.requeueAfter(ha, now.Add(10*time.Minute), now); got != 10*time.Minute+RotationSafetyMargin {
+		t.Errorf("near rotation: %s", got)
+	}
+	// Overdue: floor of one second, never zero (zero means "no requeue").
+	if got := r.requeueAfter(ha, now.Add(-time.Hour), now); got != time.Second {
+		t.Errorf("overdue: %s", got)
 	}
 }

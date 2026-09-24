@@ -81,6 +81,12 @@ variable "plugin_image" {
   description = "Plugin container image. Required. See bridge_image."
 }
 
+variable "bridge_replicas" {
+  type        = number
+  default     = 2
+  description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (ADR-0025)."
+}
+
 variable "issuer_name" {
   type        = string
   default     = "harbor-bridge-ca"
@@ -194,7 +200,7 @@ resource "helm_release" "bridge" {
       image        = var.plugin_image
     }
     bridge = {
-      replicas  = 1
+      replicas  = var.bridge_replicas
       logLevel  = "debug"
       image     = var.bridge_image
       resources = var.bridge_resources

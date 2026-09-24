@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	httptransport "github.com/go-openapi/runtime/client"
@@ -56,16 +57,50 @@ type ProjectPermission struct {
 
 // Robot is the bridge's view of a Harbor robot. Only the fields the
 // control plane actually needs are exposed. Secret is non-empty only on
-// the response of a freshly Created or just-Refreshed robot.
+// the response of a freshly Created robot.
 type Robot struct {
-	ID          int64
-	Name        string
+	ID int64
+
+	// Name is the bridge-internal robot name: what RobotName returns and
+	// what Create sends. The client strips Harbor's configured robot name
+	// prefix (default "robot$", ADR-0014) on every read path, so callers
+	// compare internal names only and never handle the prefix themselves.
+	Name string
+
+	// WireName is the name exactly as Harbor reports it
+	// (<robot prefix><Name>). It is the Basic Auth username registry
+	// clients must present, and Harbor requires it verbatim on update
+	// (PUT /robots/{id} rejects any name that differs from the stored
+	// on-wire name with 400 "cannot update the level or name of robot").
+	WireName string
+
 	Description string
-	Secret      string
+
+	// Disabled mirrors Harbor's "disable" flag. Update echoes it back
+	// unchanged: Harbor's PUT overwrites the flag with whatever the body
+	// carries, so omitting it would silently re-enable a robot an
+	// administrator disabled.
+	Disabled bool
+
+	// ExpiresAt is Harbor's expiry timestamp (unix seconds); -1 means the
+	// robot never expires, which is what the bridge always requests.
+	ExpiresAt int64
+
+	// Permissions is the robot's project/repository grant set, normalized
+	// by the client (one entry per project, canonical action order).
+	Permissions []ProjectPermission
+
+	// ForeignAccess reports that Harbor returned at least one grant the
+	// bridge never writes (another resource, kind, or a deny effect). A
+	// robot with foreign access never matches a desired permission set,
+	// so the reconciler rewrites it back to exactly what the CR declares.
+	ForeignAccess bool
+
+	Secret string
 }
 
-// ErrRobotNotFound is returned by GetByID and GetByName when no matching
-// robot exists. Callers use errors.Is to distinguish from transport errors.
+// ErrRobotNotFound is returned by GetByName when no matching robot
+// exists. Callers use errors.Is to distinguish from transport errors.
 var ErrRobotNotFound = errors.New("robot not found")
 
 // ErrRobotAlreadyExists is returned by Create when Harbor responds 409
@@ -84,33 +119,47 @@ type Client interface {
 	Create(ctx context.Context, name, description string, perms []ProjectPermission) (*Robot, error)
 	Delete(ctx context.Context, id int64) error
 	List(ctx context.Context) ([]Robot, error)
-	GetByID(ctx context.Context, id int64) (*Robot, error)
 	GetByName(ctx context.Context, name string) (*Robot, error)
 	RefreshSecret(ctx context.Context, id int64) (string, error)
-	UpdatePermissions(ctx context.Context, id int64, description string, perms []ProjectPermission) error
+	// Update rewrites the description and permission set of an existing
+	// robot. current must come from a read path (List/GetByName): its
+	// WireName and Disabled flag are echoed back as Harbor requires.
+	Update(ctx context.Context, current *Robot, description string, perms []ProjectPermission) error
+}
+
+// Option configures NewClient.
+type Option func(*goClient)
+
+// WithRobotPrefix sets the robot name prefix the Harbor instance is
+// configured with (Harbor's robot_name_prefix setting, default "robot$").
+// Harbor stores robot names without it and prepends it on every read
+// path; the client strips it again so callers only see internal names.
+func WithRobotPrefix(prefix string) Option {
+	return func(c *goClient) { c.robotPrefix = prefix }
 }
 
 // goClient is the production Client implementation, backed by
 // github.com/goharbor/go-client.
 type goClient struct {
-	api *v2client.HarborAPI
+	api         *v2client.HarborAPI
+	robotPrefix string
 }
 
 // NewClient builds a Client connected to harborURL using HTTP Basic Auth.
 // transport is optional; pass non-nil to override the default (httptest
 // servers, custom TLS, mTLS, instrumented round-trippers, etc.).
-func NewClient(harborURL *url.URL, username, password string, transport http.RoundTripper) (Client, error) {
+func NewClient(harborURL *url.URL, username, password string, transport http.RoundTripper, opts ...Option) (Client, error) {
 	if harborURL == nil {
 		return nil, errors.New("harborURL is nil")
 	}
 	u := *harborURL
 	// The SDK derives its base path from u.Path. If the operator passed
 	// just "https://harbor.example.com", we need to append /api/v2.0.
-	switch {
-	case u.Path == "" || u.Path == "/":
-		u.Path = harborBasePath
-	case !strings.HasSuffix(u.Path, harborBasePath):
-		u.Path = strings.TrimRight(u.Path, "/") + harborBasePath
+	// Trailing slashes are trimmed first so ".../api/v2.0/" does not
+	// defeat the suffix check and double the base path.
+	u.Path = strings.TrimRight(u.Path, "/")
+	if !strings.HasSuffix(u.Path, harborBasePath) {
+		u.Path += harborBasePath
 	}
 
 	cfg := v2client.Config{
@@ -118,7 +167,11 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 		Transport: transport,
 		AuthInfo:  httptransport.BasicAuth(username, password),
 	}
-	return &goClient{api: v2client.New(cfg)}, nil
+	c := &goClient{api: v2client.New(cfg), robotPrefix: HarborRobotPrefix}
+	for _, o := range opts {
+		o(c)
+	}
+	return c, nil
 }
 
 func (c *goClient) Create(ctx context.Context, name, description string, perms []ProjectPermission) (*Robot, error) {
@@ -134,10 +187,17 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 	if err != nil {
 		return nil, wrapHarborOp(fmt.Sprintf("create robot %q", name), err)
 	}
+	wire := resp.Payload.Name
+	if wire == "" {
+		wire = c.robotPrefix + name
+	}
 	return &Robot{
 		ID:          resp.Payload.ID,
-		Name:        resp.Payload.Name,
+		Name:        name,
+		WireName:    wire,
 		Description: description,
+		ExpiresAt:   robotDurationNeverExpires,
+		Permissions: normalizePermissions(perms),
 		Secret:      resp.Payload.Secret,
 	}, nil
 }
@@ -154,20 +214,30 @@ func (c *goClient) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
+// List returns every system-level robot (Harbor's GET /robots without a
+// Level filter lists exactly those).
 func (c *goClient) List(ctx context.Context) ([]Robot, error) {
+	return c.list(ctx, nil)
+}
+
+func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
 	page := int64(1)
 	size := pageSize
 	var out []Robot
 	for {
 		params := sdkrobot.NewListRobotParamsWithContext(ctx).
 			WithPage(&page).
-			WithPageSize(&size)
+			WithPageSize(&size).
+			WithQ(q)
 		resp, err := c.api.Robot.ListRobot(ctx, params)
 		if err != nil {
 			return nil, wrapHarborOp(fmt.Sprintf("list robots (page %d)", page), err)
 		}
 		for _, r := range resp.Payload {
-			out = append(out, fromHarborRobot(r))
+			if r == nil {
+				continue
+			}
+			out = append(out, c.fromHarborRobot(r))
 		}
 		if int64(len(resp.Payload)) < size {
 			return out, nil
@@ -176,36 +246,39 @@ func (c *goClient) List(ctx context.Context) ([]Robot, error) {
 	}
 }
 
-func (c *goClient) GetByID(ctx context.Context, id int64) (*Robot, error) {
-	params := sdkrobot.NewGetRobotByIDParamsWithContext(ctx).WithRobotID(id)
-	resp, err := c.api.Robot.GetRobotByID(ctx, params)
-	if err != nil {
-		if isNotFound(err) {
-			return nil, ErrRobotNotFound
-		}
-		return nil, wrapHarborOp(fmt.Sprintf("get robot %d", id), err)
-	}
-	r := fromHarborRobot(resp.Payload)
-	return &r, nil
-}
-
+// GetByName looks the robot up by its internal name. It asks Harbor for
+// an exact name match first (q=name=<name>; Harbor stores names without
+// the robot prefix, so the filter is prefix-agnostic) instead of paging
+// through every robot on every reconcile. If the filtered query returns
+// no match it falls back to a full scan, so a Harbor build whose query
+// filter behaves differently degrades to the old O(robots) cost instead
+// of a create/409 loop.
 func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
-	robots, err := c.List(ctx)
+	q := "name=" + name
+	robots, err := c.list(ctx, &q)
 	if err != nil {
 		return nil, err
 	}
-	// Harbor reads back system-level robot names with the literal
-	// "robot$" prefix even though POST /robots accepts (and we send)
-	// the un-prefixed name. Callers pass us the un-prefixed form; we
-	// match either form so a future Harbor version that drops the
-	// asymmetry (or a project-scope robot path that may not add the
-	// prefix) doesn't silently break.
-	for i := range robots {
-		if robots[i].Name == name || robots[i].Name == HarborRobotPrefix+name {
-			return &robots[i], nil
-		}
+	if r := matchName(robots, name); r != nil {
+		return r, nil
+	}
+	robots, err = c.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if r := matchName(robots, name); r != nil {
+		return r, nil
 	}
 	return nil, ErrRobotNotFound
+}
+
+func matchName(robots []Robot, name string) *Robot {
+	for i := range robots {
+		if robots[i].Name == name {
+			return &robots[i]
+		}
+	}
+	return nil
 }
 
 func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) {
@@ -216,53 +289,117 @@ func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) 
 	if err != nil {
 		return "", wrapHarborOp(fmt.Sprintf("refresh secret for robot %d", id), err)
 	}
+	if resp.Payload == nil || resp.Payload.Secret == "" {
+		return "", fmt.Errorf("refresh secret for robot %d: Harbor returned no secret", id)
+	}
 	return resp.Payload.Secret, nil
 }
 
-func (c *goClient) UpdatePermissions(ctx context.Context, id int64, description string, perms []ProjectPermission) error {
+func (c *goClient) Update(ctx context.Context, current *Robot, description string, perms []ProjectPermission) error {
+	if current == nil || current.WireName == "" {
+		return errors.New("update robot: current robot with its on-wire name is required")
+	}
 	// models.Robot.Duration is *int64 (x-nullable in swagger); take address.
 	duration := robotDurationNeverExpires
 	body := &models.Robot{
-		ID:          id,
+		ID:          current.ID,
+		Name:        current.WireName,
 		Description: description,
 		Level:       robotLevelSystem,
 		Duration:    &duration,
+		Disable:     current.Disabled,
 		Permissions: toHarborPermissions(perms),
 	}
 	params := sdkrobot.NewUpdateRobotParamsWithContext(ctx).
-		WithRobotID(id).
+		WithRobotID(current.ID).
 		WithRobot(body)
 	if _, err := c.api.Robot.UpdateRobot(ctx, params); err != nil {
-		return wrapHarborOp(fmt.Sprintf("update robot %d", id), err)
+		return wrapHarborOp(fmt.Sprintf("update robot %d", current.ID), err)
 	}
 	return nil
 }
 
-// FilterOwned returns the subset of robots whose names start with the
-// cluster's ownership prefix. The ADR-0009 safety invariant lives at the
-// reconciler and janitor call sites; this helper centralises the filter
-// so all callers use one implementation. Delegates to OwnsRobot so the
-// "robot$" normalization happens in exactly one place.
-func FilterOwned(robots []Robot, cluster string) []Robot {
-	out := make([]Robot, 0, len(robots))
-	for _, r := range robots {
-		if OwnsRobot(cluster, r.Name) {
-			out = append(out, r)
+// PermissionsMatch reports whether the robot's grants are exactly the
+// desired set (order- and duplicate-insensitive). A robot carrying any
+// grant the bridge never writes does not match.
+func PermissionsMatch(r *Robot, desired []ProjectPermission) bool {
+	if r.ForeignAccess {
+		return false
+	}
+	a, b := normalizePermissions(r.Permissions), normalizePermissions(desired)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
 		}
+	}
+	return true
+}
+
+// normalizePermissions merges entries per project, dedupes actions, and
+// sorts both, rendering each project's actions in canonical order
+// ("pull" before "push", then anything else alphabetically) joined by
+// ",". The result is a stable form for comparison and for writing.
+func normalizePermissions(perms []ProjectPermission) []ProjectPermission {
+	byProject := map[string]map[string]struct{}{}
+	for _, p := range perms {
+		set := byProject[p.Project]
+		if set == nil {
+			set = map[string]struct{}{}
+			byProject[p.Project] = set
+		}
+		for _, action := range strings.Split(p.Action, ",") {
+			if action = strings.TrimSpace(action); action != "" {
+				set[action] = struct{}{}
+			}
+		}
+	}
+	projects := make([]string, 0, len(byProject))
+	for p := range byProject {
+		projects = append(projects, p)
+	}
+	sort.Strings(projects)
+	out := make([]ProjectPermission, 0, len(projects))
+	for _, p := range projects {
+		actions := make([]string, 0, len(byProject[p]))
+		for a := range byProject[p] {
+			actions = append(actions, a)
+		}
+		sort.Slice(actions, func(i, j int) bool { return actionRank(actions[i], actions[j]) })
+		out = append(out, ProjectPermission{Project: p, Action: strings.Join(actions, ",")})
 	}
 	return out
 }
 
+func actionRank(a, b string) bool {
+	order := map[string]int{"pull": 0, "push": 1}
+	ra, oka := order[a]
+	rb, okb := order[b]
+	switch {
+	case oka && okb:
+		return ra < rb
+	case oka:
+		return true
+	case okb:
+		return false
+	default:
+		return a < b
+	}
+}
+
 // toHarborPermissions translates our compact ProjectPermission into
-// Harbor's two-level (RobotPermission + Access) shape. The "pull,push"
-// shorthand becomes two Access entries; whitespace around commas is
-// tolerated.
+// Harbor's two-level (RobotPermission + Access) shape. Entries are merged
+// per project first (Harbor stores one policy row per access, so a
+// project listed twice would otherwise produce duplicate rows), and the
+// "pull,push" shorthand becomes two Access entries.
 func toHarborPermissions(perms []ProjectPermission) []*models.RobotPermission {
-	out := make([]*models.RobotPermission, 0, len(perms))
-	for _, p := range perms {
+	norm := normalizePermissions(perms)
+	out := make([]*models.RobotPermission, 0, len(norm))
+	for _, p := range norm {
 		accesses := []*models.Access{}
 		for _, action := range strings.Split(p.Action, ",") {
-			action = strings.TrimSpace(action)
 			if action == "" {
 				continue
 			}
@@ -280,13 +417,41 @@ func toHarborPermissions(perms []ProjectPermission) []*models.RobotPermission {
 	return out
 }
 
-func fromHarborRobot(r *models.Robot) Robot {
-	return Robot{
+// fromHarborRobot converts a Harbor read-path robot. The prefix is
+// stripped only when present, so legacy (v1, non-editable) robots whose
+// names Harbor returns raw keep their names.
+func (c *goClient) fromHarborRobot(r *models.Robot) Robot {
+	out := Robot{
 		ID:          r.ID,
-		Name:        r.Name,
+		Name:        strings.TrimPrefix(r.Name, c.robotPrefix),
+		WireName:    r.Name,
 		Description: r.Description,
+		Disabled:    r.Disable,
+		ExpiresAt:   r.ExpiresAt,
 		Secret:      r.Secret,
 	}
+	var perms []ProjectPermission
+	for _, p := range r.Permissions {
+		if p == nil {
+			continue
+		}
+		if p.Kind != robotPermissionKindProject {
+			out.ForeignAccess = true
+			continue
+		}
+		for _, a := range p.Access {
+			if a == nil {
+				continue
+			}
+			if a.Resource != robotResourceRepository || (a.Effect != "" && a.Effect != "allow") {
+				out.ForeignAccess = true
+				continue
+			}
+			perms = append(perms, ProjectPermission{Project: p.Namespace, Action: a.Action})
+		}
+	}
+	out.Permissions = normalizePermissions(perms)
+	return out
 }
 
 // harborStatusErr is the interface every generated go-client error response
@@ -398,7 +563,7 @@ func wrapHarborOp(op string, err error) error {
 	// Note: a 404 from POST /robots means "referenced project not found",
 	// not "this robot does not exist", so we deliberately do not alias it
 	// to ErrRobotNotFound. ErrRobotNotFound stays scoped to the
-	// GetByID/GetByName semantics; the reconciler derives the
+	// GetByName semantics; the reconciler derives the
 	// operator-action-required branch from the readable message above.
 	return out
 }

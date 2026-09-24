@@ -1,0 +1,18 @@
+{{- if and .Values.bridge.podDisruptionBudget.enabled (gt (int .Values.bridge.replicas) 1) }}
+{{/*
+Keeps a bridge replica serving credentials through voluntary disruptions
+(node drains, upgrades): every image pull on every node depends on it.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "harbor-bridge.bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.bridge.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "harbor-bridge.bridge.selectorLabels" . | nindent 6 }}
+{{- end }}

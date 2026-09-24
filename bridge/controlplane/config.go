@@ -28,12 +28,16 @@ const (
 	EnvOIDCTokenFile        = "BRIDGE_OIDC_TOKEN_FILE"
 	EnvHarborURL            = "BRIDGE_HARBOR_URL"
 	EnvHarborAdminDir       = "BRIDGE_HARBOR_ADMIN_DIR"
+	EnvHarborRobotPrefix    = "BRIDGE_HARBOR_ROBOT_PREFIX"
 	EnvForceLocalValidation = "BRIDGE_FORCE_LOCAL_VALIDATION"
 	EnvLogLevel             = "BRIDGE_LOG_LEVEL"
 
 	clusterNamePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	clusterNameMaxLen  = 63
 	defaultLogLevel    = "info"
+
+	// defaultHarborRobotPrefix is Harbor's default robot_name_prefix.
+	defaultHarborRobotPrefix = "robot$"
 
 	adminUsernameKey = "username"
 	adminPasswordKey = "password"
@@ -52,8 +56,8 @@ var (
 type Config struct {
 	// ClusterName is this bridge instance's identity. Required, DNS-label
 	// validated. Used as the prefix for every Harbor robot this bridge owns
-	// (bridge-<ClusterName>-<saNs>-<saName>) and as the basis of the
-	// ownership-prefix safety invariant.
+	// (bridge-<ClusterName>.<saNs>.<saName>, ADR-0018) and as the basis of
+	// the ownership-prefix safety invariant.
 	ClusterName string
 
 	// Namespace is the namespace this bridge runs in. Required, DNS-label
@@ -107,6 +111,14 @@ type Config struct {
 	// per-cluster-system-robot recommendation.
 	HarborAdminDir string
 
+	// HarborRobotPrefix is the robot name prefix the Harbor instance is
+	// configured with (Harbor's robot_name_prefix, default "robot$").
+	// Harbor stores robot names without it and reports them with it; the
+	// Harbor client strips it on read paths (ADR-0014). Set it when the
+	// Harbor administrator changed the prefix — otherwise the bridge cannot
+	// recognise its own robots when it lists them.
+	HarborRobotPrefix string
+
 	// ForceLocalValidation gates whether the data plane performs full local
 	// OIDC validation. Defaults to true. The "false" path is plumbed for
 	// the post-upstream-migration scenario described in ADR-0002 and
@@ -124,6 +136,7 @@ func LoadFromEnv() (*Config, error) {
 	cfg := &Config{
 		LogLevel:             defaultLogLevel,
 		ForceLocalValidation: true,
+		HarborRobotPrefix:    defaultHarborRobotPrefix,
 	}
 	var errs []error
 
@@ -185,6 +198,10 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s is required", EnvHarborAdminDir))
 	}
 
+	if raw := strings.TrimSpace(os.Getenv(EnvHarborRobotPrefix)); raw != "" {
+		cfg.HarborRobotPrefix = raw
+	}
+
 	if raw := os.Getenv(EnvForceLocalValidation); raw != "" {
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
@@ -236,6 +253,7 @@ func (c *Config) Sanitized() map[string]string {
 		EnvOIDCIssuer:           c.OIDCIssuer.String(),
 		EnvHarborURL:            c.HarborURL.String(),
 		EnvHarborAdminDir:       c.HarborAdminDir,
+		EnvHarborRobotPrefix:    c.HarborRobotPrefix,
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
 		EnvLogLevel:             c.LogLevel,
 	}

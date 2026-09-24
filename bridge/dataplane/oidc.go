@@ -36,7 +36,7 @@ type Validator interface {
 // Claims is the projection of JWT claims the data plane needs to make
 // its trust decision. Kubernetes-specific claims
 // (kubernetes.io/serviceaccount/*, groups, etc.) are intentionally
-// not exposed: the bridge only needs sub/aud/iss/exp/iat.
+// not exposed: the bridge only needs sub/aud/iss (go-oidc enforces exp).
 type Claims struct {
 	// Subject is the sub claim. For Kubernetes SA tokens this is
 	// "system:serviceaccount:<namespace>:<name>".
@@ -51,12 +51,9 @@ type Claims struct {
 	// issuer when Validate returns nil (go-oidc enforces this).
 	Issuer string
 
-	// Expiry is the exp claim as a wall-clock time.
+	// Expiry is the exp claim as a wall-clock time. go-oidc has already
+	// rejected expired tokens; exposed for logging and tests.
 	Expiry time.Time
-
-	// IssuedAt is the iat claim as a wall-clock time. Zero when the
-	// token lacks an iat claim.
-	IssuedAt time.Time
 }
 
 // ErrInvalidToken wraps every Validate failure so callers can branch on
@@ -154,16 +151,12 @@ func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claim
 	if err := idToken.Claims(&raw); err != nil {
 		return nil, fmt.Errorf("%w: parse claims: %w", ErrInvalidToken, err)
 	}
-	out := &Claims{
+	return &Claims{
 		Subject:  raw.Sub,
 		Audience: []string(raw.Aud),
 		Issuer:   idToken.Issuer,
 		Expiry:   idToken.Expiry,
-	}
-	if raw.Iat != 0 {
-		out.IssuedAt = time.Unix(raw.Iat, 0)
-	}
-	return out, nil
+	}, nil
 }
 
 // rawClaims is the JSON shape we unmarshal into when extracting claims
@@ -171,7 +164,6 @@ func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claim
 type rawClaims struct {
 	Sub string       `json:"sub"`
 	Aud jsonAudience `json:"aud"`
-	Iat int64        `json:"iat"`
 }
 
 // jsonAudience handles the OIDC quirk that aud may be either a string or

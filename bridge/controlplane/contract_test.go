@@ -4,36 +4,10 @@
 package controlplane
 
 import (
-	"strings"
 	"testing"
-)
 
-func TestRobotSecretNameFor(t *testing.T) {
-	// Natural (non-truncated) dot form.
-	if got, want := robotSecretNameFor("team-a", "flux-access"), "robot-team-a.flux-access"; got != want {
-		t.Errorf("robotSecretNameFor = %q, want %q", got, want)
-	}
-	// Overflow: a name past the 253-char k8s limit must be hash-truncated,
-	// stay within the limit, keep the prefix, and be deterministic.
-	long := strings.Repeat("z", 300)
-	got := robotSecretNameFor("team", long)
-	if len(got) > secretNameMax {
-		t.Errorf("len(%q) = %d, want <= %d", got, len(got), secretNameMax)
-	}
-	if !strings.HasPrefix(got, SecretNamePrefix) {
-		t.Errorf("truncated name lost its %q prefix: %q", SecretNamePrefix, got)
-	}
-	if got2 := robotSecretNameFor("team", long); got != got2 {
-		t.Errorf("not deterministic: %q vs %q", got, got2)
-	}
-	// Distinct long inputs that share a truncation prefix must still differ
-	// (the hash suffix carries the uniqueness).
-	a := robotSecretNameFor("team", strings.Repeat("a", 300))
-	b := robotSecretNameFor("team", strings.Repeat("b", 300))
-	if a == b {
-		t.Errorf("distinct long inputs produced identical Secret names: %q", a)
-	}
-}
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
+)
 
 func TestRobotDescription_RoundTrip(t *testing.T) {
 	desc := RobotDescription("prod-eu-west", "harbor-bridge-system", "flux-access")
@@ -91,5 +65,31 @@ func TestParseRobotDescription_RejectsForeign(t *testing.T) {
 		if _, _, ok := ParseRobotDescription(d); ok {
 			t.Errorf("ParseRobotDescription wrongly accepted %q", d)
 		}
+	}
+}
+
+func TestRobotOwnedBy(t *testing.T) {
+	desc := RobotDescription("prod", "ns", "ha")
+	cases := []struct {
+		name  string
+		robot harbor.Robot
+		want  bool
+	}{
+		{"current name", harbor.Robot{Name: "bridge-prod.sa-ns.sa", Description: desc}, true},
+		{"legacy dash name", harbor.Robot{Name: "bridge-prod-sa-ns-sa", Description: desc}, true},
+		{"other HarborAccess", harbor.Robot{Name: "bridge-prod.sa-ns.sa", Description: RobotDescription("prod", "ns", "other")}, false},
+		{"other cluster tag", harbor.Robot{Name: "bridge-prod.sa-ns.sa", Description: RobotDescription("prod-eu", "ns", "ha")}, false},
+		// prod-eu's current robot starts with the legacy "bridge-prod-"
+		// prefix; only the description tag keeps it out.
+		{"prod-eu robot seen by prod", harbor.Robot{Name: "bridge-prod-eu.ns.sa", Description: RobotDescription("prod-eu", "ns", "ha")}, false},
+		{"foreign name", harbor.Robot{Name: "ci-robot", Description: desc}, false},
+		{"untagged", harbor.Robot{Name: "bridge-prod.sa-ns.sa", Description: "hand-made"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := robotOwnedBy("prod", &tc.robot, "ns", "ha"); got != tc.want {
+				t.Errorf("robotOwnedBy = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

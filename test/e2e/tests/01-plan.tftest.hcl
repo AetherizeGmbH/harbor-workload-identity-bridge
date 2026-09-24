@@ -95,8 +95,8 @@ run "defaults" {
     error_message = "plugin.patchKubelet is hardcoded true by the module"
   }
   assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).bridge.replicas == 1
-    error_message = "bridge.replicas is hardcoded 1 by the module"
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.replicas == 2
+    error_message = "bridge.replicas should default to 2 like the chart, so the e2e exercises a non-leader replica serving credentials (ADR-0025)"
   }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.logLevel == "debug"

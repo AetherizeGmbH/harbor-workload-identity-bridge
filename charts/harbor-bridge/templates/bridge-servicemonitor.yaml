@@ -13,18 +13,14 @@ spec:
   selector:
     matchLabels:
       {{- include "harbor-bridge.bridge.selectorLabels" . | nindent 6 }}
+      harbor.aetherize.io/service: metrics
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
   endpoints:
-    - port: https
-      scheme: https
+    - port: metrics
+      scheme: http
       path: /metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
-      tlsConfig:
-        # Prometheus reaches the bridge by Service DNS, which the cert
-        # covers. Operator configures the CA out-of-band.
-        serverName: {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc
-        insecureSkipVerify: false
 {{- end }}

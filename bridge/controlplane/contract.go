@@ -4,11 +4,12 @@
 package controlplane
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
 // FinalizerName is the finalizer the reconciler attaches to every
@@ -16,69 +17,34 @@ import (
 // before the CR is removed.
 const FinalizerName = "harbor.aetherize.io/robot"
 
-// Kubernetes label keys used on bridge-managed Secrets. They make ownership
-// observable from outside the bridge and let kubectl filter for them.
-const (
-	LabelManagedBy             = "harbor.aetherize.io/managed-by"
-	LabelManagedByValue        = "harbor-workload-identity-bridge"
-	LabelCluster               = "harbor.aetherize.io/cluster"
-	LabelHarborAccessNamespace = "harbor.aetherize.io/harboraccess-namespace"
-	LabelHarborAccessName      = "harbor.aetherize.io/harboraccess-name"
-)
-
-// SecretNamePrefix is the constant the bridge prepends to robot-password
-// Secret names so an administrator can `kubectl get secrets -l ...` and
-// reason about which Secrets are bridge-managed.
-const SecretNamePrefix = "robot-"
-
-const (
-	// secretNameMax is the Kubernetes object-name limit (DNS subdomain).
-	secretNameMax = 253
-	// secretNameHashLen is the hex digest length appended when a Secret name
-	// would overflow secretNameMax. 16 hex chars = 64 bits, matching the
-	// robot-name overflow handling in harbor/naming.go.
-	secretNameHashLen = 16
-)
-
-// robotSecretNameFor computes the per-CR robot-password Secret name. The
-// namespace and name are dot-joined for injectivity (ADR-0018; the HA
-// namespace is a dot-free RFC 1123 label, so the first dot is an unambiguous
-// boundary). When the natural name would exceed the 253-char Kubernetes limit
-// it is hash-truncated, mirroring harbor.RobotName's overflow handling — only
-// this path is probabilistic rather than provably injective.
-//
-// The data plane duplicates this exactly in dataplane.robotSecretName
-// (ADR-0015 — it must not import the control plane). The two MUST stay
-// byte-identical; both are pinned by tests (controlplane:
-// TestRobotSecretNameFor_*, dataplane: TestRobotSecretName_ContractPinned).
-func robotSecretNameFor(ns, name string) string {
-	full := SecretNamePrefix + ns + "." + name
-	if len(full) <= secretNameMax {
-		return full
-	}
-	sum := sha256.Sum256([]byte(ns + "\x00" + name))
-	digest := hex.EncodeToString(sum[:])[:secretNameHashLen]
-	budget := secretNameMax - len(SecretNamePrefix) - 1 - secretNameHashLen
-	mid := ns + "." + name
-	if len(mid) > budget {
-		mid = mid[:budget]
-	}
-	mid = strings.TrimRight(mid, "-._")
-	if mid == "" {
-		return SecretNamePrefix + digest
-	}
-	return SecretNamePrefix + mid + "." + digest
-}
-
 // PasswordRotationInterval is the maximum age of a robot password before
 // the reconciler refreshes it (ADR-0003: rotate daily).
 const PasswordRotationInterval = 24 * time.Hour
+
+// RotationSafetyMargin is how long after a Secret's rotation-not-before
+// instant the reconciler waits before rotating. The data plane never lets
+// kubelet cache credentials past rotation-not-before (ADR-0023), so the
+// margin only has to absorb request latency and clock skew between the
+// bridge replicas; a minute is generous.
+const RotationSafetyMargin = time.Minute
+
+// ResyncInterval bounds how long a Ready HarborAccess goes without the
+// reconciler re-reading its robot from Harbor. That re-read is what
+// notices out-of-band drift — a robot deleted, disabled, or re-scoped in
+// the Harbor UI — so it must not depend on controller-runtime's implicit
+// cache resync (10h by default, and tunable away entirely).
+const ResyncInterval = time.Hour
+
+// HarborAccessNameMaxLen is the maximum metadata.name length of a
+// HarborAccess. The name is stamped as a label value on the robot Secret
+// (63-character limit), so a longer name could never be reconciled.
+const HarborAccessNameMaxLen = 63
 
 // robotDescriptionTag is the constant first token in every robot description
 // the bridge writes. The reconciler and janitor use it (combined with the
 // cluster tag) to decide whether a robot belongs to this bridge — providing
 // defense-in-depth on top of the ownership-prefix check from ADR-0009.
-const robotDescriptionTag = "managed-by=" + LabelManagedByValue
+const robotDescriptionTag = "managed-by=" + robotsecret.LabelManagedByValue
 
 // RobotDescription builds the description string the bridge writes onto
 // every Harbor robot it creates. The format is space-separated key=value
@@ -135,4 +101,25 @@ func ParseRobotDescription(description string) (haNamespace, haName string, ok b
 		}
 	}
 	return "", "", false
+}
+
+// robotOwnedBy reports whether robot is a robot the bridge of cluster
+// created for the HarborAccess haNamespace/haName. All three layers must
+// hold (ADR-0009 + ADR-0023):
+//
+//  1. the name is in the cluster's ownership prefix — the current
+//     dot-terminated one, or the pre-ADR-0018 dash-delimited one;
+//  2. the description carries the bridge's tag with exactly this cluster
+//     (the only layer that separates "prod"'s legacy robots from
+//     "prod-eu"'s);
+//  3. the description names exactly this HarborAccess.
+func robotOwnedBy(cluster string, robot *harbor.Robot, haNamespace, haName string) bool {
+	if !harbor.OwnsRobot(cluster, robot.Name) && !harbor.OwnsLegacyRobot(cluster, robot.Name) {
+		return false
+	}
+	if !RobotBelongsToCluster(robot.Description, cluster) {
+		return false
+	}
+	ns, name, ok := ParseRobotDescription(robot.Description)
+	return ok && ns == haNamespace && name == haName
 }

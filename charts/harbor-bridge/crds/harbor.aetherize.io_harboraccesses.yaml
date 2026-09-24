@@ -117,8 +117,11 @@ spec:
               tokenTTL:
                 default: 1h
                 description: |-
-                  TokenTTL bounds how long a docker token issued via this HarborAccess lives.
-                  Min 5m, max 24h. Defaults to 1h.
+                  TokenTTL is the longest time kubelet may cache the robot credentials
+                  the bridge returns for this HarborAccess (the credential provider's
+                  cacheDuration). The bridge shortens it further so no cache outlives
+                  the next scheduled password rotation (ADR-0023). Min 5m, max 24h.
+                  Defaults to 1h.
                 format: duration
                 type: string
                 x-kubernetes-validations:
@@ -237,7 +240,9 @@ spec:
                     format: date-time
                     type: string
                   name:
-                    description: Name is the Harbor robot name (typically bridge-<namespace>-<serviceaccount>).
+                    description: |-
+                      Name is the Harbor robot name as Harbor reports it, i.e. with Harbor's
+                      robot prefix: robot$bridge-<cluster>.<saNamespace>.<saName> (ADR-0018).
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -256,6 +261,10 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be at most 63 characters: it is stamped as
+            a label value on the robot Secret'
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
     subresources:

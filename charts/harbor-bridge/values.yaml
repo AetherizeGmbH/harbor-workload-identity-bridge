@@ -28,6 +28,13 @@ harbor:
       username: username
       password: password
 
+  # Robot name prefix of this Harbor (Harbor's robot_name_prefix setting).
+  # Harbor stores robot names without it and reports them with it; the
+  # bridge must know it to recognise its own robots. Change it only if the
+  # Harbor administrator changed the setting (a common change, because
+  # "$" in a username trips up shells and some registry clients).
+  robotNamePrefix: "robot$"
+
 tls:
   # Set to false ONLY if you are terminating TLS upstream (e.g. service
   # mesh sidecar). Direct kubelet→plugin→bridge with TLS off is unsafe.
@@ -59,7 +66,20 @@ bridge:
   # Service-account-token issuer the bridge validates incoming SA
   # tokens against. Match the cluster's actual issuer (find it with
   # `kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`).
+  # Managed clouds use their own issuer URL (GKE:
+  # https://container.googleapis.com/v1/projects/…/clusters/…, EKS:
+  # https://oidc.eks.<region>.amazonaws.com/id/…) — set it, and set
+  # oidcJWKSURL below.
   oidcIssuer: https://kubernetes.default.svc.cluster.local
+
+  # Where the bridge fetches the token-signing keys. Empty = OIDC
+  # discovery at oidcIssuer (right when the issuer IS the in-cluster
+  # apiserver). When the issuer is a cloud URL, set this to the
+  # apiserver's own JWKS endpoint, https://kubernetes.default.svc/openid/v1/jwks:
+  # the keys come from inside the cluster (no internet egress needed, the
+  # cluster CA + the bridge's token below authenticate it), and the
+  # issuer claim is still checked against oidcIssuer.
+  oidcJWKSURL: ""
 
   # CA bundle used to verify the OIDC issuer's TLS cert. For the
   # default in-cluster issuer (the apiserver), the projected SA volume
@@ -99,6 +119,13 @@ bridge:
     limits:
       cpu: 500m
       memory: 256Mi
+
+  # Keeps at least one bridge replica serving through voluntary
+  # disruptions (node drains, cluster upgrades). Rendered only when
+  # replicas > 1.
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
 
   podAnnotations: {}
   podLabels: {}
@@ -209,10 +236,12 @@ service:
   port: 8443
   nodePort: 31443
 
-# Prometheus scrape config — chart serves /metrics on the same TLS
-# endpoint as /v1/credentials.
+# Prometheus metrics. The bridge serves /metrics over plain HTTP on its
+# own port, reachable on the pod network only (a ClusterIP Service) —
+# never on the credential listener the NodePort exposes on every node.
 metrics:
   enabled: true
+  port: 8080
   # When the Prometheus Operator is present, set this to true to ship
   # a ServiceMonitor that scrapes the bridge over the same TLS.
   serviceMonitor:
