@@ -50,7 +50,7 @@ variables {
 # ── Defaults ─────────────────────────────────────────────────────────────────
 # Nothing overridden beyond the required baseline. Pins every value the module
 # hardcodes or defaults: namespace, issuer, the chart's static knobs (replicas,
-# logLevel, patchKubelet, tls.enabled), and the bridge_resources default
+# logLevel, install.mode, tls.enabled), and the bridge_resources default
 # expansion (optional() Burstable defaults: limits.memory ≫ requests.memory).
 run "defaults" {
   command = plan
@@ -91,8 +91,8 @@ run "defaults" {
     error_message = "tls.issuerRef.name should track the default issuer_name"
   }
   assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).plugin.patchKubelet == true
-    error_message = "plugin.patchKubelet is hardcoded true by the module"
+    condition     = yamldecode(helm_release.bridge.values[0]).plugin.install.mode == "auto"
+    error_message = "plugin.install.mode should default to auto (ADR-0021)"
   }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.replicas == 2
@@ -189,6 +189,37 @@ run "custom_audience" {
     condition     = yamldecode(helm_release.bridge.values[0]).plugin.audience == "harbor.prod.aetherize"
     error_message = "plugin.audience should reflect the override"
   }
+}
+
+# ── install_mode override (ADR-0021) ─────────────────────────────────────────
+run "install_mode_none" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    install_mode = "none"
+  }
+
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).plugin.install.mode == "none"
+    error_message = "plugin.install.mode should reflect the install_mode override"
+  }
+}
+
+# ── Validation: install_mode outside the enum ────────────────────────────────
+run "invalid_install_mode" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    install_mode = "yolo"
+  }
+
+  expect_failures = [
+    var.install_mode,
+  ]
 }
 
 # ── Single match_images entry ────────────────────────────────────────────────

@@ -42,6 +42,9 @@ jobs:
       - run: make envtest
 
   go-isolation:
+    # The name is a REQUIRED status check in the main ruleset; renaming the
+    # job leaves PRs waiting on a check that never reports. The job also
+    # covers ADR-0021 (installer isolation) and generated-file drift.
     name: Package isolation (ADR-0002 + ADR-0015)
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +55,7 @@ jobs:
           cache: true
       - run: make verify-package-isolation
       - run: make verify-plugin-isolation
+      - run: make verify-installer-isolation
       - run: make verify-generated
 
   chart-test:

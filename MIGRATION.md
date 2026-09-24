@@ -1,18 +1,36 @@
 ## Chart value migrations
 
-### Unreleased: robot lifecycle and data plane (ADR-0023, ADR-0025)
+### Unreleased: lifecycle, metrics, and plugin changes (ADR-0023/0024/0025)
 
 No action is needed for a default install. Check these if they apply:
 
 | Change | What to do |
 | --- | --- |
 | `/metrics` moved from `https://<bridge>:8443/metrics` to plain HTTP on port `metrics.port` (8080) behind a new ClusterIP Service `<release>-metrics` | The chart's ServiceMonitor follows automatically. Update custom scrape configs. |
+| `tls.enabled: false` now means "bring your own Secret" and requires `tls.existingSecret` (`tls.crt`, `tls.key`, `ca.crt`) | It never worked without a pre-created Secret (the bridge always serves TLS). Set `tls.existingSecret`. |
+| New `plugin.enabled` (default `true`) | Set `false` to install the plugin out of band (Talos, baked images): [docs/install-external-plugin.md](docs/install-external-plugin.md). |
 | New `harbor.robotNamePrefix` (default `robot$`) | Set it if your Harbor's `robot_name_prefix` is not `robot$`. |
 | New `bridge.oidcJWKSURL` | Set it to `https://kubernetes.default.svc/openid/v1/jwks` when `bridge.oidcIssuer` is a cloud issuer URL (GKE, EKS, AKS with OIDC issuer). |
 | HarborAccess `metadata.name` is limited to 63 characters (CRD validation) | Longer names could never be reconciled (the robot Secret could not be labelled). Recreate such objects under a shorter name. Helm does not upgrade CRDs from `crds/`: apply the new CRD yourself — `kubectl apply -f charts/harbor-bridge/crds/` (the bridge also reports such objects as `InvalidSpec` without the CRD update). |
 | Robot passwords no longer rotate on a spec change; the daily rotation is announced to the data plane | Nothing to do. Existing Secrets get the new annotations on the first reconcile, without a rotation. |
 | Leftover robots are revoked: robots of a previous `serviceAccountRef` and dash-named robots from 0.2.x | Nothing to do. Expect the janitor to delete such robots on its first sweep; their passwords were still valid. |
 | Before `helm uninstall`, delete your HarborAccess objects | Their finalizers revoke the robots and need the running bridge. |
+
+### `plugin.patchKubelet` → `plugin.install.mode` (pre-release, ADR-0021)
+
+The boolean was replaced by an install-mode enum; the chart fails at
+template time if `plugin.patchKubelet` is still set.
+
+| Before | After |
+| --- | --- |
+| `plugin.patchKubelet: true` (default) | `plugin.install.mode: auto` (new default; resolves to `patch` on self-managed nodes and to `merge` on managed EKS/GKE/AKS nodes) — or pin `patch` explicitly |
+| `plugin.patchKubelet: false` | `plugin.install.mode: none` |
+
+Behavioural upgrades that come with the change: `helm upgrade`s that
+alter `matchImages`/`audience` now restart kubelet automatically
+(content-hash idempotency — the old flag-presence guard required a
+manual restart), `/etc/default/kubelet` is parse-merged instead of
+overwritten, and managed clouds get first-class support via `merge`.
 
 ## Migration Path
 

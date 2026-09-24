@@ -8,6 +8,7 @@ the DaemonSet copies it there.
 that tells kubelet to project an SA-bound token per pod rather than
 caching one credential per image.
 */}}
+{{- if .Values.plugin.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,9 +30,11 @@ data:
         defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
         env:
           - name: HARBOR_BRIDGE_ENDPOINT
-            # Plugin runs on the node; reach the bridge via the
-            # NodePort on the node's own loopback. ADR-0008.
-            value: "https://127.0.0.1:{{ .Values.service.nodePort }}"
+            # Plugin runs on the node; default reaches the bridge via
+            # the NodePort on the node's own loopback (ADR-0008),
+            # overridable through plugin.bridgeEndpoint. A literal
+            # $(NODE_IP) is substituted by the installer.
+            value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
           - name: HARBOR_BRIDGE_CA_BUNDLE
             value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-ca.crt"
           {{- if .Values.bridge.mTLS.enabled }}
@@ -46,3 +49,4 @@ data:
           # See KEP-4412: this makes the SA token + UID part of the
           # cache key so each pod gets its own credential.
           cacheType: ServiceAccount
+{{- end }}

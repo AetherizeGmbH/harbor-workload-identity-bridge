@@ -10,7 +10,7 @@ See ADR-0017 for the architectural rationale, scope limits, and the
 alternatives considered. Disable via plugin.audienceRBAC.create=false
 if you provide your own RBAC (rare).
 */}}
-{{- if and .Values.plugin.audience .Values.plugin.audienceRBAC.create }}
+{{- if .Values.plugin.audienceRBAC.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

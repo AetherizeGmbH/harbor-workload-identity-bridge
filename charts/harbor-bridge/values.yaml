@@ -36,9 +36,16 @@ harbor:
   robotNamePrefix: "robot$"
 
 tls:
-  # Set to false ONLY if you are terminating TLS upstream (e.g. service
-  # mesh sidecar). Direct kubelet→plugin→bridge with TLS off is unsafe.
+  # The bridge ALWAYS serves TLS and the plugin ALWAYS verifies it; this
+  # switch only chooses who provides the serving certificate.
+  #   true  — the chart requests it from cert-manager (issuerRef below).
+  #   false — you provide it: set existingSecret to a Secret in the
+  #           release namespace with tls.crt, tls.key and ca.crt (the CA
+  #           the plugin trusts, and the client CA when mTLS is on).
   enabled: true
+
+  # Required when enabled=false. Ignored otherwise.
+  existingSecret: ""
 
   # cert-manager issuer that signs the bridge's serving cert. The CA
   # from the same chain is plumbed to the plugin DaemonSet so kubelet
@@ -50,6 +57,11 @@ tls:
 # ====================================================================
 # DEFAULTED VALUES — override as needed
 # ====================================================================
+
+# Override the chart name used in labels / the release-derived object
+# names (standard Helm convention).
+nameOverride: ""
+fullnameOverride: ""
 
 bridge:
   replicas: 2
@@ -139,7 +151,16 @@ bridge:
   extraEnvFrom: []
 
 plugin:
-  # ─── REQUIRED ───────────────────────────────────────────────────────
+  # Deploy the node installer DaemonSet (and its ConfigMap and
+  # ServiceAccount). Set false when the plugin is provisioned on the nodes
+  # by other means — a Talos system extension, a baked node image, your
+  # own configuration management. The bridge, the audience RBAC for
+  # kubelet, and the NOTES (which print the provider entry to install)
+  # stay; matchImages and install.* are then unused. See
+  # docs/install-external-plugin.md.
+  enabled: true
+
+  # ─── REQUIRED (when plugin.enabled) ─────────────────────────────────
   # Image patterns (kubelet glob format) for which kubelet should call
   # this plugin. REQUIRED — an empty list means kubelet never invokes
   # the plugin and image pulls silently fall back to anonymous.
@@ -154,7 +175,8 @@ plugin:
   # Audience the kubelet projects the SA token with. Must match
   # spec.trustPolicy.audience on every HarborAccess CR served by this
   # bridge. Pick one string per cluster; embedding the cluster name is
-  # a defensible default ("harbor-bridge-<cluster>").
+  # a defensible default ("harbor-bridge-<cluster>"). REQUIRED even when
+  # plugin.enabled=false: kubelet needs RBAC to mint tokens for it.
   audience: ""
 
   # ─── DEFAULTED ──────────────────────────────────────────────────────
@@ -177,36 +199,73 @@ plugin:
     tag: ""
     pullPolicy: IfNotPresent
 
-  # Where on each node the plugin binary and config are written. These
-  # MUST match the kubelet's --image-credential-provider-bin-dir and
-  # --image-credential-provider-config flags. When patchKubelet=true
-  # (the default below) the DaemonSet patches and restarts kubelet
-  # itself, so these paths just need to be writable. When
-  # patchKubelet=false the operator owns the kubelet flags — set
-  # these to whatever the node image / cluster module configured.
+  # Where on each node the plugin binary and config are written in
+  # patch/none modes. In every mode hostConfigDir also carries the
+  # bridge CA (and mTLS client pair) — the provider entry references
+  # them by absolute path. In merge mode the binary and provider entry
+  # instead go into the paths discovered from kubelet's own flags, so
+  # hostBinaryDir is unused there.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 
-  # Whether the install init container should patch the host's
-  # /etc/default/kubelet to add --image-credential-provider-*
-  # flags and restart kubelet.service via nsenter into PID 1.
-  #
-  # Set to FALSE when the node image / cluster module already
-  # configures kubelet for credential providers (EKS / GKE / AKS
-  # nodes, baked images, or a kind/kubeadm setup that pre-stages
-  # the flags). The DaemonSet will then only refresh the binary,
-  # config, and CA — no kubelet restart, no hostPID, no nsenter.
-  #
-  # Set to TRUE for self-managed clusters where the operator does
-  # not control the node image (kind, vanilla kubeadm, k3s on
-  # commodity hosts). The DaemonSet does the wiring once per node;
-  # kubelet restarts on first install, then idempotency keeps it
-  # untouched on every subsequent reschedule.
-  #
-  # Default true matches the "no upstream pattern for this exists,
-  # so the chart handles it" reality. If you know your environment
-  # bakes it in, flip to false.
-  patchKubelet: true
+  # How the DaemonSet's installer wires the plugin into kubelet
+  # (ADR-0021). Replaces the removed plugin.patchKubelet toggle.
+  install:
+    # auto  — inspect the live kubelet command line: if the node
+    #         already runs kubelet with --image-credential-provider-*
+    #         flags (EKS / GKE / AKS node images), behave as `merge`;
+    #         otherwise behave as `patch`. The right default almost
+    #         everywhere.
+    # merge — inject our provider entry into the node's EXISTING
+    #         CredentialProviderConfig (JSON or YAML; foreign providers
+    #         and unknown fields are preserved) and drop the binary
+    #         into the existing bin dir. Kubelet flags are not touched.
+    # patch — own dirs (hostBinaryDir/hostConfigDir) plus a parse-merge
+    #         of /etc/default/kubelet's KUBELET_EXTRA_ARGS (operator-set
+    #         args are preserved). For kind and kubeadm nodes whose kubelet
+    #         unit sources /etc/default/kubelet.
+    #
+    # auto/merge/patch need a systemd-managed kubelet. Distributions that
+    # embed or supervise kubelet themselves (k3s, RKE2, Talos) are not
+    # supported by them: use none (and wire the flags through the
+    # distribution's own kubelet configuration) or plugin.enabled=false.
+    # none  — copy files only; the operator owns the kubelet flags.
+    #         Least privilege: no hostPID, no privileged container, no
+    #         host-root mount.
+    #
+    # In every mode except none, kubelet is restarted ONLY when the
+    # effective credential-provider config content (or the kubelet
+    # flags) actually changed, and the install counts as done only after
+    # kubelet is verified stably active (and, in patch mode, running with
+    # the flags) — a `helm upgrade` that changes
+    # matchImages/audience converges without operator action, and no-op
+    # re-rolls never restart kubelet. Kubelet restarts do not disturb
+    # running containers. CA/mTLS rotation and plugin binary updates
+    # never restart kubelet.
+    mode: auto
+    # Merge-mode target overrides. Leave empty to use the paths
+    # discovered from kubelet's --image-credential-provider-* flags.
+    binDir: ""
+    configFile: ""
+    # Systemd unit the installer restarts.
+    kubeletUnit: kubelet
+    # Node directory holding the installer's idempotency state file.
+    stateDir: /var/lib/harbor-bridge
+
+  # URL the on-node plugin uses to reach the bridge. Empty renders the
+  # ADR-0008 default: https://127.0.0.1:<service.nodePort> (node-local
+  # loopback NodePort). The literal $(NODE_IP) is substituted with the
+  # node's IP by the installer — use e.g. "https://$(NODE_IP):31443" on
+  # dataplanes that do not route loopback NodePorts.
+  bridgeEndpoint: ""
+
+  # The plugin can only run after its own image was pulled, so the
+  # plugin/bridge images must come from a registry that does NOT match
+  # plugin.matchImages. The chart fails at template time when the image
+  # registry host exactly equals a matchImages entry. Set true only for
+  # air-gapped mirrors that accept the bootstrap ordering (first pull
+  # of the bridge images must not need the bridge).
+  allowSelfMatchImages: false
 
   # How long kubelet may cache credentials returned by the plugin.
   # Bounded above by the HarborAccess CR's spec.tokenTTL; this is just

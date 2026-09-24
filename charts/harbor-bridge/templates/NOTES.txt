@@ -9,68 +9,113 @@
   Audience     : {{ .Values.plugin.audience }}
   Namespace    : {{ .Release.Namespace }}
   Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
-  Plugin image : {{ include "harbor-bridge.plugin.image" . }}
+{{- if .Values.plugin.enabled }}
+  Plugin image : {{ include "harbor-bridge.plugin.image" . }} (install mode: {{ .Values.plugin.install.mode }})
+{{- else }}
+  Plugin       : NOT deployed by this chart (plugin.enabled=false)
+{{- end }}
 
-NOTE — cluster-name uniqueness (ADR-0009 / ADR-0018):
-  Bridges that share one Harbor must each have a distinct
-  `clusterName`. Robots are owned by the dot-terminated name prefix
-  below; the trailing dot makes distinct cluster names collision-free
-  (`bridge-prod.` is NOT a prefix of `bridge-prod-eu.…`). Unlike the
-  older hyphen-delimited scheme, there is therefore NO requirement that
-  cluster names avoid being hyphen-prefixes of one another (ADR-0018).
-
-  This cluster's robot-ownership prefix is: `bridge-{{ .Values.clusterName }}.`
+This cluster's robot-ownership prefix in Harbor is `bridge-{{ .Values.clusterName }}.`
+Bridges sharing one Harbor must each use a distinct clusterName (ADR-0009 /
+ADR-0018; the trailing dot makes distinct names collision-free).
 
 NEXT STEPS
 
-  1. Verify the bridge came up:
+  1. Verify the bridge came up (every replica serves credentials):
 
        kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "harbor-bridge.bridge.fullname" . }}
        kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "harbor-bridge.bridge.fullname" . }} -c bridge
 
+{{- if .Values.plugin.enabled }}
+
   2. Verify the plugin landed on every node:
 
        kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "harbor-bridge.plugin.fullname" . }}
+       kubectl -n {{ .Release.Namespace }} logs ds/{{ include "harbor-bridge.plugin.fullname" . }} -c install
+{{- if eq .Values.plugin.install.mode "auto" }}
 
-  3. Apply a HarborAccess CR (see docs/examples/ in the repo). The
-     CR's spec.trustPolicy.audience must equal:
+     install.mode=auto: on each node the installer inspects kubelet. If kubelet
+     already runs with --image-credential-provider-* flags (EKS / GKE / AKS node
+     images) it MERGES our provider into that config; otherwise it PATCHES
+     /etc/default/kubelet. Kubelet is restarted once per node — only when the
+     effective config changed — and verified healthy afterwards. Running
+     containers are not affected by a kubelet restart.
+{{- else if eq .Values.plugin.install.mode "merge" }}
 
-       {{ .Values.plugin.audience }}
+     install.mode=merge: the installer adds our provider to the credential-
+     provider config kubelet already uses{{ if .Values.plugin.install.configFile }} ({{ .Values.plugin.install.configFile }}){{ end }}
+     and restarts kubelet once per node when that config changed.
+{{- else if eq .Values.plugin.install.mode "patch" }}
 
-  4. Kubelet integration:
+     install.mode=patch: the installer writes the plugin to
+     {{ .Values.plugin.hostBinaryDir }}, its config to
+     {{ .Values.plugin.hostConfigDir }}/credential-provider-config.yaml,
+     adds the two flags to KUBELET_EXTRA_ARGS in /etc/default/kubelet, and
+     restarts kubelet once per node when anything changed.
+{{- else }}
+
+     install.mode=none: the installer only copies files. KUBELET IS NOT TOUCHED —
+     until you add these flags to every kubelet, the plugin is never invoked and
+     pulls fall back to anonymous:
 
        --image-credential-provider-bin-dir={{ .Values.plugin.hostBinaryDir }}
        --image-credential-provider-config={{ .Values.plugin.hostConfigDir }}/credential-provider-config.yaml
-
-{{- if .Values.plugin.patchKubelet }}
-
-     plugin.patchKubelet=true (current setting): the plugin DaemonSet
-     patches /etc/default/kubelet on each node and restarts kubelet
-     ONCE per node to apply the flags. Expect a brief node-local
-     kubelet bounce as the DaemonSet rolls out — static pods on the
-     control plane (apiserver / controller-manager / scheduler) will
-     recover within seconds.
+{{- end }}
 {{- else }}
 
-     plugin.patchKubelet=false (current setting): the chart will NOT
-     touch kubelet. You must configure the two flags above at node
-     provisioning time (kind kubeadm patches, EKS node bootstrap,
-     custom AMI, etc.), or the plugin is installed but never invoked.
+  2. Install the plugin on every node yourself (plugin.enabled=false). Kubelet
+     needs the plugin binary and this provider entry in the credential-provider
+     config it reads (--image-credential-provider-config). The binary is in the
+     plugin image at /plugin/harbor-bridge-plugin:
+
+       {{ include "harbor-bridge.plugin.image" . }}
+
+     Provider entry (put the bridge CA — ca.crt of Secret
+     {{ include "harbor-bridge.tlsSecretName" . }} — on the node at the
+     HARBOR_BRIDGE_CA_BUNDLE path, or inline the PEM as its value):
+
+       - name: harbor-bridge-plugin
+         apiVersion: credentialprovider.kubelet.k8s.io/v1
+         matchImages: ["<your Harbor host>"]
+         defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
+         env:
+           - name: HARBOR_BRIDGE_ENDPOINT
+             value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
+           - name: HARBOR_BRIDGE_CA_BUNDLE
+             value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-ca.crt"
+         tokenAttributes:
+           serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
+           requireServiceAccount: true
+           cacheType: ServiceAccount
+
+     Talos: see docs/install-external-plugin.md in the repository.
 {{- end }}
+
+  3. Apply a HarborAccess CR (see config/samples/ in the repo). Its
+     spec.trustPolicy.audience must equal:
+
+       {{ .Values.plugin.audience }}
+
+  4. Uninstalling: delete your HarborAccess objects BEFORE `helm uninstall`.
+     Each carries a finalizer that revokes its Harbor robot; without the
+     bridge running, those deletions (and the deletion of their namespaces)
+     wait forever. If that already happened, reinstall the bridge — or remove
+     the "harbor.aetherize.io/robot" finalizer by hand and delete the leftover
+     bridge-{{ .Values.clusterName }}.* robots in Harbor.
 
 {{- if not .Values.tls.enabled }}
 
-WARNING — TLS is disabled for this release. Plugin → bridge traffic
-carries the SA token in cleartext. Only safe if a sidecar (service
-mesh) is terminating TLS for you.
+TLS: the serving certificate comes from Secret {{ .Values.tls.existingSecret | quote }}
+(tls.crt, tls.key, ca.crt). Renew it yourself; the bridge reloads it without a
+restart.{{ if .Values.plugin.enabled }} The installer copies ca.crt to the nodes on its next sync pass.{{ end }}
 {{- end }}
 
 {{- if .Values.bridge.mTLS.enabled }}
 
-mTLS enabled — the bridge will reject plugin connections without a
-chart-issued client cert. Verify cert-manager issued both certs:
+mTLS enabled — the bridge rejects plugin connections without a client cert
+issued by {{ .Values.bridge.mTLS.clientIssuerRef.name }}. Verify cert-manager issued both certs:
 
   kubectl -n {{ .Release.Namespace }} get certificate
 {{- end }}
 
-Docs: https://github.com/aetherize/harbor-workload-identity-bridge
+Docs: https://github.com/AetherizeGmbH/harbor-workload-identity-bridge

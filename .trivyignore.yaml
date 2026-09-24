@@ -8,13 +8,14 @@
 misconfigurations:
   # The plugin install DaemonSet is a node installer: its `install`
   # container writes the kubelet credential-provider binary + config onto
-  # the host (/etc/kubernetes, host bin dir) and restarts kubelet. That
-  # genuinely requires host PID namespace, a privileged container, and a
-  # writable root FS. See charts/harbor-bridge/templates/plugin-daemonset.yaml
-  # (the `# need root to write into /etc/kubernetes` / `install handoff`
-  # comments). The runtime bridge Deployment and the pause container are
-  # fully locked down; these apply only to the install container, observed
-  # here via the rendered golden chart fixtures that Trivy scans.
+  # the host (/etc/kubernetes, host bin dir) and restarts kubelet through
+  # nsenter into PID 1. That genuinely requires the host PID namespace and
+  # a privileged container. See
+  # charts/harbor-bridge/templates/plugin-daemonset.yaml and ADR-0021. The
+  # bridge Deployment and the long-running sync container are fully locked
+  # down (non-privileged, no capabilities, read-only root FS, seccomp
+  # RuntimeDefault); these apply only to the install init container,
+  # observed here via the rendered golden chart fixtures Trivy scans.
   - id: KSV-0010 # pod hostPID: true — host PID namespace for the install handoff
     paths:
       - "charts/harbor-bridge/tests/golden/*.yaml"
@@ -24,6 +25,18 @@ misconfigurations:
   - id: KSV-0017 # install container privileged — writes /etc/kubernetes on host
     paths:
       - "charts/harbor-bridge/tests/golden/*.yaml"
+  # hostPath "/" on the install init container in auto/merge/patch modes:
+  # merge mode writes into the credential-provider paths it DISCOVERS on
+  # the running kubelet (EKS, GKE and AKS each use different ones), so the
+  # paths are unknown at render time. The container is already privileged
+  # with hostPID — i.e. root on the host — so the mount adds no privilege.
+  # The long-running sync container mounts only plugin.hostConfigDir, and
+  # install.mode=none (golden none.yaml) mounts two narrow directories.
+  # Scoped to the two goldens that render an auto-mode DaemonSet.
+  - id: KSV-0121 # disallowed volume (hostPath /) on the install container
+    paths:
+      - "charts/harbor-bridge/tests/golden/default.yaml"
+      - "charts/harbor-bridge/tests/golden/mtls.yaml"
 
   # The e2e seed image is throwaway test scaffolding built during
   # `make e2e` to prep Harbor; it is never shipped or run in production, so

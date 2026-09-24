@@ -342,11 +342,6 @@ spec:
       # The installer never talks to the Kubernetes API.
       automountServiceAccountToken: false
       hostNetwork: false
-      # Required so the installer can read kubelet's command line from
-      # /proc (auto/merge discovery) and `nsenter -t 1 ...` into the
-      # host's namespaces for the kubelet restart. none mode does
-      # neither and drops this.
-      hostPID: true
       priorityClassName: system-node-critical
       securityContext:
         runAsNonRoot: false  # need root to write onto the host
@@ -360,7 +355,7 @@ spec:
           command: [/installer/harbor-bridge-installer]
           env:
             - name: INSTALL_MODE
-              value: "auto"
+              value: "none"
             - name: HOST_ROOT
               value: /host
             - name: HOST_BIN_DIR
@@ -378,8 +373,10 @@ spec:
                 fieldRef:
                   fieldPath: status.hostIP
           volumeMounts:
-            - name: host-root
-              mountPath: /host
+            - name: host-bin
+              mountPath: /host/etc/kubernetes/credential-provider
+            - name: host-config
+              mountPath: /host/etc/kubernetes/credential-provider-config
             - name: kubelet-config
               mountPath: /config
               readOnly: true
@@ -388,9 +385,11 @@ spec:
               readOnly: true
           securityContext:
             readOnlyRootFilesystem: true
-            # nsenter into PID 1 (kubelet restart) requires full
-            # privileges; the sync container below does not get them.
-            privileged: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             limits:
               cpu: 100m
@@ -405,7 +404,7 @@ spec:
           command: [/installer/harbor-bridge-installer, --sync]
           env:
             - name: INSTALL_MODE
-              value: "auto"
+              value: "none"
             - name: HOST_ROOT
               value: /host
             - name: HOST_BIN_DIR
@@ -450,10 +449,10 @@ spec:
               cpu: 10m
               memory: 16Mi
       volumes:
-        - name: host-root
+        - name: host-bin
           hostPath:
-            path: /
-            type: Directory
+            path: /etc/kubernetes/credential-provider
+            type: DirectoryOrCreate
         - name: host-config
           hostPath:
             path: /etc/kubernetes/credential-provider-config
