@@ -35,7 +35,7 @@ type fixtureIssuer struct {
 	kid    string
 }
 
-func newFixtureIssuer(t *testing.T) *fixtureIssuer {
+func newFixtureIssuer(t testing.TB) *fixtureIssuer {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
