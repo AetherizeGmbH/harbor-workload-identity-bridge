@@ -87,6 +87,9 @@ func newBridgeClient(cfg *config) (*bridgeClient, error) {
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
+	if cfg.ServerName != "" {
+		tlsCfg.ServerName = cfg.ServerName
+	}
 
 	transport := &http.Transport{
 		TLSClientConfig:       tlsCfg,
@@ -95,7 +98,16 @@ func newBridgeClient(cfg *config) (*bridgeClient, error) {
 		ResponseHeaderTimeout: requestTimeout,
 		IdleConnTimeout:       30 * time.Second,
 	}
-	hc := &http.Client{Transport: transport, Timeout: requestTimeout}
+	hc := &http.Client{
+		Transport: transport,
+		Timeout:   requestTimeout,
+		// The request carries the pod's ServiceAccount token. A redirect
+		// would re-send it, and on 307/308 the body, to wherever the
+		// response points; the bridge never redirects.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	return newBridgeClientWithHTTPClient(cfg.Endpoint, hc), nil
 }
 

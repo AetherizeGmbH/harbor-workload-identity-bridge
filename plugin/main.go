@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -130,12 +131,35 @@ func run(stdin io.Reader, stdout io.Writer, fetcher bridgeFetcher) error {
 	return writeOKResponse(stdout, resp, req.Image)
 }
 
+// serverNamePattern is a DNS name (letters, digits, '-' and '.').
+var serverNamePattern = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$`)
+
+// maxCacheDuration bounds what the plugin tells kubelet: the bridge never
+// asks for more than the longest tokenTTL (24h).
+const maxCacheDuration = 24 * time.Hour
+
+// cacheKeyTypes are the values kubelet accepts for cacheKeyType.
+var cacheKeyTypes = map[string]bool{"Image": true, "Registry": true, "Global": true}
+
 func writeOKResponse(w io.Writer, r *bridgeResponse, image string) error {
 	host := imageHost(image)
 	if host == "" {
 		return fmt.Errorf("cannot derive registry host from image %q", image)
 	}
-	dur := time.Duration(r.ExpiresInSecs) * time.Second
+	// The plugin trusts the bridge over TLS, but it still refuses to hand
+	// kubelet values kubelet cannot use: an unknown cache key type, or a
+	// negative or overflowing cache duration.
+	if !cacheKeyTypes[r.CacheKeyType] {
+		return fmt.Errorf("bridge returned cache key type %q; want Image, Registry or Global", r.CacheKeyType)
+	}
+	secs := r.ExpiresInSecs
+	if secs < 0 {
+		secs = 0
+	}
+	dur := time.Duration(secs) * time.Second
+	if secs > int(maxCacheDuration/time.Second) {
+		dur = maxCacheDuration
+	}
 	out := credentialProviderResponse{
 		APIVersion:    credentialProviderAPIVersion,
 		Kind:          responseKind,
@@ -183,6 +207,7 @@ type config struct {
 	CABundle   string // HARBOR_BRIDGE_CA_BUNDLE, optional, a path to a PEM file or the PEM body itself (inline PEM suits hand-written provider configs, e.g. Talos).
 	ClientCert string // HARBOR_BRIDGE_CLIENT_CERT, optional, path to mTLS client cert (ADR-0008).
 	ClientKey  string // HARBOR_BRIDGE_CLIENT_KEY, optional, path to mTLS client key.
+	ServerName string // HARBOR_BRIDGE_SERVER_NAME, optional, the name to verify the bridge certificate against when the endpoint's host is not in it (e.g. $(NODE_IP)).
 }
 
 // loadConfig populates a config from a getenv-like function. Taking the
@@ -194,6 +219,7 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		CABundle:   getenv("HARBOR_BRIDGE_CA_BUNDLE"),
 		ClientCert: getenv("HARBOR_BRIDGE_CLIENT_CERT"),
 		ClientKey:  getenv("HARBOR_BRIDGE_CLIENT_KEY"),
+		ServerName: getenv("HARBOR_BRIDGE_SERVER_NAME"),
 	}
 	if c.Endpoint == "" {
 		return nil, errors.New("HARBOR_BRIDGE_ENDPOINT is required")
@@ -207,6 +233,9 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	}
 	if u.Host == "" {
 		return nil, errors.New("HARBOR_BRIDGE_ENDPOINT must include a host")
+	}
+	if c.ServerName != "" && !serverNamePattern.MatchString(c.ServerName) {
+		return nil, fmt.Errorf("HARBOR_BRIDGE_SERVER_NAME %q is not a DNS name", c.ServerName)
 	}
 	if (c.ClientCert == "") != (c.ClientKey == "") {
 		return nil, errors.New("HARBOR_BRIDGE_CLIENT_CERT and HARBOR_BRIDGE_CLIENT_KEY must be set together")

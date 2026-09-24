@@ -23,7 +23,9 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   creates the RBAC that lets kubelets request tokens for `plugin.audience`.
 - Each node must reach the bridge. Default: the bridge NodePort on the node's
   own loopback (`https://127.0.0.1:31443`). On dataplanes that do not route
-  loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`.
+  loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`. The
+  chart then has the plugin verify the bridge certificate against the bridge
+  Service's DNS name, because the node IP is not in the certificate.
 - The bridge and plugin images must come from a registry outside
   `plugin.matchImages` (the chart refuses otherwise; ADR-0021).
 
