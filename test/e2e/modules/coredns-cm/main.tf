@@ -11,9 +11,12 @@ terraform {
 variable "kubeconfig" {
   type = object({
     host                   = string
-    client_certificate     = string
-    client_key             = string
     cluster_ca_certificate = string
+    # Client-cert auth (kind) and token auth (GKE) are alternatives;
+    # exactly one pair/field is expected to be set.
+    client_certificate = optional(string)
+    client_key         = optional(string)
+    token              = optional(string)
   })
   sensitive = true
 }
@@ -45,6 +48,7 @@ provider "kubernetes" {
   host                   = var.kubeconfig.host
   client_certificate     = var.kubeconfig.client_certificate
   client_key             = var.kubeconfig.client_key
+  token                  = var.kubeconfig.token
   cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
 }
 
@@ -99,14 +103,40 @@ resource "kubernetes_config_map_v1_data" "coredns" {
 # CoreDNS doesn't hot-reload at-rest configmap changes reliably; the
 # `reload` plugin watches with TTL. Just nudge the deployment so the
 # new Corefile is in effect when other modules depend on us.
+#
+# kubectl is driven ONLY by var.kubeconfig: --kubeconfig=/dev/null keeps
+# the operator's ~/.kube/config (and its current context, which may be a
+# production cluster) out of the picture entirely, and the connection
+# material is written to a private temp dir that is removed on exit.
 resource "null_resource" "coredns_reload" {
   triggers = {
     corefile_sha = sha256(kubernetes_config_map_v1_data.coredns.data.Corefile)
   }
   provisioner "local-exec" {
-    command = "kubectl --kubeconfig=$KUBECONFIG -n kube-system rollout restart deployment/coredns && kubectl --kubeconfig=$KUBECONFIG -n kube-system rollout status deployment/coredns --timeout=60s"
+    interpreter = ["bash", "-c"]
+    command     = <<-BASH
+      set -euo pipefail
+      d="$(mktemp -d)"
+      trap 'rm -rf "$d"' EXIT
+      chmod 700 "$d"
+      printf '%s' "$K8S_CA" > "$d/ca.crt"
+      args=(--kubeconfig=/dev/null --server="$K8S_HOST" --certificate-authority="$d/ca.crt")
+      if [ -n "$K8S_TOKEN" ]; then
+        args+=(--token="$K8S_TOKEN")
+      else
+        printf '%s' "$K8S_CERT" > "$d/tls.crt"
+        printf '%s' "$K8S_KEY" > "$d/tls.key"
+        args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
+      fi
+      kubectl "$${args[@]}" -n kube-system rollout restart deployment/coredns
+      kubectl "$${args[@]}" -n kube-system rollout status deployment/coredns --timeout=60s
+    BASH
     environment = {
-      KUBECONFIG = pathexpand("~/.kube/config")
+      K8S_HOST  = var.kubeconfig.host
+      K8S_CA    = var.kubeconfig.cluster_ca_certificate
+      K8S_CERT  = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+      K8S_KEY   = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+      K8S_TOKEN = var.kubeconfig.token == null ? "" : var.kubeconfig.token
     }
   }
   depends_on = [kubernetes_config_map_v1_data.coredns]

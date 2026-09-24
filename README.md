@@ -17,7 +17,7 @@ per-namespace token-distribution chores.**
 </p>
 
 > Status: **alpha — Phases 1 through 6 complete, end-to-end verified
-> on kind v1.35 + Harbor 2.x**. `make e2e` brings up a fresh kind
+> on kind (Kubernetes v1.36) + Harbor 2.x**. `make e2e` brings up a fresh kind
 > cluster, installs Harbor + the chart, seeds a private image, and
 > the load-bearing `pull_pod` assertion passes: kubelet exec's the
 > plugin, the plugin reaches the bridge over a NodePort, the bridge
@@ -252,7 +252,7 @@ spec:
   permissions:
     - project: production
       action: pull
-  tokenTTL: 1h0m0s   # canonical Go time.Duration form — see ADR-0016 §test fixtures
+  tokenTTL: 1h0m0s   # canonical Go time.Duration form (kubernetes_manifest-friendly)
 YAML
 ```
 
@@ -264,9 +264,12 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
 **Testing.** Two paths in [HOW-TO-TEST.md](HOW-TO-TEST.md):
 
 - **§1 `tofu test` (recommended)** — `make e2e` brings up a fresh
-  kind cluster, installs Harbor + the chart, seeds a private image,
-  asserts the pull end-to-end. `make e2e-pause` halts before the
-  load-bearing pull so you can `kubectl` around the cluster. ~5 min.
+  kind cluster, installs Harbor + the chart (two bridge replicas),
+  seeds private images, and asserts pulls end-to-end — then edits and
+  deletes HarborAccess objects and checks in Harbor that grants changed,
+  the old identity is refused, and no robot is left behind.
+  `make e2e-pause` halts after the assertions so you can `kubectl`
+  around the populated cluster. ~15 min.
 - **§2 Remote / manual cluster** — drive the bridge as a `go run`
   process against an existing Kubernetes + Harbor by hand, with
   `kubectl proxy` for OIDC discovery. Useful when iterating on the
@@ -403,6 +406,7 @@ contract, not individually run.
 | 6 | Kubelet-driven e2e + SECURITY.md polish + v0.1.0 tag | ✅ E2E passes end-to-end (`make e2e`); only the `v0.1.0` tag itself is outstanding |
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
 | 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), ADRs 0021 and 0024 | ✅ Code + kind e2e complete; merge mode not yet run on a managed cluster |
+| 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, ADRs 0023 and 0025 | ✅ Code + kind e2e (lifecycle stages) complete |
 
 ### Next
 

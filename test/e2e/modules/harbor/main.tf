@@ -19,9 +19,12 @@ terraform {
 variable "kubeconfig" {
   type = object({
     host                   = string
-    client_certificate     = string
-    client_key             = string
     cluster_ca_certificate = string
+    # Client-cert auth (kind) and token auth (GKE) are alternatives;
+    # exactly one pair/field is expected to be set.
+    client_certificate = optional(string)
+    client_key         = optional(string)
+    token              = optional(string)
   })
   sensitive = true
 }
@@ -66,12 +69,70 @@ variable "version_harbor" {
   description = "Harbor Helm chart version to install. null → the renovate-pinned default in locals below (the normal path; the harbor-compat matrix overrides it per ADR-0020)."
 }
 
+variable "expose_type" {
+  type        = string
+  default     = "nodePort"
+  description = <<-EOT
+    How Harbor is exposed. "nodePort" (default) is the kind harness's
+    mode: node-local routing via https_node_port. "loadBalancer" is the
+    GKE harness's mode: a Service of type LoadBalancer on 443 with an
+    optionally pre-allocated IP (load_balancer_ip), so the sslip.io
+    external hostname is known before install (ADR-0022).
+  EOT
+
+  validation {
+    condition     = contains(["nodePort", "loadBalancer"], var.expose_type)
+    error_message = "expose_type must be nodePort or loadBalancer."
+  }
+}
+
+variable "load_balancer_ip" {
+  type        = string
+  default     = null
+  description = "Pre-allocated IP for expose_type=loadBalancer (e.g. a google_compute_address). null lets the cloud pick one — but then the external hostname cannot embed the IP upfront."
+}
+
 locals {
   # renovate: datasource=helm depName=harbor registryUrl=https://helm.goharbor.io
   default_version_harbor = "1.19.2"
   # Single source of truth for the pin stays the line above so Renovate keeps
   # bumping it; callers (incl. the compat matrix) override via var.version_harbor.
   version_harbor = coalesce(var.version_harbor, local.default_version_harbor)
+
+  # host[:port] as it appears in image refs and externalURL. LoadBalancer
+  # serves on 443, which image refs leave implicit.
+  external_host = var.expose_type == "loadBalancer" ? var.external_hostname : "${var.external_hostname}:${var.https_node_port}"
+
+  expose_tls = {
+    enabled    = true
+    certSource = "auto"
+    auto = {
+      commonName = var.external_hostname
+    }
+  }
+  expose_lb = {
+    type = "loadBalancer"
+    tls  = local.expose_tls
+    loadBalancer = {
+      name  = "harbor"
+      IP    = var.load_balancer_ip
+      ports = { httpPort = 80, httpsPort = 443 }
+    }
+  }
+  expose_np = {
+    type = "nodePort"
+    tls  = local.expose_tls
+    nodePort = {
+      name = "harbor"
+      ports = {
+        http  = { port = 80, nodePort = var.http_node_port }
+        https = { port = 443, nodePort = var.https_node_port }
+      }
+    }
+  }
+  # jsonencode/jsondecode dodges HCL's conditional type unification —
+  # the two expose shapes are intentionally different objects.
+  expose = jsondecode(var.expose_type == "loadBalancer" ? jsonencode(local.expose_lb) : jsonencode(local.expose_np))
 }
 
 provider "helm" {
@@ -79,6 +140,7 @@ provider "helm" {
     host                   = var.kubeconfig.host
     client_certificate     = var.kubeconfig.client_certificate
     client_key             = var.kubeconfig.client_key
+    token                  = var.kubeconfig.token
     cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
   }
 }
@@ -87,6 +149,7 @@ provider "kubernetes" {
   host                   = var.kubeconfig.host
   client_certificate     = var.kubeconfig.client_certificate
   client_key             = var.kubeconfig.client_key
+  token                  = var.kubeconfig.token
   cluster_ca_certificate = var.kubeconfig.cluster_ca_certificate
 }
 
@@ -108,24 +171,8 @@ resource "helm_release" "harbor" {
   atomic           = false
 
   values = [yamlencode({
-    expose = {
-      type = "nodePort"
-      tls = {
-        enabled    = true
-        certSource = "auto"
-        auto = {
-          commonName = var.external_hostname
-        }
-      }
-      nodePort = {
-        name = "harbor"
-        ports = {
-          http  = { port = 80, nodePort = var.http_node_port }
-          https = { port = 443, nodePort = var.https_node_port }
-        }
-      }
-    }
-    externalURL         = "https://${var.external_hostname}:${var.https_node_port}"
+    expose              = local.expose
+    externalURL         = "https://${local.external_host}"
     harborAdminPassword = random_password.admin.result
     persistence = {
       enabled = true

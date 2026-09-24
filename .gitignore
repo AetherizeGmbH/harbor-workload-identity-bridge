@@ -19,6 +19,8 @@ test/e2e/**/.gen/
 test/e2e/**/terraform.tfstate*
 test/e2e/**/errored_test.tfstate
 test/e2e/**/.tofu-sleep
+test/e2e/**/.diag/
+test/e2e/diag-last/
 
 # Node tooling (semantic-release / commitlint)
 node_modules/

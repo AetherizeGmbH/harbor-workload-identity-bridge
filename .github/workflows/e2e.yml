@@ -6,6 +6,9 @@ on:
     paths:
       - "bridge/**"
       - "plugin/**"
+      - "installer/**"
+      - "go.mod"
+      - "go.sum"
       - "charts/harbor-bridge/**"
       - "test/e2e/**"
       - "Dockerfile.*"
@@ -55,13 +58,22 @@ jobs:
           version: v0.32.0
       - name: Run tofu test
         working-directory: test/e2e
-        # Explicit pipefail: the github-hosted runner's effective shell
-        # here is `/usr/bin/bash -e {0}` (no `-o pipefail`), so `tofu
-        # test ... | tee ...` returned tee's exit code (0) and a real
-        # tofu failure looked green. -E inherits ERR traps; -u catches
-        # accidentally-unset variables.
+        # No `| tee`: with the runner's default `bash -e` (no pipefail)
+        # a tee'd `tofu test` once returned tee's exit code and a real
+        # failure looked green. The step log already holds the output.
         shell: bash
         run: |
           set -Eeuo pipefail
           tofu init
-          TF_VAR_pause_after_pull=false tofu test -verbose 2>&1 | tee /tmp/tofu-test.log
+          TF_VAR_pause_after_pull=false tofu test -verbose
+      # A failing Job stage writes pod/event/bridge/installer/kubelet
+      # diagnostics to test/e2e/.diag/<job>/ before tofu destroys the
+      # cluster. Never Secret contents — only their names.
+      - name: Upload e2e diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-diagnostics
+          path: test/e2e/.diag/
+          if-no-files-found: ignore
+          retention-days: 7

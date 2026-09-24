@@ -84,7 +84,7 @@ e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/pus
 	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose
 
 .PHONY: e2e-pause
-e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep` to continue
+e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep-*` to continue
 	cd test/e2e && tofu init -upgrade -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose
 
 .PHONY: proxy
