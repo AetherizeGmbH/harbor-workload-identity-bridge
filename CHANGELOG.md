@@ -1,3 +1,9 @@
+## [0.5.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.3...v0.5.4) (2026-09-24)
+
+### Bug Fixes
+
+* **dataplane:** send the bridge token only to the apiserver and rate-limit key fetches ([#101](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/101)) ([fb4b6b2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/fb4b6b2f3151ad6f0a8d1f7e2030c6c329155820))
+
 ## [0.5.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.2...v0.5.3) (2026-09-24)
 
 ### Bug Fixes
