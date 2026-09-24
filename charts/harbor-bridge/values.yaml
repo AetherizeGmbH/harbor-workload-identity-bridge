@@ -99,12 +99,13 @@ bridge:
   # topologies (e.g. when discovery goes through an external IdP).
   oidcCAFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 
-  # Bearer token sent on every OIDC discovery / JWKS request. The
-  # apiserver's /.well-known/openid-configuration endpoint requires
-  # an authenticated caller. The bridge's RoundTripper re-reads this
-  # file each request so kubelet's hourly SA-token rotation is
-  # transparent. Set to empty string when the OIDC issuer is anonymous
-  # (external IdP without auth).
+  # The bridge's own ServiceAccount token, sent on discovery / JWKS
+  # requests because the apiserver serves them only to authenticated
+  # callers. It goes only to the in-cluster apiserver (the kubernetes
+  # Service names or KUBERNETES_SERVICE_HOST) over https, and to the
+  # jwks_uri the apiserver's own discovery names; never to a cloud
+  # issuer, another host, or a redirect target. Re-read per request, so
+  # kubelet's hourly token rotation is transparent. Empty disables it.
   oidcTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
 
   # Reserved for after upstream Harbor implements native OIDC trust

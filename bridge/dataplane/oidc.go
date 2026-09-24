@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -98,44 +99,80 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	if cfg.Issuer == "" {
 		return nil, errors.New("oidc: issuer is required")
 	}
+	issuerURL, err := url.Parse(cfg.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: issuer %q: %w", cfg.Issuer, err)
+	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		// Still bounded and redirect-free, just without a CA or token.
+		if httpClient, err = NewOIDCHTTPClient("", ""); err != nil {
+			return nil, err
+		}
 	}
-	// go-oidc threads the http client through context. Without this the
-	// library falls back to http.DefaultClient internally and we lose
-	// the ability to inject a fixture transport in tests.
-	ctx = oidc.ClientContext(ctx, httpClient)
+	// The bridge's token goes only to the in-cluster apiserver (see
+	// NewOIDCHTTPClient).
+	tt, _ := httpClient.Transport.(*tokenTransport)
+	allowIfAPIServer := func(u *url.URL) {
+		if tt != nil && isInClusterAPIServer(u) {
+			tt.allow(u.Host)
+		}
+	}
+	allowIfAPIServer(issuerURL)
 
-	var provider *oidc.Provider
-	if cfg.JWKSURL != "" {
-		// Operator-supplied JWKS endpoint — bypass discovery. We still
-		// require the iss claim to match cfg.Issuer; only the *fetch*
-		// URL changes. This handles the local-dev case (kubectl proxy
-		// terminates outside the cluster but tokens still claim the
-		// cluster-internal issuer) and the production case where the
-		// bridge sits behind an internal LB.
-		provider = (&oidc.ProviderConfig{
-			IssuerURL: cfg.Issuer,
-			JWKSURL:   cfg.JWKSURL,
-		}).NewProvider(ctx)
+	jwksURL := cfg.JWKSURL
+	var algs []string
+	if jwksURL != "" {
+		u, err := url.Parse(jwksURL)
+		if err != nil {
+			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
+		}
+		allowIfAPIServer(u)
 	} else {
-		p, err := oidc.NewProvider(ctx, cfg.Issuer)
+		provider, err := oidc.NewProvider(oidc.ClientContext(ctx, httpClient), cfg.Issuer)
 		if err != nil {
 			return nil, fmt.Errorf("oidc: discovery for issuer %q: %w", cfg.Issuer, err)
 		}
-		provider = p
+		var meta struct {
+			JWKSURI string   `json:"jwks_uri"`
+			Algs    []string `json:"id_token_signing_alg_values_supported"`
+		}
+		if err := provider.Claims(&meta); err != nil {
+			return nil, fmt.Errorf("oidc: discovery document for issuer %q: %w", cfg.Issuer, err)
+		}
+		u, err := url.Parse(meta.JWKSURI)
+		if err != nil || meta.JWKSURI == "" {
+			return nil, fmt.Errorf("oidc: discovery for issuer %q names no usable jwks_uri (%q)", cfg.Issuer, meta.JWKSURI)
+		}
+		jwksURL = meta.JWKSURI
+		// The apiserver's discovery names its JWKS endpoint by its own
+		// advertised address, which is not one of the Service names.
+		if tt != nil && isInClusterAPIServer(issuerURL) {
+			tt.allow(u.Host)
+		}
+		algs = supportedAlgs(meta.Algs)
 	}
 
-	verifier := provider.Verifier(&oidc.Config{
-		// Audience is per-HarborAccess and varies by request. We disable
-		// the library's audience check and validate aud in the handler
-		// against the matched CR's trustPolicy.audience.
-		SkipClientIDCheck: true,
-		// SkipExpiryCheck deliberately left false: go-oidc enforces exp.
+	verifier := oidc.NewVerifier(cfg.Issuer, newCachedKeySet(jwksURL, httpClient), &oidc.Config{
+		SkipClientIDCheck:    true,
+		SupportedSigningAlgs: algs,
 	})
-
 	return &goOIDCValidator{verifier: verifier}, nil
+}
+
+// supportedAlgs keeps the discovery-advertised algorithms the key set can
+// verify. Empty means the verifier's default, RS256.
+func supportedAlgs(advertised []string) []string {
+	var out []string
+	for _, a := range advertised {
+		for _, known := range jwtSigningAlgs {
+			if a == string(known) {
+				out = append(out, a)
+				break
+			}
+		}
+	}
+	return out
 }
 
 type goOIDCValidator struct {
