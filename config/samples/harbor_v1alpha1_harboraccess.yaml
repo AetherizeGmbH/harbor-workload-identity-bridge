@@ -14,7 +14,9 @@ spec:
     name: source-controller
   trustPolicy:
     issuer: https://kubernetes.default.svc
-    audience: harbor.example.com
+    # Must equal the bridge's plugin.audience (ADR-0026); convention:
+    # harbor-bridge-<clusterName>.
+    audience: harbor-bridge-prod
   permissions:
     - project: production
       action: pull

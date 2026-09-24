@@ -86,6 +86,9 @@ bridge:
     repository: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge
     # Defaults to .Chart.AppVersion when empty.
     tag: ""
+    # Pin the image by digest (sha256:...); when set, tag is ignored.
+    # Verify the digest's signature first (SECURITY.md).
+    digest: ""
     pullPolicy: IfNotPresent
 
   # Service-account-token issuer the bridge validates incoming SA
@@ -257,6 +260,9 @@ plugin:
   image:
     repository: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin
     tag: ""
+    # Pin by digest (sha256:...); kubelet runs this binary as root on
+    # every node. When set, tag is ignored.
+    digest: ""
     pullPolicy: IfNotPresent
 
   # Where on each node the plugin binary and config are written in
@@ -345,7 +351,9 @@ plugin:
   nodeSelector: {}
   tolerations:
     # Plugin must land on control-plane nodes too — kubelet on every
-    # node needs to exec it for image pulls.
+    # node needs to exec it for image pulls. This also places a
+    # privileged pod on control-plane nodes; narrow it (e.g. to your
+    # worker taints) if no workload there pulls from Harbor.
     - operator: Exists
 
 # Service shape. ADR-0008: NodePort by default so plugin pods can reach
@@ -362,7 +370,8 @@ metrics:
   enabled: true
   port: 8080
   # When the Prometheus Operator is present, set this to true to ship
-  # a ServiceMonitor that scrapes the bridge over the same TLS.
+  # a ServiceMonitor that scrapes the bridge's metrics port (plain HTTP on
+  # the pod network, <release>-metrics Service; never the NodePort).
   serviceMonitor:
     enabled: false
     interval: 30s

@@ -20,6 +20,7 @@ render() {
 cases=(
   "clusterName|--set|clusterName=|clusterName is REQUIRED"
   "harbor.url over plain http|--set|harbor.url=http://harbor.example.com|uses plain http"
+  "malformed image digest|--set|plugin.image.digest=sha256:nothex|must be sha256:<64 hex characters>"
   "harbor.url|--set|harbor.url=|harbor.url is REQUIRED"
   "harbor.adminCredsSecret.name|--set|harbor.adminCredsSecret.name=|harbor.adminCredsSecret.name is REQUIRED"
   "plugin.audience|--set|plugin.audience=|plugin.audience is REQUIRED"
