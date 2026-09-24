@@ -143,7 +143,7 @@ ADRs 0001–0008, `HarborAccess` v1alpha1 types, generated manifests, Makefile, 
 - [bridge/api/v1alpha1](../bridge/api/v1alpha1/) — `serviceAccountRef.{namespace,name}` required, DNS-1123 patterns; `tokenTTL` CEL bounded to 5m–24h.
 - [bridge/controlplane/config.go](../bridge/controlplane/config.go) — fail-fast env loading with joined validation errors, K8s-Secret-as-volume admin-creds loader.
 - [bridge/controlplane/harbor/](../bridge/controlplane/harbor/) — `Client` interface + go-client-backed impl; `RobotName`/`ClusterPrefix`/`OwnsRobot`/`IsValidHarborRobotName` pure helpers; client-side `FilterOwned`.
-- [bridge/controlplane/reconciler.go](../bridge/controlplane/reconciler.go) — finalizer-based delete, two-layer adoption discipline, permission update on generation, password rotation on generation or 24h elapsed, status conditions. **Bug-fixed**: `markTransientError` triggers retry; `secretMissing` forces rotation.
+- [bridge/controlplane/reconciler.go](../bridge/controlplane/reconciler.go) — finalizer-based delete, two-layer adoption discipline, permission update on generation, password rotation on generation or 24h elapsed (superseded: since ADR-0023 a spec change never rotates; rotation follows the 24h schedule or a missing/invalid Secret), status conditions. **Bug-fixed**: `markTransientError` triggers retry; `secretMissing` forces rotation.
 - [bridge/controlplane/janitor.go](../bridge/controlplane/janitor.go) — `manager.Runnable`, 5-min default sweep, ownership + description filters.
 
 ### Known operator burden
