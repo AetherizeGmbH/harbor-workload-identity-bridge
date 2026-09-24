@@ -195,6 +195,31 @@ plugin:
   # docs/install-external-plugin.md.
   enabled: true
 
+  # Namespace for the plugin DaemonSet, its ConfigMap, ServiceAccount and
+  # mTLS client certificate (ADR-0027). Empty = the release namespace, which
+  # must then allow privileged pods, and write access to it equals root on
+  # every node. A separate namespace lets the bridge namespace enforce Pod
+  # Security "restricted". It requires trust-manager: the bridge CA reaches
+  # the plugin namespace through a trust-manager Bundle (caBundle below),
+  # never through the bridge, which gets no access to that namespace.
+  namespace: ""
+  # Create plugin.namespace (labelled pod-security enforce=privileged).
+  # false = the namespace must exist.
+  createNamespace: true
+  # Split mode only: the source trust-manager copies into the plugin
+  # namespace. Exactly one of secret/configMap, in trust-manager's trust
+  # namespace (default: cert-manager), holding the CA that signs the
+  # bridge's serving certificate: typically the CA Secret of the
+  # ClusterIssuer in tls.issuerRef.
+  caBundle:
+    source:
+      secret:
+        name: ""
+        key: ca.crt
+      configMap:
+        name: ""
+        key: ca.crt
+
   # ─── REQUIRED (when plugin.enabled) ─────────────────────────────────
   # Image patterns (kubelet glob format) for which kubelet should call
   # this plugin. REQUIRED — an empty list means kubelet never invokes

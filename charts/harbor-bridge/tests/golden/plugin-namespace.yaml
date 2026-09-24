@@ -1,0 +1,794 @@
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-workload-identity-bridge
+      app.kubernetes.io/instance: harbor-bridge
+      app.kubernetes.io/component: bridge
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+automountServiceAccountToken: true
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-bridge-plugin
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin
+# Plugin pods do not talk to the K8s API — the binary running on the
+# node makes a single HTTPS call to the bridge and exits. The SA is
+# attached purely so the DaemonSet pod can mount the bridge-tls Secret
+# (read-only) to pull ca.crt onto each node.
+automountServiceAccountToken: false
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harbor-bridge-plugin
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin
+data:
+  credential-provider-config.yaml: |
+    apiVersion: kubelet.config.k8s.io/v1
+    kind: CredentialProviderConfig
+    providers:
+      - name: harbor-bridge-plugin
+        apiVersion: credentialprovider.kubelet.k8s.io/v1
+        matchImages:
+          - "harbor.example.com"
+        defaultCacheDuration: "1h"
+        env:
+          - name: HARBOR_BRIDGE_ENDPOINT
+            # Plugin runs on the node; default reaches the bridge via
+            # the NodePort on the node's own loopback (ADR-0008),
+            # overridable through plugin.bridgeEndpoint. A literal
+            # $(NODE_IP) is substituted by the installer.
+            value: "https://127.0.0.1:31443"
+          - name: HARBOR_BRIDGE_CA_BUNDLE
+            value: "/etc/kubernetes/credential-provider-config/harbor-bridge-ca.crt"
+          - name: HARBOR_BRIDGE_CLIENT_CERT
+            value: "/etc/kubernetes/credential-provider-config/harbor-bridge-client.crt"
+          - name: HARBOR_BRIDGE_CLIENT_KEY
+            value: "/etc/kubernetes/credential-provider-config/harbor-bridge-client.key"
+        tokenAttributes:
+          serviceAccountTokenAudience: "harbor-bridge-prod-eu-west"
+          requireServiceAccount: true
+          # See KEP-4412: this makes the SA token + UID part of the
+          # cache key so each pod gets its own credential.
+          cacheType: ServiceAccount
+
+---
+# Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-bridge-audience-token-request
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+rules:
+  - apiGroups: [""]
+    verbs:     ["request-serviceaccounts-token-audience"]
+    resources: ["harbor-bridge-prod-eu-west"]
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-bridge-harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+rules:
+  # Reconciler + data plane both list HarborAccess cluster-wide.
+  - apiGroups: [harbor.aetherize.io]
+    resources: [harboraccesses]
+    # patch: finalizers; status goes through the status subresource.
+    verbs: [get, list, watch, patch]
+  - apiGroups: [harbor.aetherize.io]
+    resources: [harboraccesses/status]
+    verbs: [update, patch]
+  - apiGroups: [harbor.aetherize.io]
+    resources: [harboraccesses/finalizers]
+    verbs: [update]
+
+---
+# Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-bridge-audience-token-request
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind:     ClusterRole
+  name:     harbor-bridge-audience-token-request
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind:     Group
+    name:     system:nodes
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-bridge-harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-bridge-harbor-bridge-system
+subjects:
+  - kind: ServiceAccount
+    name: harbor-bridge
+    namespace: harbor-bridge-system
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+rules:
+  # Robot-credential Secrets (the admin credentials come from a volume
+  # mount). No patch: the bridge creates, updates and deletes them.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, delete]
+  # Leader-election Lease, only used when bridge.replicas > 1. client-go's
+  # LeaseLock gets, creates and renews it; nothing else.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+  # Leader election records its transitions as events.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: harbor-bridge
+subjects:
+  - kind: ServiceAccount
+    name: harbor-bridge
+    namespace: harbor-bridge-system
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-metrics-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-bridge-metrics
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+    harbor.aetherize.io/service: metrics
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP
+      nodePort: 31443
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: harbor-bridge-plugin
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-workload-identity-bridge
+      app.kubernetes.io/instance: harbor-bridge
+      app.kubernetes.io/component: plugin
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+        app.kubernetes.io/version: "0.8.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: harbor-workload-identity-bridge
+        app.kubernetes.io/name: harbor-workload-identity-bridge
+        app.kubernetes.io/instance: harbor-bridge
+        app.kubernetes.io/component: plugin
+      annotations:
+        # Re-roll when the rendered provider config changes (the installer
+        # then converges kubelet) or when the TLS wiring changes (which
+        # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
+        # container copies rotated files in place (ADR-0021).
+        plugin.harbor.aetherize.io/config-checksum: b7af841e048cdb9e6658a09f96d772df600b7d60aa5d12d89adc281a834bd02c
+        plugin.harbor.aetherize.io/tls-checksum: b84f1c25e5f65271fd9a4d3d3abf7821fc2b628c31b267eb978e29c1aff84e00
+    spec:
+      serviceAccountName: harbor-bridge-plugin
+      # The installer never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      hostNetwork: false
+      # Required so the installer can read kubelet's command line from
+      # /proc (auto/merge discovery) and `nsenter -t 1 ...` into the
+      # host's namespaces for the kubelet restart. none mode does
+      # neither and drops this.
+      hostPID: true
+      priorityClassName: system-node-critical
+      securityContext:
+        runAsNonRoot: false  # need root to write onto the host
+        runAsUser: 0
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: install
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.8.0
+          imagePullPolicy: IfNotPresent
+          command: [/installer/harbor-bridge-installer]
+          env:
+            - name: INSTALL_MODE
+              value: "auto"
+            - name: HOST_ROOT
+              value: /host
+            - name: HOST_BIN_DIR
+              value: "/etc/kubernetes/credential-provider"
+            - name: HOST_CONFIG_DIR
+              value: "/etc/kubernetes/credential-provider-config"
+            - name: MTLS_ENABLED
+              value: "true"
+            - name: KUBELET_UNIT
+              value: "kubelet"
+            - name: STATE_DIR
+              value: "/var/lib/harbor-bridge"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: kubelet-config
+              mountPath: /config
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: mtls
+              mountPath: /mtls
+              readOnly: true
+          securityContext:
+            readOnlyRootFilesystem: true
+            # nsenter into PID 1 (kubelet restart) requires full
+            # privileges; the sync container below does not get them.
+            privileged: true
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      containers:
+        - name: sync
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.8.0
+          imagePullPolicy: IfNotPresent
+          command: [/installer/harbor-bridge-installer, --sync]
+          env:
+            - name: INSTALL_MODE
+              value: "auto"
+            - name: HOST_ROOT
+              value: /host
+            - name: HOST_BIN_DIR
+              value: "/etc/kubernetes/credential-provider"
+            - name: HOST_CONFIG_DIR
+              value: "/etc/kubernetes/credential-provider-config"
+            - name: MTLS_ENABLED
+              value: "true"
+            - name: KUBELET_UNIT
+              value: "kubelet"
+            - name: STATE_DIR
+              value: "/var/lib/harbor-bridge"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            # Only the directory it writes: a compromised sync container
+            # must not be a host-root compromise (audit H6).
+            - name: host-config
+              mountPath: /host/etc/kubernetes/credential-provider-config
+            - name: kubelet-config
+              mountPath: /config
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: mtls
+              mountPath: /mtls
+              readOnly: true
+          securityContext:
+            # Copies CA/mTLS files as root into a root-owned host dir —
+            # no capabilities, no nsenter, no /proc, never privileged.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: host-config
+          hostPath:
+            path: /etc/kubernetes/credential-provider-config
+            type: DirectoryOrCreate
+        - name: kubelet-config
+          configMap:
+            name: harbor-bridge-plugin
+            defaultMode: 0644
+        - name: tls
+          # ADR-0027: the bridge's TLS Secret is in another namespace;
+          # trust-manager copies its CA here.
+          configMap:
+            name: harbor-bridge-plugin-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: mtls
+          secret:
+            secretName: harbor-bridge-plugin-mtls-client
+            defaultMode: 0400
+
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harbor-bridge
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-workload-identity-bridge
+      app.kubernetes.io/instance: harbor-bridge
+      app.kubernetes.io/component: bridge
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+        app.kubernetes.io/version: "0.8.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: harbor-workload-identity-bridge
+        app.kubernetes.io/name: harbor-workload-identity-bridge
+        app.kubernetes.io/instance: harbor-bridge
+        app.kubernetes.io/component: bridge
+      annotations:
+        # Re-roll when the TLS wiring changes (which Secret; chart- vs
+        # operator-managed). Certificate ROTATION needs no restart: the
+        # bridge reloads the serving pair and client CA from the mounted
+        # Secret on its own.
+        bridge.harbor.aetherize.io/tls-cert-checksum: 315530593d5c0a99d6e050b75b77101e8a76404a2b98a629ff7e739e09e76868
+    spec:
+      serviceAccountName: harbor-bridge
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Soft anti-affinity: prefer spreading replicas across nodes so
+      # losing one node doesn't take both bridge pods down.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: harbor-workload-identity-bridge
+                    app.kubernetes.io/instance: harbor-bridge
+                    app.kubernetes.io/component: bridge
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: bridge
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge:0.8.0
+          imagePullPolicy: IfNotPresent
+          args: []
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: BRIDGE_CLUSTER_NAME
+              value: "prod-eu-west"
+            - name: BRIDGE_NAMESPACE
+              value: "harbor-bridge-system"
+            - name: BRIDGE_OIDC_ISSUER
+              value: "https://kubernetes.default.svc.cluster.local"
+            # The only token audience the bridge serves (ADR-0026).
+            - name: BRIDGE_AUDIENCE
+              value: "harbor-bridge-prod-eu-west"
+            - name: BRIDGE_RATE_LIMIT_PER_SOURCE
+              value: "20"
+            - name: BRIDGE_RATE_LIMIT_BURST
+              value: "100"
+            - name: BRIDGE_OIDC_CA_FILE
+              # In-cluster: the OIDC issuer is the apiserver and its
+              # cert is signed by the cluster CA. The projected SA
+              # volume always carries the cluster CA at this path.
+              # Override via .Values.bridge.oidcCAFile to point at a
+              # custom CA bundle (e.g. mTLS apiserver topologies).
+              value: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+            - name: BRIDGE_OIDC_TOKEN_FILE
+              # The apiserver gates /.well-known/openid-configuration
+              # behind system:authenticated; the bridge sends its own
+              # SA token as Bearer. Token rotates every ~hour; the
+              # transport re-reads on every request.
+              value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            - name: BRIDGE_HARBOR_URL
+              value: "https://harbor.example.com"
+            - name: BRIDGE_HARBOR_ALLOW_INSECURE_HTTP
+              value: "false"
+            - name: BRIDGE_HARBOR_ADMIN_DIR
+              value: /etc/bridge/harbor-admin
+            - name: BRIDGE_HARBOR_ROBOT_PREFIX
+              value: "robot$"
+            - name: BRIDGE_FORCE_LOCAL_VALIDATION
+              value: "true"
+            - name: BRIDGE_LOG_LEVEL
+              value: "info"
+            - name: BRIDGE_TLS_CERT_FILE
+              value: /etc/bridge/tls/tls.crt
+            - name: BRIDGE_TLS_KEY_FILE
+              value: /etc/bridge/tls/tls.key
+            - name: BRIDGE_TLS_CLIENT_CA_FILE
+              value: /etc/bridge/tls/ca.crt
+            - name: BRIDGE_LISTEN_ADDR
+              value: ":8443"
+            - name: BRIDGE_HEALTH_ADDR
+              value: ":8081"
+            - name: BRIDGE_METRICS_ADDR
+              value: ":8080"
+            - name: BRIDGE_ENABLE_LEADER_ELECTION
+              value: "true"
+          volumeMounts:
+            - name: harbor-admin
+              mountPath: /etc/bridge/harbor-admin
+              readOnly: true
+            - name: tls
+              mountPath: /etc/bridge/tls
+              readOnly: true
+          # Ready = the credential listener is bound (it binds only after
+          # the informer caches synced) — so every replica the Service
+          # routes to can actually serve.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: harbor-admin
+          secret:
+            secretName: harbor-admin
+            defaultMode: 0400
+            items:
+              - key: username
+                path: username
+              - key: password
+                path: password
+        - name: tls
+          secret:
+            secretName: harbor-bridge-tls
+            defaultMode: 0400
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-cabundle.yaml
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: harbor-bridge-plugin-ca
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin
+spec:
+  sources:
+    - secret:
+        name: "harbor-bridge-ca"
+        key: "ca.crt"
+  target:
+    configMap:
+      key: ca.crt
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: "harbor-bridge-plugin"
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-certificate.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-bridge-tls
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  secretName: harbor-bridge-tls
+  # The plugin reads ca.crt from this Secret via the DaemonSet's
+  # volume mount. cert-manager writes it by default.
+  duration: 2160h     # 90d
+  renewBefore: 360h   # 15d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  subject:
+    organizations: [aetherize.harbor-workload-identity-bridge]
+  commonName: harbor-bridge
+  dnsNames:
+    - harbor-bridge
+    - harbor-bridge.harbor-bridge-system
+    - harbor-bridge.harbor-bridge-system.svc
+    - harbor-bridge.harbor-bridge-system.svc.cluster.local
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  usages:
+    - server auth
+    - client auth
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# Source: harbor-workload-identity-bridge/templates/bridge-certificate.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-bridge-plugin-mtls-client
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.8.0
+    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin
+spec:
+  secretName: harbor-bridge-plugin-mtls-client
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  commonName: harbor-bridge-plugin
+  usages:
+    - client auth
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

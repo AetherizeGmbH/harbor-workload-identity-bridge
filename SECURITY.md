@@ -323,6 +323,16 @@ exposes no writable host filesystem and is unsupported.
 
 Operator choices:
 
+- `plugin.namespace` runs the DaemonSet in a namespace of its own
+  ([ADR-0027](docs/adr/0027-optional-plugin-namespace.md)), created with
+  Pod Security `enforce: privileged`. The bridge namespace can then
+  enforce `restricted`, and write access to it no longer means root on
+  every node. The bridge CA reaches the plugin namespace through a
+  trust-manager `Bundle` (required in this mode); the bridge gets no
+  access to the plugin namespace. Without it, the release namespace must
+  allow privileged pods, and **write access to it (create pods, edit the
+  plugin ConfigMap or the TLS Secret) is equivalent to root on every
+  node**: restrict it like cluster-admin.
 - `plugin.install.mode: none` is the least-privilege configuration:
   files only, no `hostPID`, no privileged container, and only the two
   narrow `plugin.hostBinaryDir`/`hostConfigDir` hostPath mounts. The

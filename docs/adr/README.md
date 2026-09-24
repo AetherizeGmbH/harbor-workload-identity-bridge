@@ -28,5 +28,6 @@
 | 0024 | [The chart can leave the plugin to the platform; supported node platforms](0024-plugin-optional-and-platform-support.md) | Accepted (extends 0021) |
 | 0025 | [Data plane serves on every replica; metrics leave the credential listener](0025-data-plane-serving.md) | Accepted (amends 0002, 0008) |
 | 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023) |
+| 0027 | [The plugin DaemonSet can run in its own namespace](0027-optional-plugin-namespace.md) | Accepted (extends 0021, 0024) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.
