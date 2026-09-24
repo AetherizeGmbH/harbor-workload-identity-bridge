@@ -1,3 +1,16 @@
+## [0.6.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.5...v0.6.0) (2026-09-24)
+
+### ⚠ BREAKING CHANGES
+
+* **bridge:** BRIDGE_AUDIENCE is required (the chart sets it from
+plugin.audience). HarborAccess objects whose trustPolicy.audience differs
+from plugin.audience stop receiving credentials and report
+AudienceMismatch; set their audience to plugin.audience.
+
+### Features
+
+* **bridge:** serve one audience and a selected set of HarborAccess objects ([#106](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/106)) ([a5fb5f9](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/a5fb5f93b919a899a4920e7ce4384680d6e49d29))
+
 ## [0.5.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.4...v0.5.5) (2026-09-24)
 
 ### Bug Fixes
