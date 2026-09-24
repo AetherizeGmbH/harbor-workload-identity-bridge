@@ -155,7 +155,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load admin creds: %w", err)
 	}
-	harborClient, err := harbor.NewClient(cfg.HarborURL, adminCreds.Username, adminCreds.Password, nil,
+	harborTransport, err := harbor.NewTransport(cfg.HarborCAFile)
+	if err != nil {
+		return fmt.Errorf("build harbor transport: %w", err)
+	}
+	harborClient, err := harbor.NewClient(cfg.HarborURL, adminCreds.Username, adminCreds.Password, harborTransport,
 		harbor.WithRobotPrefix(cfg.HarborRobotPrefix))
 	if err != nil {
 		return fmt.Errorf("build harbor client: %w", err)

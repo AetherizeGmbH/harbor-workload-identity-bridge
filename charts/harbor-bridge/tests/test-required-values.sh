@@ -19,6 +19,7 @@ render() {
 # and override the field-under-test to empty/null.
 cases=(
   "clusterName|--set|clusterName=|clusterName is REQUIRED"
+  "harbor.url over plain http|--set|harbor.url=http://harbor.example.com|uses plain http"
   "harbor.url|--set|harbor.url=|harbor.url is REQUIRED"
   "harbor.adminCredsSecret.name|--set|harbor.adminCredsSecret.name=|harbor.adminCredsSecret.name is REQUIRED"
   "plugin.audience|--set|plugin.audience=|plugin.audience is REQUIRED"

@@ -13,8 +13,21 @@
 clusterName: ""
 
 harbor:
-  # Base URL of the Harbor instance the bridge manages robots in.
+  # Base URL of the Harbor instance the bridge manages robots in. Use
+  # https: over plain http the admin credentials travel on every call and
+  # robot passwords come back in the responses.
   url: ""
+
+  # Allow an http:// url anyway (e.g. an in-cluster Harbor reached over
+  # the pod network in a test cluster).
+  allowInsecureHTTP: false
+
+  # Existing Secret in the release namespace with the CA that signs
+  # Harbor's certificate, for a Harbor behind a private CA. Empty = the
+  # system trust store.
+  caSecret:
+    name: ""
+    key: ca.crt
 
   # Reference to an *existing* Secret in the release namespace holding
   # Harbor admin credentials. Two keys: `username`, `password`.

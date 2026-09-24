@@ -466,6 +466,12 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 	// the one matched for this token, two CRs have collided on one Secret
 	// name. Refuse rather than hand one workload's SA the other workload's
 	// robot password.
+	// Serve only Secrets the control plane wrote (it stamps its labels on
+	// every write): a Secret someone else created at that name is never
+	// handed out as robot credentials.
+	if !robotsecret.IsManaged(secret) {
+		return nil, fmt.Errorf("%w: Secret %s/%s is not managed by the bridge", errSecretOwnerMismatch, h.Config.BridgeNamespace, name)
+	}
 	if robotsecret.StampedForOther(secret, ha.Namespace, ha.Name) {
 		return nil, fmt.Errorf("%w: Secret %s/%s is stamped for HarborAccess %s/%s, not %s/%s",
 			errSecretOwnerMismatch, h.Config.BridgeNamespace, name,

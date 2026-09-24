@@ -15,7 +15,8 @@ rules:
   # Reconciler + data plane both list HarborAccess cluster-wide.
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses]
-    verbs: [get, list, watch, update, patch]
+    # patch: finalizers; status goes through the status subresource.
+    verbs: [get, list, watch, patch]
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/status]
     verbs: [update, patch]
@@ -46,15 +47,17 @@ metadata:
   labels:
     {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
 rules:
-  # Robot-credential Secrets and the admin-creds Secret the bridge reads.
+  # Robot-credential Secrets (the admin credentials come from a volume
+  # mount). No patch: the bridge creates, updates and deletes them.
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, watch, create, update, patch, delete]
-  # Leader-election Lease, only created when bridge.replicas > 1.
+    verbs: [get, list, watch, create, update, delete]
+  # Leader-election Lease, only used when bridge.replicas > 1. client-go's
+  # LeaseLock gets, creates and renews it; nothing else.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, list, watch, create, update, patch, delete]
-  # Events for status surfacing (not strictly required today but cheap).
+    verbs: [get, create, update]
+  # Leader election records its transitions as events.
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

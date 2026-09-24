@@ -291,3 +291,25 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestLoadFromEnv_HarborHTTPNeedsOptIn(t *testing.T) {
+	base := map[string]string{
+		EnvClusterName:    "prod",
+		EnvNamespace:      "harbor-bridge-system",
+		EnvOIDCIssuer:     "https://kubernetes.default.svc",
+		EnvHarborURL:      "http://harbor-core.harbor.svc",
+		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		EnvAudience:       "harbor-bridge-prod",
+	}
+	clearAllEnv(t)
+	_ = os.Unsetenv(EnvHarborAllowHTTP)
+	setEnv(t, base)
+	if _, err := LoadFromEnv(); err == nil || !strings.Contains(err.Error(), "plain http") {
+		t.Fatalf("err = %v, want the plain-http refusal", err)
+	}
+	setEnv(t, map[string]string{EnvHarborAllowHTTP: "true"})
+	cfg, err := LoadFromEnv()
+	if err != nil || !cfg.HarborAllowHTTP {
+		t.Fatalf("with opt-in: cfg=%+v err=%v", cfg, err)
+	}
+}

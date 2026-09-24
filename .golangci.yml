@@ -47,7 +47,7 @@ linters:
       # G304 (file path from a variable): every one of these paths comes
       # from the operator's configuration (BRIDGE_* env, chart values) or
       # from procfs, never from a request or a CR.
-      - path: (bridge/cmd/main|bridge/dataplane/oidc_client)\.go
+      - path: (bridge/cmd/main|bridge/dataplane/oidc_client|bridge/controlplane/harbor/client)\.go
         linters: [gosec]
         text: "G304"
       - path: bridge/controlplane/config\.go

@@ -74,6 +74,7 @@ func newTestRobotSecret() *corev1.Secret {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: hTestBridgeNS,
 			Name:      "robot-" + hTestHANs + "." + hTestHAName,
+			Labels:    robotsecret.Labels("prod", hTestHANs, hTestHAName),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -721,5 +722,25 @@ func TestHandler_UnsetAudienceServesNothing(t *testing.T) {
 	h.ServeHTTP(w, bearerReq(t, "img"))
 	if w.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 (fail closed without a configured audience)", w.Code)
+	}
+}
+
+// The data plane never hands out a Secret the control plane did not write.
+func TestHandler_UnmanagedSecret_NotServed(t *testing.T) {
+	unmanaged := newTestRobotSecret()
+	unmanaged.Labels = nil
+	k8s := fake.NewClientBuilder().
+		WithScheme(handlerTestScheme).
+		WithObjects(newTestHA(), unmanaged).
+		Build()
+	h := &Handler{
+		K8sClient: k8s,
+		Validator: &stubValidator{claims: newTestClaims()},
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), hTestRobotPass) {
+		t.Fatalf("status %d body %q, want 403 without credentials", w.Code, w.Body.String())
 	}
 }

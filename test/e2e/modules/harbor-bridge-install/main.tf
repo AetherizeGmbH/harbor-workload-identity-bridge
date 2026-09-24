@@ -234,6 +234,9 @@ resource "helm_release" "bridge" {
     clusterName = var.cluster_name
     harbor = {
       url = var.harbor_url
+      # The test Harbor is reached over the pod network (harbor-core
+      # Service, plain http); production uses https.
+      allowInsecureHTTP = startswith(var.harbor_url, "http://")
       adminCredsSecret = {
         name = kubernetes_secret_v1.admin.metadata[0].name
       }

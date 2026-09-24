@@ -6,10 +6,12 @@ package harbor
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -184,6 +186,28 @@ func defaultTransport() http.RoundTripper {
 	t.ResponseHeaderTimeout = DefaultCallTimeout
 	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	return t
+}
+
+// NewTransport returns the default transport, trusting only the PEM
+// bundle in caFile when it is set (a Harbor behind a private CA).
+func NewTransport(caFile string) (http.RoundTripper, error) {
+	t, ok := defaultTransport().(*http.Transport)
+	if !ok {
+		return nil, errors.New("default transport is not an *http.Transport")
+	}
+	if caFile == "" {
+		return t, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read Harbor CA file %s: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("harbor CA file %s contains no PEM certificates", caFile)
+	}
+	t.TLSClientConfig.RootCAs = pool
+	return t, nil
 }
 
 // noLogger discards the SDK runtime's debug output.

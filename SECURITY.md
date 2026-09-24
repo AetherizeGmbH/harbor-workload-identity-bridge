@@ -409,6 +409,7 @@ their own RBAC.
 | Lever | Default | Recommendation |
 | --- | --- | --- |
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
+| Harbor transport (`harbor.url`) | https required | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
 | `plugin.install.mode` | `auto` | `none` for the least privilege (no `hostPID`, no privileged container, two narrow hostPath mounts; you wire the kubelet flags). `plugin.enabled: false` for no node agent at all |

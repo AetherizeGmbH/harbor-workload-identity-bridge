@@ -138,6 +138,9 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- if not .Values.harbor.url -}}
 {{- fail "harbor.url is REQUIRED. The bridge needs the Harbor base URL to manage robots." -}}
 {{- end -}}
+{{- if and (hasPrefix "http://" .Values.harbor.url) (not .Values.harbor.allowInsecureHTTP) -}}
+{{- fail "harbor.url uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (harbor.caSecret for a private CA), or set harbor.allowInsecureHTTP=true." -}}
+{{- end -}}
 {{- if not .Values.harbor.adminCredsSecret.name -}}
 {{- fail "harbor.adminCredsSecret.name is REQUIRED. Pre-create a Secret in the release namespace holding Harbor admin {username,password}." -}}
 {{- end -}}

@@ -1,5 +1,13 @@
 ## Chart value migrations
 
+### Unreleased: Harbor over https, least-privilege RBAC
+
+| Change | What to do |
+| --- | --- |
+| `harbor.url` must use https; an `http://` URL fails at template time and at bridge start | Use https, with `harbor.caSecret` (a Secret holding the CA, key `ca.crt`) for a private CA. Only if Harbor is reachable solely over plain http (e.g. in-cluster in a test cluster), set `harbor.allowInsecureHTTP: true`. |
+| The bridge serves and adopts only Secrets it labelled; a Secret at a robot Secret's name that the bridge did not write and that holds another username is reported as `RobotConflict` | Nothing, unless such a Secret exists: rename or delete it. Secrets written by older bridges are labelled on their first reconcile. |
+| Bridge RBAC lost unused verbs (`update` on harboraccesses, `patch` on Secrets, all but get/create/update on Leases) | Nothing. |
+
 ### Unreleased: audit log and rate limit
 
 | Change | What to do |
