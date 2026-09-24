@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 )
 
@@ -38,7 +37,7 @@ const stateSchemaVersion = 1
 const stateFileName = "installer-state.json"
 
 func loadState(stateDir string) (*state, error) {
-	raw, err := os.ReadFile(filepath.Join(stateDir, stateFileName))
+	raw, err := readHostFile(filepath.Join(stateDir, stateFileName))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}

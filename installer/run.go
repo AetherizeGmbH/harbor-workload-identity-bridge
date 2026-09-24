@@ -111,7 +111,7 @@ func runPatch(cfg *config, rendered []byte) error {
 
 	// Compute everything that can be refused BEFORE touching the host,
 	// so a refusal never leaves a half-install behind.
-	existingEnv, err := os.ReadFile(cfg.hostPath(defaultKubeletPath))
+	existingEnv, err := readHostFile(cfg.hostPath(defaultKubeletPath))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", defaultKubeletPath, err)
 	}
@@ -156,7 +156,7 @@ func runPatch(cfg *config, rendered []byte) error {
 func runMerge(cfg *config, rendered []byte, wiring kubeletWiring) error {
 	// Read, validate, and merge first: an unknown schema or a missing file
 	// is refused before anything is written (no half-install).
-	existing, err := os.ReadFile(cfg.hostPath(wiring.ConfigFile))
+	existing, err := readHostFile(cfg.hostPath(wiring.ConfigFile))
 	if err != nil {
 		// Kubelet refuses to start when the flag points at a missing
 		// file, so on a live node this indicates a wrong override.

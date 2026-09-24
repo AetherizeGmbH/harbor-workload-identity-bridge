@@ -276,6 +276,15 @@ container:
   carries the flags) before it records success; otherwise the pod fails
   loudly. Running containers survive the restart (containerd owns them).
   Binary drops and CA/mTLS rotation never restart kubelet.
+- opens every host file relative to its directory and accepts only a
+  regular file: a symlink, FIFO or device in place of a file it reads
+  or replaces (including the `.bak` backups) fails the install. The
+  sync container and any pod with a hostPath volume on the same
+  directory can write next to these files; before this check a
+  planted symlink turned the next install into a root write, or a copy
+  of any host file into a readable backup, anywhere on the node. In
+  merge mode this also means the node's existing credential-provider
+  config must be a regular file.
 - in `patch` mode parse-merges `/etc/default/kubelet`, preserving
   operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
   node's existing `CredentialProviderConfig`, preserving foreign
