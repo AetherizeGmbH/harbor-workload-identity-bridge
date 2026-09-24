@@ -6,7 +6,7 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 | Platform | Chart settings | What happens on each node | Verified |
 |---|---|---|---|
 | kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`, kubelet restarted and verified | yes (CI e2e) |
-| GKE Standard | defaults | kubelet already runs GKE's `auth-provider-gcp` → **merge** into that config (YAML), binary into its bin dir | merge unit-tested, not run |
+| GKE Standard | defaults | kubelet already runs GKE's `auth-provider-gcp` → **merge** into that config (YAML), binary into its bin dir | harness ready (`make e2e-gke`), never run |
 | EKS (AL2023) | defaults | kubelet already runs `ecr-credential-provider` → **merge** into `/etc/eks/image-credential-provider/config.json` (stays JSON) | merge unit-tested, not run |
 | AKS | defaults | kubelet already runs `acr-credential-provider` → **merge** into its config | merge unit-tested, not run |
 | Talos | `plugin.enabled: false` | nothing — the plugin comes from a system extension, the entry from the machine config | documented ([install-external-plugin.md](install-external-plugin.md)) |
@@ -41,9 +41,16 @@ converge the same way. If a platform resets the provider config at boot (GKE COS
 keeps `/etc` stateless), the next DaemonSet pod start merges again and restarts
 kubelet once.
 
-**GKE, EKS, AKS.** A managed-cloud e2e harness would reuse the shared modules
-in `test/e2e/modules` with a cloud-specific cluster module. Points to confirm
-on the first run:
+**GKE.** The e2e harness (`test/e2e-gke`, ADR-0022) creates a zonal spot cluster
+with Dataplane V2, Workload Identity (pods cannot read the node's credentials),
+legacy metadata endpoints off, and the control plane reachable only from the
+operator's IP. It is billed and has never been run. First-run findings go into
+ADR-0022.
+
+**EKS / AKS.** A harness would reuse the shared modules in `test/e2e/modules`
+(token-auth kubeconfig, LoadBalancer Harbor, pull jobs with diagnostics, the
+HarborAccess scenario) with a cloud-specific cluster module, like the GKE one.
+Points to confirm on the first run:
 
 - the node's credential-provider config path and format (the installer reads the
   live kubelet flags, so it does not depend on a hard-coded path);
