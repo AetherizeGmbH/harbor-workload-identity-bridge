@@ -4,10 +4,11 @@ Two paths, pick by what you're doing.
 
 - **§1 `tofu test`** — the recommended path. One command spins up a
   fresh kind cluster, installs Cilium + cert-manager + Harbor + the
-  bridge chart, seeds a private image, and asserts the kubelet
-  credential-provider chain by pulling that image. ~5 minutes
-  start-to-finish. Use this for every change you'd otherwise want
-  smoke-tested.
+  bridge chart, seeds private images, asserts the kubelet
+  credential-provider chain by pulling them, and then checks the
+  HarborAccess lifecycle (grant change, identity change, deletion)
+  against Harbor. ~15 minutes start-to-finish. Use this for every
+  change you'd otherwise want smoke-tested.
 
 - **§2 Remote / manual cluster** — drive the bridge against your own
   pre-existing Kubernetes + Harbor by hand, without the Helm chart.
@@ -22,23 +23,30 @@ Two paths, pick by what you're doing.
 ## Prerequisites
 
 - Docker
-- OpenTofu ≥ 1.6 (`brew install opentofu`)
+- OpenTofu ≥ 1.12 (`brew install opentofu`)
 - kind on `$PATH` (`brew install kind`)
 - `kubectl` for poking at the cluster while paused
 
 The OpenTofu harness handles the rest: pulls the kind, Cilium, cert-
 manager, and Harbor charts, builds the bridge + plugin + seed images
 locally, loads them into the kind nodes, applies the chart, seeds the
-test image, and runs the assertion pod.
+test images, and runs the assertions.
+
+The harness never touches `~/.kube/config`: kind writes the cluster's
+kubeconfig to `test/e2e/.gen/bridge-e2e.kubeconfig`, and every kubectl call
+inside the harness uses explicit connection data. Host ports default to
+8080/8443/6443; if another local cluster holds them, set
+`TF_VAR_host_http_port`, `TF_VAR_host_https_port`,
+`TF_VAR_host_api_server_port`.
 
 ## Run it
 
 ```bash
 make e2e         # no pause — full run, no human in the loop
-make e2e-pause   # pauses between bridge_install and pull_pod so you can poke around
+make e2e-pause   # pauses after the pull assertions, before the teardown stages
 ```
 
-Both end with `run "pull_pod"... pass` if the chain works end-to-end.
+A green run ends with `Success! … passed, 0 failed.`
 
 ## Topology
 
@@ -53,21 +61,31 @@ dashed arrow is the one-time setup tofu drives.
 
 ## Stages, in order
 
-Every `run` block in [`test/e2e/tests/01-bridge.tftest.hcl`](test/e2e/tests/01-bridge.tftest.hcl):
+Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-bridge.tftest.hcl)
+(`01-plan.tftest.hcl` holds plan-only checks of the install module):
 
-| # | Stage              | What it does |
-|---|--------------------|--------------|
-| 1 | `build_images`     | `docker build` bridge + plugin + seed images locally |
-| 2 | `cluster`          | kind cluster with Cilium kube-proxy replacement, cert-manager, containerd config |
-| 3 | `harbor`           | Harbor chart, exposed at `https://harbor.e2e:30843` |
+| # | Stage | What it does |
+|---|---|---|
+| 1 | `build_images` | `docker build` bridge + plugin + seed images locally |
+| 2 | `cluster` | kind cluster with Cilium kube-proxy replacement, cert-manager, containerd config |
+| 3 | `harbor` | Harbor chart, exposed at `https://harbor.e2e:30843` |
 | 4 | `containerd_trust` | Extract Harbor's TLS cert from each node, install as `/etc/containerd/certs.d/harbor.e2e:30843/ca.crt` |
-| 5 | `coredns_rewrite`  | CoreDNS hosts-plugin entry so `harbor.e2e` resolves to a kind node IP cluster-wide |
-| 6 | `seed_image`       | crane copy `alpine:3.20` into several projects (`your-project`, `project-alpha/beta/gamma`, `beta-1/2/3`) |
-| 7 | `bridge_install`   | The chart — CRDs, bridge Deployment, plugin DaemonSet, audience RBAC |
-| 8 | `harbor_access`    | Apply the `HarborAccess` CRs (baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR); wait on `Ready=True` |
-| 9 | `pull_pod*`        | Load-bearing pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot) |
-| 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and pull another — verifies the `pull,push` action |
-| 11 | `file_sleep`      | No-op unless `TF_VAR_pause_after_pull=true` — pauses AFTER all assertions (see below) |
+| 5 | `coredns_rewrite` | CoreDNS hosts-plugin entry so `harbor.e2e` resolves to a kind node IP cluster-wide |
+| 6 | `seed_image` | Create the projects, crane-copy the test image into each, verify, and wait for the Job to finish |
+| 7 | `bridge_install` | The chart — CRDs, bridge Deployment (2 replicas), plugin DaemonSet, audience RBAC |
+| 8 | `harbor_access` | HarborAccess scenario, phase `initial`: baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR, the upgrade CR |
+| 9 | `pull_pod*` | Pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot) |
+| 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and read another — verifies the `pull,push` action |
+| 11 | `bridge_upgrade` | `helm upgrade` adding a `matchImages` entry — the installer must restart kubelet |
+| 12 | `pull_pod_upgrade` | Pulls the newly matched project |
+| 13 | `harbor_access_update` | Scenario phase `updated`: a grant added to `test-access`, `collide-one` moved to a new ServiceAccount; waits for the new generation to be applied |
+| 14 | `pull_pod_granted` | The newly granted project pulls (grant reached Harbor, no rotation broke kubelet's cache) |
+| 15 | `pull_pod_renamed` | The new ServiceAccount pulls |
+| 16 | `pull_pod_revoked` | The old ServiceAccount must get an authorization failure |
+| 17 | `robot_check_update` | Asks Harbor: the old robot is gone, the new one exists |
+| 18 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |
+| 19 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
+| 20 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left |
 
 ## Pause-for-inspection mode
 
@@ -75,7 +93,8 @@ Every `run` block in [`test/e2e/tests/01-bridge.tftest.hcl`](test/e2e/tests/01-b
 `enabled` input on the `test-sleep` module, which runs AFTER all the
 pull/push assertions. While paused:
 
-- A file appears at **`test/e2e/.tofu-sleep`**.
+- A file appears at **`test/e2e/.tofu-sleep-<8 hex chars>`** (a fresh
+  suffix per run; the run log prints the exact path).
 - The terraform apply blocks on a `while [ -f ... ]; do sleep 2; done`
   loop watching that file.
 - The cluster is fully exercised: Harbor running, chart installed, all
@@ -86,12 +105,11 @@ pull/push assertions. While paused:
 In another shell, poke around:
 
 ```bash
-export KUBECONFIG=~/.kube/config   # kind wrote it during cluster setup
+export KUBECONFIG=$PWD/test/e2e/.gen/bridge-e2e.kubeconfig
 kubectl get pod -A
-kubectl -n harbor-bridge-system logs deploy/harbor-bridge
-kubectl -n harbor-bridge-system exec deploy/harbor-bridge -- \
-  wget -qO- http://localhost:8081/metrics | grep bridge_
-# manually run the pull_pod manifest, exec into it, etc.
+kubectl -n harbor-bridge-system logs -l app.kubernetes.io/component=bridge --prefix
+kubectl -n harbor-bridge-system port-forward svc/harbor-bridge-metrics 8080 &
+curl -s localhost:8080/metrics | grep bridge_
 ```
 
 ### Open Harbor in your browser
@@ -134,10 +152,10 @@ CRs and tear down orphans — see ADR-0012.
 When done:
 
 ```bash
-rm test/e2e/.tofu-sleep
+rm test/e2e/.tofu-sleep-*
 ```
 
-The apply unblocks, `pull_pod` runs, and the test finishes.
+The apply unblocks, the teardown stages run, and the test finishes.
 
 **Ctrl-C while paused** triggers the trap inside the sleep loop — it
 removes the sleep file and exits 0, so terraform proceeds to teardown
@@ -147,33 +165,38 @@ cleanly. No orphan kind clusters.
 
 | File / module | Role |
 |---|---|
-| [`test/e2e/main.tf`](test/e2e/main.tf) | Declares `pause_after_pull` variable |
-| [`test/e2e/tests/01-bridge.tftest.hcl`](test/e2e/tests/01-bridge.tftest.hcl) | The test definition — every `run` block |
+| [`test/e2e/main.tf`](test/e2e/main.tf) | Declares the file-level variables (`pause_after_pull`, `version_harbor`, `host_*_port`) |
+| [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-bridge.tftest.hcl) | The test definition — every `run` block |
+| [`test/e2e/modules/harbor-seed`](test/e2e/modules/harbor-seed) | Projects + images, waits for completion (own state) |
+| [`test/e2e/modules/harbor-access-scenario`](test/e2e/modules/harbor-access-scenario) | The HarborAccess fixtures per lifecycle phase |
 | [`test/e2e/modules/docker-build`](test/e2e/modules/docker-build) | `docker build` bridge + plugin + seed images |
 | [`test/e2e/modules/kind-cluster`](test/e2e/modules/kind-cluster) | Kind + Cilium + cert-manager + `extra_etc_hosts` |
 | [`test/e2e/modules/harbor`](test/e2e/modules/harbor) | Harbor chart + node IP / cert-extract helpers |
 | [`test/e2e/modules/containerd-registry-trust`](test/e2e/modules/containerd-registry-trust) | Pulls Harbor's cert off the wire, installs into containerd |
 | [`test/e2e/modules/coredns-cm`](test/e2e/modules/coredns-cm) | Patches CoreDNS `Corefile` for synthetic hostnames |
 | [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install |
-| [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests with optional `wait` on conditions |
+| [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests (keyed by object identity) with optional `wait` |
 | [`test/e2e/modules/test-sleep`](test/e2e/modules/test-sleep) | The pause mechanism |
-| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | The `pull_pod` assertion |
+| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
 
 ## When it fails
 
-The CI workflow ([`.github/workflows/e2e.yml`](.github/workflows/e2e.yml))
-captures kubelet logs, bridge metrics, plugin logs, and Kubernetes
-events to `/tmp/diag/` on any failed stage. For local runs:
+A failing Job stage writes diagnostics before the cluster is destroyed, to
+`test/e2e/.diag/<job>/` (CI uploads the directory as an artifact): pod and Job
+descriptions, namespace events, the pod log, the bridge logs, all HarborAccess
+objects, the names (never the contents) of the bridge Secrets, the installer
+log of the node, and that node's kubelet journal.
+
+While a run is still up (or paused):
 
 ```bash
-NODE=$(kubectl -n test-pull get pod bridge-pull-test -o jsonpath='{.spec.nodeName}')
-docker exec "$NODE" journalctl -u kubelet --since "2 minutes ago" --no-pager \
+export KUBECONFIG=$PWD/test/e2e/.gen/bridge-e2e.kubeconfig
+NODE=$(kubectl -n test-pull get pod -l app=bridge-pull-test -o jsonpath='{.items[0].spec.nodeName}')
+docker exec "$NODE" journalctl -u kubelet --since "5 minutes ago" --no-pager \
   | grep -E "plugins.go|harbor-bridge|credential"
-kubectl -n harbor-bridge-system exec deploy/harbor-bridge -- \
-  wget -qO- http://localhost:8081/metrics | grep bridge_credential_issuances_total
-kubectl -n harbor-bridge-system logs ds/harbor-bridge-plugin --tail=50
-kubectl -n test-pull describe pod bridge-pull-test | tail -30
+kubectl -n harbor-bridge-system logs ds/harbor-bridge-plugin -c install
+kubectl get harboraccess -A
 ```
 
 The pull errors you may hit and what they mean:
@@ -321,14 +344,14 @@ kubectl get harboraccess -n harbor-bridge-system test-access -o yaml -w
 **Checkpoint 2.** Within a few seconds:
 
 - `status.conditions[type=Ready].status=True`
-- `status.robot.name = robot$bridge-dev-test-pull-image-puller`
+- `status.robot.name = robot$bridge-dev.test-pull.image-puller`
 - A Secret in the bridge namespace:
   ```bash
   kubectl get secret -n harbor-bridge-system \
-    robot-harbor-bridge-system-test-access -o yaml
+    robot-harbor-bridge-system.test-access -o yaml
   ```
 - In Harbor's *Administration → Robot Accounts*, a new robot named
-  `bridge-dev-test-pull-image-puller`.
+  `bridge-dev.test-pull.image-puller`.
 
 The control plane is now validated end-to-end against real Harbor +
 real Kubernetes.
@@ -350,7 +373,7 @@ curl -sv -k \
 
 ```json
 {
-  "username": "robot$bridge-dev-test-pull-image-puller",
+  "username": "robot$bridge-dev.test-pull.image-puller",
   "password": "<long opaque string>",
   "expires_in": 3600,
   "cache_key_type": "Registry"
@@ -362,7 +385,7 @@ Save the username + password — Phase 4 needs them.
 ## Phase 4 — Crane handshake check (ADR-0013 acid test)
 
 ```bash
-USER='robot$bridge-dev-test-pull-image-puller'
+USER='robot$bridge-dev.test-pull.image-puller'
 PASS='THE_PASSWORD_FROM_PHASE_3'
 
 crane auth login your-harbor.example.com -u "$USER" -p "$PASS"
@@ -418,7 +441,7 @@ echo "$PLUGIN_RESP" | jq .
   "cacheDuration": "1h0m0s",
   "auth": {
     "your-harbor.example.com": {
-      "username": "robot$bridge-dev-test-pull-image-puller",
+      "username": "robot$bridge-dev.test-pull.image-puller",
       "password": "<long opaque string>"
     }
   }

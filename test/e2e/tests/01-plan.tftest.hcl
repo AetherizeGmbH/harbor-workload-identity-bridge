@@ -99,6 +99,10 @@ run "defaults" {
     error_message = "bridge.replicas should default to 2 like the chart, so the e2e exercises a non-leader replica serving credentials (ADR-0025)"
   }
   assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.oidcIssuer == "https://kubernetes.default.svc.cluster.local" && yamldecode(helm_release.bridge.values[0]).bridge.oidcJWKSURL == ""
+    error_message = "the kind defaults must keep in-cluster OIDC discovery"
+  }
+  assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.logLevel == "debug"
     error_message = "bridge.logLevel is hardcoded debug by the module"
   }

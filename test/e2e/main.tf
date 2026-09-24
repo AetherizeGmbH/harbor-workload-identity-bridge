@@ -9,8 +9,10 @@ terraform {
 }
 
 # File-scope variables for the tftest files. Declaring them here makes
-# them settable via `tofu test -var ...` or TF_VAR_* env vars. CI gets
-# the defaults; local dev flips them on as needed.
+# them settable via `tofu test -var ...` or TF_VAR_* env vars. NOTE: the
+# `default`s below are documentation only — inside a run block `var`
+# holds just the values passed on the CLI/env, so every reference in the
+# test files wraps them in try(var.x, <default>) with the same default.
 
 variable "pause_after_pull" {
   type        = bool
@@ -22,4 +24,22 @@ variable "version_harbor" {
   type        = string
   description = "Harbor Helm *chart* version the harness installs (not the Harbor app version; chart 1.N → Harbor 2.(N-4)). Forwarded into the `run \"harbor\"` block in tests/02-bridge.tftest.hcl. Default null → the harbor module's own default (its current pin). The harbor-compat CI matrix sets this via TF_VAR_version_harbor to test the supported range (ADR-0020)."
   default     = null
+}
+
+variable "host_http_port" {
+  type        = number
+  description = "Laptop port kind maps to the Harbor HTTP NodePort (30880). Override when another local cluster already binds it."
+  default     = 8080
+}
+
+variable "host_https_port" {
+  type        = number
+  description = "Laptop port kind maps to the Harbor HTTPS NodePort (30843). Override when another local cluster already binds it."
+  default     = 8443
+}
+
+variable "host_api_server_port" {
+  type        = number
+  description = "Laptop port kind binds for the kube-apiserver. Override when another local cluster already binds it."
+  default     = 6443
 }

@@ -13,13 +13,13 @@ output "internal_api_url" {
 }
 
 output "external_url" {
-  value       = "https://${var.external_hostname}:${var.https_node_port}"
+  value       = "https://${local.external_host}"
   description = "External URL Harbor advertises in API responses and registry www-authenticate realms."
 }
 
 output "external_host" {
-  value       = "${var.external_hostname}:${var.https_node_port}"
-  description = "host:port the test image refs use."
+  value       = local.external_host
+  description = "host[:port] the test image refs use (port implicit for expose_type=loadBalancer, which serves on 443)."
 }
 
 data "kubernetes_nodes" "this" {}

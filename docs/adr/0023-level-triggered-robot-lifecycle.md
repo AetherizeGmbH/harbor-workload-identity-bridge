@@ -153,11 +153,9 @@ name is a label value on the Secret; a longer one could never be reconciled
 - A HarborAccess deletion, an identity change, or an upgrade from 0.2.x leaves no
   robot with a valid password behind. Deleting a HarborAccess now costs one full
   robot listing; so does the first pass after a spec change.
-- Unit tests pin each behaviour against a fake Harbor that enforces the
-  verified API rules, and an envtest runs the whole lifecycle against a real
-  apiserver. End-to-end stages against a real Harbor (grant change without
-  breaking cached credentials, `serviceAccountRef` change with the old identity
-  refused and its robot gone, deletion with no robot left) arrive with the e2e
-  harness rework.
+- The e2e harness verifies all of it against a real Harbor: a grant change
+  without breaking cached credentials, a `serviceAccountRef` change with the old
+  identity refused and its robot gone, and deletion of every HarborAccess with no
+  robot of the cluster left.
 - Upgrading needs no migration: missing annotations are backfilled without a
   rotation; the CRD's new name rule only affects names that could never work.
