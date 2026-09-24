@@ -65,7 +65,7 @@ jobs:
           # Exact pins. Floating these broke the release on 2026-09-22:
           # conventional-changelog-conventionalcommits 10.4.0 (a MINOR
           # bump) started requiring conventional-changelog-writer@9, but
-          # semantic-release 24's release-notes-generator@14 ships
+          # semantic-release 24's (and 25's) release-notes-generator@14 ships
           # writer@8 ("Missing helper: conventional-changelog-
           # conventionalcommits requires conventional-changelog-writer@9").
           # conventionalcommits stays on 9.x, the version

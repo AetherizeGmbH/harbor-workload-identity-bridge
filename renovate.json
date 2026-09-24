@@ -90,7 +90,7 @@
       "addLabels": ["release-tooling"]
     },
     {
-      "description": "conventional-changelog-conventionalcommits 10.x renders empty release notes with semantic-release 24 (release-notes-generator 14 ships conventional-changelog-writer 8). Hold it on 9.x until semantic-release moves to writer 9; `make verify-release-notes` proves any bump.",
+      "description": "conventional-changelog-conventionalcommits 10.x renders empty release notes with semantic-release 24 and 25 (both bundle release-notes-generator 14, which ships conventional-changelog-writer 8). Hold it on 9.x until semantic-release moves to writer 9; `make verify-release-notes` proves any bump.",
       "matchManagers": ["custom.regex"],
       "matchPackageNames": ["conventional-changelog-conventionalcommits"],
       "allowedVersions": "<10"
