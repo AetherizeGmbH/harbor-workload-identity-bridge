@@ -215,6 +215,7 @@ func testReconcilerConfig() *Config {
 		HarborURL:      harborURL,
 		HarborAdminDir: "/dev/null",
 		LogLevel:       "debug",
+		Audience:       "harbor.example.com",
 	}
 }
 

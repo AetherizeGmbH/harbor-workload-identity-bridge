@@ -129,6 +129,10 @@ func run() error {
 						cfg.Namespace: {},
 					},
 				},
+				// ADR-0026: with a selector the reconciler and the data
+				// plane only ever see the HarborAccess objects this bridge
+				// serves. nil keeps every object.
+				&harborv1alpha1.HarborAccess{}: {Label: cfg.HarborAccessSelector},
 			},
 		},
 	}
@@ -211,6 +215,7 @@ func run() error {
 		Config: dataplane.HandlerConfig{
 			BridgeNamespace:      cfg.Namespace,
 			ForceLocalValidation: cfg.ForceLocalValidation,
+			Audience:             cfg.Audience,
 		},
 		Metrics: metrics,
 	}

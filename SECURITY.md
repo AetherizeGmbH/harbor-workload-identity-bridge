@@ -82,11 +82,23 @@ cannot be replayed against cluster A's bridge because the issuer
 strings disagree. The kubelet always projects tokens with the cluster's
 own issuer; this can't be tricked.
 
-The audience (`aud`) claim must match the `trustPolicy.audience` on the
-matching `HarborAccess`. Operators choose this — the convention is
+The audience (`aud`) claim must carry the one audience the bridge
+serves (`plugin.audience`, [ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)),
+and the matching `HarborAccess` must name exactly that audience. A CR
+that names another audience gets `Ready=False, reason=AudienceMismatch`
+and no credentials: otherwise a CR author could name, say, the
+apiserver's default audience and make every automounted token of that
+ServiceAccount, including tokens leaked to third-party webhooks,
+redeemable for Harbor credentials. The convention is
 `harbor-bridge-<clusterName>`, one audience per cluster, so a token
 minted for one cluster's bridge is refused by every other cluster's
 bridge even where the issuers happen to agree.
+
+Several bridges on one cluster each serve only the HarborAccess objects
+their `bridge.harborAccessSelector` matches. A bridge revokes its robot
+for an object that stops matching and releases its own per-instance
+finalizer. Bridges that share a Harbor must use different `clusterName`
+values (the robot ownership prefix).
 
 ### Cross-cluster robot manipulation
 

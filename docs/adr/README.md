@@ -27,5 +27,6 @@
 | 0023 | [Level-triggered robot lifecycle, rotation-safe credential caching, and complete revocation](0023-level-triggered-robot-lifecycle.md) | Accepted (amends 0003, 0012, 0013, 0014) |
 | 0024 | [The chart can leave the plugin to the platform; supported node platforms](0024-plugin-optional-and-platform-support.md) | Accepted (extends 0021) |
 | 0025 | [Data plane serves on every replica; metrics leave the credential listener](0025-data-plane-serving.md) | Accepted (amends 0002, 0008) |
+| 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

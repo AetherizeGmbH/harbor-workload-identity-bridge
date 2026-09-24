@@ -15,6 +15,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/labels"
+
+	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 )
 
 // Environment variable names. Constants so wiring (Helm chart, Deployment
@@ -31,6 +35,14 @@ const (
 	EnvHarborRobotPrefix    = "BRIDGE_HARBOR_ROBOT_PREFIX"
 	EnvForceLocalValidation = "BRIDGE_FORCE_LOCAL_VALIDATION"
 	EnvLogLevel             = "BRIDGE_LOG_LEVEL"
+	EnvAudience             = "BRIDGE_AUDIENCE"
+	EnvHarborAccessSelector = "BRIDGE_HARBORACCESS_SELECTOR"
+	EnvInstance             = "BRIDGE_INSTANCE"
+
+	// instanceMaxLen keeps the per-instance finalizer's name part
+	// ("robot-<instance>") within the 63-character limit.
+	instanceMaxLen = 50
+	audienceMaxLen = 253
 
 	clusterNamePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	clusterNameMaxLen  = 63
@@ -127,6 +139,40 @@ type Config struct {
 
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel string
+
+	// Audience is the only token audience this bridge serves (ADR-0026):
+	// the audience kubelet requests for the plugin (chart:
+	// plugin.audience). A HarborAccess naming another audience is not
+	// served.
+	Audience string
+
+	// HarborAccessSelector limits the bridge to matching HarborAccess
+	// objects (ADR-0026). nil selects every HarborAccess.
+	HarborAccessSelector labels.Selector
+
+	// Instance names this bridge among several on a cluster. It is
+	// required with a selector and forms the per-instance finalizer.
+	Instance string
+}
+
+// Finalizer returns the finalizer this bridge sets on the HarborAccess
+// objects it manages: the shared FinalizerName without a selector, a
+// per-instance one with a selector, so that a bridge can release a CR that
+// moved to another bridge without touching that bridge's finalizer.
+func (c *Config) Finalizer() string {
+	if !c.selective() {
+		return FinalizerName
+	}
+	return FinalizerName + "-" + c.Instance
+}
+
+// Selects reports whether this bridge manages ha.
+func (c *Config) Selects(ha *harborv1alpha1.HarborAccess) bool {
+	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(ha.Labels))
+}
+
+func (c *Config) selective() bool {
+	return c.HarborAccessSelector != nil && !c.HarborAccessSelector.Empty()
 }
 
 // LoadFromEnv reads bridge configuration from BRIDGE_* environment variables
@@ -219,6 +265,30 @@ func LoadFromEnv() (*Config, error) {
 		}
 	}
 
+	cfg.Audience = strings.TrimSpace(os.Getenv(EnvAudience))
+	switch {
+	case cfg.Audience == "":
+		errs = append(errs, fmt.Errorf("%s is required (the token audience kubelet requests for the plugin)", EnvAudience))
+	case len(cfg.Audience) > audienceMaxLen:
+		errs = append(errs, fmt.Errorf("%s exceeds %d characters", EnvAudience, audienceMaxLen))
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(EnvHarborAccessSelector)); raw != "" {
+		sel, err := labels.Parse(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s %q: %w", EnvHarborAccessSelector, raw, err))
+		} else {
+			cfg.HarborAccessSelector = sel
+		}
+	}
+	cfg.Instance = strings.TrimSpace(os.Getenv(EnvInstance))
+	switch {
+	case cfg.selective() && cfg.Instance == "":
+		errs = append(errs, fmt.Errorf("%s is required when %s is set", EnvInstance, EnvHarborAccessSelector))
+	case cfg.Instance != "" && (len(cfg.Instance) > instanceMaxLen || !clusterNameRegex.MatchString(cfg.Instance)):
+		errs = append(errs, fmt.Errorf("%s %q must be a DNS label of at most %d characters", EnvInstance, cfg.Instance, instanceMaxLen))
+	}
+
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("invalid bridge configuration: %w", errors.Join(errs...))
 	}
@@ -256,6 +326,11 @@ func (c *Config) Sanitized() map[string]string {
 		EnvHarborRobotPrefix:    c.HarborRobotPrefix,
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
 		EnvLogLevel:             c.LogLevel,
+		EnvAudience:             c.Audience,
+	}
+	if c.selective() {
+		out[EnvHarborAccessSelector] = c.HarborAccessSelector.String()
+		out[EnvInstance] = c.Instance
 	}
 	if c.OIDCJWKSURL != nil {
 		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.String()

@@ -65,6 +65,7 @@ func newReconciler(t *testing.T, mockHarbor harbor.Client, clock Clock, objects 
 		HarborURL:      harborURL,
 		HarborAdminDir: "/dev/null",
 		LogLevel:       "debug",
+		Audience:       "harbor.example.com",
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme).
@@ -150,6 +151,8 @@ type mockHarbor struct {
 	errOnUpdate error
 	// errOnList, if non-nil, is returned from List.
 	errOnList error
+	// errOnDelete, if non-nil, is returned from Delete (the robot stays).
+	errOnDelete error
 	// hideFromGetByName, if non-empty, is the set of robot names
 	// GetByName must report as ErrRobotNotFound on the NEXT lookup
 	// only. The flag clears after that one miss so the recovery
@@ -233,6 +236,9 @@ func (m *mockHarbor) Delete(_ context.Context, id int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deleteCalls = append(m.deleteCalls, id)
+	if m.errOnDelete != nil {
+		return m.errOnDelete
+	}
 	delete(m.robots, id)
 	return nil
 }

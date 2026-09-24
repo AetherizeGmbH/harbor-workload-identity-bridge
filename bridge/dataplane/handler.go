@@ -80,6 +80,10 @@ type HandlerConfig struct {
 	// path is reserved for after upstream Harbor implements OIDC trust
 	// policies (goharbor/harbor#17520). See PHASES.md.
 	ForceLocalValidation bool
+
+	// Audience is the only token audience served (ADR-0026). Empty
+	// serves nothing.
+	Audience string
 }
 
 // Handler is the HTTP handler that validates an SA token, looks up the
@@ -298,6 +302,13 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 		// relaxes the marker, would otherwise let an empty trustPolicy.audience
 		// match a token carrying aud:"" — a silent auth bypass).
 		if ha.Spec.TrustPolicy.Audience == "" || ha.Spec.TrustPolicy.Issuer == "" {
+			continue
+		}
+		// The bridge serves exactly one audience (ADR-0026). The reconciler
+		// already marks a CR with another audience not ready; the data
+		// plane, as the security boundary, never matches one either. An
+		// unset configured audience matches nothing (fail closed).
+		if ha.Spec.TrustPolicy.Audience != h.Config.Audience {
 			continue
 		}
 		expectedSub := "system:serviceaccount:" + ha.Spec.ServiceAccountRef.Namespace + ":" + ha.Spec.ServiceAccountRef.Name

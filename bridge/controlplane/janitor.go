@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
@@ -99,20 +100,31 @@ func (j *Janitor) reader() client.Reader {
 // and skipped so one bad robot cannot stall the sweep; only a failure to
 // list robots at all is returned.
 func (j *Janitor) Sweep(ctx context.Context) error {
-	if err := j.sweepRobots(ctx); err != nil {
+	pending, err := j.sweepRobots(ctx)
+	if err != nil {
 		return err
 	}
 	j.sweepSecrets(ctx)
+	j.releaseUnselected(ctx, pending)
 	return nil
 }
 
-func (j *Janitor) sweepRobots(ctx context.Context) error {
+// sweepRobots deletes robots nobody should hold anymore. It returns the
+// owners for which a robot deletion failed, so releaseUnselected does not
+// drop a finalizer while a robot with a valid password remains.
+func (j *Janitor) sweepRobots(ctx context.Context) (map[types.NamespacedName]bool, error) {
 	logger := log.FromContext(ctx).WithName("janitor")
 	cluster := j.Config.ClusterName
 
 	robots, err := j.Harbor.List(ctx)
 	if err != nil {
-		return fmt.Errorf("list robots: %w", err)
+		return nil, fmt.Errorf("list robots: %w", err)
+	}
+	pending := map[types.NamespacedName]bool{}
+	del := func(robot *harbor.Robot, why string, owner types.NamespacedName) {
+		if !j.deleteRobot(ctx, robot, why, owner.String()) {
+			pending[owner] = true
+		}
 	}
 
 	for i := range robots {
@@ -144,20 +156,26 @@ func (j *Janitor) sweepRobots(ctx context.Context) error {
 			continue
 		}
 
+		owner := types.NamespacedName{Namespace: haNS, Name: haName}
 		ha := &harborv1alpha1.HarborAccess{}
-		err := j.reader().Get(ctx, types.NamespacedName{Namespace: haNS, Name: haName}, ha)
+		err := j.reader().Get(ctx, owner, ha)
 		switch {
 		case apierrors.IsNotFound(err):
-			j.deleteRobot(ctx, robot, "owning HarborAccess is gone", haNS+"/"+haName)
+			del(robot, "owning HarborAccess is gone", owner)
 		case err != nil:
 			logger.Error(err, "failed to check HarborAccess existence",
 				"harboraccess", haNS+"/"+haName, "robot", robot.WireName)
+			pending[owner] = true
+		case !j.Config.Selects(ha):
+			// ADR-0026: the owner moved to another bridge or out of
+			// every bridge's scope; this bridge's robot for it must go.
+			del(robot, "owning HarborAccess is no longer selected by this bridge", owner)
 		case legacy:
 			// The owner exists but a legacy name is never what the current
 			// bridge uses for it: the reconciler created (or will create)
 			// the dot-named robot. The legacy robot's password is still
 			// valid, so it must go.
-			j.deleteRobot(ctx, robot, "pre-ADR-0018 robot superseded by the dot-named robot", haNS+"/"+haName)
+			del(robot, "pre-ADR-0018 robot superseded by the dot-named robot", owner)
 		default:
 			want, err := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
 			if err != nil || want == robot.Name {
@@ -166,17 +184,50 @@ func (j *Janitor) sweepRobots(ctx context.Context) error {
 			// The owner's serviceAccountRef now maps to a different robot:
 			// this one belongs to the previous identity. Normally the
 			// reconciler already revoked it; this covers a failed cleanup.
-			j.deleteRobot(ctx, robot, "owning HarborAccess now uses robot "+want, haNS+"/"+haName)
+			del(robot, "owning HarborAccess now uses robot "+want, owner)
 		}
 	}
-	return nil
+	return pending, nil
 }
 
-func (j *Janitor) deleteRobot(ctx context.Context, robot *harbor.Robot, why, owner string) {
+func (j *Janitor) deleteRobot(ctx context.Context, robot *harbor.Robot, why, owner string) bool {
 	logger := log.FromContext(ctx).WithName("janitor")
 	logger.Info("deleting robot", "robot", robot.WireName, "id", robot.ID, "harboraccess", owner, "reason", why)
 	if err := j.Harbor.Delete(ctx, robot.ID); err != nil {
 		logger.Error(err, "failed to delete robot", "robot", robot.WireName)
+		return false
+	}
+	return true
+}
+
+// releaseUnselected removes this bridge's per-instance finalizer from
+// HarborAccess objects it no longer selects (ADR-0026), once sweepRobots
+// has revoked their robots. Without a selector every object is selected
+// and there is nothing to release.
+func (j *Janitor) releaseUnselected(ctx context.Context, pending map[types.NamespacedName]bool) {
+	finalizer := j.Config.Finalizer()
+	if finalizer == FinalizerName {
+		return
+	}
+	logger := log.FromContext(ctx).WithName("janitor")
+	var list harborv1alpha1.HarborAccessList
+	if err := j.reader().List(ctx, &list); err != nil {
+		logger.Error(err, "failed to list HarborAccess objects for release")
+		return
+	}
+	for i := range list.Items {
+		ha := &list.Items[i]
+		key := types.NamespacedName{Namespace: ha.Namespace, Name: ha.Name}
+		if j.Config.Selects(ha) || !controllerutil.ContainsFinalizer(ha, finalizer) || pending[key] {
+			continue
+		}
+		patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		controllerutil.RemoveFinalizer(ha, finalizer)
+		if err := j.Client.Patch(ctx, ha, patch); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to release HarborAccess no longer selected", "harboraccess", key.String())
+			continue
+		}
+		logger.Info("released HarborAccess no longer selected by this bridge", "harboraccess", key.String(), "finalizer", finalizer)
 	}
 }
 
@@ -203,10 +254,16 @@ func (j *Janitor) sweepSecrets(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		err := j.reader().Get(ctx, types.NamespacedName{Namespace: haNS, Name: haName}, &harborv1alpha1.HarborAccess{})
+		ha := &harborv1alpha1.HarborAccess{}
+		err := j.reader().Get(ctx, types.NamespacedName{Namespace: haNS, Name: haName}, ha)
+		gone := apierrors.IsNotFound(err)
 		switch {
-		case apierrors.IsNotFound(err):
-			logger.Info("deleting orphan robot Secret (owning HarborAccess gone)",
+		case gone || (err == nil && !j.Config.Selects(ha)):
+			why := "owning HarborAccess gone"
+			if !gone {
+				why = "owning HarborAccess no longer selected by this bridge"
+			}
+			logger.Info("deleting orphan robot Secret", "reason", why,
 				"secret", s.Name, "harboraccess", haNS+"/"+haName)
 			if err := j.Client.Delete(ctx, s, client.Preconditions{UID: &s.UID}); err != nil && !apierrors.IsNotFound(err) {
 				logger.Error(err, "failed to delete orphan robot Secret", "secret", s.Name)

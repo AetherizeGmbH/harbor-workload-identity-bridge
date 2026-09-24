@@ -340,6 +340,7 @@ BRIDGE_CLUSTER_NAME=dev \
 BRIDGE_NAMESPACE=harbor-bridge-system \
 BRIDGE_OIDC_ISSUER="$(kubectl get --raw /.well-known/openid-configuration | jq -r .issuer)" \
 BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks \
+BRIDGE_AUDIENCE=harbor-bridge \
 BRIDGE_HARBOR_URL=https://your-harbor.example.com \
 BRIDGE_HARBOR_ADMIN_DIR=/tmp/harbor-admin \
 BRIDGE_LOG_LEVEL=debug \

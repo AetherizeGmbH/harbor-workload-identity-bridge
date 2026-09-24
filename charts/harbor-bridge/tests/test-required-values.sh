@@ -33,6 +33,7 @@ cases=(
   "relative plugin.hostBinaryDir|--set|plugin.hostBinaryDir=etc/kubernetes|must be an absolute, clean node path"
   "dot-dot plugin.hostConfigDir|--set|plugin.hostConfigDir=/etc/../tmp|must be an absolute, clean node path"
   "matchImages covering own image registry|--set|plugin.matchImages={ghcr.io}|chicken-and-egg"
+  "bridge.instance with a selector|--set|bridge.harborAccessSelector.a=b,bridge.instance=Bad_Name|must be a DNS label of at most 50 characters"
 )
 
 failed=0
