@@ -420,13 +420,21 @@ switches off the SDK's wire dumps, which the go-openapi runtime would
 otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
 bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
+Failures (token rejected, no matching CR, Secret missing) log at
+`V(1)` with the same shape minus the fields that don't apply.
+
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never
 answers makes reconciles fail with an error and a `Ready=False`
 condition instead of blocking the controller.
 
-Failures (token rejected, no matching CR, Secret missing) log at
-`V(1)` with the same shape minus the fields that don't apply.
+OIDC discovery and JWKS fetches follow no redirects and are bounded
+(30s). The bridge's own ServiceAccount token, which the apiserver
+requires for them, is sent only over https to the in-cluster apiserver
+and to the jwks_uri its discovery names: anywhere else it could be
+replayed against the apiserver with the bridge's RBAC. The signing keys
+are fetched again at most every 30s, so forged tokens with unknown key
+IDs cannot make the bridge poll the apiserver once per request.
 
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 
