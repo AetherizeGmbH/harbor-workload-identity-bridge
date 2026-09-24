@@ -1,3 +1,13 @@
+## [0.7.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.6.0...v0.7.0) (2026-09-24)
+
+### Features
+
+* **dataplane:** attributed audit log and a per-source rate limit ([#107](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/107)) ([cdddf17](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/cdddf17fe66e71c1e261c2a0c753b4e14c77e10f))
+
+### Bug Fixes
+
+* **installer:** stricter kubelet discovery and node path validation ([#108](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/108)) ([ab9f12c](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/ab9f12cb4018e0c757c390774cf33c6fe776b676))
+
 ## [0.6.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.5...v0.6.0) (2026-09-24)
 
 ### ⚠ BREAKING CHANGES
