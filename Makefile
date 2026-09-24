@@ -148,7 +148,8 @@ FUZZ_TARGETS ?= \
 	./installer:FuzzKubeletCmdline \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \
 	./bridge/internal/robotsecret:FuzzName_Injective \
-	./bridge/dataplane:FuzzJSONAudience
+	./bridge/dataplane:FuzzJSONAudience \
+	./bridge/dataplane:FuzzCachedKeySet_VerifySignature
 FUZZTIME ?= 10s
 
 .PHONY: fuzz

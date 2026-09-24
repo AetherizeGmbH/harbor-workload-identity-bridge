@@ -76,7 +76,7 @@ Abuse stories:
 | --- | --- | --- | --- | --- | --- |
 | T1 | S | B1 | Forged or foreign-audience token redeemed for credentials | OIDC signature, issuer, expiry (go-oidc, `bridge/dataplane/oidc.go`); exactly one served audience, CR must name it ([ADR-0026](../adr/0026-audience-pinning-and-harboraccess-selector.md)); subject must match `serviceAccountRef` | Low (2.4) |
 | T2 | S | B1 | Pod-creator mounts a bridge-audience token and fetches its own SA's password (abuse story 2) | Same credential the workload already gets through kubelet; limited to that SA's grants; mTLS (optional) and a NetworkPolicy restrict who can reach the endpoint | Medium (4.8), see A2 |
-| T3 | T | B1 | Man in the middle between plugin and bridge | TLS 1.2+, plugin pins the bridge CA, `127.0.0.1` NodePort by default; optional mTLS | Low (2.0) |
+| T3 | T | B1 | Man in the middle between plugin and bridge, or a redirect that carries the pod token away | TLS 1.2+, plugin pins the bridge CA, `127.0.0.1` NodePort by default, verifies against the Service name for `$(NODE_IP)` endpoints; no redirects followed (`plugin/bridge_client.go`); optional mTLS | Low (2.0) |
 | T4 | D | B1 | Flood of requests or forged tokens | Per-source token bucket, 429 before parsing (`ratelimit.go`); JWKS refetch at most every 30s (`oidc_keyset.go`); 64 KiB body, 32 KiB headers, server timeouts; PDB with two replicas | Medium (4.2) |
 | T5 | I | B2 | Bridge SA token leaks to a non-apiserver host or redirect target | Token only over https to the in-cluster apiserver and its discovery-named `jwks_uri`; redirects not followed (`oidc_client.go`) | Low (1.8) |
 | T6 | E | B5 | CR author grants `*` (every Harbor project) | Harbor project-name pattern in the CRD, the reconciler and the client (`harboraccess_types.go`, `naming.go`) | Low (2.0) |
@@ -84,12 +84,12 @@ Abuse stories:
 | T8 | E | B5 | Anyone allowed to create HarborAccess objects grants any project to any SA | Documented as cluster-privileged; restrict RBAC and gate with admission policy (SECURITY.md "Unauthorized HarborAccess authorship") | Medium (5.0), see A1 |
 | T9 | E | B6 | Symlink planted next to installer files redirects a root write or read | `os.Root`, Lstat + `os.SameFile`, `O_NOFOLLOW`, O_EXCL temp + rename (`installer/files.go`) | Low (2.2) |
 | T10 | S/E | B6 | Fake kubelet process steers where the installer writes | PPID 1, readable non-pod cgroup, shared host mount namespace, refuse ambiguity (`installer/discover.go`) | Low (2.4) |
-| T11 | E | B6 | Write access to the plugin's namespace equals root on every node | Namespace split so the bridge namespace can enforce PSA `restricted` (planned); today documented in SECURITY.md | High (6.8) until the split, see open item O1 |
-| T12 | I | B4 | Harbor admin credential or robot passwords in logs | SDK wire dumps disabled regardless of `DEBUG` (`harbor/client.go`); audit lines never carry secrets (tested) | Low (1.6) |
+| T11 | E | B6 | Write access to the namespace of the privileged plugin DaemonSet equals root on every node | Optional split: `plugin.namespace` runs the DaemonSet in its own `privileged` namespace, the CA arrives through a trust-manager Bundle, the bridge namespace can enforce `restricted` ([ADR-0027](../adr/0027-optional-plugin-namespace.md)); SECURITY.md states the default layout's equivalence | High (6.8) in the default layout; Low (3.0) with the split |
+| T12 | I | B4 | Harbor admin credential or robot passwords in logs or on the wire | SDK wire dumps disabled regardless of `DEBUG` (`harbor/client.go`); https to Harbor required, plain http only by explicit opt-in, private CA via `harbor.caSecret`; audit lines never carry secrets (tested) | Low (1.6) |
 | T13 | D | B4 | Hung Harbor blocks all reconciles and revocations | 30s per call, header/TLS timeouts, page cap (`harbor/client.go`); `DeletionBlocked` on error | Low (2.6) |
 | T14 | R | B1/B5 | Credential issuance or denial cannot be attributed | Audit logger fixed at info; source IP, client cert, pod, node, reason per decision (`handler.go`); Kubernetes audit log covers CR changes | Low (2.4) |
-| T15 | T | B7 | Malicious dependency or tool version reaches a signed release | Actions SHA-pinned; Trivy pinned; Renovate waits 7 days and never automerges majors; images built from the tag without cache; Trivy isolated without rights; cosign signatures, SBOM and SLSA provenance on every image and the chart | Medium (4.4), see O4 |
-| T16 | I | B3 | Robot Secrets readable by others in the bridge namespace | Secrets live only in the bridge namespace; restrict namespace RBAC; enable encryption at rest (operator) | Medium (4.0), see A3 |
+| T15 | T | B7 | Malicious dependency or tool version reaches a signed release, or a re-pointed tag reaches the nodes | Actions SHA-pinned; Trivy pinned; Renovate waits 7 days and never automerges majors; images built from the tag without cache; Trivy isolated without rights; cosign signatures, SBOM and SLSA provenance on every image and the chart; images pinnable by digest (`*.image.digest`) | Medium (4.4), see O4 |
+| T16 | I | B3 | Robot Secrets readable by others in the bridge namespace, or a foreign Secret served as credentials | Secrets live only in the bridge namespace; the data plane serves only Secrets the bridge labelled, the reconciler never adopts a foreign one; RBAC trimmed to the verbs used; restrict namespace RBAC; enable encryption at rest (operator) | Medium (4.0), see A3 |
 
 Security events the system must log (acceptance criteria):
 
@@ -131,8 +131,9 @@ operator's admission control (SECURITY.md recommends one).
 
 Open items (not accepted; tracked):
 
-- **O1** Namespace split for the plugin DaemonSet (T11) — decided, design
-  of the CA distribution pending.
+- **O1** Namespace split for the plugin DaemonSet (T11) — implemented as an
+  option (ADR-0027, requires trust-manager); the default layout keeps the
+  risk. Decide whether a future major release makes the split the default.
 - **O2** mTLS client identity: dedicated client CA and identity pinning;
   mTLS is off by default.
 - **O3** Token lifetime cap and pod binding for credential requests.
