@@ -129,6 +129,10 @@ verify-generated: generate manifests ## Fail if the CRDs / deepcopy code drift f
 	@git diff --exit-code -- bridge/api config/crd charts/harbor-bridge/crds || \
 		{ echo "generated files are stale — run 'make generate manifests' and commit the result"; exit 1; }
 
+.PHONY: verify-release-notes
+verify-release-notes: ## Prove the semantic-release plugins pinned in release.yml render release notes (needs npm)
+	./hack/check-release-notes.sh
+
 .PHONY: verify-plugin-isolation
 verify-plugin-isolation: ## Enforce ADR-0015: plugin must not pull k8s.io or sigs.k8s.io packages
 	@count=$$(go list -deps ./plugin/... 2>/dev/null | grep -cE '^(k8s\.io|sigs\.k8s\.io)' || true); \

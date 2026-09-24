@@ -1,18 +1,59 @@
 ## [0.4.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.8...v0.4.0) (2026-09-24)
 
+### ⚠ BREAKING CHANGES
+
+* **bridge:** /metrics moved from the credential port (8443) to
+plain HTTP on port 8080 (Service <release>-metrics). HarborAccess names
+are limited to 63 characters; apply the CRD manually on upgrade.
+
+### Bug Fixes
+
+* **bridge:** level-triggered robot lifecycle and multi-replica data plane ([#88](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/88)) ([7c579b6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/7c579b6d919069b30f00fc8806459cf65fb76ef4))
+
 ## [0.3.8](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.7...v0.3.8) (2026-09-24)
+
+### Bug Fixes
+
+* **deps:** update kubernetes go modules to v0.36.4 ([#70](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/70)) ([e5b0c5f](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/e5b0c5fc3b2aadd8bb075f69ca8af8f27787c6c5))
+* **deps:** update kubernetes go modules to v0.37.0 ([#74](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/74)) ([690bbf3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/690bbf320065298429cc2e407734d170ad506efe))
+* **deps:** update module sigs.k8s.io/controller-runtime to v0.25.0 ([#78](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/78)) ([5eb847f](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/5eb847f203819638f72fcc790d40ffb72bd505fb))
+* **deps:** update module sigs.k8s.io/controller-runtime to v0.25.1 ([#81](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/81)) ([7c865fa](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/7c865fad95d0b4e6897cd55e4b846eb2292a7ca2))
 
 ## [0.3.7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.6...v0.3.7) (2026-07-27)
 
+### Bug Fixes
+
+* **deps:** update module github.com/go-openapi/runtime to v0.33.0 ([#55](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/55)) ([eeecb61](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/eeecb61c30d9f4322bb2c96d128b438cba549ae7))
+
 ## [0.3.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.5...v0.3.6) (2026-07-24)
+
+### Bug Fixes
+
+* **deps:** update module github.com/prometheus/client_golang to v1.24.1 ([#54](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/54)) ([06ffa9a](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/06ffa9a1c170411f38446f0d98ac6d3fd9de7243))
 
 ## [0.3.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.4...v0.3.5) (2026-07-23)
 
+### Bug Fixes
+
+* **deps:** update kubernetes go modules to v0.36.3 ([#53](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/53)) ([fcf486f](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/fcf486fa5f40070c3b1eb5b2dc71191ffa05f72b))
+
 ## [0.3.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.3...v0.3.4) (2026-07-22)
+
+### Bug Fixes
+
+* **deps:** update go modules ([#50](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/50)) ([8102da0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/8102da002a74486c849552ae9d888af78d4077c7))
 
 ## [0.3.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.2...v0.3.3) (2026-07-17)
 
+### Bug Fixes
+
+* **deps:** update module github.com/go-openapi/runtime to v0.32.5 ([#49](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/49)) ([b3d6a5b](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/b3d6a5b53626316bcf315ebacc15f57851f40eca))
+
 ## [0.3.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.1...v0.3.2) (2026-07-09)
+
+### Bug Fixes
+
+* **deps:** update go modules ([#39](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/39)) ([0b3e93c](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/0b3e93cbcdc383de50c8707bffa9e6682466dbfd))
 
 ## [0.3.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.3.0...v0.3.1) (2026-06-21)
 

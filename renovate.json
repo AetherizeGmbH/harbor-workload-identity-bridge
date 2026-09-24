@@ -85,6 +85,12 @@
       "addLabels": ["release-tooling"]
     },
     {
+      "description": "conventional-changelog-conventionalcommits 10.x renders empty release notes with semantic-release 24 (release-notes-generator 14 ships conventional-changelog-writer 8). Hold it on 9.x until semantic-release moves to writer 9; `make verify-release-notes` proves any bump.",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["conventional-changelog-conventionalcommits"],
+      "allowedVersions": "<10"
+    },
+    {
       "description": "The go.mod `go` directive is a deliberate security FLOOR (CVE fixes on OIDC/x509 paths), not a version to chase: raising it forces every consumer and tool (e.g. the Go that golangci-lint was built with) up with it. Toolchain bumps stay enabled.",
       "matchManagers": ["gomod"],
       "matchDepTypes": ["golang"],
