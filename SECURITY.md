@@ -4,6 +4,10 @@ This document describes what the bridge defends against, what it does
 not defend against, and the operator-side choices that affect both. Read
 it before installing.
 
+The system-level threat model (STRIDE per trust boundary, residual
+risks, logged security events) is in
+[docs/threat-models/harbor-workload-identity-bridge.md](docs/threat-models/harbor-workload-identity-bridge.md).
+
 ## Goals
 
 A workload should be able to pull from Harbor with its existing Service
@@ -152,10 +156,13 @@ through 24h rotation but does not eliminate it.
 
 Mitigations:
 
-- Treat node compromise as the credential breach it is. Rotate
-  the affected robot immediately by deleting and re-creating its
-  `HarborAccess` (or `kubectl patch` to bump generation, which forces
-  a `RefreshSecret` call).
+- Treat node compromise as the credential breach it is. Rotate the
+  affected robot's password immediately by deleting its password Secret
+  in the bridge namespace: `kubectl -n <bridge-namespace> delete secret
+  robot-<ha-namespace>.<ha-name>`. The bridge watches these Secrets and
+  rotates at once (a missing Secret always forces a rotation). To revoke
+  the robot entirely, delete the `HarborAccess`. A spec edit or a
+  generation bump does **not** rotate (ADR-0023).
 - Use Harbor project-level scopes aggressively. A robot with `pull`
   on only the projects a workload actually needs has a small blast
   radius even when exfiltrated.
@@ -255,10 +262,14 @@ Mitigations:
 - Use the shortest `tokenTTL` that still keeps your pull rate
   reasonable. The bridge is cheap to ask; cluster-local NodePort
   hop, no Harbor round-trip for already-issued robots.
-- For *immediate* revocation, force a password rotation: bump the
-  CR's `metadata.generation` via any non-spec change, which triggers
-  the reconciler's `RefreshSecret` path. The cached credentials at
-  every kubelet then fail their next Harbor handshake.
+- For *immediate* revocation, delete the robot's password Secret
+  (`robot-<ha-namespace>.<ha-name>` in the bridge namespace): the bridge
+  rotates the password at once, and every copy of the old one fails its
+  next Harbor handshake. Kubelets that cached the old credentials fail
+  their pulls until the cache entry expires (at most `tokenTTL`), so
+  expect pull errors on the affected workloads for that long. Deleting
+  the `HarborAccess` deletes the robot instead. A spec edit or a
+  generation bump does not rotate (ADR-0023).
 
 ### Privilege of the install DaemonSet
 
