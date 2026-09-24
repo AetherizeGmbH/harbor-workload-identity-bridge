@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"sigs.k8s.io/yaml"
 )
@@ -84,24 +85,25 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 	}
 	cfg["providers"] = providers
 
-	jsonDoc := isJSON(existing)
-	out, err = marshalMatching(cfg, jsonDoc)
-	if err != nil {
-		return nil, false, fmt.Errorf("marshal merged credential-provider config: %w", err)
-	}
-	// changed is computed against a re-marshal of the ORIGINAL document
-	// rather than its raw bytes: the first merge normalizes formatting
-	// (key order, indentation), and comparing raw bytes would report a
-	// perpetual diff on files we already own the entry in.
+	// Compare parsed documents, not bytes: when our entry is already
+	// there, return the file's own bytes untouched. Re-marshaling is not a
+	// fixed point for every YAML input (YAML 1.1 reads keys like `012` or
+	// `00:8002` as numbers, which come back as quoted strings sorted
+	// differently), so a byte comparison could rewrite the file on every
+	// run and restart kubelet each time (found by FuzzMergeProvider).
+	// Untouched bytes also keep the node's own formatting.
 	orig := map[string]any{}
 	if err := yaml.Unmarshal(existing, &orig); err != nil {
 		return nil, false, fmt.Errorf("reparse node credential-provider config: %w", err)
 	}
-	origOut, err := marshalMatching(orig, jsonDoc)
-	if err != nil {
-		return nil, false, fmt.Errorf("re-marshal node credential-provider config: %w", err)
+	if reflect.DeepEqual(orig, cfg) {
+		return existing, false, nil
 	}
-	return out, !bytes.Equal(out, origOut), nil
+	out, err = marshalMatching(cfg, isJSON(existing))
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal merged credential-provider config: %w", err)
+	}
+	return out, true, nil
 }
 
 // marshalMatching renders cfg in the format the node file uses, so a

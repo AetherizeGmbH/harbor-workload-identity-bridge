@@ -25,6 +25,7 @@ linters:
     - unconvert
     - unparam
     - usestdlibvars
+    - gosec
   settings:
     errcheck:
       check-type-assertions: true
@@ -39,7 +40,51 @@ linters:
   exclusions:
     rules:
       - path: _test\.go
-        linters: [errcheck, unparam, revive]
+        linters: [errcheck, unparam, revive, gosec]
+      # gosec allow-list. Each entry is scoped to one file and one rule
+      # and says why the finding does not apply; anything new fails CI.
+      #
+      # G304 (file path from a variable): every one of these paths comes
+      # from the operator's configuration (BRIDGE_* env, chart values) or
+      # from procfs, never from a request or a CR.
+      - path: (bridge/cmd/main|bridge/dataplane/oidc_client)\.go
+        linters: [gosec]
+        text: "G304"
+      - path: bridge/controlplane/config\.go
+        linters: [gosec]
+        text: "G304"
+      - path: plugin/bridge_client\.go
+        linters: [gosec]
+        text: "G304"
+      - path: installer/discover\.go
+        linters: [gosec]
+        text: "G304"
+      # copyFile reads the installer's own mounted sources (plugin binary,
+      # ConfigMap, Secret volumes); host files go through os.Root.
+      - path: installer/files\.go
+        linters: [gosec]
+        text: "G304"
+      # G101 (hardcoded credentials): names of environment variables and
+      # config keys that hold credentials, not credentials.
+      - path: (bridge/controlplane/config|installer/providerconfig|plugin/main)\.go
+        linters: [gosec]
+        text: "G101"
+      # G117 (secret-named JSON field): the kubelet credential-provider
+      # response must carry the robot password; that is the product.
+      - path: bridge/dataplane/handler\.go
+        linters: [gosec]
+        text: "G117"
+      # G301 (directory mode): node directories the installer creates for
+      # kubelet's config and plugin binary follow the node's own layout
+      # (/etc/kubernetes is 0755); the files inside have their own modes.
+      - path: installer/files\.go
+        linters: [gosec]
+        text: "G301"
+      # G204 (subprocess with variables): nsenter with a fixed argv and a
+      # unit name validated against systemd's character set (restart.go).
+      - path: installer/restart\.go
+        linters: [gosec]
+        text: "G204"
 
 issues:
   max-issues-per-linter: 0

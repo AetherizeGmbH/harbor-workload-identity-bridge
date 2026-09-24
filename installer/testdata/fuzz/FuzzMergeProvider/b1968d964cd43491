@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("apiVersion: kubelet.config.k8s.io/v1\n00:80021712:\n    00A1:\n    00102B:\n    012:")

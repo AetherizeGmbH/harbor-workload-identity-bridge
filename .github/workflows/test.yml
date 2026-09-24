@@ -67,6 +67,20 @@ jobs:
         with: { version: v4.3.0 }
       - run: make chart-test
 
+  fuzz:
+    # Plain `go test` runs only the seed corpora; this gives every fuzz
+    # target a short randomized run on each PR (make fuzz also fails when
+    # a Fuzz function is missing from FUZZ_TARGETS).
+    name: Fuzz (short)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make fuzz FUZZTIME=30s
+
   release-notes:
     # The release job runs only on main; this proves on every PR that the
     # semantic-release plugins pinned in release.yml still render notes.
