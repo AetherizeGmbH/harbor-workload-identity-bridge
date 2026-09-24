@@ -469,3 +469,17 @@ func TestServer_MTLS_PicksUpRotatedClientCA(t *testing.T) {
 	}
 	t.Fatal("server never trusted the rotated client CA")
 }
+
+func TestServer_BoundsHeadersAndErrorLog(t *testing.T) {
+	cert, key := writeSelfSignedCert(t)
+	srv, err := NewServer(ServerConfig{ListenAddr: "127.0.0.1:0", CertFile: cert, KeyFile: key, Handler: http.NewServeMux()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.srv.MaxHeaderBytes != maxHeaderBytes || maxHeaderBytes > 64<<10 {
+		t.Errorf("MaxHeaderBytes = %d, want %d", srv.srv.MaxHeaderBytes, maxHeaderBytes)
+	}
+	if srv.srv.ErrorLog == nil {
+		t.Error("no rate-limited ErrorLog: TLS handshake errors would be unbounded")
+	}
+}

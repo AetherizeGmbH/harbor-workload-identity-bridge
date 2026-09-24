@@ -103,6 +103,48 @@ type Handler struct {
 	// Now is the time source used to bound the credential cache duration.
 	// nil means time.Now.
 	Now func() time.Time
+
+	// Limiter bounds requests per source IP; nil means no limit.
+	Limiter *SourceLimiter
+
+	// Audit receives one line per decision (issued or denied), with the
+	// caller's attribution. main wires a logger fixed at info level, so
+	// BRIDGE_LOG_LEVEL=warn cannot silence the audit trail. Unset falls
+	// back to the request logger.
+	Audit logr.Logger
+}
+
+// maxAuditImageLen bounds the caller-supplied image reference in audit
+// lines; the body may carry up to 64 KiB.
+const maxAuditImageLen = 512
+
+func (h *Handler) audit(fallback logr.Logger) logr.Logger {
+	if h.Audit.GetSink() != nil {
+		return h.Audit
+	}
+	return fallback
+}
+
+// callerFields attributes a request: the TCP source and, with mTLS, the
+// client certificate's subject.
+func callerFields(r *http.Request) []any {
+	fields := []any{"source", sourceIP(r)}
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		fields = append(fields, "client_cert", r.TLS.PeerCertificates[0].Subject.String())
+	}
+	return fields
+}
+
+// claimFields attributes a validated token to its pod and node.
+func claimFields(c *Claims) []any {
+	return []any{"subject", c.Subject, "pod", c.Pod, "pod_uid", c.PodUID, "node", c.Node}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func (h *Handler) now() time.Time {
@@ -126,6 +168,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Before any parsing or token validation: the cheapest possible
+	// refusal. Not logged per request, or a flood would flood the log.
+	if !h.Limiter.Allow(sourceIP(r)) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		h.recordResult(ResultRateLimited)
+		return
+	}
+	caller := callerFields(r)
 
 	// Every return below this point is one request from a metrics
 	// perspective; observe duration on exit.
@@ -170,7 +221,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Validate the SA token (signature, expiry, issuer).
 	claims, err := h.Validator.Validate(ctx, rawToken)
 	if err != nil {
-		logger.V(1).Info("token validation failed", "err", err.Error(), "image", req.Image)
+		h.audit(logger).Info("credential denied", append(caller,
+			"reason", "invalid_token", "err", truncate(err.Error(), 200),
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		h.recordOIDCFailure(err)
 		h.recordResult(ResultUnauthorized)
@@ -191,8 +244,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if matched == nil {
-		logger.Info("no matching HarborAccess for request",
-			"subject", claims.Subject, "audiences", claims.Audience, "image", req.Image)
+		h.audit(logger).Info("credential denied", append(append(caller, claimFields(claims)...),
+			"reason", "no_matching_harboraccess", "audiences", claims.Audience,
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "no matching HarborAccess for the requesting service account and audience",
 			http.StatusForbidden)
 		h.recordResult(ResultForbidden)
@@ -209,7 +263,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// expected name belongs to a different HarborAccess. Deny —
 			// never cross-wire one workload's credentials to another.
 			logger.Error(err, "robot Secret owner mismatch; refusing to issue credentials",
-				"harboraccess", matched.Namespace+"/"+matched.Name, "image", req.Image)
+				"harboraccess", matched.Namespace+"/"+matched.Name)
+			h.audit(logger).Info("credential denied", append(append(caller, claimFields(claims)...),
+				"reason", "secret_owner_mismatch", "harboraccess", matched.Namespace+"/"+matched.Name,
+				"requested_image", truncate(req.Image, maxAuditImageLen))...)
 			http.Error(w, "credential Secret ownership mismatch", http.StatusForbidden)
 			h.recordResult(ResultForbidden)
 			return
@@ -244,7 +301,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ttl := cacheDuration(matched.Spec.TokenTTL.Duration, creds.rotationNotBefore, creds.hasRotationNotBefore, h.now())
 
 	h.writeResponse(w, creds, ttl)
-	auditIssuance(logger, claims, matched, audMatched, &req, creds.username, ttl)
+	auditIssuance(h.audit(logger), caller, claims, matched, audMatched, &req, creds.username, ttl)
 	h.recordResult(ResultOK)
 }
 
@@ -453,6 +510,7 @@ func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl ti
 // any single field.
 func auditIssuance(
 	logger logr.Logger,
+	caller []any,
 	claims *Claims,
 	matched *harborv1alpha1.HarborAccess,
 	audienceMatched string,
@@ -460,13 +518,13 @@ func auditIssuance(
 	robotName string,
 	ttl time.Duration,
 ) {
-	logger.Info("credential issued",
-		"subject", claims.Subject,
+	logger.Info("credential issued", append(append(caller, claimFields(claims)...),
 		"audience", audienceMatched,
 		"harboraccess", matched.Namespace+"/"+matched.Name,
 		"generation", matched.Generation,
 		"robot", robotName,
 		"ttl_seconds", int(ttl/time.Second),
-		"image", req.Image,
-	)
+		// Asserted by the caller, not verified.
+		"requested_image", truncate(req.Image, maxAuditImageLen),
+	)...)
 }

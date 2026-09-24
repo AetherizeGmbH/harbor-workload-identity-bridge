@@ -20,6 +20,7 @@ const (
 	ResultUnavailable  = "unavailable"
 	ResultBadRequest   = "bad_request"
 	ResultServerError  = "server_error"
+	ResultRateLimited  = "rate_limited"
 )
 
 // Label values for bridge_oidc_validation_failures_total{reason}. The
@@ -85,7 +86,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	// Touch every label value so the time series exist as zero before the
 	// first request. Without this, dashboards using rate() on a never-yet-
 	// incremented series have to special-case missing data.
-	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError} {
+	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited} {
 		m.Issuances.WithLabelValues(r)
 	}
 	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonOther} {

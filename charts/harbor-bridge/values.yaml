@@ -127,6 +127,13 @@ bridge:
   # harbor.aetherize.io/robot-<instance>). Used only with a selector.
   # Empty = the release name. DNS label, at most 50 characters.
   instance: ""
+  # Requests per second (and burst) the credential endpoint accepts from
+  # one source IP before it answers 429. Kubelet calls through its node's
+  # address and caches credentials per registry, so it stays far below.
+  # perSource: 0 disables the limit.
+  rateLimit:
+    perSource: 20
+    burst: 100
 
   # mTLS between plugin and bridge — optional defense-in-depth on top
   # of SA-token validation (ADR-0008). When enabled, the plugin

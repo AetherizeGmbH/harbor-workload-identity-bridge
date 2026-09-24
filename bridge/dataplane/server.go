@@ -10,12 +10,15 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
+	stdlog "log"
 	"net"
 	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/time/rate"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -160,8 +163,32 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		// The request carries one bearer token and a small JSON body;
+		// Go's 1 MiB default would let any caller make the bridge buffer
+		// a megabyte of headers per connection.
+		MaxHeaderBytes: maxHeaderBytes,
+		// TLS handshake errors from scanners and probes on the NodePort
+		// would otherwise write one unstructured line each, unbounded.
+		ErrorLog: stdlog.New(&rateLimitedWriter{w: os.Stderr, limiter: rate.NewLimiter(rate.Every(time.Second), 20)}, "http: ", 0),
 	}
 	return s, nil
+}
+
+// maxHeaderBytes caps request headers; a Kubernetes ServiceAccount token
+// is a few KiB.
+const maxHeaderBytes = 32 << 10
+
+// rateLimitedWriter drops writes beyond the limiter's rate.
+type rateLimitedWriter struct {
+	w       io.Writer
+	limiter *rate.Limiter
+}
+
+func (r *rateLimitedWriter) Write(p []byte) (int, error) {
+	if !r.limiter.Allow() {
+		return len(p), nil
+	}
+	return r.w.Write(p)
 }
 
 // Addr returns the address the server is bound to. Before Start binds

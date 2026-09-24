@@ -251,3 +251,21 @@ func TestNewValidator_SendsTokenOnlyToInClusterAPIServer(t *testing.T) {
 		})
 	}
 }
+
+func TestValidator_ExposesPodAndNodeForAudit(t *testing.T) {
+	fi := newFixtureIssuer(t)
+	v := newValidatorFor(t, fi)
+	claims := fi.standardClaims()
+	claims["kubernetes.io"] = map[string]any{
+		"namespace": "team-a",
+		"pod":       map[string]any{"name": "puller-7d9", "uid": "3f2c"},
+		"node":      map[string]any{"name": "node-a", "uid": "9e1b"},
+	}
+	got, err := v.Validate(context.Background(), fi.signToken(t, claims))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Pod != "puller-7d9" || got.PodUID != "3f2c" || got.Node != "node-a" {
+		t.Fatalf("pod/node attribution = %q %q %q", got.Pod, got.PodUID, got.Node)
+	}
+}

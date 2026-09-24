@@ -561,6 +561,10 @@ spec:
             # The only token audience the bridge serves (ADR-0026).
             - name: BRIDGE_AUDIENCE
               value: "harbor-bridge-prod-eu-west"
+            - name: BRIDGE_RATE_LIMIT_PER_SOURCE
+              value: "20"
+            - name: BRIDGE_RATE_LIMIT_BURST
+              value: "100"
             - name: BRIDGE_OIDC_CA_FILE
               # In-cluster: the OIDC issuer is the apiserver and its
               # cert is signed by the cluster CA. The projected SA

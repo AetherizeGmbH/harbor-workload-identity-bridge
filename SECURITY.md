@@ -412,19 +412,36 @@ their own RBAC.
 
 ## Audit log shape
 
-One structured `Info`-level line per credential issuance, with these
-fields (logr key=value):
+One structured line per decision on the `audit` logger. That logger is
+fixed at info level: `BRIDGE_LOG_LEVEL=warn` or `error` does not silence
+it.
 
 ```
 credential issued
+  source=10.0.3.17                       # TCP peer (the node, via the NodePort)
+  client_cert=CN=harbor-bridge-plugin    # with mTLS
   subject=system:serviceaccount:flux-system:source-controller
+  pod=source-controller-7d9f  pod_uid=3f2c…  node=node-a   # bound-token claims
   audience=harbor.example.com
   harboraccess=harbor-bridge-system/flux-access
   generation=3
   robot=robot$bridge-prod-eu-west.flux-system.source-controller
   ttl_seconds=3600
-  image=harbor.example.com/production/myimg:v1
+  requested_image=harbor.example.com/production/myimg:v1   # asserted by the caller, max 512 chars
+
+credential denied
+  source=…  reason=invalid_token|no_matching_harboraccess|secret_owner_mismatch
+  (subject, pod, node, audiences once the token is valid) requested_image=…
 ```
+
+The pod and node come from the `kubernetes.io` claim of a bound token and
+are recorded for attribution only; no trust decision reads them.
+
+The credential endpoint accepts at most `bridge.rateLimit.perSource`
+requests per second (burst `bridge.rateLimit.burst`) from one source IP
+and answers `429` beyond that, before it parses the token. Request
+headers are capped at 32 KiB, and TLS handshake errors are logged at
+most 20 per second.
 
 Greppable by any single field. The robot password is never logged,
 and neither are the Harbor admin credentials: the Harbor client
@@ -450,7 +467,7 @@ IDs cannot make the bridge poll the apiserver once per request.
 
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 
-- `bridge_credential_issuances_total{result=ok|unauthorized|forbidden|unavailable|bad_request|server_error}`
+- `bridge_credential_issuances_total{result=ok|unauthorized|forbidden|unavailable|bad_request|server_error|rate_limited}`
 - `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|other}`
 - `bridge_harboraccess_lookup_failures_total`
 - `bridge_robot_secret_missing_total`

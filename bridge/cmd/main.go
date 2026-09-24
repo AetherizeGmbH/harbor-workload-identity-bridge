@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
@@ -49,12 +50,16 @@ const (
 	envHealthAddr       = "BRIDGE_HEALTH_ADDR"
 	envMetricsAddr      = "BRIDGE_METRICS_ADDR"
 	envEnableLeaderElec = "BRIDGE_ENABLE_LEADER_ELECTION"
+	envRateLimit        = "BRIDGE_RATE_LIMIT_PER_SOURCE"
+	envRateLimitBurst   = "BRIDGE_RATE_LIMIT_BURST"
 
 	defaultTLSCertFile = "/etc/bridge/tls/tls.crt"
 	defaultTLSKeyFile  = "/etc/bridge/tls/tls.key"
 	defaultListenAddr  = ":8443"
 	defaultHealthAddr  = ":8081"
 	defaultMetricsAddr = ":8080"
+	defaultRateLimit   = 20
+	defaultRateBurst   = 100
 
 	leaderElectionID = "bridge.harbor.aetherize.io"
 )
@@ -209,6 +214,10 @@ func run() error {
 
 	// Step 8: Handler + HTTPS server.
 	metrics := dataplane.NewMetrics(crmetrics.Registry)
+	perSource, burst, err := rateLimitFromEnv()
+	if err != nil {
+		return err
+	}
 	handler := &dataplane.Handler{
 		K8sClient: mgr.GetClient(),
 		Validator: validator,
@@ -218,6 +227,10 @@ func run() error {
 			Audience:             cfg.Audience,
 		},
 		Metrics: metrics,
+		Limiter: dataplane.NewSourceLimiter(perSource, burst),
+		// Fixed at info: BRIDGE_LOG_LEVEL must not be able to silence the
+		// record of who received credentials.
+		Audit: newLogger("info").WithName("audit"),
 	}
 
 	mux := http.NewServeMux()
@@ -251,6 +264,27 @@ func run() error {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
+}
+
+// rateLimitFromEnv reads the per-source request limit of the credential
+// endpoint (requests per second and burst; 0 per second disables it).
+func rateLimitFromEnv() (float64, int, error) {
+	perSource, burst := float64(defaultRateLimit), defaultRateBurst
+	if raw := os.Getenv(envRateLimit); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v < 0 {
+			return 0, 0, fmt.Errorf("%s %q must be a non-negative number of requests per second", envRateLimit, raw)
+		}
+		perSource = v
+	}
+	if raw := os.Getenv(envRateLimitBurst); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 1 {
+			return 0, 0, fmt.Errorf("%s %q must be a positive integer", envRateLimitBurst, raw)
+		}
+		burst = v
+	}
+	return perSource, burst, nil
 }
 
 // newLogger constructs a zap-backed logr.Logger at the requested level.
