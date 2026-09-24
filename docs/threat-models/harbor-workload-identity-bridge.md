@@ -1,8 +1,8 @@
 # Threat model: Harbor Workload Identity Bridge
 
-Status: proposed
-Approved-by:
-Approved-at:
+Status: approved
+Approved-by: Karsten Siemer
+Approved-at: 2026-09-24
 
 Applies-to:
 - `bridge/**`
@@ -15,8 +15,9 @@ This is the system-level model after the 2026-09 security review. It
 complements [SECURITY.md](../../SECURITY.md) (the operator-facing threat
 model and hardening guide) with STRIDE per trust boundary, DREAD-rated
 residual risks and the security events the system logs. It follows the
-format of the DSOMM-based ai-security-rules; it is `proposed` until a
-maintainer reviews and approves it.
+format of the DSOMM-based ai-security-rules and was approved by the
+maintainer on 2026-09-24. Changes to the threat model need a new
+approval.
 
 ## Scope and protection requirement
 

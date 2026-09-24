@@ -418,6 +418,7 @@ contract, not individually run.
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
 | 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), GKE e2e harness, ADRs 0021, 0022 and 0024 | ✅ Code + kind e2e complete; first `make e2e-gke` run against a real project still outstanding |
 | 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, ADRs 0023 and 0025 | ✅ Code + kind e2e (lifecycle stages) complete |
+| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, signed releases with provenance, gosec and fuzzing, ADRs 0026–0027, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
 
 ### Next
 
@@ -430,14 +431,7 @@ In order.
    Dataplane V2) and folds them back into ADR-0022. EKS/AKS harnesses
    can follow the same module split.
 
-2. **Label-selected `HarborAccess` CRs.** A bridge owns every
-   `HarborAccess` in its namespace. Add a label selector so one
-   cluster can run several bridges at once, each reconciling only the
-   CRs it matches: one bridge per Harbor, or one per team. The selector
-   joins the `bridge-<cluster>.` robot prefix as part of the ownership
-   boundary, so two bridges never touch the same robot.
-
-3. **Other registries via a backend plugin.** Move the Harbor-specific
+2. **Other registries via a backend plugin.** Move the Harbor-specific
    code behind a translation layer so the CRD, reconciler, and data
    plane no longer depend on Harbor, then add a Nexus backend. The flow
    takes an SA token in and returns scoped credentials, which holds for
@@ -445,6 +439,35 @@ In order.
    differ. It reuses the control-plane and data-plane split
    ([ADR-0002](docs/adr/0002-bridge-control-plane-data-plane-split.md)),
    with the backend as a third seam.
+
+### Open decisions (TODO)
+
+Open items from the 2026-09 security review (threat model items O2, O3
+and O5). None blocks a single-bridge install today.
+
+- [ ] **Configurable plugin provider names (O5).** The plugin's provider
+  name and file names are fixed (`harbor-bridge-plugin`), so only one
+  chart-installed plugin can exist per node, and one plugin talks to one
+  bridge. *Limits now:* several bridges on one cluster (ADR-0026) work on
+  the bridge side, but every bridge after the first needs its plugin
+  installed by hand (`plugin.enabled=false`, a renamed copy of the binary
+  and its own kubelet provider entry). This is the only item that limits
+  what the chart can do.
+- [ ] **mTLS client identity (O2).** With mTLS on, the bridge accepts any
+  client certificate its CA signed; with a shared ClusterIssuer, anyone who
+  may create cert-manager Certificates can get one. Decide on a dedicated
+  client CA plus an identity check, and whether mTLS should be on by
+  default. *Limits now:* nothing functional; mTLS is optional defense in
+  depth, and every request still needs a valid, audience-bound
+  ServiceAccount token.
+- [ ] **Token lifetime cap and pod binding (O3).** The bridge accepts any
+  valid token of the right audience until it expires, including
+  long-lived ones from `kubectl create token --duration=…` (which needs
+  the right to create tokens for that ServiceAccount) and tokens not bound
+  to a pod. Decide on a maximum lifetime and whether to require the pod
+  claim. *Limits now:* nothing functional; kubelet's own tokens are short
+  and pod-bound, so this only narrows what a stolen or hand-minted token
+  can do.
 
 ## Support and services
 
