@@ -405,7 +405,16 @@ credential issued
   image=harbor.example.com/production/myimg:v1
 ```
 
-Greppable by any single field. The robot password is never logged.
+Greppable by any single field. The robot password is never logged,
+and neither are the Harbor admin credentials: the Harbor client
+switches off the SDK's wire dumps, which the go-openapi runtime would
+otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
+bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
+
+Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
+on paginated listings), so a Harbor that accepts connections and never
+answers makes reconciles fail with an error and a `Ready=False`
+condition instead of blocking the controller.
 
 Failures (token rejected, no matching CR, Secret missing) log at
 `V(1)` with the same shape minus the fields that don't apply.
