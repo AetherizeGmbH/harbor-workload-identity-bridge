@@ -1,3 +1,9 @@
+## [0.5.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.5.0...v0.5.1) (2026-09-24)
+
+### Bug Fixes
+
+* **deps:** update go modules ([#68](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/68)) ([9573936](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/9573936ac5ae8f4fdc13a907688dcd68b552c825))
+
 ## [0.5.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.4.0...v0.5.0) (2026-09-24)
 
 ### ⚠ BREAKING CHANGES
