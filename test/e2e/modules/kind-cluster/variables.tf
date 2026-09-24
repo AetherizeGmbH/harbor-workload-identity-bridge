@@ -31,7 +31,7 @@ variable "api_server_port" {
 variable "node_image" {
   type = string
   # renovate: datasource=docker depName=kindest/node
-  default     = "kindest/node:v1.36.1"
+  default     = "kindest/node:v1.37.0"
   description = "kind node image (controls kubelet version)"
 }
 
@@ -82,5 +82,5 @@ variable "images_to_load" {
 variable "kubeconfig_path" {
   type        = string
   default     = null
-  description = "Where kind writes the cluster's kubeconfig. Default: <cwd>/.gen/<name>.kubeconfig, i.e. test/e2e/.gen/ (gitignored). Deliberately never ~/.kube/config — see the kind_cluster resource."
+  description = "Where kind writes the cluster's kubeconfig. Default: <cwd>/.gen/<name>.kubeconfig, i.e. test/e2e/.gen/ (gitignored). Deliberately never ~/.kube/config — see null_resource.cluster in main.tf."
 }

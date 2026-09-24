@@ -67,7 +67,9 @@ jobs:
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           install_only: true
-          version: v0.32.0
+          # Must support the node image; see e2e.yml.
+          # renovate: datasource=github-releases depName=kubernetes-sigs/kind
+          version: v0.33.0
       - name: Run e2e and record result
         id: e2e
         env:

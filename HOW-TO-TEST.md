@@ -27,7 +27,7 @@ Two paths, pick by what you're doing.
 
 - Docker
 - OpenTofu ≥ 1.12 (`brew install opentofu`)
-- kind on `$PATH` (`brew install kind`)
+- kind v0.33 or newer on `$PATH` (`brew install kind`). The harness creates the cluster with it, and older kind cannot start Kubernetes 1.37 nodes.
 - `kubectl` for poking at the cluster while paused
 
 The OpenTofu harness handles the rest: pulls the kind, Cilium, cert-

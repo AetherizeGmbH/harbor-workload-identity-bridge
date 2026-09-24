@@ -51,11 +51,13 @@ jobs:
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           install_only: true   # we want the binary; cluster is created by tofu
-          # Must be >= v0.25 to parse containerd 2.x's `ctr plugins ls`
-          # output (kindest/node:v1.35.0 ships containerd 2.x). v0.24
-          # silently fails snapshotter detection here. Pinned to v0.32
-          # to match what brew installs on developer machines.
-          version: v0.32.0
+          # The harness creates the cluster with this binary, so it must
+          # support the node image in modules/kind-cluster (kind v0.33+
+          # for kindest/node v1.37: kubeadm 1.37 dropped the v1beta3 config
+          # older kind writes). Renovate bumps it together with the node
+          # image (group "kind").
+          # renovate: datasource=github-releases depName=kubernetes-sigs/kind
+          version: v0.33.0
       - name: Run tofu test
         working-directory: test/e2e
         # No `| tee`: with the runner's default `bash -e` (no pipefail)

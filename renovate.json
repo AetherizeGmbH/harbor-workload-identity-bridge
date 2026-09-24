@@ -78,6 +78,11 @@
     }
 ,
     {
+      "description": "The kind CLI and the kindest/node image move together: the harness creates the cluster with the CLI, and a node image newer than the CLI supports fails in kubeadm init (kindest/node v1.37 needs kind v0.33+).",
+      "matchPackageNames": ["kindest/node", "kubernetes-sigs/kind"],
+      "groupName": "kind"
+    },
+    {
       "description": "semantic-release plugins (release.yml extra_plugins): never automerge. The release job only runs on main, so no PR check exercises them; a floating conventionalcommits minor already broke one release.",
       "matchManagers": ["custom.regex"],
       "matchDatasources": ["npm"],
@@ -117,6 +122,14 @@
         "\\s(?<depName>@semantic-release/[a-z-]+|conventional-changelog-[a-z-]+)@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ],
       "datasourceTemplate": "npm"
+    },
+    {
+      "description": "Tool versions in workflow `with:` inputs (e.g. helm/kind-action's `version`). Annotate the input with a `# renovate:` comment on the line directly above it.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n\\s*version:\\s*(?<currentValue>\\S+)"
+      ]
     }
   ],
   "vulnerabilityAlerts": {
