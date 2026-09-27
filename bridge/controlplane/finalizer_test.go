@@ -357,3 +357,21 @@ func TestReconcile_SelectiveBridgeReleasesOnlyItsInstanceFinalizerFromARefusedOb
 		t.Errorf("finalizers %v, want only the shared one left", got)
 	}
 }
+
+// Another bridge that serves the object records its robot in the status.
+// A refusing bridge then leaves the shared finalizer alone: it is the
+// other bridge's, which would add it back at once, and every removal would
+// bring both bridges back to the object.
+func TestReconcile_RefusedHarborAccessServedByAnotherBridgeKeepsTheSharedFinalizer(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.TrustPolicy.Audience = "audience-b"
+	ha.Status.Robot = &harborv1alpha1.RobotRef{Name: mockRobotPrefix + "bridge-cluster-b.flux-system.source-controller", ID: 7}
+	r := newReconciler(t, newMockHarbor(), fixedClock{time.Now()}, ha)
+	r.Config.ClusterName, r.Config.Audience, r.Config.HarborRobotPrefix = "cluster-a", "audience-a", mockRobotPrefix
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if got := getHA(t, r); !controllerutil.ContainsFinalizer(got, FinalizerName) {
+		t.Errorf("the refusing bridge removed the shared finalizer of the bridge that serves the object: %v", got.Finalizers)
+	}
+}

@@ -49,11 +49,14 @@ of ADR-0030:
    its finalizers with an optimistic lock. This releases the objects
    older bridges finalized while refusing them. A robot of an earlier
    `serviceAccountRef` or a pre-ADR-0018 robot keeps the finalizers until
-   the janitor has deleted it. With a selector, only the per-instance
-   finalizer is released this way: a bridge without a selector that
-   serves the object sets the shared one too and would add it back at
-   once. If the object is accepted again, decision 1 adds the finalizer
-   back before any robot is created.
+   the janitor has deleted it. The shared finalizer is released this way
+   only by a bridge without a selector, and only while the object's
+   `status.robot` records no robot of another `clusterName`: a bridge
+   without a selector that serves the object sets the shared finalizer
+   too, records its robot there, and would add the finalizer back at once.
+   With a selector only the per-instance finalizer is released. If the
+   object is accepted again, decision 1 adds the finalizer back before
+   any robot is created.
 4. **Which finalizers are this bridge's** (`Config.ReleasedFinalizers`):
    with a selector, the per-instance one and the shared one (ADR-0026 §3);
    without a selector, the shared one and, when `BRIDGE_INSTANCE` is set,
@@ -100,4 +103,5 @@ of ADR-0030:
   another bridge on the same cluster that uses the same `clusterName`
   with another Harbor; an object an older bridge refused or found in
   conflict has no `status.robot`, so if it stops matching a new selector
-  its shared finalizer stays.
+  its shared finalizer stays. Two bridges without a selector on one
+  cluster share one finalizer; ADR-0026 gives several bridges selectors.

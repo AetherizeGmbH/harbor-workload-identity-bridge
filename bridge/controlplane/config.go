@@ -212,6 +212,15 @@ func (c *Config) ReleasedFinalizers() []string {
 	}
 }
 
+// statusRobotIsOurs reports whether the robot ha's status records, if any,
+// has this bridge's clusterName prefix. Every bridge that serves ha
+// records its robot there (markReady), so a robot of another clusterName
+// means another bridge served ha since.
+func (c *Config) statusRobotIsOurs(ha *harborv1alpha1.HarborAccess) bool {
+	return ha.Status.Robot == nil ||
+		harbor.OwnsRobot(c.ClusterName, strings.TrimPrefix(ha.Status.Robot.Name, c.HarborRobotPrefix))
+}
+
 // Selects reports whether this bridge manages ha.
 func (c *Config) Selects(ha *harborv1alpha1.HarborAccess) bool {
 	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(ha.Labels))

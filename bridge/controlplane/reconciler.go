@@ -533,13 +533,17 @@ func (r *Reconciler) suspendRobot(ctx context.Context, ha *harborv1alpha1.Harbor
 // later pass releases them. If the object is accepted again,
 // ensureFinalizer adds the finalizer back before any robot is created.
 //
-// With a selector only the per-instance finalizer is released: a bridge
-// without a selector that serves the object sets the shared one too
-// (overlapping selectors, ADR-0026), and would add it back at once.
+// The shared finalizer is released only by a bridge without a selector,
+// and only while the object's status records no robot of another
+// clusterName: a bridge without a selector that serves the object sets it
+// too (overlapping selectors, ADR-0026) and would add it back at once.
+// Several bridges on one cluster need selectors; the per-instance
+// finalizer is this bridge's alone.
 func (r *Reconciler) releaseRefused(ctx context.Context, ha *harborv1alpha1.HarborAccess) error {
+	sharedIsOurs := r.Config.Finalizer() == FinalizerName && r.Config.statusRobotIsOurs(ha)
 	var release []string
 	for _, f := range r.Config.ReleasedFinalizers() {
-		if controllerutil.ContainsFinalizer(ha, f) && (f != FinalizerName || r.Config.Finalizer() == FinalizerName) {
+		if controllerutil.ContainsFinalizer(ha, f) && (f != FinalizerName || sharedIsOurs) {
 			release = append(release, f)
 		}
 	}

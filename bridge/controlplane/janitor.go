@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -265,8 +264,7 @@ func (j *Janitor) releaseUnselected(ctx context.Context, pending map[types.Names
 // is this bridge's, set before it had a selector (ADR-0026 point 3). A
 // bridge that served ha since records its own robot there instead.
 func (j *Janitor) servedHere(ha *harborv1alpha1.HarborAccess) bool {
-	return ha.Status.Robot != nil &&
-		harbor.OwnsRobot(j.Config.ClusterName, strings.TrimPrefix(ha.Status.Robot.Name, j.Config.HarborRobotPrefix))
+	return ha.Status.Robot != nil && j.Config.statusRobotIsOurs(ha)
 }
 
 // sweepSecrets deletes robot Secrets of this cluster whose HarborAccess no
