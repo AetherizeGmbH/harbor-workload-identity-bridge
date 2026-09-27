@@ -71,6 +71,10 @@ func (f *fakeKubelet) state(string) (string, error) {
 	return st, nil
 }
 
+// newTestEnv builds a fake node. kubeletCmdline is the command line of the
+// running kubelet; nil means no kubelet process at all, which only none
+// mode and merge mode with explicit targets get by with (patch mode reads
+// kubelet's wiring before it writes, checkRewire).
 func newTestEnv(t *testing.T, mode string, kubeletCmdline []string) *testEnv {
 	t.Helper()
 	root := t.TempDir()
@@ -139,7 +143,7 @@ func (e *testEnv) hostFile(t *testing.T, nodePath string) string {
 }
 
 func TestRun_PatchFirstInstallThenIdempotent(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 
 	if err := run(env.cfg); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -171,7 +175,7 @@ func TestRun_PatchFirstInstallThenIdempotent(t *testing.T) {
 }
 
 func TestRun_PatchPreservesOperatorArgs(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	envPath := env.cfg.hostPath(defaultKubeletPath)
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -192,7 +196,7 @@ func TestRun_PatchPreservesOperatorArgs(t *testing.T) {
 }
 
 func TestRun_PatchConfigChangeRestarts(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +214,7 @@ func TestRun_PatchConfigChangeRestarts(t *testing.T) {
 }
 
 func TestRun_PatchCrashWindowRetriesRestart(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +541,7 @@ func TestRun_AutoStaysPatchAfterOwnInstall(t *testing.T) {
 // restart succeeds even when kubelet then crash-loops. The install must
 // fail and must not record success.
 func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.states = []string{"activating", "failed"}
 	err := run(env.cfg)
 	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
@@ -551,7 +555,7 @@ func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
 // TestRun_RestartVerification_FlapAfterActiveIsCaught: "active" once is not
 // enough — the unit must still be active after the settle period.
 func TestRun_RestartVerification_FlapAfterActiveIsCaught(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.states = []string{"active", "failed"}
 	if err := run(env.cfg); err == nil {
 		t.Fatal("a kubelet that fails right after reporting active passed verification")
@@ -562,7 +566,7 @@ func TestRun_RestartVerification_FlapAfterActiveIsCaught(t *testing.T) {
 // source /etc/default/kubelet, the flags never reach kubelet. Before, the
 // install "succeeded" and the plugin was silently never invoked.
 func TestRun_PatchVerification_UnitIgnoresEnvFile(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.ignoreEnvFile = true
 	err := run(env.cfg)
 	if err == nil || !strings.Contains(err.Error(), "does the kubelet unit source") {
@@ -571,7 +575,7 @@ func TestRun_PatchVerification_UnitIgnoresEnvFile(t *testing.T) {
 }
 
 func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.restartErr = errors.New("systemctl: unit not found")
 	if err := run(env.cfg); err == nil {
 		t.Fatal("restart failure swallowed")
@@ -584,7 +588,7 @@ func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
 // TestRun_UnwritableStateDir_NoRestart: a state dir that cannot be written
 // would otherwise restart kubelet on every re-roll forever.
 func TestRun_UnwritableStateDir_NoRestart(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	stateParent := filepath.Dir(env.cfg.hostPath(env.cfg.StateDir))
 	if err := os.MkdirAll(stateParent, 0o755); err != nil {
 		t.Fatal(err)
@@ -623,7 +627,7 @@ func TestRun_MergeRefusalLeavesNoHalfInstall(t *testing.T) {
 }
 
 func TestRun_PatchRefusalLeavesNoHalfInstall(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	envPath := env.cfg.hostPath(defaultKubeletPath)
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		t.Fatal(err)

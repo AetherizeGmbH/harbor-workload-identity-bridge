@@ -142,7 +142,7 @@ const (
 )
 
 func TestRun_NonDefaultNameDerivesItsFiles(t *testing.T) {
-	env := withName(t, newTestEnv(t, modePatch, nil), euName)
+	env := withName(t, newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}), euName)
 	env.cfg.MTLSEnabled = true
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestRun_NonDefaultNameDerivesItsFiles(t *testing.T) {
 }
 
 func TestRun_ProviderNameMustMatchTheRenderedEntry(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.cfg.ProviderName = euName // the chart rendered harbor-bridge-plugin
 	err := run(env.cfg)
 	if err == nil || !strings.Contains(err.Error(), `no provider named "harbor-bridge-eu"`) {
@@ -414,7 +414,7 @@ func TestRun_LegacyStateIsConvertedWithoutRestart(t *testing.T) {
 	}{
 		{
 			name: "patch",
-			env:  func(t *testing.T) *testEnv { return newTestEnv(t, modePatch, nil) },
+			env:  func(t *testing.T) *testEnv { return newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}) },
 			legacy: func(t *testing.T, e *testEnv) *state {
 				cfgPath := configDir + "/" + configFileName
 				return &state{Mode: modePatch, BinDir: binDir, ConfigFile: cfgPath,
@@ -475,7 +475,7 @@ func TestRun_LegacyStateIsConvertedWithoutRestart(t *testing.T) {
 // installer holds the node lock, a pass neither reads nor writes; after
 // the other installer's write it merges into the file as it is then.
 func TestRun_TakesTheNodeLockBeforeReadingSharedFiles(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	unlock, err := lockFile(env.cfg.hostPath(nodeLockPath), time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -702,5 +702,107 @@ func TestSiblingEntry(t *testing.T) {
 	}
 	if env.cfg.siblingEntry(eu) {
 		t.Fatal("an entry whose binary is a symlink counts")
+	}
+}
+
+// TestRun_PatchDoesNotMoveKubeletAwayFromAnotherInstall: kubelet reads one
+// config from one bin dir. A patch-mode install with other directories
+// than an install already on the node would take the other install's
+// entry out of kubelet's view, or, with only the bin dir different, leave
+// kubelet without its binary. It refuses before it writes anything.
+func TestRun_PatchDoesNotMoveKubeletAwayFromAnotherInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		binDir, configDir string
+	}{
+		{"other config and bin dir", "/etc/kubernetes/hb-eu-bin", "/etc/kubernetes/hb-eu"},
+		{"other bin dir only", "/etc/kubernetes/hb-eu-bin", configDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+			if err := run(a.cfg); err != nil {
+				t.Fatal(err)
+			}
+			envBefore := a.hostFile(t, defaultKubeletPath)
+			configBefore := a.hostFile(t, configDir+"/"+configFileName)
+
+			b := newSiblingEnv(t, a, modePatch, euName)
+			b.cfg.HostBinDir, b.cfg.HostConfigDir = tc.binDir, tc.configDir
+			err := run(b.cfg)
+			if err == nil || !strings.Contains(err.Error(), `holds the provider entries "harbor-bridge-plugin" of other harbor-bridge installs`) {
+				t.Fatalf("got %v, want a refusal naming the other install's entry", err)
+			}
+			if b.restarts != 0 {
+				t.Fatal("kubelet restarted after a refusal")
+			}
+			assertAbsent(t, b, tc.binDir+"/"+euName, tc.configDir+"/harbor-bridge-eu.ca.crt")
+			if a.hostFile(t, defaultKubeletPath) != envBefore || a.hostFile(t, configDir+"/"+configFileName) != configBefore {
+				t.Fatal("the refused pass changed kubelet's flags or config")
+			}
+			got, err := discoverKubelet(a.cfg.ProcRoot)
+			if err != nil || got != (kubeletWiring{BinDir: binDir, ConfigFile: configDir + "/" + configFileName}) {
+				t.Fatalf("kubelet wiring = %+v (err %v)", got, err)
+			}
+		})
+	}
+
+	// A single install that changes its own directories still moves.
+	a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.HostBinDir, a.cfg.HostConfigDir = "/etc/kubernetes/hb-bin", "/etc/kubernetes/hb"
+	if err := run(a.cfg); err != nil {
+		t.Fatalf("moving the only install's directories was refused: %v", err)
+	}
+	got, err := discoverKubelet(a.cfg.ProcRoot)
+	if err != nil || got != (kubeletWiring{BinDir: "/etc/kubernetes/hb-bin", ConfigFile: "/etc/kubernetes/hb/" + configFileName}) {
+		t.Fatalf("kubelet wiring = %+v (err %v)", got, err)
+	}
+	if a.restarts != 2 {
+		t.Fatalf("restarts = %d, want 2", a.restarts)
+	}
+}
+
+// TestRun_PatchReadsAConfigDirectoryBeforeMovingKubelet: kubelet 1.34+ also
+// reads a directory of config files. An install in none mode may have put
+// its entry into one; patch mode reads them all before it moves kubelet.
+func TestRun_PatchReadsAConfigDirectoryBeforeMovingKubelet(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{
+		"/usr/bin/kubelet",
+		"--image-credential-provider-bin-dir=/opt/cp/bin",
+		"--image-credential-provider-config=/opt/cp/providers.d",
+	})
+	withName(t, env, euName)
+	writeHostFile(t, env, "/opt/cp/providers.d/00-cloud.yaml", gkeConfig)
+	writeHostFile(t, env, "/opt/cp/providers.d/README", "not a config")
+	if err := os.MkdirAll(env.cfg.hostPath("/opt/cp/providers.d/sub.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Without another install's entry in the directory, patch mode moves
+	// kubelet to its own directories, as it always did.
+	if err := checkRewire(env.cfg, kubeletWiring{BinDir: "/opt/cp/bin", ConfigFile: "/opt/cp/providers.d"}); err != nil {
+		t.Fatalf("a directory without bridge entries was refused: %v", err)
+	}
+
+	writeHostFile(t, env, "/opt/cp/providers.d/10-bridge.yaml", renderedConfig)
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), `holds the provider entries "harbor-bridge-plugin"`) {
+		t.Fatalf("got %v, want a refusal", err)
+	}
+
+	// A symlink, which kubelet would follow, cannot be vetted.
+	if err := os.Remove(env.cfg.hostPath("/opt/cp/providers.d/10-bridge.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("00-cloud.yaml", env.cfg.hostPath("/opt/cp/providers.d/10-bridge.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	err = run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "cannot tell whether") {
+		t.Fatalf("got %v, want a refusal", err)
+	}
+	if env.restarts != 0 {
+		t.Fatal("kubelet restarted after a refusal")
 	}
 }

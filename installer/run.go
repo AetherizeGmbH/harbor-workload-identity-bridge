@@ -10,6 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 )
 
 const configFileName = "credential-provider-config.yaml"
@@ -74,6 +77,13 @@ func run(cfg *config) error {
 			mode = modeMerge
 		}
 		logf("mode auto resolved to %s", mode)
+	case modePatch:
+		// Patch mode points kubelet at this install's directories; where
+		// kubelet points now decides whether that is safe (checkRewire).
+		wiring, err = discoverKubelet(cfg.ProcRoot)
+		if err != nil {
+			return fmt.Errorf("mode patch: %w", err)
+		}
 	case modeMerge:
 		if cfg.MergeBinDir != "" {
 			wiring = kubeletWiring{BinDir: cfg.MergeBinDir, ConfigFile: cfg.MergeConfigFile}
@@ -86,6 +96,12 @@ func run(cfg *config) error {
 			if !wiring.wired() {
 				return fmt.Errorf("mode merge: kubelet runs without --image-credential-provider-* flags — nothing to merge into; use mode patch (self-managed nodes) or set plugin.install.binDir/configFile")
 			}
+		}
+	}
+
+	if mode == modePatch {
+		if err := checkRewire(cfg, wiring); err != nil {
+			return err
 		}
 	}
 
@@ -195,6 +211,98 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 		legacyHash: contentHash(desiredConfig, desiredEnv),
 	}
 	return finishWithRestart(cfg, t, configChanged || envChanged, verify)
+}
+
+// checkRewire refuses a patch-mode pass that would point kubelet away from
+// the config it reads now (current) while that config holds another
+// install's entry (ADR-0029). Kubelet has one config and one bin dir:
+// moving the config drops that install's entry, and moving only the bin
+// dir leaves kubelet without that install's binary, so that kubelet does
+// not start. A single install that changed its own directories still
+// moves. The caller holds the node lock, which every installer that merges
+// into a config also holds.
+func checkRewire(cfg *config, current kubeletWiring) error {
+	want := kubeletWiring{BinDir: cfg.HostBinDir, ConfigFile: cfg.ownConfigPath()}
+	if !current.wired() || current == want {
+		return nil
+	}
+	docs, err := configDocs(cfg.hostPath(current.ConfigFile))
+	if err != nil {
+		return fmt.Errorf("mode patch: cannot tell whether kubelet's credential-provider config %s holds other installs' entries, so it stays wired to it: %w", current.ConfigFile, err)
+	}
+	var others []string
+	for _, doc := range docs {
+		for _, name := range otherBridgeProviders(doc, cfg.ProviderName) {
+			others = append(others, strconv.Quote(name))
+		}
+	}
+	if len(others) == 0 {
+		return nil
+	}
+	return fmt.Errorf("mode patch: kubelet runs with bin-dir=%q config=%q, which holds the provider entries %s of other harbor-bridge installs; moving kubelet to this install's bin-dir=%q config=%q would break them. Give every install the same plugin.hostBinaryDir and plugin.hostConfigDir, or use plugin.install.mode=auto",
+		current.BinDir, current.ConfigFile, strings.Join(others, ", "), want.BinDir, want.ConfigFile)
+}
+
+// configDocs returns the credential-provider config documents kubelet reads
+// from path (a host path): the file, or, since Kubernetes 1.34, the
+// *.json, *.yaml and *.yml files of a directory, in kubelet's order. A
+// missing path has none. Every file must pass openRegular: a symlink,
+// which kubelet would follow, is an error.
+func configDocs(path string) ([][]byte, error) {
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case !fi.IsDir():
+		doc, err := readHostFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{doc}, nil
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	d, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := d.ReadDir(-1)
+	_ = d.Close()
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		// Kubelet skips directories, and so does this.
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	var docs [][]byte
+	for _, name := range names {
+		switch filepath.Ext(name) {
+		case ".json", ".yaml", ".yml":
+		default:
+			continue
+		}
+		f, err := openRegular(root, name)
+		if err != nil {
+			return nil, err
+		}
+		doc, err := readAllCapped(f)
+		_ = f.Close()
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, nil
 }
 
 // ownConfig reads the chart-owned provider config of patch and none mode
