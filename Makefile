@@ -171,7 +171,9 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 	fi
 
 # Every Go fuzz target, as <package>:<function>. `make fuzz` fails when a
-# Fuzz function exists that this list does not name.
+# Fuzz function exists that this list does not name, or when an entry's
+# package does not contain its function (`go test -fuzz` in the wrong
+# package fuzzes nothing and still passes).
 FUZZ_TARGETS ?= \
 	./installer:FuzzMergeProvider \
 	./installer:FuzzMergeExtraArgs \
@@ -192,6 +194,13 @@ fuzz: ## Run every fuzz target for FUZZTIME each (default 10s); plain `go test` 
 		echo "listed:"; echo "$$listed"; echo "found:"; echo "$$found"; \
 		exit 1; \
 	fi; \
+	for t in $(FUZZ_TARGETS); do \
+		pkg=$${t%%:*}; fn=$${t##*:}; \
+		go test -list="^$$fn$$" "$$pkg" | grep -qx "$$fn" || { \
+			echo "FUZZ_TARGETS names $$t, but $$pkg has no $$fn."; \
+			exit 1; \
+		}; \
+	done; \
 	for t in $(FUZZ_TARGETS); do \
 		pkg=$${t%%:*}; fn=$${t##*:}; \
 		echo "== $$fn ($$pkg, $(FUZZTIME))"; \
