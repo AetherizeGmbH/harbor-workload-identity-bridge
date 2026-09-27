@@ -3,7 +3,11 @@
 # test keys state by module source), and k8s-yaml keys objects by
 # identity, so moving between phases is exactly what a user does:
 #
-#   initial  — namespaces, ServiceAccounts, HarborAccess CRs (see below).
+#   initial  — namespaces, ServiceAccounts, HarborAccess CRs (see below),
+#              and the RBAC of token-ns/token-check: that ServiceAccount
+#              may create tokens for itself (resourceNames: only itself)
+#              and nothing else. The token_rejection stage runs a pod as
+#              it and mints its own tokens (ADR-0028).
 #   updated  — the same objects, edited in place:
 #                * test-access gains pull on project-gamma (grant change →
 #                  the robot's permissions must change in Harbor, without a
@@ -59,7 +63,13 @@ variable "audience" {
 locals {
   updated = var.phase == "updated"
 
-  namespaces = ["test-pull", "team-a", "team", "app-ns", "beta-ns", "upgrade-ns"]
+  namespaces = ["test-pull", "team-a", "team", "app-ns", "beta-ns", "upgrade-ns", "token-ns"]
+
+  # The token_rejection stage's identity: a pod running as this
+  # ServiceAccount mints tokens for it, so the tokens can be bound to
+  # that pod (the apiserver binds a token only to a pod that runs as the
+  # token's ServiceAccount).
+  token_check_sa = { namespace = "token-ns", name = "token-check" }
 
   service_accounts = concat(
     [
@@ -69,6 +79,7 @@ locals {
       { namespace = "app-ns", name = "runner" },
       { namespace = "beta-ns", name = "beta-runner" },
       { namespace = "upgrade-ns", name = "upgrade-runner" },
+      local.token_check_sa,
     ],
     local.updated ? [{ namespace = "team-a", name = "svc-renamed" }] : [],
   )
@@ -124,6 +135,39 @@ locals {
       permissions = [{ project = "upgrade-only", action = "pull" }]
       generation  = 1
     },
+    {
+      # ADR-0028: the token_rejection stage's identity. Its robot must
+      # exist so that a valid token gets credentials; the stage asks the
+      # bridge directly and pulls nothing.
+      name        = "token-check"
+      namespace   = var.bridge_namespace
+      sa          = local.token_check_sa
+      permissions = [{ project = "your-project", action = "pull" }]
+      generation  = 1
+    },
+  ]
+
+  # Least privilege for token_rejection: create tokens for exactly one
+  # ServiceAccount, granted to that ServiceAccount itself.
+  token_check_rbac = [
+    {
+      apiVersion = "rbac.authorization.k8s.io/v1"
+      kind       = "Role"
+      metadata   = { name = "mint-own-token", namespace = local.token_check_sa.namespace }
+      rules = [{
+        apiGroups     = [""]
+        resources     = ["serviceaccounts/token"]
+        resourceNames = [local.token_check_sa.name]
+        verbs         = ["create"]
+      }]
+    },
+    {
+      apiVersion = "rbac.authorization.k8s.io/v1"
+      kind       = "RoleBinding"
+      metadata   = { name = "mint-own-token", namespace = local.token_check_sa.namespace }
+      roleRef    = { apiGroup = "rbac.authorization.k8s.io", kind = "Role", name = "mint-own-token" }
+      subjects   = [{ kind = "ServiceAccount", name = local.token_check_sa.name, namespace = local.token_check_sa.namespace }]
+    },
   ]
 
   all_manifests = concat(
@@ -133,6 +177,10 @@ locals {
     }],
     [for sa in local.service_accounts : {
       yaml = yamlencode({ apiVersion = "v1", kind = "ServiceAccount", metadata = { name = sa.name, namespace = sa.namespace } })
+      wait = null
+    }],
+    [for o in local.token_check_rbac : {
+      yaml = yamlencode(o)
       wait = null
     }],
     [for ha in local.harbor_accesses : {

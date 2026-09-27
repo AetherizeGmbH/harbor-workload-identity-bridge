@@ -83,7 +83,7 @@ variable "diag_dir" {
 variable "diag_bridge_namespace" {
   type        = string
   default     = "harbor-bridge-system"
-  description = "Namespace of the bridge release whose logs and HarborAccess state are captured on failure."
+  description = "Namespace of the bridge release whose logs and HarborAccess state are captured on failure, and whose logs expect_bridge_log searches."
 }
 
 variable "node_log_command" {
@@ -108,6 +108,25 @@ variable "env_from_secret" {
   type        = string
   default     = ""
   description = "Optional Secret name in the job namespace; its keys are exposed as env vars via envFrom (e.g. a robot-credential Secret's username/password)."
+}
+
+variable "env_field_refs" {
+  type        = map(string)
+  default     = {}
+  description = "Optional env vars from the downward API, name → fieldPath (e.g. POD_UID = \"metadata.uid\"), for checks that need their own pod's identity."
+}
+
+variable "expect_bridge_log" {
+  type        = list(list(string))
+  default     = []
+  description = "After the Job succeeded, each entry must match a line of the bridge logs (all replicas, last 15 minutes): every string of the entry occurs on that one line, compared literally. Lets a check assert the bridge's own audit decision, not only the answer the Job saw. Not combinable with expect_pull_failure."
+
+  validation {
+    condition = alltrue([
+      for e in var.expect_bridge_log : length(e) > 0 && alltrue([for s in e : s != "" && !strcontains(s, "\t") && !strcontains(s, "\n")])
+    ])
+    error_message = "Each expect_bridge_log entry needs at least one string; the strings must be non-empty and contain no tab or newline."
+  }
 }
 
 locals {
@@ -153,6 +172,17 @@ resource "kubernetes_job_v1" "this" {
               }
             }
           }
+          dynamic "env" {
+            for_each = var.env_field_refs
+            content {
+              name = env.key
+              value_from {
+                field_ref {
+                  field_path = env.value
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -168,7 +198,8 @@ locals {
   diag_dir = coalesce(var.diag_dir, abspath("${path.cwd}/.diag/${var.name}"))
 }
 
-# Waits for the Job to succeed. On failure or timeout it writes pod,
+# Waits for the Job to succeed (and, with expect_bridge_log, for the
+# expected bridge log lines). On failure or timeout it writes pod,
 # event, bridge, plugin and (optionally) kubelet diagnostics to diag_dir
 # and fails the run. Secret CONTENTS are never captured — only names.
 # kubectl is driven ONLY by var.kubeconfig (--kubeconfig=/dev/null keeps
@@ -177,6 +208,12 @@ locals {
 resource "null_resource" "wait" {
   triggers = {
     job_uid = kubernetes_job_v1.this.metadata[0].uid
+  }
+  lifecycle {
+    precondition {
+      condition     = !(var.expect_pull_failure && length(var.expect_bridge_log) > 0)
+      error_message = "expect_bridge_log is checked after a successful Job; it cannot be combined with expect_pull_failure."
+    }
   }
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
@@ -195,6 +232,32 @@ resource "null_resource" "wait" {
         args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
       fi
       k() { kubectl "$${args[@]}" "$@"; }
+
+      # Prints the EXPECT_BRIDGE_LOG entries (one per line, their strings
+      # tab-separated) that no single bridge log line matches, and fails
+      # if there is one. Polls for up to 30s: the bridge writes its audit
+      # line before it answers, but the container log can trail a moment.
+      bridge_log_missing() {
+        local tab=$'\t' logs matched missing entry p i
+        local -a parts
+        [ -n "$EXPECT_BRIDGE_LOG" ] || return 0
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          logs="$(k -n "$BRIDGE_NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=-1 --since=15m 2>/dev/null || true)"
+          missing=""
+          while IFS= read -r entry; do
+            matched="$logs"
+            IFS="$tab" read -r -a parts <<< "$entry"
+            for p in "$${parts[@]}"; do
+              matched="$(grep -F -- "$p" <<< "$matched" || true)"
+            done
+            if [ -z "$matched" ]; then missing+="[$${entry//$tab/ + }] "; fi
+          done <<< "$EXPECT_BRIDGE_LOG"
+          if [ -z "$missing" ]; then return 0; fi
+          sleep 3
+        done
+        printf '%s' "$${missing% }"
+        return 1
+      }
 
       deadline=$(( $(date +%s) + TIMEOUT ))
       while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -217,7 +280,11 @@ resource "null_resource" "wait" {
             fi
           fi
         else
-          if [ "$${ok:-0}" -ge 1 ]; then exit 0; fi
+          if [ "$${ok:-0}" -ge 1 ]; then
+            if missing="$(bridge_log_missing)"; then exit 0; fi
+            FAIL_MESSAGE="the Job succeeded, but no bridge log line matches $missing: $FAIL_MESSAGE"
+            break
+          fi
         fi
         if [ "$${failed:-0}" -ge 1 ]; then break; fi
         sleep 3
@@ -260,6 +327,7 @@ resource "null_resource" "wait" {
       FAIL_MESSAGE        = var.fail_message
       NODE_LOG_COMMAND    = var.node_log_command
       EXPECT_PULL_FAILURE = tostring(var.expect_pull_failure)
+      EXPECT_BRIDGE_LOG   = join("\n", [for e in var.expect_bridge_log : join("\t", e)])
     }
   }
 }

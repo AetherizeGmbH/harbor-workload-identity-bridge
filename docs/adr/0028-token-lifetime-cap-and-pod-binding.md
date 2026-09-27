@@ -51,7 +51,11 @@ Accepted (2026-09-27). Extends ADR-0006 (OIDC validation) and ADR-0010
   issued an 8760h token on request; binding a token to a pod that runs as
   another ServiceAccount fails. Through this validator the pod-bound
   token passes, the unbound one is `not_pod_bound` and the 8760h one
-  `excessive_lifetime`.
+  `excessive_lifetime`. The e2e stage `token_rejection`
+  (`test/e2e/tests/02-bridge.tftest.hcl`) repeats this on every run
+  against the deployed bridge, with tokens from the TokenRequest API: a
+  pod-bound 1h token gets credentials, an unbound 1h token and a
+  pod-bound 2h token get `401`, and the audit log shows both categories.
 - Identity is the ServiceAccount (ADR-0010). Many pods may share one
   ServiceAccount (GitLab runners, for example), and the chart sets
   `cacheType: ServiceAccount`, so kubelet caches credentials per

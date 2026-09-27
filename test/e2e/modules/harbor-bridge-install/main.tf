@@ -278,6 +278,15 @@ output "namespace" {
   value = kubernetes_namespace_v1.this.metadata[0].name
 }
 
+# The credential endpoint through the bridge's Service, for in-cluster
+# checks that call the bridge directly (the plugin uses the NodePort). The
+# Service carries the release name (the chart's fullname) and the chart's
+# default service.port 8443, which this module does not override; the
+# serving certificate names this host.
+output "credentials_url" {
+  value = "https://${helm_release.bridge.name}.${helm_release.bridge.namespace}.svc:8443/v1/credentials"
+}
+
 # Teardown guard. HarborAccess objects carry the bridge's finalizer, which
 # only a running bridge releases. tofu test destroys states in reverse
 # order of the LAST run that touched each, so after a failure (or with any

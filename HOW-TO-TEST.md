@@ -7,8 +7,10 @@ Two paths, pick by what you're doing.
   bridge chart, seeds private images, asserts the kubelet
   credential-provider chain by pulling them, and then checks the
   HarborAccess lifecycle (grant change, identity change, deletion)
-  against Harbor. ~15 minutes start-to-finish. Use this for every
-  change you'd otherwise want smoke-tested.
+  against Harbor and that the bridge refuses ServiceAccount tokens not
+  bound to a pod or living longer than an hour. ~15 minutes
+  start-to-finish. Use this for every change you'd otherwise want
+  smoke-tested.
 
 - **§1b GKE** — the same flow on a real GKE cluster (`make e2e-gke`).
   Creates **billed** resources; local only, never in CI.
@@ -76,7 +78,7 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 5 | `coredns_rewrite` | CoreDNS hosts-plugin entry so `harbor.e2e` resolves to a kind node IP cluster-wide |
 | 6 | `seed_image` | Create the projects, crane-copy the test image into each, verify, and wait for the Job to finish |
 | 7 | `bridge_install` | The chart — CRDs, bridge Deployment (2 replicas), plugin DaemonSet, audience RBAC |
-| 8 | `harbor_access` | HarborAccess scenario, phase `initial`: baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR, the upgrade CR |
+| 8 | `harbor_access` | HarborAccess scenario, phase `initial`: baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR, the upgrade CR, and `token-check`, whose ServiceAccount may create tokens for itself only |
 | 9 | `pull_pod*` | Pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot) |
 | 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and read another — verifies the `pull,push` action |
 | 11 | `bridge_upgrade` | `helm upgrade` adding a `matchImages` entry — the installer must restart kubelet |
@@ -86,9 +88,10 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 15 | `pull_pod_renamed` | The new ServiceAccount pulls |
 | 16 | `pull_pod_revoked` | The old ServiceAccount must get an authorization failure |
 | 17 | `robot_check_update` | Asks Harbor: the old robot is gone, the new one exists |
-| 18 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |
-| 19 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
-| 20 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left |
+| 18 | `token_rejection` | [ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md): a Job running as `token-ns/token-check` mints three tokens through the TokenRequest API and sends each to the bridge's Service. Bound to its own pod for 1h: `200` with the robot's credentials. Bound to no pod: `401`. Bound to the pod for 2h: `401`. The Job first checks the claims the apiserver issued, and the bridge's audit log must show each decision with its category (`not_pod_bound`, `excessive_lifetime`) |
+| 19 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |
+| 20 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
+| 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left |
 
 ## Pause-for-inspection mode
 
@@ -180,7 +183,7 @@ cleanly. No orphan kind clusters.
 | [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install |
 | [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests (keyed by object identity) with optional `wait` |
 | [`test/e2e/modules/test-sleep`](test/e2e/modules/test-sleep) | The pause mechanism |
-| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure |
+| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
 
 ## When it fails
