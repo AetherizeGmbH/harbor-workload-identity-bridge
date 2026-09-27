@@ -14,7 +14,9 @@ CLAUDE.md
 # OpenTofu / Terraform e2e
 test/e2e/.terraform/
 test/e2e/**/.terraform/
-test/e2e/**/.terraform.lock.hcl
+# The harness root's lock file is committed (provider versions + hashes);
+# lock files from ad-hoc `tofu init` runs inside modules are not.
+test/e2e/modules/**/.terraform.lock.hcl
 test/e2e/**/.gen/
 test/e2e/**/terraform.tfstate*
 test/e2e/**/errored_test.tfstate
