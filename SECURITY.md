@@ -682,12 +682,18 @@ than by offset, so a robot deleted by someone else during the walk
 cannot hide another one (`TestClient_List_ConcurrentDeleteHidesNoRobot`).
 
 OIDC discovery and JWKS fetches follow no redirects and are bounded
-(30s). The bridge's own ServiceAccount token, which the apiserver
-requires for them, is sent only over https to the in-cluster apiserver
-and to the jwks_uri its discovery names: anywhere else it could be
-replayed against the apiserver with the bridge's RBAC. The signing keys
-are fetched again at most every 30s, so forged tokens with unknown key
-IDs cannot make the bridge poll the apiserver once per request.
+(30s for discovery, 10s for a JWKS fetch). The bridge's own
+ServiceAccount token, which the apiserver requires for them, is sent
+only over https to the in-cluster apiserver and to the jwks_uri its
+discovery names: anywhere else it could be replayed against the
+apiserver with the bridge's RBAC. The signing keys are fetched again at
+most every 30s (counted from the end of the previous fetch), so forged
+tokens with unknown key IDs cannot make the bridge poll the apiserver
+once per request. A token signed by a key the bridge already holds never
+waits for a fetch: keys older than 10 minutes are refreshed in the
+background, and while the apiserver is slow or unreachable the last
+keys fetched stay in use, including a key the issuer has since rotated
+out.
 
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 

@@ -17,16 +17,23 @@ import (
 )
 
 const (
-	// jwksMinRefresh is the shortest interval between two JWKS fetches.
-	// go-oidc's RemoteKeySet fetches again for every token whose key ID
-	// it does not know, so every forged token sent to the NodePort cost
-	// one authenticated request to the apiserver. A real key rotation is
-	// picked up at most this late.
+	// jwksMinRefresh is the shortest interval between the end of one JWKS
+	// fetch and the start of the next. go-oidc's RemoteKeySet fetches
+	// again for every token whose key ID it does not know, so every forged
+	// token sent to the NodePort cost one authenticated request to the
+	// apiserver. A real key rotation is picked up at most this late.
+	// Measured from the end of a fetch: a fetch that hangs until its
+	// timeout must not be followed by the next one at once.
 	jwksMinRefresh = 30 * time.Second
 
-	// jwksMaxAge is how long a fetched key set is used before the next
-	// verification fetches it again, even for a known key ID.
+	// jwksMaxAge is how long a fetched key set is used before a
+	// verification starts a refresh, even for a known key ID.
 	jwksMaxAge = 10 * time.Minute
+
+	// jwksFetchTimeout bounds one JWKS fetch. Only a caller whose token
+	// names a key the bridge does not hold waits for a fetch, and it has
+	// to be answered within the plugin's 15s request timeout.
+	jwksFetchTimeout = 10 * time.Second
 
 	// maxJWKSSize bounds the JWKS response.
 	maxJWKSSize = 1 << 20
@@ -41,20 +48,40 @@ var jwtSigningAlgs = []jose.SignatureAlgorithm{
 	jose.EdDSA,
 }
 
-// cachedKeySet implements oidc.KeySet with a rate-limited refresh.
+// cachedKeySet implements oidc.KeySet with a rate-limited refresh that
+// never makes a caller with a known key wait.
+//
+// At most one fetch runs at a time, outside the mutex. A token signed by
+// a cached key verifies at once, also while a fetch runs, after one
+// failed, or when the keys are older than jwksMaxAge (that starts a
+// background refresh instead). Only a token whose key is not cached waits
+// for a fetch, and only as long as its own request context allows; the
+// fetch itself is detached from every request. After a failed fetch the
+// last good keys stay in use: a key the issuer rotated out is still
+// accepted until a fetch succeeds.
 type cachedKeySet struct {
-	url    string
-	client *http.Client
-	now    func() time.Time
+	url          string
+	client       *http.Client
+	now          func() time.Time
+	fetchTimeout time.Duration
 
 	mu        sync.Mutex
 	keys      []jose.JSONWebKey
 	fetchedAt time.Time // zero until the first successful fetch
-	triedAt   time.Time // last fetch attempt, successful or not
+	doneAt    time.Time // end of the last fetch, successful or not
+	lastErr   error     // error of the last fetch, nil after a success
+	inflight  *keyFetch // the running fetch, nil when none runs
+}
+
+// keyFetch is one JWKS fetch any number of callers can wait for.
+type keyFetch struct {
+	done chan struct{} // closed once keys and err are set
+	keys []jose.JSONWebKey
+	err  error
 }
 
 func newCachedKeySet(url string, client *http.Client) *cachedKeySet {
-	return &cachedKeySet{url: url, client: client, now: time.Now}
+	return &cachedKeySet{url: url, client: client, now: time.Now, fetchTimeout: jwksFetchTimeout}
 }
 
 // VerifySignature implements oidc.KeySet.
@@ -68,20 +95,16 @@ func (k *cachedKeySet) VerifySignature(ctx context.Context, raw string) ([]byte,
 	}
 	keyID := jws.Signatures[0].Header.KeyID
 
-	keys, err := k.keysFor(ctx, false)
-	if err != nil {
-		return nil, err
+	if payload, ok := verifyWith(jws, k.cachedKeys(), keyID); ok {
+		return payload, nil
 	}
+	// Unknown key: fetch again, unless the last fetch ended too recently.
+	keys, refreshErr := k.refreshedKeys(ctx)
 	if payload, ok := verifyWith(jws, keys, keyID); ok {
 		return payload, nil
 	}
-	// Unknown key: fetch again, unless the last attempt was too recent.
-	keys, err = k.keysFor(ctx, true)
-	if err != nil {
-		return nil, err
-	}
-	if payload, ok := verifyWith(jws, keys, keyID); ok {
-		return payload, nil
+	if refreshErr != nil {
+		return nil, fmt.Errorf("failed to verify token signature: %w", refreshErr)
 	}
 	return nil, errors.New("failed to verify token signature")
 }
@@ -98,38 +121,79 @@ func verifyWith(jws *jose.JSONWebSignature, keys []jose.JSONWebKey, keyID string
 	return nil, false
 }
 
-// keysFor returns the cached keys, fetching when there are none, when they
-// are older than jwksMaxAge, or when refresh is set; any fetch waits at
-// least jwksMinRefresh after the previous attempt. The lock is held across
-// the fetch, so concurrent callers share one request.
-func (k *cachedKeySet) keysFor(ctx context.Context, refresh bool) ([]jose.JSONWebKey, error) {
+// cachedKeys returns the cached keys without waiting. When there are none
+// or they are older than jwksMaxAge, it starts a fetch in the background
+// (if no fetch runs and the rate limit allows one).
+func (k *cachedKeySet) cachedKeys() []jose.JSONWebKey {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	now := k.now()
 	stale := k.fetchedAt.IsZero() || now.Sub(k.fetchedAt) > jwksMaxAge
-	if !refresh && !stale {
-		return k.keys, nil
+	if stale && k.mayFetchLocked(now) {
+		k.startFetchLocked()
 	}
-	if !k.triedAt.IsZero() && now.Sub(k.triedAt) < jwksMinRefresh {
-		if k.fetchedAt.IsZero() {
-			return nil, errors.New("no token signing keys available yet (JWKS fetch failed recently)")
+	return k.keys
+}
+
+// refreshedKeys waits for the running fetch, or starts one when the rate
+// limit allows it, and returns the keys after it. Rate-limited, it returns
+// the cached keys at once. The error, when set, says why the returned
+// keys may be out of date: the fetch failed (the keys are then the last
+// good ones, possibly none) or ctx ended while waiting.
+func (k *cachedKeySet) refreshedKeys(ctx context.Context) ([]jose.JSONWebKey, error) {
+	k.mu.Lock()
+	f := k.inflight
+	if f == nil {
+		if !k.mayFetchLocked(k.now()) {
+			keys, lastErr := k.keys, k.lastErr
+			k.mu.Unlock()
+			if lastErr != nil {
+				return keys, fmt.Errorf("last JWKS fetch failed: %w", lastErr)
+			}
+			return keys, nil
 		}
-		return k.keys, nil
+		f = k.startFetchLocked()
 	}
-	k.triedAt = now
-	// A caller that gives up must not fail the shared fetch for everyone
-	// else; the client's own timeout still bounds it.
-	keys, err := k.fetch(context.WithoutCancel(ctx))
-	if err != nil {
-		if k.fetchedAt.IsZero() {
-			return nil, err
-		}
-		// Keep serving the last good keys; the next attempt comes after
-		// jwksMinRefresh.
-		return k.keys, nil
+	k.mu.Unlock()
+	select {
+	case <-f.done:
+		return f.keys, f.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("waiting for the JWKS fetch: %w", context.Cause(ctx))
 	}
-	k.keys, k.fetchedAt = keys, now
-	return keys, nil
+}
+
+// mayFetchLocked reports whether a fetch may start now: none runs, and the
+// last one ended at least jwksMinRefresh ago.
+func (k *cachedKeySet) mayFetchLocked(now time.Time) bool {
+	return k.inflight == nil && (k.doneAt.IsZero() || now.Sub(k.doneAt) >= jwksMinRefresh)
+}
+
+func (k *cachedKeySet) startFetchLocked() *keyFetch {
+	f := &keyFetch{done: make(chan struct{})}
+	k.inflight = f
+	go k.runFetch(f)
+	return f
+}
+
+// runFetch performs f. It is detached from every request: a caller that
+// gives up must not fail the fetch for the others waiting for it. The
+// fetch timeout bounds it.
+func (k *cachedKeySet) runFetch(f *keyFetch) {
+	ctx, cancel := context.WithTimeout(context.Background(), k.fetchTimeout)
+	defer cancel()
+	keys, err := k.fetch(ctx)
+
+	k.mu.Lock()
+	now := k.now()
+	k.doneAt, k.lastErr = now, err
+	if err == nil {
+		k.keys, k.fetchedAt = keys, now
+	}
+	f.keys, f.err = k.keys, err
+	k.inflight = nil
+	k.mu.Unlock()
+	close(f.done)
 }
 
 func (k *cachedKeySet) fetch(ctx context.Context) ([]jose.JSONWebKey, error) {
