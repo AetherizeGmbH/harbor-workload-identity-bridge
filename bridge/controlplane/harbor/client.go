@@ -4,11 +4,14 @@
 package harbor
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,7 +19,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
 	sdkrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
@@ -277,6 +282,7 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 	// reasons, so the dumps are switched off unconditionally.
 	rt.SetDebug(false)
 	rt.SetLogger(noLogger{})
+	rt.SetResponseReader(newErrorBodyResponse)
 
 	c := &goClient{
 		robots:      sdkrobot.New(rt, strfmt.Default, httptransport.BasicAuth(username, password)),
@@ -767,35 +773,111 @@ type harborPayloadErr interface {
 	GetPayload() *models.Errors
 }
 
+// maxErrorBody bounds how much of an error response body the client keeps
+// to explain the error.
+const maxErrorBody = 4 << 10
+
+// errorBodyResponse is the runtime.ClientResponse the client hands the SDK
+// (Runtime.SetResponseReader). For a status of 300 or more it keeps the
+// first maxErrorBody bytes of the body, and still serves the whole body to
+// the SDK's typed readers. For a status its swagger does not declare
+// (Harbor's 409 on POST /robots, a 401 on GET /robots, a proxy's 502) the
+// SDK returns a runtime.APIError that holds only this response, after the
+// runtime has closed the body; the kept bytes are all that is left of
+// Harbor's explanation.
+type errorBodyResponse struct {
+	res  *http.Response
+	body io.ReadCloser
+	head []byte
+}
+
+func newErrorBodyResponse(res *http.Response) runtime.ClientResponse {
+	r := &errorBodyResponse{res: res, body: res.Body}
+	if res.StatusCode >= http.StatusMultipleChoices && res.Body != nil {
+		// A read error only shortens the explanation; the typed readers
+		// see the same error on the rest of the body.
+		head, _ := io.ReadAll(io.LimitReader(res.Body, maxErrorBody))
+		r.head = head
+		r.body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), res.Body), res.Body}
+	}
+	return r
+}
+
+func (r *errorBodyResponse) Code() int                       { return r.res.StatusCode }
+func (r *errorBodyResponse) Message() string                 { return r.res.Status }
+func (r *errorBodyResponse) GetHeader(name string) string    { return r.res.Header.Get(name) }
+func (r *errorBodyResponse) GetHeaders(name string) []string { return r.res.Header.Values(name) }
+func (r *errorBodyResponse) Body() io.ReadCloser             { return r.body }
+
 // formatHarborMessage returns a human-readable rendering of err. When the
 // underlying SDK error carries a models.Errors payload (typed 4xx
-// responses) it formats as "CODE: message; CODE: message"; otherwise it
-// falls through to err.Error(), which for runtime.APIError (untyped
-// fallback) already includes the status code and raw body.
+// responses) it formats as "CODE: message; CODE: message". A status the
+// SDK's swagger does not declare arrives as runtime.APIError, whose own
+// Error() renders the response as "{}"; it formats as "unexpected status
+// N from Harbor", followed by Harbor's error messages when the kept body
+// is Harbor's error document (a proxy's HTML page is left out). Anything
+// else falls through to err.Error().
 func formatHarborMessage(err error) string {
 	if err == nil {
 		return ""
 	}
 	var hpe harborPayloadErr
 	if errors.As(err, &hpe) {
-		payload := hpe.GetPayload()
-		if payload != nil && len(payload.Errors) > 0 {
-			parts := make([]string, 0, len(payload.Errors))
-			for _, e := range payload.Errors {
-				code := e.Code
-				if code == "" {
-					code = "UNKNOWN"
-				}
-				if e.Message != "" {
-					parts = append(parts, code+": "+e.Message)
-				} else {
-					parts = append(parts, code)
-				}
-			}
-			return strings.Join(parts, "; ")
+		if msg := renderHarborErrors(hpe.GetPayload()); msg != "" {
+			return msg
 		}
 	}
+	var apiErr *runtime.APIError
+	if errors.As(err, &apiErr) {
+		msg := fmt.Sprintf("unexpected status %d from Harbor", apiErr.Code)
+		if r, ok := apiErr.Response.(*errorBodyResponse); ok {
+			var payload models.Errors
+			if json.Unmarshal(r.head, &payload) == nil {
+				if detail := renderHarborErrors(&payload); detail != "" {
+					msg += ": " + detail
+				}
+			}
+		}
+		return msg
+	}
 	return err.Error()
+}
+
+// renderHarborErrors formats Harbor's error document as "CODE: message;
+// CODE: message", or "" when it holds no errors. Control characters are
+// dropped: the text ends up in a single-line status condition.
+func renderHarborErrors(payload *models.Errors) string {
+	if payload == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(payload.Errors))
+	for _, e := range payload.Errors {
+		if e == nil {
+			continue
+		}
+		code := dropControl(e.Code)
+		if code == "" {
+			code = "UNKNOWN"
+		}
+		if m := dropControl(e.Message); m != "" {
+			parts = append(parts, code+": "+m)
+		} else {
+			parts = append(parts, code)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func dropControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // hbErr wraps an SDK error so .Error() renders a clean message while

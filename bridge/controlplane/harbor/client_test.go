@@ -989,18 +989,47 @@ func TestFormatHarborMessage_MultipleErrorsAreJoined(t *testing.T) {
 }
 
 // TestFormatHarborMessage_FallbackOnUntyped covers the swagger-undeclared
-// path: Harbor returns 409 on POST /robots but the SDK doesn't enumerate
-// that status code in the response handler, so the wrapper sees a
-// runtime.APIError. The decoder must not crash and must surface
-// something better than a Go pointer.
+// path through the real SDK: Harbor answers 409 on POST /robots and 401 on
+// GET /robots, neither of which the SDK's swagger declares, so the SDK
+// returns a runtime.APIError whose own rendering of the response is "{}".
+// The message must keep the status and Harbor's error text, and must not
+// copy a proxy's HTML page into the status condition.
 func TestFormatHarborMessage_FallbackOnUntyped(t *testing.T) {
-	apiErr := runtime.NewAPIError("create robot", "{}", 409)
-	got := formatHarborMessage(apiErr)
-	if !strings.Contains(got, "409") {
-		t.Errorf("expected status 409 in fallback message, got %q", got)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			writeHarborError(w, http.StatusConflict, "CONFLICT", "robot bridge-x.y.z\nalready exists")
+		case !strings.Contains(r.URL.Query().Get("q"), "name="): // List, not GetByName
+			writeHarborError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html><body>502 Bad Gateway</body></html>"))
+		}
+	}))
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+
+	_, err := c.Create(context.Background(), "bridge-x.y.z", "", []ProjectPermission{{Project: "p", Action: "pull"}})
+	if !errors.Is(err, ErrRobotAlreadyExists) {
+		t.Errorf("409 not tagged as ErrRobotAlreadyExists: %v", err)
 	}
-	if strings.Contains(got, "0x") {
-		t.Errorf("fallback message contains a raw pointer: %q", got)
+	if got := fmt.Sprint(err); !strings.Contains(got, "status 409") || !strings.Contains(got, "CONFLICT: robot bridge-x.y.zalready exists") || strings.Contains(got, "{}") {
+		t.Errorf("409 message = %q, want the status and Harbor's message (control characters dropped)", got)
+	}
+	_, err = c.List(context.Background())
+	if got := fmt.Sprint(err); !strings.Contains(got, "status 401") || !strings.Contains(got, "UNAUTHORIZED: unauthorized") {
+		t.Errorf("401 message = %q, want the status and Harbor's message", got)
+	}
+	_, err = c.GetByName(context.Background(), "bridge-x.y.z")
+	if got := fmt.Sprint(err); !strings.Contains(got, "status 502") || strings.Contains(got, "html") {
+		t.Errorf("502 message = %q, want the status without the proxy's page", got)
+	}
+
+	// An APIError that does not carry the client's response still renders
+	// cleanly.
+	if got := formatHarborMessage(runtime.NewAPIError("create robot", "{}", 409)); got != "unexpected status 409 from Harbor" {
+		t.Errorf("bare APIError = %q", got)
 	}
 }
 
