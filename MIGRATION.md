@@ -45,6 +45,12 @@ default.
 | The installer takes a lock on each node (`/run/harbor-bridge-installer.lock`, and `<provider config>.lock` next to the provider config) and records a per-install `entryHash` in its state file next to `appliedHash`, which keeps its meaning | Nothing. The first pass adds `entryHash` to the state file of the previous version without a kubelet restart; a rollback of a single install finds its own `appliedHash` and does not restart kubelet either. |
 | A second bridge installed by hand with `plugin.enabled=false` (the workaround so far) | Optional: switch it to the chart's DaemonSet with the same provider name. The installer adopts an existing bridge entry of that name, but replaces the hand-copied binary only if it is byte for byte the plugin of the chart's `plugin.image` (it has no record yet): copy that version onto the nodes first, or the installer refuses the file as another program's. |
 
+### Unreleased: data-plane fixes
+
+| Change | What to do |
+| --- | --- |
+| A request with a valid token that gets `503` or `500` is logged as a `credential unavailable` audit line (`reason=secret_missing`, `secret_unreadable` or `harboraccess_lookup_failed`, with source, subject, pod and node). The regular log's `robot Secret not yet available` line is gone | Match `credential unavailable` instead of `robot Secret not yet available` in log queries. |
+
 ### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 
 | Change | What to do |

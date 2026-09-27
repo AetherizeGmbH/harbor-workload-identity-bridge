@@ -110,10 +110,13 @@ type Handler struct {
 	// Limiter bounds requests per source IP; nil means no limit.
 	Limiter *SourceLimiter
 
-	// Audit receives one line per decision (issued or denied), with the
-	// caller's attribution. main wires a logger fixed at info level, so
-	// BRIDGE_LOG_LEVEL=warn cannot silence the audit trail. Unset falls
-	// back to the request logger.
+	// Audit receives one line per request that reached token validation:
+	// issued, denied, or unavailable (a 503 or 500 after the token was
+	// checked), with the caller's attribution. Refusals before that
+	// (method, path, rate limit, missing bearer, bad body) are counted,
+	// not logged, so a flood cannot flood the log. main wires a logger
+	// fixed at info level, so BRIDGE_LOG_LEVEL=warn cannot silence the
+	// audit trail. Unset falls back to the request logger.
 	Audit logr.Logger
 }
 
@@ -241,6 +244,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	matched, audMatched, err := h.findHarborAccess(ctx, claims)
 	if err != nil {
 		logger.Error(err, "list HarborAccess", "subject", claims.Subject)
+		h.audit(logger).Info("credential unavailable", append(append(caller, claimFields(claims)...),
+			"reason", "harboraccess_lookup_failed", "err", truncate(err.Error(), 200),
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		if h.Metrics != nil {
 			h.Metrics.HarborAccessLookupFailures.Inc()
@@ -296,9 +302,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// means the control plane is mid-rotation or has not yet
 			// caught up. 503 lets the plugin retry with backoff rather
 			// than fail the workload outright.
-			logger.Info("robot Secret not yet available",
-				"harboraccess", matched.Namespace+"/"+matched.Name,
-				"image", req.Image)
+			h.audit(logger).Info("credential unavailable", append(append(caller, claimFields(claims)...),
+				"reason", "secret_missing", "harboraccess", matched.Namespace+"/"+matched.Name,
+				"requested_image", truncate(req.Image, maxAuditImageLen))...)
 			http.Error(w, "credentials not yet available; retry", http.StatusServiceUnavailable)
 			if h.Metrics != nil {
 				h.Metrics.RobotSecretMissing.Inc()
@@ -308,6 +314,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		logger.Error(err, "read robot Secret",
 			"harboraccess", matched.Namespace+"/"+matched.Name)
+		h.audit(logger).Info("credential unavailable", append(append(caller, claimFields(claims)...),
+			"reason", "secret_unreadable", "harboraccess", matched.Namespace+"/"+matched.Name,
+			"err", truncate(err.Error(), 200),
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		h.recordResult(ResultServerError)
 		return

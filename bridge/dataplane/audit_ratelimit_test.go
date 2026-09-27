@@ -5,6 +5,7 @@ package dataplane
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,11 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"golang.org/x/time/rate"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type captured struct {
@@ -140,6 +146,94 @@ func TestHandler_DenialsAreAudited(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("denial line lacks %s:\n%s", want, out)
 		}
+	}
+}
+
+// A refusal after the token was validated (503, 500) is audited with the
+// caller's attribution, on the audit logger BRIDGE_LOG_LEVEL cannot
+// silence. No log line carries the password or more than
+// maxAuditImageLen of the caller-supplied image.
+func TestHandler_UnavailableIsAudited(t *testing.T) {
+	image := "harbor.example.com/production/app:" + strings.Repeat("x", 2*maxAuditImageLen)
+	for _, tc := range []struct {
+		name   string
+		fault  func(t *testing.T, f *handlerFixture)
+		status int
+		want   []string
+	}{
+		{
+			name: "robot Secret missing",
+			fault: func(t *testing.T, f *handlerFixture) {
+				if err := f.K8s.Delete(context.Background(), newTestRobotSecret()); err != nil {
+					t.Fatal(err)
+				}
+			},
+			status: http.StatusServiceUnavailable,
+			want:   []string{`"reason"="secret_missing"`, `"harboraccess"="harbor-bridge-system/flux-access"`},
+		},
+		{
+			name: "robot Secret without a password",
+			fault: func(t *testing.T, f *handlerFixture) {
+				sec := &corev1.Secret{}
+				if err := f.K8s.Get(context.Background(), client.ObjectKeyFromObject(newTestRobotSecret()), sec); err != nil {
+					t.Fatal(err)
+				}
+				delete(sec.Data, "password")
+				if err := f.K8s.Update(context.Background(), sec); err != nil {
+					t.Fatal(err)
+				}
+			},
+			status: http.StatusInternalServerError,
+			want:   []string{`"reason"="secret_unreadable"`, `"harboraccess"="harbor-bridge-system/flux-access"`},
+		},
+		{
+			name: "HarborAccess lookup failed",
+			fault: func(_ *testing.T, f *handlerFixture) {
+				f.Handler.K8sClient = fake.NewClientBuilder().WithScheme(handlerTestScheme).
+					WithObjects(newTestHA(), newTestRobotSecret()).
+					WithInterceptorFuncs(interceptor.Funcs{
+						List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+							return errors.New("apiserver unavailable")
+						},
+					}).Build()
+			},
+			status: http.StatusInternalServerError,
+			want:   []string{`"reason"="harboraccess_lookup_failed"`, `"err"="list HarborAccess: apiserver unavailable"`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var audit, request captured
+			f := newHandlerFixture(t)
+			claims := newTestClaims()
+			claims.Pod, claims.PodUID, claims.Node = "puller-7d9", "3f2c", "node-a"
+			f.Validator.claims = claims
+			f.Handler.Audit = audit.logger()
+			tc.fault(t, f)
+
+			r := bearerReq(t, image)
+			r.RemoteAddr = "10.1.2.3:51000"
+			r = r.WithContext(log.IntoContext(r.Context(), request.logger()))
+			w := httptest.NewRecorder()
+			f.Handler.ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("status %d, want %d", w.Code, tc.status)
+			}
+			out := audit.joined()
+			for _, want := range append([]string{`"credential unavailable"`, `"source"="10.1.2.3"`,
+				`"subject"="` + hTestSubject + `"`, `"pod"="puller-7d9"`, `"node"="node-a"`, `"requested_image"=`}, tc.want...) {
+				if !strings.Contains(out, want) {
+					t.Errorf("audit line lacks %s:\n%s", want, out)
+				}
+			}
+			for name, lines := range map[string]string{"audit": out, "request": request.joined()} {
+				if strings.Contains(lines, strings.Repeat("x", maxAuditImageLen+1)) {
+					t.Errorf("%s log carries the untruncated image", name)
+				}
+				if strings.Contains(lines, hTestRobotPass) {
+					t.Fatalf("%s log carries the robot password", name)
+				}
+			}
+		})
 	}
 }
 

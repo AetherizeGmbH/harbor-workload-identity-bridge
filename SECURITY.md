@@ -645,6 +645,11 @@ credential denied
   source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch
   category=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other   # invalid_token only
   (subject, pod, node, audiences once the token is valid) requested_image=…
+
+credential unavailable                   # valid token, nothing issued: 503 or 500
+  source=…  subject=…  pod=…  node=…
+  reason=secret_missing|secret_unreadable|harboraccess_lookup_failed
+  (harboraccess once matched, err for a 500) requested_image=…
 ```
 
 The pod and node come from the `kubernetes.io` claim of the token. The
@@ -666,8 +671,12 @@ bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
 Denials (token rejected, no matching CR, Secret owner mismatch) are the
 `credential denied` lines above, on the same fixed-info audit logger. A
-robot Secret that does not exist yet (`503`) and Kubernetes API errors
-(`500`) go to the regular log.
+request with a valid token that gets no credentials for another reason
+is a `credential unavailable` line: the robot Secret does not exist yet
+(`503`, the plugin retries), or it is incomplete or the Kubernetes API
+failed (`500`, also on the regular log with the full error). Requests
+refused before the token is checked (rate limit, missing bearer, bad
+body) are counted in the metrics below but not logged one by one.
 
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never

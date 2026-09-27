@@ -98,7 +98,8 @@ Abuse stories:
 Security events the system must log (acceptance criteria):
 
 - every credential issuance and denial, with reason, source and pod/node
-  attribution (`audit` logger, `credential issued` / `credential denied`);
+  attribution (`audit` logger, `credential issued` / `credential denied`,
+  and `credential unavailable` for a valid token answered with 503 or 500);
 - token validation failures by category, including `excessive_lifetime`
   and `not_pod_bound` (metric `bridge_oidc_validation_failures_total`,
   and the `category` of the `credential denied` audit line);
