@@ -1337,6 +1337,106 @@ func TestRun_ConcurrentNoneAndPatchInstallsBothLand(t *testing.T) {
 	}
 }
 
+// probingKubelet is a fakeKubelet whose restart first tries each of locks
+// (lock files, node paths) as another installer would, and records the
+// ones it could take. The installer restarts kubelet after it wrote the
+// config, so a lock free at the restart is one the pass did not hold
+// through its read-modify-write of the config.
+type probingKubelet struct {
+	*fakeKubelet
+	locks []string
+	free  []string
+}
+
+func (p *probingKubelet) restart(unit string) error {
+	for _, lock := range p.locks {
+		if unlock, err := lockFile(p.env.cfg.hostPath(lock), 0); err == nil {
+			unlock()
+			p.free = append(p.free, lock)
+		}
+	}
+	return p.fakeKubelet.restart(unit)
+}
+
+// probe makes env's kubelet a probingKubelet over locks.
+func probe(env *testEnv, locks ...string) *probingKubelet {
+	p := &probingKubelet{fakeKubelet: env.kubelet, locks: locks}
+	env.cfg.kubelet = p
+	return p
+}
+
+// TestRun_ConfigLocksAreHeldUntilThePassEnds: the config locks a pass takes
+// guard the whole read-modify-write of the config, not only the read or the
+// rewire check. A none-mode installer takes only the config lock; had the
+// pass released it early, such an installer could write its entry between
+// this pass's read and write, and the pass would drop that entry (ADR-0029,
+// decision 5). The pass must still hold them when it restarts kubelet,
+// after the config write.
+func TestRun_ConfigLocksAreHeldUntilThePassEnds(t *testing.T) {
+	ownLock := configDir + "/" + configFileName + lockSuffix
+	t.Run("patch, own config", func(t *testing.T) {
+		env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+		p := probe(env, ownLock)
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+		if env.restarts != 1 || len(p.free) != 0 {
+			t.Fatalf("restarts = %d, locks free at the restart = %v", env.restarts, p.free)
+		}
+	})
+	t.Run("patch, kubelet's current config and own config", func(t *testing.T) {
+		env := newTestEnv(t, modePatch, []string{
+			"/usr/bin/kubelet",
+			"--image-credential-provider-bin-dir=/opt/cp-bin",
+			"--image-credential-provider-config=/opt/cp/" + configFileName,
+		})
+		writeCloudConfig(t, env, "/opt/cp-bin", "/opt/cp/"+configFileName, gkeConfig)
+		p := probe(env, "/opt/cp/"+configFileName+lockSuffix, ownLock)
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := discoverKubelet(env.cfg.ProcRoot); err != nil || got.ConfigFile != configDir+"/"+configFileName {
+			t.Fatalf("precondition: kubelet was not moved to this install's config (wiring %+v, err %v)", got, err)
+		}
+		if env.restarts != 1 || len(p.free) != 0 {
+			t.Fatalf("restarts = %d, locks free at the restart = %v", env.restarts, p.free)
+		}
+	})
+	t.Run("merge into a chart-owned config", func(t *testing.T) {
+		// A patch-mode release wired kubelet; a release in auto mode with
+		// other directories merges into its chart-owned config, which the
+		// none-mode installs of that directory lock too.
+		a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+		if err := run(a.cfg); err != nil {
+			t.Fatal(err)
+		}
+		b := newSiblingEnv(t, a, modeAuto, euName)
+		b.cfg.HostBinDir, b.cfg.HostConfigDir = "/etc/kubernetes/hb-eu-bin", "/etc/kubernetes/hb-eu"
+		p := probe(b, ownLock)
+		if err := run(b.cfg); err != nil {
+			t.Fatal(err)
+		}
+		if b.restarts != 1 || len(p.free) != 0 {
+			t.Fatalf("restarts = %d, locks free at the restart = %v", b.restarts, p.free)
+		}
+	})
+	t.Run("merge into a cloud's config", func(t *testing.T) {
+		env := newTestEnv(t, modeAuto, []string{
+			"/usr/bin/kubelet",
+			"--image-credential-provider-bin-dir=/cloud/bin",
+			"--image-credential-provider-config=/cloud/config.yaml",
+		})
+		writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
+		p := probe(env, "/cloud/config.yaml"+lockSuffix)
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+		if env.restarts != 1 || len(p.free) != 0 {
+			t.Fatalf("restarts = %d, locks free at the restart = %v", env.restarts, p.free)
+		}
+	})
+}
+
 // TestRun_MergeRefusesABinDirInReachOfHostConfigDir: kubelet's discovered
 // bin dir must be out of reach of plugin.hostConfigDir's writers, like
 // HOST_BIN_DIR (loadConfig).
