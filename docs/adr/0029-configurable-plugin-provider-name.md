@@ -86,6 +86,16 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      round-trips (`map[string]any`, ADR-0021). An existing entry of this
      name that is not a bridge entry (no `HARBOR_BRIDGE_ENDPOINT` env) is
      never replaced.
+   - Every pass writes a record `<bin-dir>/<name>.entry` next to the
+     binary, before the binary and before the entry: the canonical bytes
+     of the entry it is about to write (JSON with sorted keys). The name
+     has a dot, so it is never a provider name; the file has mode `0600`
+     (only the root installers read it) and no execute bit, so kubelet
+     cannot run it even under a planted entry of that name. The bin dir is
+     the one directory the installers write that no writer of
+     `plugin.hostConfigDir` reaches (next bullet but one); the sync
+     container never mounts it. The record ties another install's entry
+     and this install's binary to content only an installer writes.
    - Patch and none mode keep the chart-owned config
      (`<plugin.hostConfigDir>/credential-provider-config.yaml`)
      authoritative. That directory is writable by the sync container of
@@ -95,24 +105,36 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      rendered config on every pass, which removed anything planted there.
      Each pass now writes the rendered config plus the entries of the other
      installs, in place: bridge entries with a valid provider name whose
-     binary is an executable regular file in `plugin.hostBinaryDir`, which
-     no such writer mounts (another install writes its binary before its
-     entry). This install's entry is replaced whatever it holds; every other
-     entry, a repeated name and unknown top-level fields are dropped. While
-     no other install's entry is in the file, it is the rendered config
-     byte for byte, as before. A chart-owned file that cannot be parsed is
-     replaced, as before.
+     binary is an executable regular file in `plugin.hostBinaryDir` and
+     whose record there holds exactly the entry's canonical bytes (another
+     install writes its record and binary before its entry). An entry that
+     differs from its record, or has none, is dropped, also when a binary
+     of its name is there (an uninstalled release leaves its binary, and
+     any program in the bin dir is executable). This install's entry is
+     replaced whatever it holds; every other entry, a repeated name and
+     unknown top-level fields are dropped. While no other install's entry
+     is in the file, it is the rendered config byte for byte, as before. A
+     chart-owned file that cannot be parsed is replaced, as before.
    - What the installer trusts must be out of reach of the writers of
      `plugin.hostConfigDir`: the chart and the installer refuse a
      `plugin.hostBinaryDir` or `plugin.install.binDir` that is that
      directory, inside it or contains it, and a `plugin.install.stateDir`
      that is that directory or inside it (per path segment); merge mode
      refuses a discovered kubelet bin dir in that relation.
+     `plugin.hostBinaryDir` must hold only this chart's plugins.
    - For a non-default name, an existing `<bin-dir>/<name>` is replaced
-     only when the config already holds a bridge entry of that name or the
-     file already has exactly the bytes the installer would write. GKE keeps
-     `kubelet` itself in its credential-provider bin dir; a name like
-     `kubelet` is refused instead of overwriting it.
+     only when this install's record is next to it or the file already has
+     exactly the bytes the installer would write. A bridge entry of that
+     name in the config does not count: in patch and none mode that config
+     is writable by pods other than installers. The record keeps the
+     binary this install's own when its entry has left the config (patch
+     mode moving `plugin.hostConfigDir`, a cloud rewriting its config).
+     GKE keeps `kubelet` itself in its credential-provider bin dir; a name
+     like `kubelet` is refused instead of overwriting it.
+   - A pass that refuses (a foreign entry or file of this name, a config
+     it cannot use, another install's entry in the way of patch mode)
+     refuses before it writes anything: the CA and mTLS files, the record
+     and the binary come after every check.
 5. **Locks.** Every read-modify-write of a shared file and every kubelet
    restart runs under an exclusive `flock(2)`:
    - the node lock `/run/harbor-bridge-installer.lock`, a fixed path that
@@ -182,10 +204,10 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   credentials and no cache entry, and that bridge logs a denial for every
   such pull.
 - `helm uninstall` removes nothing on the nodes, as before: the entry, the
-  binary, the CA and mTLS files, the state file, the lock files and the
-  `.bak` copies of every file the installer replaced (the binary's is an
-  executable earlier plugin in kubelet's bin dir; also the shared config's
-  and, in patch mode, `/etc/default/kubelet`'s) stay.
+  binary, its record, the CA and mTLS files, the state file, the lock
+  files and the `.bak` copies of every file the installer replaced (the
+  binary's is an executable earlier plugin in kubelet's bin dir; also the
+  shared config's and, in patch mode, `/etc/default/kubelet`'s) stay.
   Kubelet keeps running the orphaned plugin for its `matchImages`; the
   plugin cannot reach the removed bridge (a new service on the same port
   would also need a certificate from the pinned CA) and contributes no
@@ -200,14 +222,18 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   rewrites the shared config with its own entry alone.
 - Two installs with the same `plugin.providerName` still overwrite each
   other; the installer cannot tell them apart from an upgrade.
-- A writer of `plugin.hostConfigDir` can still change another install's
-  entry in the shared file: its name and binary are genuine, so the other
-  installers keep the change until the owning installer's next pass
-  replaces it, and a kubelet restart in between runs it, also one that
-  another installer triggers for its own entry. With a single install, a
-  planted change lasts until that install's next pass, as before this ADR.
-  An install in auto mode that merges into another install's chart-owned
-  file (other directories) keeps whatever that file holds, like any merge.
+- A writer of `plugin.hostConfigDir` can no longer get a changed or
+  planted entry kept: the next pass of any install drops it and, in patch
+  mode, restarts kubelet onto the file without it. It can still remove
+  another install's entry from the chart-owned config (delete it, change
+  it so that the next pass drops it, or make the file unparsable), which
+  lasts until that install's next pass, usually its next pod start: a
+  denial of service against that install's pulls. And kubelet reads the
+  file as it is at its own start, before any installer runs: a node
+  reboot makes whatever the file holds then live until the next pass, as
+  before this ADR. An install in auto mode that merges into another
+  install's chart-owned file (other directories) keeps whatever that file
+  holds, like any merge.
 - Every node gets two empty lock files, also with a single install.
 
 ## Alternatives considered

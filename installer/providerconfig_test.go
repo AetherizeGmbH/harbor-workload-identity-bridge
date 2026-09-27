@@ -366,19 +366,10 @@ func TestMergeProvider_RefusesToReplaceAForeignProvider(t *testing.T) {
 	}
 }
 
-func TestHasAndOtherBridgeProviders(t *testing.T) {
+func TestOtherBridgeProviders(t *testing.T) {
 	doc, _, err := mergeProvider([]byte(gkeConfig), mustEntry(t, renderedConfig, defaultProviderName))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !hasBridgeProvider(doc, defaultProviderName) {
-		t.Fatal("our entry not recognised")
-	}
-	if hasBridgeProvider(doc, "auth-provider-gcp") {
-		t.Fatal("the GKE provider taken for a bridge entry")
-	}
-	if hasBridgeProvider(nil, defaultProviderName) || hasBridgeProvider([]byte("{nope"), defaultProviderName) {
-		t.Fatal("an absent or unreadable config holds no entry")
 	}
 	if got := otherBridgeProviders(doc, defaultProviderName); len(got) != 0 {
 		t.Fatalf("otherBridgeProviders = %v; the GKE provider is not a bridge entry", got)
@@ -539,8 +530,9 @@ func TestProviderName_YAMLAmbiguousNamesStayStrings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !hasBridgeProvider(merged, name) {
-			t.Fatalf("%s: the merged config lost the name's string type:\n%s", name, merged)
+		// renderedProvider compares the name as a string.
+		if _, err := renderedProvider(merged, name); err != nil {
+			t.Fatalf("%s: the merged config lost the name's string type: %v\n%s", name, err, merged)
 		}
 		bare := strings.Replace(renderedConfig, "name: harbor-bridge-plugin", "name: "+name, 1)
 		if _, err := renderedProvider([]byte(bare), name); err == nil {

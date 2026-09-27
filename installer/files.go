@@ -105,6 +105,18 @@ func isExecutableHostFile(path string) bool {
 	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
 }
 
+// isRegularHostFile reports whether path is a regular file, without
+// following a symlink in its last component.
+func isRegularHostFile(path string) bool {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	fi, err := root.Lstat(filepath.Base(path))
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // mkdirNodeDir creates the node directory dir (a host path) and its
 // parents when missing, with the node's usual mode (/etc/kubernetes is
 // 0755). The parents are root-owned node directories (or the installer's

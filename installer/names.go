@@ -31,7 +31,10 @@ func validProviderName(name string) error {
 // config, the bin dir, /etc/default/kubelet and the kubelet unit are
 // shared by every install on the node.
 type nodeFiles struct {
-	Binary     string // in the kubelet bin dir: kubelet runs <bin-dir>/<provider name>
+	Binary string // in the kubelet bin dir: kubelet runs <bin-dir>/<provider name>
+	// Record is next to Binary in the kubelet bin dir: the canonical bytes
+	// of this install's provider entry (entryRecord).
+	Record     string
 	CA         string // in HostConfigDir
 	ClientCert string // in HostConfigDir
 	ClientKey  string // in HostConfigDir
@@ -43,10 +46,13 @@ type nodeFiles struct {
 // prefixes them with "<name>.": a provider name has no dot, so two names
 // never share a file, and no derived name equals one of the default name's
 // files. The chart derives the same paths (harbor-bridge.plugin.hostFile).
+// The record did not exist before ADR-0029 and is "<name>.entry" for every
+// name: dotted, so never a provider name, and never a binary kubelet runs.
 func filesFor(name string) nodeFiles {
 	if name == defaultProviderName {
 		return nodeFiles{
 			Binary:     defaultProviderName,
+			Record:     defaultProviderName + ".entry",
 			CA:         "harbor-bridge-ca.crt",
 			ClientCert: "harbor-bridge-client.crt",
 			ClientKey:  "harbor-bridge-client.key",
@@ -55,6 +61,7 @@ func filesFor(name string) nodeFiles {
 	}
 	return nodeFiles{
 		Binary:     name,
+		Record:     name + ".entry",
 		CA:         name + ".ca.crt",
 		ClientCert: name + ".client.crt",
 		ClientKey:  name + ".client.key",

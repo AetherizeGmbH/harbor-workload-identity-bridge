@@ -304,7 +304,10 @@ plugin:
   # mode they must use the same two directories. The sync container of
   # every release can write hostConfigDir, so hostBinaryDir (and
   # install.binDir) must not be hostConfigDir, inside it, or contain it;
-  # the chart and the installer refuse that (ADR-0029).
+  # the chart and the installer refuse that (ADR-0029). hostBinaryDir
+  # must hold only this chart's plugins: each install keeps its binary
+  # and a record of its entry (<providerName>.entry) there, and trusts
+  # another install's entry only through them.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 

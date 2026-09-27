@@ -302,8 +302,8 @@ yourself when you are done.
 
 `helm uninstall` removes nothing on the nodes. The provider entry named
 `plugin.providerName` stays in kubelet's credential-provider config, and
-the plugin binary, the CA (and mTLS) files, the state file, the lock
-files and the `.bak` copies the installer keeps of every file it
+the plugin binary with its record (`<providerName>.entry`), the CA (and
+mTLS) files, the state file, the lock files and the `.bak` copies the installer keeps of every file it
 replaced stay on disk. Kubelet keeps running the plugin for its
 `matchImages`; with the bridge gone the plugin fails and adds no
 credentials, so those pulls go ahead with whatever other credentials
@@ -321,7 +321,8 @@ clean a node:
 2. Restart kubelet (`systemctl restart kubelet`). Do this before you
    delete the binary: kubelet does not start while an entry's binary is
    missing.
-3. Delete `<bin-dir>/<providerName>`, the CA and mTLS files in
+3. Delete `<bin-dir>/<providerName>` and its record
+   `<bin-dir>/<providerName>.entry`, the CA and mTLS files in
    `plugin.hostConfigDir` and the state file in `plugin.install.stateDir`
    (file names in [Several installs per cluster](#several-installs-per-cluster-adr-0029)),
    each with its `.bak` copy. The binary's `.bak` is an earlier plugin
@@ -399,7 +400,9 @@ service:
   and `installer-state.json`. Any other name uses `<name>` in the bin
   dir, `<name>.ca.crt` (`<name>.client.crt`/`.key`) in
   `plugin.hostConfigDir` and `<name>.installer-state.json` in
-  `plugin.install.stateDir`.
+  `plugin.install.stateDir`. Every install also keeps a record of its
+  entry next to its binary, `<name>.entry` (`harbor-bridge-plugin.entry`
+  for the default name, mode `0600`).
 - **Upgrade first.** Every release on the cluster must run a chart
   version with ADR-0029 before you add the second: an older installer in
   patch or none mode rewrites the shared config with only its own entry.
@@ -420,13 +423,18 @@ service:
   entry.
 - **The chart-owned config stays the chart's.** In patch and none mode
   each pass rewrites `<plugin.hostConfigDir>/credential-provider-config.yaml`
-  to its own entry plus the other releases' entries, recognised by their
-  binary in `plugin.hostBinaryDir`, and drops anything else, as the
-  single install always did.
+  to its own entry plus the other releases' entries, and drops anything
+  else, as the single install always did. It keeps another release's
+  entry only when that release's binary and its record, holding exactly
+  that entry, are in `plugin.hostBinaryDir`, which the sync containers
+  cannot write. Keep `plugin.hostBinaryDir` for this chart's plugins
+  only; the chart refuses a `plugin.hostBinaryDir` or
+  `plugin.install.stateDir` in reach of `plugin.hostConfigDir`.
 - **The installer refuses names it does not own**: in a cloud's config
   (merge mode), a provider entry of that name that is not a bridge
   entry; for a non-default name, a file of that name in kubelet's bin
-  dir that is not this plugin (GKE keeps kubelet itself there).
+  dir that is not this plugin (GKE keeps kubelet itself there) and has
+  no record of this install next to it. A refused pass writes nothing.
 - Removing one release, or renaming its provider, leaves its entry on
   the nodes: see [Uninstalling](#uninstalling).
 

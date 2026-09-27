@@ -396,25 +396,36 @@ container:
   concurrent installers neither lose each other's entries nor restart
   kubelet at the same time. The lock files follow the same file rules as
   above.
+- writes a record `<bin dir>/<providerName>.entry` (mode `0600`, not
+  executable) next to the plugin binary before it writes its entry: the
+  canonical bytes of that entry. The bin dir is out of reach of the sync
+  containers (no sync container mounts it, and the chart and the
+  installer refuse a `plugin.hostBinaryDir` in reach of
+  `plugin.hostConfigDir`, and a state dir inside it). Keep
+  `plugin.hostBinaryDir` for this chart's plugins only.
 - in `patch` and `none` mode keeps the chart-owned config
   (`<plugin.hostConfigDir>/credential-provider-config.yaml`) the chart's.
   The sync container of every release can write that directory, and
   kubelet runs every entry of the file after its next restart. Each pass
   rewrites the file to this install's entry plus the other installs'
-  entries, which it recognises by their executable binary in
-  `plugin.hostBinaryDir` (no sync container mounts that directory), and
-  drops everything else, as it replaced the whole file before ADR-0029.
-  Residual: a writer of `plugin.hostConfigDir` can change another
-  install's entry, whose name and binary are genuine; the other installs
-  keep that change until the owning installer's next pass, and a kubelet
-  restart in between runs it. In `patch` mode the installer also refuses
-  to point kubelet at its own directories while the config kubelet reads
-  holds another install's entry.
+  entries, and keeps another install's entry only when its executable
+  binary is in `plugin.hostBinaryDir` and its record there holds exactly
+  that entry. A planted entry, or another install's entry changed in the
+  file, is dropped before the installer restarts kubelet, as the whole
+  file was replaced before ADR-0029. Residual: a writer of
+  `plugin.hostConfigDir` can remove another install's entry (or change
+  it so that the next pass drops it) until that install's next pass,
+  and kubelet reads the file as it is when kubelet itself starts, before
+  any installer runs (a node reboot). In `patch` mode the installer also
+  refuses to point kubelet at its own directories while the config
+  kubelet reads holds another install's entry.
 - treats the provider name, a chart value, as a file name in kubelet's
   bin dir, where GKE keeps kubelet itself: in a cloud's config (`merge`
   mode) it never replaces a provider entry of that name that is not a
   bridge entry, and, for a non-default name, it never replaces a file of
-  that name that is not this plugin.
+  that name that is not this plugin: only its own record next to the
+  file, or the file already holding this plugin's bytes, makes it this
+  install's. A pass that refuses writes nothing on the node.
 
 This privilege model is what installing a credential provider on
 nodes requires — managed node images (EKS, GKE, AKS) pre-wire their

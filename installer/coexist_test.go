@@ -115,15 +115,20 @@ func writeHostFile(t *testing.T, env *testEnv, nodePath, content string) {
 	}
 }
 
-// writeSiblingBinary puts the plugin binary of another install named name
-// into the chart's bin dir, as that install's installer does before it
-// writes its entry.
-func writeSiblingBinary(t *testing.T, env *testEnv, name string) {
+// writeSiblingFiles puts the plugin binary and the record of another
+// install named name into the chart's bin dir, as that install's installer
+// does before it writes its entry, the one renderedConfigFor(name) holds.
+func writeSiblingFiles(t *testing.T, env *testEnv, name string) {
 	t.Helper()
 	writeHostFile(t, env, filepath.Join(binDir, name), "ELF-fake-plugin")
 	if err := os.Chmod(env.cfg.hostPath(filepath.Join(binDir, name)), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	record, err := entryBytes(mustEntry(t, renderedConfigFor(name), name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, env, filepath.Join(binDir, filesFor(name).Record), string(record))
 }
 
 func assertAbsent(t *testing.T, env *testEnv, nodePaths ...string) {
@@ -362,6 +367,8 @@ func TestRun_RefusesToTakeOverAForeignProvider(t *testing.T) {
 	if env.restarts != 0 {
 		t.Fatal("kubelet restarted after a refusal")
 	}
+	// A refused pass writes nothing, not even the CA.
+	assertAbsent(t, env, configDir+"/ecr-credential-provider.ca.crt", "/cloud/bin/ecr-credential-provider.entry")
 }
 
 // TestRun_RefusesToOverwriteAForeignBinary: GKE keeps kubelet itself in its
@@ -387,6 +394,24 @@ func TestRun_RefusesToOverwriteAForeignBinary(t *testing.T) {
 	if got := env.hostFile(t, "/etc/srv/kubernetes/cri_auth_config.yaml"); got != gkeConfig {
 		t.Fatal("the cloud config was changed")
 	}
+	// A refused pass writes nothing, not even the CA or the record.
+	assertAbsent(t, env, configDir+"/kubelet.ca.crt", "/home/kubernetes/bin/kubelet.entry")
+
+	// A bridge entry of that name in the config does not make the file
+	// ours: in patch and none mode pods other than installers can write
+	// that config.
+	merged, _, err := mergeProvider([]byte(gkeConfig), renderedEntry(t, env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, env, "/etc/srv/kubernetes/cri_auth_config.yaml", string(merged))
+	if err := run(env.cfg); err == nil || !strings.Contains(err.Error(), "does not belong to this plugin") {
+		t.Fatalf("got %v, want a refusal although the config holds an entry of the name", err)
+	}
+	if got := env.hostFile(t, "/home/kubernetes/bin/kubelet"); got != "KUBELET-BINARY" {
+		t.Fatal("kubelet's binary was overwritten")
+	}
+	writeHostFile(t, env, "/etc/srv/kubernetes/cri_auth_config.yaml", gkeConfig)
 
 	// Our own bytes from an interrupted pass (binary written, entry not)
 	// are not foreign.
@@ -394,7 +419,8 @@ func TestRun_RefusesToOverwriteAForeignBinary(t *testing.T) {
 	if err := run(env.cfg); err != nil {
 		t.Fatalf("a leftover of our own binary was refused: %v", err)
 	}
-	// From now on the entry vouches for the file, whatever its version.
+	// From now on the record next to it vouches for the file, whatever
+	// its version.
 	if err := os.WriteFile(env.cfg.SourcePlugin, []byte("ELF-fake-plugin-v2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +582,12 @@ func TestRun_ForwardUpgradeFromPreADR0029StateDoesNotRestart(t *testing.T) {
 			if err := run(env.cfg); err != nil {
 				t.Fatal(err)
 			}
-			// Replace the record with the one 0.10.0 writes for the same
+			// 0.10.0 wrote no record next to the binary.
+			record := tc.binDir + "/" + filesFor(defaultProviderName).Record
+			if err := os.Remove(env.cfg.hostPath(record)); err != nil {
+				t.Fatal(err)
+			}
+			// Replace the state with the one 0.10.0 writes for the same
 			// files: its fields only, its hash.
 			old := preADR0029State{SchemaVersion: 1, Mode: tc.mode, BinDir: tc.binDir, ConfigFile: tc.configFile,
 				AppliedHash: preADR0029Hash(t, env, tc.mode, tc.configFile)}
@@ -577,6 +608,11 @@ func TestRun_ForwardUpgradeFromPreADR0029StateDoesNotRestart(t *testing.T) {
 			st, err := loadState(env.statePath())
 			if err != nil || st == nil || st.EntryHash == "" || st.AppliedHash != old.AppliedHash {
 				t.Fatalf("state = %+v (err %v), want the entry hash added and appliedHash kept", st, err)
+			}
+			// Other installs keep this install's entry only once its
+			// record exists.
+			if _, err := os.Lstat(env.cfg.hostPath(record)); err != nil {
+				t.Fatalf("the upgrade did not write the record: %v", err)
 			}
 		})
 	}
@@ -690,7 +726,7 @@ func TestRun_TakesTheNodeLockBeforeReadingSharedFiles(t *testing.T) {
 	assertAbsent(t, env, configDir+"/harbor-bridge-ca.crt", binDir+"/harbor-bridge-plugin")
 
 	// Meanwhile, the lock holder installs its binary and its entry.
-	writeSiblingBinary(t, env, euName)
+	writeSiblingFiles(t, env, euName)
 	writeHostFile(t, env, configDir+"/"+configFileName, renderedConfigFor(euName))
 	unlock()
 	select {
@@ -728,7 +764,7 @@ func TestRun_NoneTakesTheConfigLock(t *testing.T) {
 	default:
 	}
 	assertAbsent(t, env, binDir+"/harbor-bridge-plugin", configPath)
-	writeSiblingBinary(t, env, euName)
+	writeSiblingFiles(t, env, euName)
 	writeHostFile(t, env, configPath, renderedConfigFor(euName))
 	unlock()
 	select {
@@ -846,17 +882,24 @@ func TestRun_ChartOwnedConfigDropsPlantedEntries(t *testing.T) {
 }
 
 // TestSiblingEntry: an entry in the chart-owned config counts as another
-// install's only if a writer of plugin.hostConfigDir alone cannot have made
-// it.
+// install's only if it is exactly what that install's installer wrote:
+// its binary and its record are in the bin dir, which no writer of
+// plugin.hostConfigDir can write, and the record holds the entry.
 func TestSiblingEntry(t *testing.T) {
 	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
-	eu := renderedEntry(t, withName(t, newSiblingEnv(t, env, modePatch, euName), euName))
+	eu := mustEntry(t, renderedConfigFor(euName), euName)
 	euBin := env.cfg.hostPath(binDir + "/" + euName)
+	euRecord := binDir + "/" + filesFor(euName).Record
+	record, err := entryBytes(eu)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if env.cfg.siblingEntry(eu) {
 		t.Fatal("an entry without a binary counts")
 	}
 	writeHostFile(t, env, binDir+"/"+euName, "ELF-fake-plugin")
+	writeHostFile(t, env, euRecord, string(record))
 	if env.cfg.siblingEntry(eu) {
 		t.Fatal("an entry whose binary kubelet cannot execute counts")
 	}
@@ -866,6 +909,37 @@ func TestSiblingEntry(t *testing.T) {
 	if !env.cfg.siblingEntry(eu) {
 		t.Fatal("another install's entry does not count")
 	}
+
+	// Without its record, or with a record of other content, a binary
+	// alone vouches for nothing: an uninstalled release leaves its binary
+	// behind, and every program in the bin dir is executable.
+	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
+		t.Fatal(err)
+	}
+	if env.cfg.siblingEntry(eu) {
+		t.Fatal("an entry without a record counts")
+	}
+	changed := mustEntry(t, strings.Replace(renderedConfigFor(euName), "127.0.0.1:31444", "203.0.113.7:443", 1), euName)
+	writeHostFile(t, env, euRecord, string(record))
+	if env.cfg.siblingEntry(changed) {
+		t.Fatal("an entry that differs from its record counts")
+	}
+	// A symlinked record, even to the right content, is not a record an
+	// installer wrote.
+	writeHostFile(t, env, "/tmp/record", string(record))
+	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(env.cfg.hostPath("/tmp/record"), env.cfg.hostPath(euRecord)); err != nil {
+		t.Fatal(err)
+	}
+	if env.cfg.siblingEntry(eu) {
+		t.Fatal("an entry whose record is a symlink counts")
+	}
+	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, env, euRecord, string(record))
 
 	noBridge := map[string]any{}
 	for k, v := range eu {
@@ -877,17 +951,13 @@ func TestSiblingEntry(t *testing.T) {
 	}
 
 	ours := renderedEntry(t, env)
-	writeSiblingBinary(t, env, defaultProviderName)
+	writeSiblingFiles(t, env, defaultProviderName)
 	if env.cfg.siblingEntry(ours) {
 		t.Fatal("this install's own entry counts as another install's")
 	}
 
-	dotted := map[string]any{}
-	for k, v := range eu {
-		dotted[k] = v
-	}
-	dotted["name"] = defaultProviderName + ".bak"
-	writeSiblingBinary(t, env, defaultProviderName+".bak")
+	dotted := mustEntry(t, renderedConfigFor(defaultProviderName+".bak"), defaultProviderName+".bak")
+	writeSiblingFiles(t, env, defaultProviderName+".bak")
 	if env.cfg.siblingEntry(dotted) {
 		t.Fatal("an entry whose name is no provider name counts")
 	}
@@ -1111,9 +1181,9 @@ func TestRun_PatchTakesTheConfigLock(t *testing.T) {
 	}
 	defer unlock()
 	done := waitBlocked(t, env, "the config lock")
-	assertAbsent(t, env, configPath, binDir+"/"+defaultProviderName, defaultKubeletPath)
+	assertAbsent(t, env, configPath, binDir+"/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt", defaultKubeletPath)
 
-	writeSiblingBinary(t, env, euName)
+	writeSiblingFiles(t, env, euName)
 	writeHostFile(t, env, configPath, renderedConfigFor(euName))
 	unlock()
 	awaitPass(t, done)
@@ -1145,7 +1215,7 @@ func TestRun_AutoMergeTakesTheConfigLock(t *testing.T) {
 	if got := env.hostFile(t, "/cloud/config.yaml"); got != gkeConfig {
 		t.Fatal("the cloud config changed while its lock was held")
 	}
-	assertAbsent(t, env, "/cloud/bin/"+defaultProviderName)
+	assertAbsent(t, env, "/cloud/bin/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt")
 
 	// The holder merges another install's entry.
 	holder := renderedEntry(t, withName(t, newSiblingEnv(t, env, modeAuto, euName), euName))
@@ -1215,5 +1285,187 @@ func TestRun_MergeRefusesABinDirInReachOfHostConfigDir(t *testing.T) {
 	assertAbsent(t, env, configDir+"/bin/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt")
 	if env.restarts != 0 {
 		t.Fatal("kubelet restarted after a refusal")
+	}
+}
+
+// plantedAs is plantedEntry under the provider name name.
+func plantedAs(name string) string {
+	return strings.Replace(plantedEntry, "name: harbor-bridge-plugin.bak", "name: "+name, 1)
+}
+
+// TestRun_ChartOwnedConfigDropsEntriesThatDoNotMatchTheirRecord: a binary
+// in the bin dir does not make an entry of its name another install's.
+// Only the record an installer writes next to it does, and only for
+// exactly the entry it records.
+func TestRun_ChartOwnedConfigDropsEntriesThatDoNotMatchTheirRecord(t *testing.T) {
+	configPath := configDir + "/" + configFileName
+	for _, tc := range []struct {
+		name string
+		// prepare puts files into the bin dir and returns the entry
+		// planted next to this install's.
+		prepare func(t *testing.T, env *testEnv) string
+	}{
+		{"leftover binary without a record", func(t *testing.T, env *testEnv) string {
+			// e.g. a bridge installed by hand before ADR-0029, removed
+			// without cleaning the node.
+			writeHostFile(t, env, binDir+"/harbor-bridge-old", "ELF-fake-plugin")
+			if err := os.Chmod(env.cfg.hostPath(binDir+"/harbor-bridge-old"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return plantedAs("harbor-bridge-old")
+		}},
+		{"another program without a record", func(t *testing.T, env *testEnv) string {
+			writeHostFile(t, env, binDir+"/sh", "#!/bin/busybox")
+			if err := os.Chmod(env.cfg.hostPath(binDir+"/sh"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return plantedAs("sh")
+		}},
+		{"leftover binary with the record of another entry", func(t *testing.T, env *testEnv) string {
+			// An uninstalled release leaves its binary and its record;
+			// the entry it recorded is not the one planted now.
+			writeSiblingFiles(t, env, euName)
+			return plantedAs(euName)
+		}},
+	} {
+		for _, mode := range []string{modePatch, modeNone} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				env := newTestEnv(t, mode, []string{"/usr/bin/kubelet"})
+				if err := run(env.cfg); err != nil {
+					t.Fatal(err)
+				}
+				planted := tc.prepare(t, env)
+				writeHostFile(t, env, configPath, renderedConfig+planted)
+				if err := run(env.cfg); err != nil {
+					t.Fatal(err)
+				}
+				if got := env.hostFile(t, configPath); got != renderedConfig {
+					t.Fatalf("the planted entry survived the pass:\n%s", got)
+				}
+				if want := map[string]int{modePatch: 2, modeNone: 0}[mode]; env.restarts != want {
+					t.Fatalf("restarts = %d, want %d (onto the clean file)", env.restarts, want)
+				}
+			})
+		}
+	}
+}
+
+// TestRun_ChangedSiblingEntryIsDropped: a writer of plugin.hostConfigDir
+// changes another install's entry in the shared file. The next installer
+// must not keep the change, least of all restart kubelet onto it; the
+// owning install's next pass writes its entry back.
+func TestRun_ChangedSiblingEntryIsDropped(t *testing.T) {
+	configPath := configDir + "/" + configFileName
+	a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	b := newSiblingEnv(t, a, modePatch, euName)
+	for _, env := range []*testEnv{a, b} {
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, order := providersIn(t, a, configPath)
+	changed := mustEntry(t, strings.Replace(renderedConfigFor(euName), "https://127.0.0.1:31444", "https://attacker.example", 1), euName)
+	writeHostFile(t, a, configPath, string(configWith(t, before[order[0]].(map[string]any), changed)))
+
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.hostFile(t, configPath); got != renderedConfig {
+		t.Fatalf("the changed entry survived the pass:\n%s", got)
+	}
+	if a.restarts != 2 {
+		t.Fatalf("restarts = %d, want 2 (onto the file without the changed entry)", a.restarts)
+	}
+
+	if err := run(b.cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, afterOrder := providersIn(t, a, configPath)
+	if !reflect.DeepEqual(afterOrder, []string{defaultProviderName, euName}) || !reflect.DeepEqual(after, before) {
+		t.Fatalf("providers = %v, want both entries as their installers wrote them", afterOrder)
+	}
+	if b.restarts != 2 {
+		t.Fatalf("the owning install must restart kubelet onto its entry again (restarts = %d)", b.restarts)
+	}
+}
+
+// TestRun_OwnBinaryUpgradeAfterTheEntryVanished: a non-default install's
+// binary stays its own while the config kubelet reads no longer holds its
+// entry: its record in the bin dir proves it.
+func TestRun_OwnBinaryUpgradeAfterTheEntryVanished(t *testing.T) {
+	t.Run("patch moves plugin.hostConfigDir", func(t *testing.T) {
+		env := withName(t, newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}), euName)
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+		// helm upgrade: a new plugin and another config directory in one
+		// pass. The new directory has no entry yet.
+		env.cfg.HostConfigDir = "/etc/kubernetes/hb-eu"
+		if err := os.WriteFile(env.cfg.SourcePlugin, []byte("ELF-fake-plugin-v2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(env.cfg); err != nil {
+			t.Fatalf("upgrading this install's own binary was refused: %v", err)
+		}
+		if got := env.hostFile(t, binDir+"/"+euName); got != "ELF-fake-plugin-v2" {
+			t.Fatalf("binary = %q", got)
+		}
+		got, err := discoverKubelet(env.cfg.ProcRoot)
+		if err != nil || got.ConfigFile != "/etc/kubernetes/hb-eu/"+configFileName {
+			t.Fatalf("kubelet wiring = %+v (err %v)", got, err)
+		}
+	})
+	t.Run("merge after the cloud rewrote its config", func(t *testing.T) {
+		env := withName(t, newTestEnv(t, modeMerge, nil), euName)
+		env.cfg.MergeBinDir, env.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
+		writeHostFile(t, env, "/cloud/config.yaml", gkeConfig)
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+		// The node's own tooling rewrote the config without our entry,
+		// and the next pass brings a new plugin.
+		writeHostFile(t, env, "/cloud/config.yaml", gkeConfig)
+		if err := os.WriteFile(env.cfg.SourcePlugin, []byte("ELF-fake-plugin-v2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(env.cfg); err != nil {
+			t.Fatalf("upgrading this install's own binary was refused: %v", err)
+		}
+		if got := env.hostFile(t, "/cloud/bin/"+euName); got != "ELF-fake-plugin-v2" {
+			t.Fatalf("binary = %q", got)
+		}
+		byName, _ := providersIn(t, env, "/cloud/config.yaml")
+		if !reflect.DeepEqual(byName[euName], renderedEntry(t, env)) {
+			t.Fatal("the entry was not merged back")
+		}
+	})
+}
+
+// TestRun_RecordHoldsTheEntry: every pass records the entry it writes, next
+// to the binary, readable by root only and not executable.
+func TestRun_RecordHoldsTheEntry(t *testing.T) {
+	for _, name := range []string{defaultProviderName, euName} {
+		t.Run(name, func(t *testing.T) {
+			env := withName(t, newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}), name)
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			recordPath := binDir + "/" + name + ".entry"
+			fi, err := os.Lstat(env.cfg.hostPath(recordPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode() != 0o600 {
+				t.Fatalf("record mode = %v, want -rw-------", fi.Mode())
+			}
+			byName, _ := providersIn(t, env, configDir+"/"+configFileName)
+			want, err := entryBytes(byName[name].(map[string]any))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := env.hostFile(t, recordPath); got != string(want) {
+				t.Fatalf("record = %s, want the entry in the config %s", got, want)
+			}
+		})
 	}
 }

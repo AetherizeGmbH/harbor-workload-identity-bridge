@@ -131,26 +131,6 @@ func isBridgeProvider(entry map[string]any) bool {
 	return false
 }
 
-// hasBridgeProvider reports whether the CredentialProviderConfig in doc
-// holds a harbor-bridge entry named name. A document it cannot read holds
-// none.
-func hasBridgeProvider(doc []byte, name string) bool {
-	cfg := map[string]any{}
-	if err := yaml.Unmarshal(doc, &cfg); err != nil {
-		return false
-	}
-	providers, err := providerList(cfg)
-	if err != nil {
-		return false
-	}
-	for _, p := range providers {
-		if pm, ok := p.(map[string]any); ok && pm["name"] == name {
-			return isBridgeProvider(pm)
-		}
-	}
-	return false
-}
-
 // composeOwnConfig builds the chart-owned credential-provider config of
 // patch and none mode (ADR-0029) from the rendered config and the file as
 // it is (existing). The result holds this install's rendered entry and

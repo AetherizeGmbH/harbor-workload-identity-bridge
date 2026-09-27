@@ -13,6 +13,7 @@ import (
 func TestFilesFor_DefaultKeepsPreADR0029Names(t *testing.T) {
 	want := nodeFiles{
 		Binary:     "harbor-bridge-plugin",
+		Record:     "harbor-bridge-plugin.entry",
 		CA:         "harbor-bridge-ca.crt",
 		ClientCert: "harbor-bridge-client.crt",
 		ClientKey:  "harbor-bridge-client.key",
@@ -26,6 +27,7 @@ func TestFilesFor_DefaultKeepsPreADR0029Names(t *testing.T) {
 func TestFilesFor_OtherNamesDeriveTheirFiles(t *testing.T) {
 	want := nodeFiles{
 		Binary:     "harbor-bridge-eu",
+		Record:     "harbor-bridge-eu.entry",
 		CA:         "harbor-bridge-eu.ca.crt",
 		ClientCert: "harbor-bridge-eu.client.crt",
 		ClientKey:  "harbor-bridge-eu.client.key",
@@ -54,13 +56,14 @@ func TestValidProviderName(t *testing.T) {
 	}
 }
 
-// installFiles lists every file name one install creates in a directory it
+// nodeFileNames lists every file name one install creates in a directory it
 // shares with other installs: its own files and their .bak copies
-// (writeFileAtomic).
-func installFiles(name string) []string {
+// (writeFileAtomic). The record must never be a provider name, or a
+// planted entry of that name would make kubelet run it.
+func nodeFileNames(name string) []string {
 	f := filesFor(name)
 	var out []string
-	for _, n := range []string{f.Binary, f.CA, f.ClientCert, f.ClientKey, f.State} {
+	for _, n := range []string{f.Binary, f.Record, f.CA, f.ClientCert, f.ClientKey, f.State} {
 		out = append(out, n, n+".bak")
 	}
 	return out
@@ -82,7 +85,10 @@ func FuzzNodeFiles_Injective(f *testing.F) {
 		}
 		seen := map[string]string{}
 		for _, name := range []string{a, b} {
-			for _, file := range installFiles(name) {
+			if validProviderName(filesFor(name).Record) == nil {
+				t.Fatalf("the record %q of provider name %q is a provider name itself", filesFor(name).Record, name)
+			}
+			for _, file := range nodeFileNames(name) {
 				if shared[file] {
 					t.Fatalf("provider name %q owns the shared file %q", name, file)
 				}
