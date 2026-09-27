@@ -4,11 +4,22 @@
 package main
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
+
+// dockerfiles are the release Dockerfiles that run the check.
+var dockerfiles = []string{"Dockerfile.bridge", "Dockerfile.plugin"}
+
+// checkCommand is how both Dockerfiles invoke the check.
+const checkCommand = "go run ./hack/toolchaincheck"
 
 const gomodWithToolchain = `module example.com/m
 
@@ -134,7 +145,7 @@ func TestDockerfiles_EnforceToolchainFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"Dockerfile.bridge", "Dockerfile.plugin"} {
+	for _, name := range dockerfiles {
 		t.Run(name, func(t *testing.T) {
 			raw, err := os.ReadFile("../../" + name)
 			if err != nil {
@@ -148,11 +159,148 @@ func TestDockerfiles_EnforceToolchainFloor(t *testing.T) {
 			if _, err := check("go"+m[1], gomod); err != nil {
 				t.Fatalf("builder image golang:%s is older than go.mod's minimum %s: %v", m[1], want, err)
 			}
-			run := strings.Index(df, "go run ./hack/toolchaincheck")
+			run := strings.Index(df, checkCommand)
 			build := strings.Index(df, "go build")
 			if run < 0 || build < 0 || run > build {
-				t.Fatalf("%s must run `go run ./hack/toolchaincheck` before its first `go build`", name)
+				t.Fatalf("%s must run `%s` before its first `go build`", name, checkCommand)
 			}
 		})
 	}
+}
+
+// The builder stage runs the check before it copies any source: it holds
+// only what the COPY instructions above the check put there (today go.mod,
+// go.sum and this directory). Rebuild exactly that view in a temp dir, from
+// each Dockerfile's own COPY lines, and run the check there the way the
+// Dockerfile does. A main() that reads a file the stage lacks, or an import
+// of a package the stage does not copy, fails here instead of first failing
+// in release-images, after the release tag exists.
+func TestToolchaincheck_RunsInTheDockerStage(t *testing.T) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("the go command is needed to run the check as the Dockerfiles do: %v", err)
+	}
+	for _, name := range dockerfiles {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile("../../" + name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			copies, err := copiesBeforeCheck(string(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			stage := t.TempDir()
+			for _, c := range copies {
+				if err := stageCopy("../..", stage, c); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command(goBin, "run", "./hack/toolchaincheck")
+			cmd.Dir = stage
+			cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s in the %s builder stage view (%v) failed: %v\n%s", checkCommand, name, copies, err, out)
+			}
+			if !strings.Contains(string(out), "satisfies go.mod's minimum") {
+				t.Fatalf("%s printed %q, want the success line", checkCommand, out)
+			}
+		})
+	}
+}
+
+// copyInstr is one COPY instruction: sources relative to the build context,
+// destination relative to the builder stage's WORKDIR.
+type copyInstr struct {
+	srcs []string
+	dest string
+}
+
+// copiesBeforeCheck returns the COPY instructions of the golang builder
+// stage that precede the RUN line invoking the check.
+func copiesBeforeCheck(df string) ([]copyInstr, error) {
+	var copies []copyInstr
+	inBuilder := false
+	for _, line := range strings.Split(df, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		switch strings.ToUpper(f[0]) {
+		case "FROM":
+			inBuilder = golangFrom.MatchString(line + "\n")
+			copies = nil
+		case "COPY":
+			if !inBuilder {
+				continue
+			}
+			args := f[1:]
+			for len(args) > 0 && strings.HasPrefix(args[0], "--") {
+				if strings.HasPrefix(args[0], "--from") {
+					return nil, fmt.Errorf("COPY %s before the check: this test only models copies from the build context", args[0])
+				}
+				args = args[1:]
+			}
+			if len(args) < 2 {
+				return nil, fmt.Errorf("cannot parse %q", line)
+			}
+			copies = append(copies, copyInstr{srcs: args[:len(args)-1], dest: args[len(args)-1]})
+		case "RUN":
+			if inBuilder && strings.Contains(line, checkCommand) {
+				if len(copies) == 0 {
+					return nil, fmt.Errorf("no COPY before %q", line)
+				}
+				return copies, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no RUN line with %q in a golang builder stage", checkCommand)
+}
+
+// stageCopy applies c to stage with Docker's COPY semantics for the forms
+// the Dockerfiles use: a destination ending in "/" receives each source
+// under its base name, otherwise the single source becomes the destination.
+// A directory source copies its contents.
+func stageCopy(context, stage string, c copyInstr) error {
+	dest := path.Clean(c.dest)
+	if path.IsAbs(dest) {
+		return fmt.Errorf("COPY %v %s: this test models destinations relative to WORKDIR only", c.srcs, c.dest)
+	}
+	if strings.HasSuffix(c.dest, "/") || dest == "." {
+		for _, src := range c.srcs {
+			if err := copyTree(filepath.Join(context, src), filepath.Join(stage, dest, path.Base(src))); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(c.srcs) != 1 {
+		return fmt.Errorf("COPY %v %s: several sources need a destination ending in /", c.srcs, c.dest)
+	}
+	return copyTree(filepath.Join(context, c.srcs[0]), filepath.Join(stage, dest))
+}
+
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o600)
+	})
 }
