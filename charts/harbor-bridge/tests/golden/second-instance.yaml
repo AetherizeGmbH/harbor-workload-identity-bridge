@@ -3,7 +3,7 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: harbor-bridge
+  name: harbor-bridge-eu
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -26,7 +26,7 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: harbor-bridge
+  name: harbor-bridge-eu
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -43,7 +43,7 @@ automountServiceAccountToken: true
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: harbor-bridge-plugin
+  name: harbor-bridge-eu-plugin
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -64,7 +64,7 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: harbor-bridge-plugin
+  name: harbor-bridge-eu-plugin
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -109,7 +109,7 @@ data:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: harbor-bridge-audience-token-request
+  name: harbor-bridge-eu-audience-token-request
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
     app.kubernetes.io/version: "0.10.0"
@@ -125,7 +125,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: harbor-bridge-harbor-bridge-system
+  name: harbor-bridge-eu-harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
     app.kubernetes.io/version: "0.10.0"
@@ -152,7 +152,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: harbor-bridge-audience-token-request
+  name: harbor-bridge-eu-audience-token-request
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
     app.kubernetes.io/version: "0.10.0"
@@ -161,7 +161,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind:     ClusterRole
-  name:     harbor-bridge-audience-token-request
+  name:     harbor-bridge-eu-audience-token-request
 subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind:     Group
@@ -172,7 +172,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: harbor-bridge-harbor-bridge-system
+  name: harbor-bridge-eu-harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
     app.kubernetes.io/version: "0.10.0"
@@ -184,10 +184,10 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: harbor-bridge-harbor-bridge-system
+  name: harbor-bridge-eu-harbor-bridge-system
 subjects:
   - kind: ServiceAccount
-    name: harbor-bridge
+    name: harbor-bridge-eu
     namespace: harbor-bridge-system
 
 ---
@@ -195,7 +195,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: harbor-bridge
+  name: harbor-bridge-eu
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -226,7 +226,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: harbor-bridge
+  name: harbor-bridge-eu
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -239,10 +239,10 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: harbor-bridge
+  name: harbor-bridge-eu
 subjects:
   - kind: ServiceAccount
-    name: harbor-bridge
+    name: harbor-bridge-eu
     namespace: harbor-bridge-system
 
 ---
@@ -250,7 +250,7 @@ subjects:
 apiVersion: v1
 kind: Service
 metadata:
-  name: harbor-bridge-metrics
+  name: harbor-bridge-eu-metrics
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -278,7 +278,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: harbor-bridge
+  name: harbor-bridge-eu
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -306,7 +306,7 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: harbor-bridge-plugin
+  name: harbor-bridge-eu-plugin
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -341,10 +341,10 @@ spec:
         # then converges kubelet) or when the TLS wiring changes (which
         # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
         # container copies rotated files in place (ADR-0021).
-        plugin.harbor.aetherize.io/config-checksum: d6814a39b8839d1401df80a6724024d3384d83eb9132eb3b6ac8deb69be3a90d
-        plugin.harbor.aetherize.io/tls-checksum: b84f1c25e5f65271fd9a4d3d3abf7821fc2b628c31b267eb978e29c1aff84e00
+        plugin.harbor.aetherize.io/config-checksum: f6d26f194315eea73f72a6d2349f185826df0092de2bff2da1db57fa7cb88ae8
+        plugin.harbor.aetherize.io/tls-checksum: 57e56ec1ae9a392310d6e30eeb777a8116efd367dca74943f17b1d83282a1cd2
     spec:
-      serviceAccountName: harbor-bridge-plugin
+      serviceAccountName: harbor-bridge-eu-plugin
       # The installer never talks to the Kubernetes API.
       automountServiceAccountToken: false
       hostNetwork: false
@@ -476,18 +476,18 @@ spec:
             type: DirectoryOrCreate
         - name: kubelet-config
           configMap:
-            name: harbor-bridge-plugin
+            name: harbor-bridge-eu-plugin
             defaultMode: 0644
         - name: tls
           secret:
-            secretName: harbor-bridge-tls
+            secretName: harbor-bridge-eu-tls
             defaultMode: 0400
             items:
               - key: ca.crt
                 path: ca.crt
         - name: mtls
           secret:
-            secretName: harbor-bridge-plugin-mtls-client
+            secretName: harbor-bridge-eu-plugin-mtls-client
             defaultMode: 0400
 
 
@@ -496,7 +496,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: harbor-bridge
+  name: harbor-bridge-eu
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -533,9 +533,9 @@ spec:
         # operator-managed). Certificate ROTATION needs no restart: the
         # bridge reloads the serving pair and client CA from the mounted
         # Secret on its own.
-        bridge.harbor.aetherize.io/tls-cert-checksum: 315530593d5c0a99d6e050b75b77101e8a76404a2b98a629ff7e739e09e76868
+        bridge.harbor.aetherize.io/tls-cert-checksum: 5dbab86d40549cad6d345bf23b2f3c525a2c69f3b603d4bcc2cecc6b53f931d5
     spec:
-      serviceAccountName: harbor-bridge
+      serviceAccountName: harbor-bridge-eu
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -591,7 +591,7 @@ spec:
             - name: BRIDGE_HARBORACCESS_SELECTOR
               value: "harbor.aetherize.io/bridge=harbor-eu"
             - name: BRIDGE_INSTANCE
-              value: "harbor-bridge"
+              value: "harbor-bridge-eu"
             - name: BRIDGE_RATE_LIMIT_PER_SOURCE
               value: "20"
             - name: BRIDGE_RATE_LIMIT_BURST
@@ -683,7 +683,7 @@ spec:
                 path: password
         - name: tls
           secret:
-            secretName: harbor-bridge-tls
+            secretName: harbor-bridge-eu-tls
             defaultMode: 0400
 
 ---
@@ -691,7 +691,7 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: harbor-bridge-tls
+  name: harbor-bridge-eu-tls
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -702,7 +702,7 @@ metadata:
     app.kubernetes.io/instance: harbor-bridge
     app.kubernetes.io/component: bridge
 spec:
-  secretName: harbor-bridge-tls
+  secretName: harbor-bridge-eu-tls
   # The plugin reads ca.crt from this Secret via the DaemonSet's
   # volume mount. cert-manager writes it by default.
   duration: 2160h     # 90d
@@ -713,12 +713,12 @@ spec:
     rotationPolicy: Always
   subject:
     organizations: [aetherize.harbor-workload-identity-bridge]
-  commonName: harbor-bridge
+  commonName: harbor-bridge-eu
   dnsNames:
-    - harbor-bridge
-    - harbor-bridge.harbor-bridge-system
-    - harbor-bridge.harbor-bridge-system.svc
-    - harbor-bridge.harbor-bridge-system.svc.cluster.local
+    - harbor-bridge-eu
+    - harbor-bridge-eu.harbor-bridge-system
+    - harbor-bridge-eu.harbor-bridge-system.svc
+    - harbor-bridge-eu.harbor-bridge-system.svc.cluster.local
     - localhost
   ipAddresses:
     - 127.0.0.1
@@ -735,7 +735,7 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: harbor-bridge-plugin-mtls-client
+  name: harbor-bridge-eu-plugin-mtls-client
   namespace: harbor-bridge-system
   labels:
     helm.sh/chart: harbor-workload-identity-bridge-0.10.0
@@ -746,14 +746,14 @@ metadata:
     app.kubernetes.io/instance: harbor-bridge
     app.kubernetes.io/component: plugin
 spec:
-  secretName: harbor-bridge-plugin-mtls-client
+  secretName: harbor-bridge-eu-plugin-mtls-client
   duration: 2160h
   renewBefore: 360h
   privateKey:
     algorithm: ECDSA
     size: 256
     rotationPolicy: Always
-  commonName: harbor-bridge-plugin
+  commonName: harbor-bridge-eu-plugin
   usages:
     - client auth
   issuerRef:
