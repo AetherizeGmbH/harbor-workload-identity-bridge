@@ -96,16 +96,26 @@ Accepted (2026-09-27). Extends ADR-0006 (OIDC validation) and ADR-0010
   --bound-object-kind=Pod --bound-object-name=<pod>`. The apiserver
   refuses to bind a token to a pod that runs as another ServiceAccount.
   MIGRATION.md and HOW-TO-TEST.md show the command.
+- The cap bounds how long one token can be redeemed at the bridge, not
+  how long the credentials it buys stay valid. The bridge returns the
+  robot's password, which Harbor accepts until the next rotation. The
+  bridge schedules that rotation `PasswordRotationInterval` (24h) plus
+  `RotationSafetyMargin` (1m) after the previous one
+  (`bridge/controlplane/contract.go`; ADR-0003, ADR-0023); deleting the
+  robot's password Secret rotates at once, deleting the HarborAccess
+  deletes the robot.
 - Whoever may create tokens for a ServiceAccount can still mint a
-  pod-bound token for any existing pod of that ServiceAccount. The cap
-  bounds each such token to one hour, so continued access needs a new
-  token every hour, each one a TokenRequest in the apiserver audit log.
-  Every accepted token now names a pod, so every audit line carries
-  `pod` and `pod_uid`.
-- Residual risk: a stolen kubelet token stays usable at the bridge for
-  its remaining lifetime, at most one hour, after its pod or its
-  ServiceAccount is gone. Only TokenReview would close that window, at
-  the cost of an apiserver round trip per pull.
+  pod-bound token for any existing pod of that ServiceAccount. One such
+  token per rotation keeps them supplied with credentials, so sustained
+  abuse costs about one TokenRequest a day in the apiserver audit log,
+  not one an hour. Every accepted token now names a pod, so every audit
+  line carries `pod` and `pod_uid`.
+- Residual risk: a stolen kubelet token stays redeemable at the bridge
+  for its remaining lifetime, at most one hour, after its pod or its
+  ServiceAccount is gone, and a password redeemed in that hour works at
+  Harbor until the next rotation, up to about 24 hours later. Only
+  TokenReview would close the first window, at the cost of an apiserver
+  round trip per pull; deleting the password Secret closes the second.
 - A cap below one hour refuses every kubelet token, and every pull
   through the bridge fails, unless an external token signer issues
   shorter tokens. The chart and SECURITY.md document this; the bridge

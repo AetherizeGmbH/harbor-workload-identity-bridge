@@ -129,12 +129,24 @@ Both are `401` with `reason=invalid_token` and the audit category
 used for authorization: the ServiceAccount is the identity
 ([ADR-0010](docs/adr/0010-service-account-ref-as-identity.md)).
 
-Residual risk: a stolen kubelet token stays usable at the bridge for its
-remaining lifetime, at most one hour, after its pod or its ServiceAccount
-is deleted (only the apiserver's TokenReview checks the bound object).
-Whoever may create tokens for a ServiceAccount can still mint a pod-bound
-token for an existing pod of it, but must mint a new one every hour, each
-recorded as a TokenRequest in the apiserver audit log.
+The cap limits how long one token can be redeemed at the bridge, not how
+long the credentials it buys stay valid. The bridge answers with the
+robot's password, and Harbor accepts that password until its next
+rotation, which the bridge schedules 24 hours and one minute after the
+previous one (`PasswordRotationInterval` plus `RotationSafetyMargin` in
+`bridge/controlplane/contract.go`), or until you delete the robot's
+password Secret or the `HarborAccess` (see *Replay of cached credentials
+after revocation*).
+
+Residual risk: a stolen kubelet token stays redeemable at the bridge for
+its remaining lifetime, at most one hour, after its pod or its
+ServiceAccount is deleted (only the apiserver's TokenReview checks the
+bound object), and a password redeemed in that hour works at Harbor
+until the next rotation. Whoever may create tokens for a ServiceAccount
+can still mint a pod-bound token for an existing pod of it. One such
+token per rotation keeps them supplied with credentials, so sustained
+abuse shows up as about one TokenRequest a day in the apiserver audit
+log, not one an hour.
 
 ### Cross-cluster robot manipulation
 
@@ -272,8 +284,11 @@ choices the operator makes upstream: `automountServiceAccountToken:
 false` when not needed, short-lived projected tokens, audience-scoped
 tokens. The bridge accepts no token that lives longer than
 `bridge.tokenValidation.maxLifetime` (see *Long-lived and unbound
-tokens*), so a stolen token stops working at the bridge within that
-time.
+tokens*), so a stolen token can be redeemed at the bridge for at most
+that long. The robot password it was redeemed for keeps working at
+Harbor until the next rotation, up to 24 hours; deleting the robot's
+password Secret rotates it at once (see *Replay of cached credentials
+after revocation*).
 
 ### Replay of cached credentials after revocation
 

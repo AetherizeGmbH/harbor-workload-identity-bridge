@@ -132,13 +132,18 @@ operator's admission control (SECURITY.md recommends one).
   until the cache entry expires. Justification: kubelet has no
   invalidation API.
 - **A5 — A stolen pod-bound token outlives its pod at the bridge.** The
-  bridge validates tokens locally, so a stolen kubelet token stays usable
-  for its remaining lifetime, at most `bridge.tokenValidation.maxLifetime`
-  (1h), after its pod or its ServiceAccount is deleted; whoever may create
-  tokens for a ServiceAccount can mint a pod-bound one for an existing pod
-  of it, one hour at a time. Justification: only the apiserver's
-  TokenReview checks the bound object, at the cost of an apiserver round
-  trip per pull ([ADR-0028](../adr/0028-token-lifetime-cap-and-pod-binding.md)).
+  bridge validates tokens locally, so a stolen kubelet token stays
+  redeemable for its remaining lifetime, at most
+  `bridge.tokenValidation.maxLifetime` (1h), after its pod or its
+  ServiceAccount is deleted. The robot password it redeems works at
+  Harbor until the next rotation, which the bridge schedules 24h and 1m
+  after the previous one (`bridge/controlplane/contract.go`), unless the
+  password Secret is deleted first. Whoever may create tokens for a
+  ServiceAccount can mint a pod-bound one for an existing pod of it; one
+  token per rotation, about one TokenRequest a day, keeps them supplied.
+  Justification: only the apiserver's TokenReview checks the bound
+  object, at the cost of an apiserver round trip per pull
+  ([ADR-0028](../adr/0028-token-lifetime-cap-and-pod-binding.md)).
 
 Open items (not accepted; tracked):
 
