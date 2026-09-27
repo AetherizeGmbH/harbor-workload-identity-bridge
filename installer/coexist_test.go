@@ -1083,7 +1083,10 @@ func TestRun_PatchReadsAConfigDirectoryBeforeMovingKubelet(t *testing.T) {
 // may read exactly that config (a file, or since Kubernetes 1.34 the
 // directory it writes into). Patch mode with other directories must wait
 // for that lock before it reads the config (checkRewire), or it moves
-// kubelet away from an entry the none-mode install adds meanwhile.
+// kubelet away from an entry the none-mode install adds meanwhile. That
+// holds too when kubelet reads this install's own config (or the directory
+// plugin.hostConfigDir) and only the bin dir differs: then the lock of the
+// current config is this install's own config lock.
 func TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1093,6 +1096,8 @@ func TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt(t *testing.T) {
 	}{
 		{"config file", "/opt/cp/" + configFileName, "/opt/cp"},
 		{"config directory", "/opt/cp.d", "/opt/cp.d"},
+		{"own config file, other bin dir", configDir + "/" + configFileName, configDir},
+		{"own config directory, other bin dir", configDir, configDir},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newTestEnv(t, modePatch, []string{
@@ -1134,7 +1139,13 @@ func TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt(t *testing.T) {
 			if b.restarts != 0 {
 				t.Fatal("kubelet restarted after a refusal")
 			}
-			assertAbsent(t, b, binDir+"/"+defaultProviderName, configDir+"/"+configFileName, defaultKubeletPath)
+			if got := b.hostFile(t, noneConfig); got != renderedConfigFor(euName) {
+				t.Fatalf("the refused pass changed the config the holder wrote:\n%s", got)
+			}
+			assertAbsent(t, b, binDir+"/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt", defaultKubeletPath)
+			if noneConfig != configDir+"/"+configFileName {
+				assertAbsent(t, b, configDir+"/"+configFileName)
+			}
 		})
 	}
 }
