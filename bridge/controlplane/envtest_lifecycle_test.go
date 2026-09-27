@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,6 +28,7 @@ import (
 // TestEnvtest_Lifecycle runs the reconciler against a real apiserver
 // through a HarborAccess's whole life: create, a deleted Secret rebuilt via
 // the Secret watch, a serviceAccountRef change revoking the old robot, a
+// refusal suspending the robot and its end resuming it (ADR-0030), a
 // rename (a second HarborAccess for the same ServiceAccount takes over when
 // the first is deleted), and deletion revoking every robot before the
 // finalizer is released. It also
@@ -146,6 +148,52 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 	eventually("old robot revoked, new robot present, its password stored", func() bool {
 		return robotNamed(secondRobot) && !robotNamed(firstRobot) && storedMatchesHarbor(secondRobot)
 	})
+
+	// Suspension (ADR-0030): naming another audience disables the robot
+	// and deletes its Secret; restoring the audience rotates the password
+	// while the robot is still disabled, then re-enables it.
+	editSpec := func(key client.ObjectKey, edit func(*harborv1alpha1.HarborAccess)) {
+		t.Helper()
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			got := &harborv1alpha1.HarborAccess{}
+			if err := k8s.Get(ctx, key, got); err != nil {
+				return err
+			}
+			edit(got)
+			return k8s.Update(ctx, got)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	robotState := func(name string) (disabled, suspended, found bool) {
+		mh.mu.Lock()
+		defer mh.mu.Unlock()
+		for _, r := range mh.robots {
+			if r.Name == name {
+				return r.Disabled, RobotSuspended(r.Description), true
+			}
+		}
+		return false, false, false
+	}
+	beforeSuspension := &corev1.Secret{}
+	if err := k8s.Get(ctx, secretKey, beforeSuspension); err != nil {
+		t.Fatal(err)
+	}
+	editSpec(client.ObjectKeyFromObject(ha), func(h *harborv1alpha1.HarborAccess) { h.Spec.TrustPolicy.Audience = "another-bridge" })
+	eventually("robot suspended, its Secret deleted", func() bool {
+		disabled, suspended, found := robotState(secondRobot)
+		return found && disabled && suspended && apierrors.IsNotFound(k8s.Get(ctx, secretKey, &corev1.Secret{}))
+	})
+	editSpec(client.ObjectKeyFromObject(ha), func(h *harborv1alpha1.HarborAccess) { h.Spec.TrustPolicy.Audience = testReconcilerConfig().Audience })
+	eventually("robot resumed with a new password, stored", func() bool {
+		disabled, suspended, found := robotState(secondRobot)
+		s := &corev1.Secret{}
+		return found && !disabled && !suspended && storedMatchesHarbor(secondRobot) &&
+			k8s.Get(ctx, secretKey, s) == nil && string(s.Data["password"]) != string(beforeSuspension.Data["password"])
+	})
+	if err := k8s.Get(ctx, client.ObjectKeyFromObject(ha), cur); err != nil {
+		t.Fatal(err)
+	}
 
 	// Rename: a second HarborAccess for the same ServiceAccount is refused
 	// while the first owns the robot, and takes over once the first is
