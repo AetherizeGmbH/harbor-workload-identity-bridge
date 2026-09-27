@@ -4,12 +4,19 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane"
@@ -307,5 +314,66 @@ func TestShutdownBudget(t *testing.T) {
 	if left := *opts.GracefulShutdownTimeout - sc.ShutdownDelay - sc.ShutdownTimeout; left < leaderStopBudget {
 		t.Errorf("the longest shutdown delay (%s) and the listener's shutdown (%s) leave %s of %s for the reconciler and the janitor, want at least %s",
 			sc.ShutdownDelay, sc.ShutdownTimeout, left, *opts.GracefulShutdownTimeout, leaderStopBudget)
+	}
+}
+
+// TestNewHarborClient_ReadsRotatedAdminCredentials: the operator rotates
+// the Harbor admin password (or the system robot's secret) and updates the
+// mounted Secret; the next Harbor call must carry the new password without
+// a restart. It used to be read once at startup, so every call failed with
+// 401 and HarborAccess deletions hung in DeletionBlocked until the pods
+// were restarted by hand.
+func TestNewHarborClient_ReadsRotatedAdminCredentials(t *testing.T) {
+	var mu sync.Mutex
+	var auth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auth = append(auth, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(srv.Close)
+	harborURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	write := func(key, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, key), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("username", "admin")
+	write("password", "before")
+
+	c, err := newHarborClient(&controlplane.Config{HarborURL: harborURL, HarborAdminDir: dir}, logr.Discard())
+	if err != nil {
+		t.Fatalf("newHarborClient: %v", err)
+	}
+	if _, err := c.List(context.Background()); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	write("password", "after")
+	if _, err := c.List(context.Background()); err != nil {
+		t.Fatalf("List after rotation: %v", err)
+	}
+
+	basic := func(p string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:"+p)) }
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auth) != 2 || auth[0] != basic("before") || auth[1] != basic("after") {
+		t.Fatalf("Authorization headers = %q, want %q", auth, []string{basic("before"), basic("after")})
+	}
+}
+
+func TestNewHarborClient_FailsWithoutAdminCredentials(t *testing.T) {
+	harborURL, err := url.Parse("https://harbor.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newHarborClient(&controlplane.Config{HarborURL: harborURL, HarborAdminDir: t.TempDir()}, logr.Discard()); err == nil {
+		t.Fatal("newHarborClient succeeded with an empty admin directory")
 	}
 }

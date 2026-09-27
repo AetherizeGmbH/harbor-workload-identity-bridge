@@ -158,19 +158,10 @@ func run() error {
 		return fmt.Errorf("add healthz: %w", err)
 	}
 
-	// Step 4: load Harbor admin credentials and build the Harbor client.
-	adminCreds, err := cfg.LoadAdminCreds()
+	// Step 4: build the Harbor client.
+	harborClient, err := newHarborClient(cfg, logger.WithName("harbor-credentials"))
 	if err != nil {
-		return fmt.Errorf("load admin creds: %w", err)
-	}
-	harborTransport, err := harbor.NewTransport(cfg.HarborCAFile)
-	if err != nil {
-		return fmt.Errorf("build harbor transport: %w", err)
-	}
-	harborClient, err := harbor.NewClient(cfg.HarborURL, adminCreds.Username, adminCreds.Password, harborTransport,
-		harbor.WithRobotPrefix(cfg.HarborRobotPrefix))
-	if err != nil {
-		return fmt.Errorf("build harbor client: %w", err)
+		return err
 	}
 
 	// Step 5: instantiate Reconciler and register with the manager.
@@ -278,6 +269,29 @@ func serverConfig(handler http.Handler, shutdownDelay time.Duration) dataplane.S
 		ShutdownDelay:   shutdownDelay,
 		ShutdownTimeout: serverShutdownTimeout,
 	}
+}
+
+// newHarborClient builds the Harbor client. It reads the admin credentials
+// from BRIDGE_HARBOR_ADMIN_DIR on every Harbor call, so a rotated Secret
+// takes effect without a restart; reading them once here fails startup on
+// a missing or empty file.
+func newHarborClient(cfg *controlplane.Config, log logr.Logger) (harbor.Client, error) {
+	adminCreds := controlplane.NewAdminCredsReader(cfg, log)
+	username, password, err := adminCreds.Read()
+	if err != nil {
+		return nil, fmt.Errorf("load admin creds: %w", err)
+	}
+	transport, err := harbor.NewTransport(cfg.HarborCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("build harbor transport: %w", err)
+	}
+	c, err := harbor.NewClient(cfg.HarborURL, username, password, transport,
+		harbor.WithRobotPrefix(cfg.HarborRobotPrefix),
+		harbor.WithCredentialSource(adminCreds.Read))
+	if err != nil {
+		return nil, fmt.Errorf("build harbor client: %w", err)
+	}
+	return c, nil
 }
 
 // managerOptions builds the controller-runtime Manager's options.

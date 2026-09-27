@@ -440,7 +440,7 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 - **Permission-edit blip**: between a `spec.permissions` edit and the next reconcile, the data plane could mint credentials for permissions the in-Harbor robot doesn't yet have. Harbor's `/service/token` will issue a JWT that doesn't include the not-yet-granted scope; containerd's pull fails with 403 until reconcile catches up. Operator-perceptible blip; acceptable.
 - **Janitor at scale**: lists all Harbor robots on each sweep. O(robots) per 5min. Fine for hundreds, marginal for thousands; consider Harbor query-param filter if it becomes a problem.
 - **CRD validation tests**: the CRD CEL/pattern markers are not round-tripped through a real apiserver. Add envtest-based validation tests in Phase 6 polish.
-- **`controlplane.Config.LoadAdminCreds` reload**: credentials load once at startup. If admin creds rotate, the bridge needs a restart. cert-manager pattern (pod restarts on Secret change) covers this — chart concern.
+- ~~**`controlplane.Config.LoadAdminCreds` reload**: credentials load once at startup. If admin creds rotate, the bridge needs a restart. cert-manager pattern (pod restarts on Secret change) covers this — chart concern.~~ Resolved: nothing restarted the pods on a Secret change (the chart cannot hash a Secret it does not own). The Harbor client now reads the credentials from `BRIDGE_HARBOR_ADMIN_DIR` on every call (`controlplane.AdminCredsReader`, both keys from one `..data` version of the volume).
 
 ## Open questions
 
