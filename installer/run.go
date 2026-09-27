@@ -157,6 +157,9 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON); err != nil {
+		return err
+	}
 	logf("mode none: files installed (config changed: %v); kubelet wiring is the operator's responsibility", changed)
 	return nil
 }
@@ -192,6 +195,9 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	}
 	configChanged, err := writeFileAtomic(cfg.hostPath(configPath), desiredConfig, 0o644)
 	if err != nil {
+		return err
+	}
+	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON); err != nil {
 		return err
 	}
 	envChanged, err := writeFileAtomic(cfg.hostPath(defaultKubeletPath), desiredEnv, 0o644)
@@ -395,10 +401,13 @@ func ownConfig(cfg *config, rendered []byte, entry map[string]any) ([]byte, erro
 // provider name, whose binary is an executable regular file in
 // plugin.hostBinaryDir and whose record there (entryRecord) holds the
 // entry's canonical bytes. No writer of plugin.hostConfigDir can write
-// that directory (loadConfig refuses overlapping directories), and every
-// installer writes its record and its binary before its entry, so the
-// entry of another install always passes, while a planted entry, or
-// another install's entry changed in the file, never does.
+// that directory (loadConfig refuses overlapping directories). Every
+// installer adds its entry to its record and writes its binary before it
+// writes the entry, and drops an earlier entry from the record only after
+// the config holds the new one, so the entry another install has in the
+// file passes, also after that install's pass died halfway, while a
+// planted entry, or another install's entry changed in the file into
+// anything that install did not write, never does.
 func (c *config) siblingEntry(entry map[string]any) bool {
 	name, ok := entry["name"].(string)
 	if !ok || name == c.ProviderName || validProviderName(name) != nil || !isBridgeProvider(entry) {
@@ -408,12 +417,8 @@ func (c *config) siblingEntry(entry map[string]any) bool {
 	if !isExecutableHostFile(c.hostPath(filepath.Join(c.HostBinDir, files.Binary))) {
 		return false
 	}
-	record, err := readHostFile(c.hostPath(filepath.Join(c.HostBinDir, files.Record)))
-	if err != nil {
-		return false
-	}
 	got, err := entryBytes(entry)
-	return err == nil && bytes.Equal(got, record)
+	return err == nil && c.readRecord(filepath.Join(c.HostBinDir, files.Record)).holds(got)
 }
 
 // runMerge injects our provider entry into the node's existing
@@ -454,6 +459,9 @@ func runMerge(cfg *config, entry map[string]any, wiring kubeletWiring) error {
 	}
 	written, err := writeFileAtomic(cfg.hostPath(wiring.ConfigFile), merged, 0o644)
 	if err != nil {
+		return err
+	}
+	if err := cfg.commitRecord(wiring.BinDir, entryJSON); err != nil {
 		return err
 	}
 	if mergeChanged {
@@ -547,23 +555,18 @@ func installFiles(cfg *config, binDir string, entryJSON []byte) error {
 	return installPluginBinary(cfg, binDir, entryJSON)
 }
 
-// installPluginBinary writes this install's record (entryRecord) and then
-// copies the plugin into binDir (a node path) under the provider name,
-// which is the file kubelet runs for the entry. The record comes first: a
-// pass interrupted between the two leaves a binary that the next pass
-// still recognises as its own (checkBinaryOwnership), whatever version it
-// then installs.
-//
-// entryRecord: <binDir>/<name>.entry holds entryJSON, the canonical bytes
-// of the entry this pass writes into kubelet's config. It lives next to
-// the binary, where no writer of plugin.hostConfigDir can write, and is
-// what siblingEntry compares another install's entry with and what
-// checkBinaryOwnership takes as proof that <binDir>/<name> is this
-// install's.
+// installPluginBinary adds entryJSON, the canonical bytes of the entry this
+// pass writes into kubelet's config, to this install's record
+// (entryRecord, beginRecord) and then copies the plugin into binDir (a
+// node path) under the provider name, which is the file kubelet runs for
+// the entry. The record comes first: a pass interrupted between the two
+// leaves a binary that the next pass still recognises as its own
+// (checkBinaryOwnership), whatever version it then installs. The caller
+// reduces the record to entryJSON once the config holds it
+// (commitRecord).
 func installPluginBinary(cfg *config, binDir string, entryJSON []byte) error {
 	files := cfg.files()
-	record := filepath.Join(binDir, files.Record)
-	if _, err := writeFileAtomic(cfg.hostPath(record), entryJSON, recordFileMode); err != nil {
+	if err := cfg.beginRecord(binDir, entryJSON); err != nil {
 		return err
 	}
 	dst := filepath.Join(binDir, files.Binary)

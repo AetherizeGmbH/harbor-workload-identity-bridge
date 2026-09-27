@@ -126,11 +126,25 @@ func writeSiblingFiles(t *testing.T, env *testEnv, name string) {
 	if err := os.Chmod(env.cfg.hostPath(filepath.Join(binDir, name)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	record, err := entryBytes(mustEntry(t, renderedConfigFor(name), name))
+	writeHostFile(t, env, filepath.Join(binDir, filesFor(name).Record), recordOf(t, mustEntry(t, renderedConfigFor(name), name)))
+}
+
+// recordOf is the record (entryRecord) of an install that holds entries.
+func recordOf(t *testing.T, entries ...map[string]any) string {
+	t.Helper()
+	var r entryRecord
+	for _, e := range entries {
+		raw, err := entryBytes(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Entries = append(r.Entries, raw)
+	}
+	out, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeHostFile(t, env, filepath.Join(binDir, filesFor(name).Record), string(record))
+	return string(out)
 }
 
 func assertAbsent(t *testing.T, env *testEnv, nodePaths ...string) {
@@ -892,16 +906,13 @@ func TestSiblingEntry(t *testing.T) {
 	eu := mustEntry(t, renderedConfigFor(euName), euName)
 	euBin := env.cfg.hostPath(binDir + "/" + euName)
 	euRecord := binDir + "/" + filesFor(euName).Record
-	record, err := entryBytes(eu)
-	if err != nil {
-		t.Fatal(err)
-	}
+	record := recordOf(t, eu)
 
 	if env.cfg.siblingEntry(eu) {
 		t.Fatal("an entry without a binary counts")
 	}
 	writeHostFile(t, env, binDir+"/"+euName, "ELF-fake-plugin")
-	writeHostFile(t, env, euRecord, string(record))
+	writeHostFile(t, env, euRecord, record)
 	if env.cfg.siblingEntry(eu) {
 		t.Fatal("an entry whose binary kubelet cannot execute counts")
 	}
@@ -922,13 +933,36 @@ func TestSiblingEntry(t *testing.T) {
 		t.Fatal("an entry without a record counts")
 	}
 	changed := mustEntry(t, strings.Replace(renderedConfigFor(euName), "127.0.0.1:31444", "203.0.113.7:443", 1), euName)
-	writeHostFile(t, env, euRecord, string(record))
+	writeHostFile(t, env, euRecord, record)
 	if env.cfg.siblingEntry(changed) {
 		t.Fatal("an entry that differs from its record counts")
 	}
+	// A pass that died between its record and its config holds the entry
+	// in the config and the one it meant to write: both count.
+	upgraded := mustEntry(t, strings.Replace(renderedConfigFor(euName), "31444", "31445", 1), euName)
+	writeHostFile(t, env, euRecord, recordOf(t, eu, upgraded))
+	if !env.cfg.siblingEntry(eu) || !env.cfg.siblingEntry(upgraded) {
+		t.Fatal("an entry of a record with two entries does not count")
+	}
+	if env.cfg.siblingEntry(changed) {
+		t.Fatal("an entry that is in neither of the record's entries counts")
+	}
+	// A record that is not an installer's record vouches for nothing: the
+	// bare entry, or something that does not parse.
+	raw, err := entryBytes(eu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{string(raw), "{nope", `{"entries":"x"}`} {
+		writeHostFile(t, env, euRecord, bad)
+		if env.cfg.siblingEntry(eu) {
+			t.Fatalf("an entry counts under the record %q", bad)
+		}
+	}
+	writeHostFile(t, env, euRecord, record)
 	// A symlinked record, even to the right content, is not a record an
 	// installer wrote.
-	writeHostFile(t, env, "/tmp/record", string(record))
+	writeHostFile(t, env, "/tmp/record", record)
 	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +975,7 @@ func TestSiblingEntry(t *testing.T) {
 	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
 		t.Fatal(err)
 	}
-	writeHostFile(t, env, euRecord, string(record))
+	writeHostFile(t, env, euRecord, record)
 
 	noBridge := map[string]any{}
 	for k, v := range eu {
@@ -1507,14 +1541,84 @@ func TestRun_RecordHoldsTheEntry(t *testing.T) {
 				t.Fatalf("record mode = %v, want -rw-------", fi.Mode())
 			}
 			byName, _ := providersIn(t, env, configDir+"/"+configFileName)
-			want, err := entryBytes(byName[name].(map[string]any))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := env.hostFile(t, recordPath); got != string(want) {
+			if got, want := env.hostFile(t, recordPath), recordOf(t, byName[name].(map[string]any)); got != want {
 				t.Fatalf("record = %s, want the entry in the config %s", got, want)
 			}
 		})
+	}
+}
+
+// TestEntryRecord_RoundTripsEveryEntry: a record holds an entry's canonical
+// bytes exactly, also for characters that JSON encoders escape.
+func TestEntryRecord_RoundTripsEveryEntry(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	entry := mustEntry(t, renderedConfig, defaultProviderName)
+	entry["args"] = []any{"<a&b>", "line sep ", `quote " and \ backslash`, "ü"}
+	raw, err := entryBytes(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.cfg.beginRecord(binDir, raw); err != nil {
+		t.Fatal(err)
+	}
+	if !env.cfg.readRecord(binDir + "/" + filesFor(defaultProviderName).Record).holds(raw) {
+		t.Fatalf("the record does not hold %s", raw)
+	}
+}
+
+// TestRun_InterruptedSiblingPassKeepsItsLiveEntry: another install's pass
+// that changes its entry and dies after its record, before its config
+// write, must not make the next installer drop that install's entry, which
+// is still the one in the file, and restart kubelet without it.
+func TestRun_InterruptedSiblingPassKeepsItsLiveEntry(t *testing.T) {
+	configPath := configDir + "/" + configFileName
+	a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	b := newSiblingEnv(t, a, modePatch, euName)
+	for _, env := range []*testEnv{a, b} {
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, order := providersIn(t, a, configPath)
+
+	// helm upgrade of the second install; its pass fails at the binary,
+	// after its record and before its config.
+	upgraded := strings.Replace(renderedConfigFor(euName), "31444", "31445", 1)
+	if err := os.WriteFile(b.cfg.SourceConfig, []byte(upgraded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plugin := b.cfg.SourcePlugin
+	b.cfg.SourcePlugin = plugin + ".missing"
+	if err := run(b.cfg); err == nil {
+		t.Fatal("the second install's pass succeeded without its plugin")
+	}
+	if !reflect.DeepEqual(func() map[string]any { m, _ := providersIn(t, a, configPath); return m }(), before) {
+		t.Fatal("precondition: the failed pass changed the config")
+	}
+
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, afterOrder := providersIn(t, a, configPath)
+	if !reflect.DeepEqual(afterOrder, order) || !reflect.DeepEqual(after, before) {
+		t.Fatalf("providers = %v, want %v unchanged", afterOrder, order)
+	}
+	if a.restarts != 1 {
+		t.Fatalf("restarts = %d, want 1: nothing of the first install changed", a.restarts)
+	}
+
+	// The second install's next pass lands its entry and keeps only it in
+	// its record.
+	b.cfg.SourcePlugin = plugin
+	if err := run(b.cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = providersIn(t, a, configPath)
+	if !reflect.DeepEqual(after[euName], renderedEntry(t, b)) {
+		t.Fatal("the second install's entry was not updated")
+	}
+	if got, want := a.hostFile(t, binDir+"/"+filesFor(euName).Record), recordOf(t, renderedEntry(t, b)); got != want {
+		t.Fatalf("record = %s, want only the entry in the config %s", got, want)
 	}
 }
 

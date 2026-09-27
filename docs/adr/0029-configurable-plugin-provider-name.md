@@ -101,16 +101,24 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      round-trips (`map[string]any`, ADR-0021). An existing entry of this
      name that is not a bridge entry (no `HARBOR_BRIDGE_ENDPOINT` env) is
      never replaced.
-   - Every pass writes a record `<bin-dir>/<name>.entry` next to the
-     binary, before the binary and before the entry: the canonical bytes
-     of the entry it is about to write (JSON with sorted keys). The name
-     has a dot, so it is never a provider name; the file has mode `0600`
-     (only the root installers read it) and no execute bit, so kubelet
-     cannot run it even under a planted entry of that name. The bin dir is
-     the one directory the installers write that no writer of
-     `plugin.hostConfigDir` reaches (next bullet but one); the sync
-     container never mounts it. The record ties another install's entry
-     and this install's binary to content only an installer writes.
+   - Every pass keeps a record `<bin-dir>/<name>.entry` next to the
+     binary: a JSON object whose `entries` hold the canonical bytes of
+     the entries (JSON with sorted keys) this install may have in the
+     config. The record and the config are two files that no pass can
+     replace together, so a pass first adds the entry it is about to
+     write to the entries the record holds, then writes the binary and
+     the entry, and only then reduces the record to that entry. A pass
+     that dies in between, after a helm upgrade changed its entry, leaves
+     both the entry still in the config and the new one in its record,
+     and the other installs keep whichever the config holds until this
+     install's next pass. The name has a dot, so it is never a provider
+     name; the file has mode `0600` (only the root installers read it)
+     and no execute bit, so kubelet cannot run it even under a planted
+     entry of that name. The bin dir is the one directory the installers
+     write that no writer of `plugin.hostConfigDir` reaches (next bullet
+     but one); the sync container never mounts it. The record ties
+     another install's entry and this install's binary to content only an
+     installer writes.
    - Patch and none mode keep the chart-owned config
      (`<plugin.hostConfigDir>/credential-provider-config.yaml`)
      authoritative. That directory is writable by the sync container of
@@ -122,8 +130,9 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      installs, in place: bridge entries with a valid provider name whose
      binary is an executable regular file in `plugin.hostBinaryDir` and
      whose record there holds exactly the entry's canonical bytes (another
-     install writes its record and binary before its entry). An entry that
-     differs from its record, or has none, is dropped, also when a binary
+     install adds its entry to its record and writes its binary before
+     the entry). An entry that matches none of its record's entries, or
+     has no record, is dropped, also when a binary
      of its name is there (an uninstalled release leaves its binary, and
      any program in the bin dir is executable). This install's entry is
      replaced whatever it holds; every other entry, a repeated name and
@@ -271,7 +280,11 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   another install's entry from the chart-owned config (delete it, change
   it so that the next pass drops it, or make the file unparsable), which
   lasts until that install's next pass, usually its next pod start: a
-  denial of service against that install's pulls. And kubelet reads the
+  denial of service against that install's pulls. After a pass of another
+  install died between its record and its config, until that install's
+  next pass, the writer can also switch that install's entry between the
+  one in the file and the one the pass meant to write: both are entries
+  that install's installer wrote. And kubelet reads the
   file as it is at its own start, before any installer runs: a node
   reboot makes whatever the file holds then live until the next pass, as
   before this ADR. An install in auto mode that merges into another
