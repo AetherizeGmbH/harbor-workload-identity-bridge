@@ -1,5 +1,5 @@
-// Run by hack/check-release-notes.sh from a directory holding the pinned
-// plugins. Feeds a fixed set of commits through the commit analyzer and
+// Run by hack/check-release-notes.sh after `npm ci` in the repo root, so
+// the plugins resolve from the pinned node_modules. Feeds a fixed set of commits through the commit analyzer and
 // the release-notes generator configured in .releaserc.json and fails
 // when a release type or a notes section is missing.
 import { readFileSync } from 'node:fs';

@@ -199,7 +199,7 @@ fuzz: ## Run every fuzz target for FUZZTIME each (default 10s); plain `go test` 
 	done
 
 .PHONY: verify-release-notes
-verify-release-notes: ## Prove the semantic-release plugins pinned in release.yml render release notes (needs npm)
+verify-release-notes: ## Prove the semantic-release plugins pinned in package-lock.json render release notes (needs npm)
 	./hack/check-release-notes.sh
 
 .PHONY: verify-plugin-isolation

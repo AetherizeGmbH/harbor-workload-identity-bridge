@@ -30,7 +30,7 @@ jobs:
     # no head_commit, so manual runs fall through the guard.
     if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):') }}
     outputs:
-      # cycjimmy/semantic-release-action sets these — npx semantic-release alone does not.
+      # hack/release.mjs sets these; the bare semantic-release CLI does not.
       released: ${{ steps.semrel.outputs.new_release_published }}
       version:  ${{ steps.semrel.outputs.new_release_version }}
     steps:
@@ -56,38 +56,25 @@ jobs:
         with: { node-version: 22 }
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.3.0 }  # semantic-release prepareCmd regenerates chart goldens
-      # cycjimmy/semantic-release-action exposes `new_release_published`
-      # and `new_release_version` as step outputs — the bare `npx
-      # semantic-release` does not, which silently broke our downstream
-      # dispatch (chart-release + release-images) for v0.0.0–v0.0.5.
-      - uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+      # semantic-release and its plugins come from package-lock.json: exact
+      # versions, integrity hashes, and the same install that `make
+      # verify-release-notes` (test.yml) exercises on every PR. Floating
+      # versions broke a release before: on 2026-09-22 a MINOR bump of
+      # conventional-changelog-conventionalcommits (10.4.0) required
+      # conventional-changelog-writer@9, which semantic-release 25's
+      # release-notes-generator@14 does not ship. conventionalcommits stays
+      # on 9.x (renovate.json holds it there). --ignore-scripts: no install
+      # hook runs in the job that holds the App token.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: semantic-release
         id: semrel
-        with:
-          semantic_version: 25
-          # Exact pins. Floating these broke the release on 2026-09-22:
-          # conventional-changelog-conventionalcommits 10.4.0 (a MINOR
-          # bump) started requiring conventional-changelog-writer@9, but
-          # semantic-release 24's (and 25's) release-notes-generator@14 ships
-          # writer@8 ("Missing helper: conventional-changelog-
-          # conventionalcommits requires conventional-changelog-writer@9").
-          # conventionalcommits stays on 9.x, the version
-          # release-notes-generator@14 is tested against: 10.x moved its
-          # templates to @conventional-changelog/template, and writer@8
-          # rendered every release from 0.3.2 to 0.4.0 with an empty body.
-          # `make verify-release-notes` (test.yml) proves on every PR that
-          # these pins render notes; Renovate tracks them via the
-          # release.yml custom manager and never automerges them.
-          extra_plugins: |
-            @semantic-release/changelog@7.0.0
-            @semantic-release/git@11.0.1
-            @semantic-release/exec@7.1.0
-            conventional-changelog-conventionalcommits@9.3.1
         env:
           # App token (not GITHUB_TOKEN): semantic-release uses GH_TOKEN/
           # GITHUB_TOKEN both for the GitHub API and to build the
           # authenticated push URL, so this routes the bypass-eligible
           # App identity through the `git push` to main.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: node hack/release.mjs
 
   # release-images.yml and release-chart.yml are dispatched explicitly from
   # here, gated on a real release (released == 'true') so each fires exactly

@@ -22,7 +22,7 @@
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": true,
-    "automergeType": "branch"
+    "automergeType": "pr"
   },
   "packageRules": [
     {
@@ -86,15 +86,15 @@
       "groupName": "kind"
     },
     {
-      "description": "semantic-release plugins (release.yml extra_plugins): never automerge. The release job only runs on main, so no PR check exercises them; a floating conventionalcommits minor already broke one release.",
-      "matchManagers": ["custom.regex"],
-      "matchDatasources": ["npm"],
+      "description": "semantic-release and its plugins (package.json): never automerge. The release job only runs on main, so no PR check exercises the publish path; a floating conventionalcommits minor already broke one release. `make verify-release-notes` covers analyze + notes on the PR.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["semantic-release", "@semantic-release/*", "conventional-changelog-*"],
       "automerge": false,
       "addLabels": ["release-tooling"]
     },
     {
       "description": "conventional-changelog-conventionalcommits 10.x renders empty release notes with semantic-release 24 and 25 (both bundle release-notes-generator 14, which ships conventional-changelog-writer 8). Hold it on 9.x until semantic-release moves to writer 9; `make verify-release-notes` proves any bump.",
-      "matchManagers": ["custom.regex"],
+      "matchManagers": ["npm"],
       "matchPackageNames": ["conventional-changelog-conventionalcommits"],
       "allowedVersions": "<10"
     },
@@ -121,15 +121,6 @@
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+?)(?:\\s+versioning=(?<versioning>\\S+))?(?:\\s+registryUrl=(?<registryUrl>\\S+))?\\s*\\n\\s*[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\"(?:[^\"\\n]*:)?(?<currentValue>[^\":\\n]+)\""
       ]
-    },
-    {
-      "description": "semantic-release extra_plugins in release.yml are `name@version` lines no native manager sees. Exact-pinned since a floating minor broke the release (see the release.yml comment).",
-      "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/release\\.yml$/"],
-      "matchStrings": [
-        "\\s(?<depName>@semantic-release/[a-z-]+|conventional-changelog-[a-z-]+)@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
-      ],
-      "datasourceTemplate": "npm"
     },
     {
       "description": "Tool versions in workflow `with:` inputs (e.g. helm/kind-action's `version`). Annotate the input with a `# renovate:` comment on the line directly above it.",
