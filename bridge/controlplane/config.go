@@ -252,7 +252,7 @@ func LoadFromEnv() (*Config, error) {
 		// Optional — when set, must still parse as a URL with a scheme
 		// and host. Same shape as the other URL knobs. Unlike them it may
 		// carry user:password@: net/http sends that as Basic auth to the
-		// JWKS endpoint. It is redacted wherever the URL is printed.
+		// JWKS endpoint. Sanitized() hides the whole part (redactURL).
 		if v, err := requireURL(raw, EnvOIDCJWKSURL); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -279,7 +279,7 @@ func LoadFromEnv() (*Config, error) {
 		// scheme, host and path); they would only end up in logs.
 		errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): the bridge ignores them and authenticates to Harbor with the credentials in %s (chart harbor.adminCredsSecret)", EnvHarborURL, EnvHarborAdminDir))
 	} else if v.Scheme == "http" && !cfg.HarborAllowHTTP {
-		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, v.Redacted(), EnvHarborCAFile, EnvHarborAllowHTTP))
+		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, redactURL(v), EnvHarborCAFile, EnvHarborAllowHTTP))
 	} else {
 		cfg.HarborURL = v
 	}
@@ -363,16 +363,29 @@ func LoadFromEnv() (*Config, error) {
 }
 
 // requireURL parses an http(s) URL setting. Its errors never repeat the
-// value: it may carry user:password@, and a value without a scheme
-// ("user:password@host") parses with the password in the opaque part,
-// which url.URL.Redacted does not hide.
+// value or any part of it that could hold a credential: the value may
+// carry user:password@, and a malformed one leaks it in ways
+// url.URL.Redacted does not hide:
+//
+//   - without a scheme ("user:password@host") the user name parses as the
+//     scheme and the password lands in the opaque part;
+//   - a '/', '?' or '#' inside the password ends the host part early, so
+//     the parser quotes the password's start as an invalid port
+//     ("https://admin:s3cr/et@host": invalid port ":s3cr"), or, when that
+//     start is all digits, accepts host "admin:1234" and keeps the rest of
+//     the password in the path.
 func requireURL(raw, name string) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, fmt.Errorf("%s is required", name)
 	}
+	hasAt := strings.Contains(raw, "@")
 	u, err := url.Parse(raw)
 	if err != nil {
+		if hasAt {
+			return nil, fmt.Errorf("%s is not a valid URL (the parser's reason is left out because the value contains '@' "+
+				"and the reason could quote a credential); percent-encode any '/', '?', '#' or '@' inside a user:password@ part", name)
+		}
 		// *url.Error repeats the whole input; keep only the cause.
 		var uerr *url.Error
 		if errors.As(err, &uerr) {
@@ -381,24 +394,50 @@ func requireURL(raw, name string) (*url.URL, error) {
 		return nil, fmt.Errorf("%s is not a valid URL: %w", name, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
+		if hasAt {
+			return nil, fmt.Errorf("%s must use http or https scheme", name)
+		}
 		return nil, fmt.Errorf("%s must use http or https scheme (got scheme %q)", name, u.Scheme)
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("%s must include a host", name)
 	}
+	// Only a literal '@': one written as %40 cannot have come from a
+	// user:password@ part.
+	if strings.Contains(u.EscapedPath()+u.RawQuery+u.EscapedFragment(), "@") {
+		return nil, fmt.Errorf("%s has an '@' after its host part: a '/', '?' or '#' inside a user:password@ part ends the host early, "+
+			"so percent-encode them, and write an '@' that belongs to the path, query or fragment as %%40 "+
+			"(the value is left out because it could hold a credential)", name)
+	}
 	return u, nil
+}
+
+// redactURL renders u for logs and error messages with its whole
+// user:password@ part replaced. url.URL.Redacted hides only a password,
+// so a credential given as the user name alone (https://TOKEN@host,
+// which net/http sends as Basic auth "TOKEN:") would be printed in full.
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.User == nil {
+		return u.String()
+	}
+	c := *u
+	c.User = url.User("xxxxx")
+	return c.String()
 }
 
 // Sanitized returns a representation of the Config suitable for startup
 // logging. Admin credentials are deliberately excluded; only the path to the
-// secret mount is included. URLs are redacted: a password in one
-// (BRIDGE_OIDC_JWKS_URL may carry one) is replaced by "xxxxx".
+// secret mount is included. URLs are redacted: the user:password@ part
+// of one (only BRIDGE_OIDC_JWKS_URL may carry it) is replaced by "xxxxx".
 func (c *Config) Sanitized() map[string]string {
 	out := map[string]string{
 		EnvClusterName:          c.ClusterName,
 		EnvNamespace:            c.Namespace,
-		EnvOIDCIssuer:           c.OIDCIssuer.Redacted(),
-		EnvHarborURL:            c.HarborURL.Redacted(),
+		EnvOIDCIssuer:           redactURL(c.OIDCIssuer),
+		EnvHarborURL:            redactURL(c.HarborURL),
 		EnvHarborAdminDir:       c.HarborAdminDir,
 		EnvHarborRobotPrefix:    c.HarborRobotPrefix,
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
@@ -416,7 +455,7 @@ func (c *Config) Sanitized() map[string]string {
 		out[EnvInstance] = c.Instance
 	}
 	if c.OIDCJWKSURL != nil {
-		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.Redacted()
+		out[EnvOIDCJWKSURL] = redactURL(c.OIDCJWKSURL)
 	}
 	if c.OIDCCAFile != "" {
 		out[EnvOIDCCAFile] = c.OIDCCAFile
