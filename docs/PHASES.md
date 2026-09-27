@@ -218,6 +218,7 @@ Originally-planned section (kept for archaeology):
    - `+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch` — data plane reads bridge-namespace Secrets.
    - `+kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses,verbs=get;list;watch` — data plane lists CRs to route requests.
    - Plus the existing controlplane RBAC. `make manifests` regenerates `config/rbac/`.
+   - *Superseded:* nothing generates RBAC (`make manifests` generates CRDs only). The chart's hand-maintained [bridge-rbac.yaml](../charts/harbor-bridge/templates/bridge-rbac.yaml) is the only source, and the reconciler's markers were removed: the Secrets one named no namespace, so it would have generated a cluster-wide Secret grant (ADR-0011).
 
 **Tests:**
 

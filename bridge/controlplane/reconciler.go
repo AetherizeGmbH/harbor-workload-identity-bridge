@@ -102,10 +102,10 @@ func (r *Reconciler) secretToHarborAccess(_ context.Context, obj client.Object) 
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}}
 }
 
-// +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses,verbs=get;list;watch;patch
-// +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses/status,verbs=update;patch
-// +kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// The bridge's RBAC is hand-maintained in
+// charts/harbor-bridge/templates/bridge-rbac.yaml: Secrets and the
+// leader-election Lease in the bridge namespace only (ADR-0011),
+// HarborAccess cluster-wide. Nothing generates RBAC from markers here.
 
 // Reconcile is the entry point controller-runtime calls per HarborAccess event.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
