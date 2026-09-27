@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -581,8 +582,10 @@ func TestClient_GetByName_UsesExactNameQuery(t *testing.T) {
 	if _, err := c.GetByName(context.Background(), "bridge-a.b.c"); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.queries) != 1 || fake.queries[0] != "name=bridge-a.b.c" {
-		t.Errorf("queries = %q, want exactly [name=bridge-a.b.c]", fake.queries)
+	// The id range rides along from the first page on, so every lookup
+	// exercises Harbor's parsing of name= ANDed with a range.
+	if len(fake.queries) != 1 || fake.queries[0] != "name=bridge-a.b.c,id=[1~]" {
+		t.Errorf("queries = %q, want exactly [name=bridge-a.b.c,id=[1~]]", fake.queries)
 	}
 }
 
@@ -874,8 +877,12 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 	if len(robots) != 150 {
 		t.Errorf("List returned %d robots, want 150", len(robots))
 	}
-	if len(fake.queries) != 1 || fake.queries[0] != fmt.Sprintf("id=[%d~]", robots[99].ID+1) {
-		t.Errorf("queries = %q, want one keyset query for the second page", fake.queries)
+	// The first page carries the range too (id=[1~]): the e2e and
+	// harbor-compat runs never reach a second page, and this way they
+	// still send Harbor the range on every listing.
+	want := []string{"id=[1~]", fmt.Sprintf("id=[%d~]", robots[99].ID+1)}
+	if !slices.Equal(fake.queries, want) {
+		t.Errorf("queries = %q, want %q", fake.queries, want)
 	}
 }
 

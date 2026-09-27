@@ -377,7 +377,7 @@ func (c *goClient) List(ctx context.Context) ([]Robot, error) {
 // list returns every robot matching filter (a Harbor q expression, or "").
 // It pages by keyset, not by offset: each request asks for the first page
 // of robots sorted by ID with an ID above the highest one seen so far
-// (sort=id, q=id=[<last+1>~]).
+// (sort=id, q=id=[<last+1>~]; id=[1~] on the first page).
 //
 // Harbor pages with LIMIT/OFFSET over its default order, the robot name
 // (goharbor/harbor src/lib/orm/query.go QuerySetter, src/pkg/robot/model
@@ -388,19 +388,26 @@ func (c *goClient) List(ctx context.Context) ([]Robot, error) {
 // HarborAccess deletion would then release its finalizer and leave that
 // robot alive with a valid password. IDs only grow, so a deletion cannot
 // move an unseen robot behind the cursor, and a robot created during the
-// walk is listed at most once. Harbor supports both parameters on
-// GET /robots in every version the bridge supports (the id column is
-// sortable and range-filterable: src/lib/orm/metadata.go, src/lib/q
-// parseRange). A server that ignores either shows up as an ID that does
-// not increase, and the listing fails instead of silently missing robots.
+// walk is listed at most once. A server that ignores the sort or the
+// range shows up as an ID that does not increase, and the listing fails
+// instead of silently missing robots.
+//
+// That Harbor honours both parameters on GET /robots is read from its
+// source, not tested against a live Harbor: for v2.9.5, v2.11.2, v2.13.5,
+// v2.15.1 (the harbor-compat matrix) and main, ListRobot passes q and
+// sort to BuildQuery, src/lib/q parseRange accepts "[n~]", and
+// src/lib/orm/metadata.go makes the id column sortable and filterable.
+// The e2e and harbor-compat runs hold fewer robots than one page, so the
+// first page carries the range too (id=[1~], every robot): every listing
+// and every GetByName they make sends the range and its AND with name=,
+// and a Harbor that rejects either syntax fails them. A Harbor that
+// accepts the range but ignores it only shows on a second page, where the
+// ID check stops the listing.
 func (c *goClient) list(ctx context.Context, filter string) ([]Robot, error) {
 	var out []Robot
 	var cursor int64 // highest robot ID seen; Harbor's IDs start at 1
 	for page := 1; page <= maxPages; page++ {
-		q := filter
-		if cursor > 0 {
-			q = joinQuery(filter, fmt.Sprintf("id=[%d~]", cursor+1))
-		}
+		q := joinQuery(filter, fmt.Sprintf("id=[%d~]", cursor+1))
 		resp, err := c.listPage(ctx, q)
 		if err != nil {
 			return nil, wrapHarborOp(fmt.Sprintf("list robots (page %d)", page), err)
@@ -445,10 +452,8 @@ func (c *goClient) listPage(ctx context.Context, q string) (*sdkrobot.ListRobotO
 	params := sdkrobot.NewListRobotParamsWithContext(ctx).
 		WithPage(&page).
 		WithPageSize(&size).
-		WithSort(&sortByID)
-	if q != "" {
-		params = params.WithQ(&q)
-	}
+		WithSort(&sortByID).
+		WithQ(&q)
 	return c.robots.ListRobot(ctx, params)
 }
 
