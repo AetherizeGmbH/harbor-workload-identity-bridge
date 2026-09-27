@@ -24,6 +24,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
@@ -110,6 +111,13 @@ func newTestClaims() *Claims {
 	}
 }
 
+// newFakeClientBuilder is a fake client builder with the cache index the
+// handler lists HarborAccess objects by.
+func newFakeClientBuilder() *fake.ClientBuilder {
+	return fake.NewClientBuilder().WithScheme(handlerTestScheme).
+		WithIndex(&harborv1alpha1.HarborAccess{}, HarborAccessSubjectField, harborAccessSubjectIndex)
+}
+
 // ----------------------------------------------------------------------------
 // Stubs
 // ----------------------------------------------------------------------------
@@ -139,8 +147,7 @@ type handlerFixture struct {
 func newHandlerFixture(t *testing.T, extras ...client.Object) *handlerFixture {
 	t.Helper()
 	objs := append([]client.Object{newTestHA(), newTestRobotSecret()}, extras...)
-	k8s := fake.NewClientBuilder().
-		WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(objs...).
 		Build()
 	validator := &stubValidator{claims: newTestClaims()}
@@ -368,6 +375,48 @@ func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
 	}
 }
 
+// The handler lists only the CRs naming the token's ServiceAccount, from
+// the cache index and without deep-copying them; a plain List copied
+// every HarborAccess on every request, also for tokens matching none.
+func TestFindHarborAccess_ListsByIndexedSubjectWithoutDeepCopy(t *testing.T) {
+	other := newTestHA()
+	other.Name = "other"
+	other.Spec.ServiceAccountRef.Name = "someone-else"
+	var opts client.ListOptions
+	listed := 0
+	k8s := newFakeClientBuilder().WithObjects(newTestHA(), other).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, o ...client.ListOption) error {
+				opts.ApplyOptions(o)
+				err := c.List(ctx, list, o...)
+				if hal, ok := list.(*harborv1alpha1.HarborAccessList); ok {
+					listed = len(hal.Items)
+				}
+				return err
+			},
+		}).Build()
+	h := &Handler{K8sClient: k8s, Config: testHandlerConfig()}
+	matched, _, _, err := h.findHarborAccess(context.Background(), newTestClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched == nil || matched.Name != hTestHAName {
+		t.Fatalf("matched %v, want %s", matched, hTestHAName)
+	}
+	if v, ok := opts.FieldSelector.RequiresExactMatch(HarborAccessSubjectField); opts.FieldSelector == nil || !ok || v != hTestSubject {
+		t.Errorf("listed with field selector %v, want %s=%s", opts.FieldSelector, HarborAccessSubjectField, hTestSubject)
+	}
+	if opts.UnsafeDisableDeepCopy == nil || !*opts.UnsafeDisableDeepCopy {
+		t.Error("listed with deep copies")
+	}
+	if listed != 1 {
+		t.Errorf("%d HarborAccess objects listed, want only the one naming the token's ServiceAccount", listed)
+	}
+	if got := harborAccessSubjectIndex(newTestRobotSecret()); got != nil {
+		t.Errorf("index of a non-HarborAccess = %v, want nil", got)
+	}
+}
+
 func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 	// The CRD enforces MinLength=1 on trustPolicy.{audience,issuer}, but the
 	// data plane must not depend on that (AUDIT.md F13). A CR that somehow
@@ -408,8 +457,7 @@ func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cr := base()
 			tc.mutateCR(cr)
-			k8s := fake.NewClientBuilder().
-				WithScheme(handlerTestScheme).
+			k8s := newFakeClientBuilder().
 				WithObjects(cr).
 				Build()
 			h := &Handler{
@@ -444,7 +492,7 @@ func deletingHA() *harborv1alpha1.HarborAccess {
 // until the finalizer is released.
 func TestHandler_HarborAccessBeingDeleted_NotServed(t *testing.T) {
 	var audit captured
-	k8s := fake.NewClientBuilder().WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(deletingHA(), newTestRobotSecret()).Build()
 	h := &Handler{
 		K8sClient: k8s,
@@ -474,7 +522,7 @@ func TestFindHarborAccess_SkipsHarborAccessBeingDeleted(t *testing.T) {
 	live := newTestHA()
 	live.Name = "zzz-live"
 	h := &Handler{
-		K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(gone, live).Build(),
+		K8sClient: newFakeClientBuilder().WithObjects(gone, live).Build(),
 		Config:    testHandlerConfig(),
 	}
 	matched, _, deleting, err := h.findHarborAccess(context.Background(), newTestClaims())
@@ -498,7 +546,7 @@ func TestHandler_SecretForPreviousIdentity_503(t *testing.T) {
 	claims := newTestClaims()
 	claims.Subject = "system:serviceaccount:team-b:new-sa"
 	h := &Handler{
-		K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).
+		K8sClient: newFakeClientBuilder().
 			WithObjects(ha, newTestRobotSecret()).Build(), // still robot$bridge-prod.flux-system.source-controller
 		Validator: &stubValidator{claims: claims},
 		Config:    testHandlerConfig(),
@@ -536,8 +584,7 @@ func TestHandler_MissingRobotSecret_503(t *testing.T) {
 	// Bridge namespace exists but the Secret is missing — control plane
 	// is mid-rotation or hasn't caught up yet. 503 invites the plugin
 	// to retry.
-	k8s := fake.NewClientBuilder().
-		WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(newTestHA()).
 		Build()
 	h := &Handler{
@@ -566,8 +613,7 @@ func TestHandler_SecretInWrongNamespace_503(t *testing.T) {
 			"password": []byte("attacker-supplied"),
 		},
 	}
-	k8s := fake.NewClientBuilder().
-		WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(newTestHA(), wrongNs).
 		Build()
 	h := &Handler{
@@ -727,7 +773,7 @@ func TestHandler_CacheNeverOutlivesTheRotationPromise(t *testing.T) {
 			if tc.notBefore != "" {
 				sec.Annotations = map[string]string{robotsecret.AnnotationRotationNotBefore: tc.notBefore}
 			}
-			k8s := fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(newTestHA(), sec).Build()
+			k8s := newFakeClientBuilder().WithObjects(newTestHA(), sec).Build()
 			h := &Handler{
 				K8sClient: k8s,
 				Validator: &stubValidator{claims: newTestClaims()},
@@ -796,8 +842,7 @@ func TestHandler_ForeignAudienceCR_NotServed(t *testing.T) {
 	ha.Spec.TrustPolicy.Audience = foreign
 	claims := newTestClaims()
 	claims.Audience = []string{foreign}
-	k8s := fake.NewClientBuilder().
-		WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(ha, newTestRobotSecret()).
 		Build()
 	h := &Handler{
@@ -813,8 +858,7 @@ func TestHandler_ForeignAudienceCR_NotServed(t *testing.T) {
 }
 
 func TestHandler_UnsetAudienceServesNothing(t *testing.T) {
-	k8s := fake.NewClientBuilder().
-		WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(newTestHA(), newTestRobotSecret()).
 		Build()
 	h := &Handler{
@@ -833,8 +877,7 @@ func TestHandler_UnsetAudienceServesNothing(t *testing.T) {
 func TestHandler_UnmanagedSecret_NotServed(t *testing.T) {
 	unmanaged := newTestRobotSecret()
 	unmanaged.Labels = nil
-	k8s := fake.NewClientBuilder().
-		WithScheme(handlerTestScheme).
+	k8s := newFakeClientBuilder().
 		WithObjects(newTestHA(), unmanaged).
 		Build()
 	h := &Handler{
@@ -873,7 +916,7 @@ func TestHandler_TokenPolicyDenialsAreAuditedByCategory(t *testing.T) {
 			reg := prometheus.NewRegistry()
 			var audit captured
 			h := &Handler{
-				K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(ha, newTestRobotSecret()).Build(),
+				K8sClient: newFakeClientBuilder().WithObjects(ha, newTestRobotSecret()).Build(),
 				Validator: newValidatorFor(t, fi),
 				Config:    testHandlerConfig(),
 				Metrics:   NewMetrics(reg),

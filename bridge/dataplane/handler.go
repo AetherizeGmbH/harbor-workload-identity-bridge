@@ -437,8 +437,16 @@ func (h *Handler) recordOIDCFailure(category string) {
 // robot than intended. We therefore pick the namespace/name-sorted first
 // match and log the ambiguity so an operator can resolve it.
 func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched *harborv1alpha1.HarborAccess, audience string, deleting *harborv1alpha1.HarborAccess, err error) {
+	// Only the CRs naming the token's ServiceAccount, through the cache's
+	// index, and without the deep copy of each: the handler never mutates
+	// a listed object (they share maps and slices with the informer
+	// cache; keep it that way). A full List copied every HarborAccess on
+	// every request, also for tokens that match none.
 	var list harborv1alpha1.HarborAccessList
-	if err := h.K8sClient.List(ctx, &list); err != nil {
+	if err := h.K8sClient.List(ctx, &list,
+		client.MatchingFields{HarborAccessSubjectField: claims.Subject},
+		client.UnsafeDisableDeepCopy,
+	); err != nil {
 		return nil, "", nil, fmt.Errorf("list HarborAccess: %w", err)
 	}
 	type match struct {
@@ -465,8 +473,9 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 		if ha.Spec.TrustPolicy.Audience != h.Config.Audience {
 			continue
 		}
-		expectedSub := "system:serviceaccount:" + ha.Spec.ServiceAccountRef.Namespace + ":" + ha.Spec.ServiceAccountRef.Name
-		if expectedSub != claims.Subject {
+		// The index already selected on this; kept so the match never
+		// depends on how the list was filtered.
+		if harborAccessSubject(ha) != claims.Subject {
 			continue
 		}
 		// Defense-in-depth (AUDIT.md F5): the Validator already pins iss to
@@ -534,6 +543,32 @@ func specError(ha *harborv1alpha1.HarborAccess) error {
 		return fmt.Errorf("spec.tokenTTL: %w", err)
 	}
 	return nil
+}
+
+// HarborAccessSubjectField is the cache index findHarborAccess lists by:
+// the ServiceAccount subject a HarborAccess serves. Register it with
+// IndexHarborAccessBySubject before the manager starts.
+const HarborAccessSubjectField = "dataplane.subject"
+
+// harborAccessSubject is the token subject of the ServiceAccount a
+// HarborAccess names. ServiceAccount namespaces and names contain no ':',
+// so the mapping is injective.
+func harborAccessSubject(ha *harborv1alpha1.HarborAccess) string {
+	return "system:serviceaccount:" + ha.Spec.ServiceAccountRef.Namespace + ":" + ha.Spec.ServiceAccountRef.Name
+}
+
+// IndexHarborAccessBySubject registers HarborAccessSubjectField on the
+// manager's cache.
+func IndexHarborAccessBySubject(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &harborv1alpha1.HarborAccess{}, HarborAccessSubjectField, harborAccessSubjectIndex)
+}
+
+func harborAccessSubjectIndex(obj client.Object) []string {
+	ha, ok := obj.(*harborv1alpha1.HarborAccess)
+	if !ok {
+		return nil
+	}
+	return []string{harborAccessSubject(ha)}
 }
 
 // robotCreds carries the username and password read from a robot Secret.

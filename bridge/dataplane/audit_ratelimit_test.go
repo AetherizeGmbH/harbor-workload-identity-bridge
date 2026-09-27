@@ -19,7 +19,6 @@ import (
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -189,7 +188,7 @@ func TestHandler_UnavailableIsAudited(t *testing.T) {
 		{
 			name: "HarborAccess lookup failed",
 			fault: func(_ *testing.T, f *handlerFixture) {
-				f.Handler.K8sClient = fake.NewClientBuilder().WithScheme(handlerTestScheme).
+				f.Handler.K8sClient = newFakeClientBuilder().
 					WithObjects(newTestHA(), newTestRobotSecret()).
 					WithInterceptorFuncs(interceptor.Funcs{
 						List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {

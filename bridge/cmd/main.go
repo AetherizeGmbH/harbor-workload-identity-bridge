@@ -242,6 +242,10 @@ func run() error {
 		Audit: newLogger("info").WithName("audit"),
 	}
 
+	if err := dataplane.IndexHarborAccessBySubject(startupCtx, mgr.GetFieldIndexer()); err != nil {
+		return fmt.Errorf("index HarborAccess by subject: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle(dataplane.CredentialsPath, handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
