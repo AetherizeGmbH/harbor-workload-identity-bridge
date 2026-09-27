@@ -234,11 +234,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// the listener.
 	reloadCtx, stopReload := context.WithCancel(ctx)
 	defer stopReload()
-	go func() {
-		if err := s.cert.Start(reloadCtx); err != nil {
-			logger.Error(err, "certificate watcher stopped")
-		}
-	}()
+	go s.watchCertificate(reloadCtx, logger)
 	if s.ca != nil {
 		go s.ca.watch(reloadCtx, s.cfg.ReloadInterval, logger.Error)
 	}
@@ -279,6 +275,35 @@ func (s *Server) Start(ctx context.Context) error {
 		// TLS handshake setup failure, etc.). Return so the manager
 		// can shut everything down.
 		return err
+	}
+}
+
+// watchCertificate keeps the serving pair fresh for the lifetime of ctx.
+// certwatcher reloads it on file events and polls it every ReloadInterval,
+// but its Start gives up on both, polling included, when it cannot add the
+// file watches within 10 seconds (e.g. the node's inotify watches are used
+// up). The replica would then serve its startup certificate until it
+// expires, while staying ready. So the pair is polled here instead, which
+// keeps ADR-0025's promise that a renewed certificate needs no restart.
+func (s *Server) watchCertificate(ctx context.Context, logger logr.Logger) {
+	err := s.cert.Start(ctx)
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	logger.Error(err, "cannot watch the serving certificate files; polling them instead", "interval", s.cfg.ReloadInterval)
+	t := time.NewTicker(s.cfg.ReloadInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			// ReadCertificate swaps in only a pair that parses as a
+			// matching pair; on error the previous one stays in use.
+			if err := s.cert.ReadCertificate(); err != nil {
+				logger.Error(err, "serving certificate reload failed; keeping the previous pair")
+			}
+		}
 	}
 }
 

@@ -435,6 +435,52 @@ func TestServer_PicksUpRotatedCertificate(t *testing.T) {
 	t.Fatal("server never served the rotated certificate")
 }
 
+// TestServer_PicksUpRotatedCertificateWithoutFileWatch: certwatcher's
+// Start gives up after 10s when it cannot add its file watches (on a node
+// whose inotify watches are used up), and stops polling too. The server
+// must still pick up a renewed pair. The files are missing while Start
+// retries, which makes adding the watches fail the same way.
+func TestServer_PicksUpRotatedCertificateWithoutFileWatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out certwatcher's 10s watch retry")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	cert, key := writeServingPair(t, dir, 1)
+	srv, err := NewServer(ServerConfig{
+		ListenAddr: "127.0.0.1:0", CertFile: cert, KeyFile: key,
+		Handler: http.NewServeMux(), ReloadInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	for _, p := range []string{cert, key} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = srv.Start(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	addr := waitForBind(t, srv, 2*time.Second)
+	if got, err := servedSerial(t, addr, nil); err != nil || got != 1 {
+		t.Fatalf("initial serial = %d, %v", got, err)
+	}
+
+	// certwatcher retries adding the watches for 10s, then gives up.
+	time.Sleep(11 * time.Second)
+	writeServingPair(t, dir, 2)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, err := servedSerial(t, addr, nil); err == nil && got == 2 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("server never served the rotated certificate after the file watch failed")
+}
+
 // TestServer_MTLS_PicksUpRotatedClientCA: a new issuing CA for plugin
 // client certs must be honoured without a restart.
 func TestServer_MTLS_PicksUpRotatedClientCA(t *testing.T) {
