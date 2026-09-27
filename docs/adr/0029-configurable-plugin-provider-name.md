@@ -1,0 +1,159 @@
+# 29. Configurable plugin provider name
+
+## Status
+
+Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
+(several bridges per cluster); neither is reversed.
+
+## Context
+
+- ADR-0026 lets one cluster run several bridges, but only one
+  chart-installed plugin could exist per node: the provider entry, the
+  plugin binary, the CA and mTLS client files and the installer's state
+  file had fixed names, so a second release's installer replaced the
+  first one's entry and files (threat model item O5).
+- Kubelet has exactly one `--image-credential-provider-config` and one
+  `--image-credential-provider-bin-dir` (ADR-0021) and runs
+  `<bin-dir>/<provider name>` for each entry. Several installs therefore
+  share the config file, the bin dir, `/etc/default/kubelet` (patch mode)
+  and the kubelet unit. Only the entry, the binary's name and the files the
+  entry points to can belong to one install.
+- Patch and none mode wrote the chart-rendered config verbatim, which drops
+  every other entry. Merge mode already replaced or appended by name.
+- The installers of two releases can run at the same time on one node (a
+  new node, two `helm upgrade`s). Unsynchronised read-modify-write of the
+  shared file loses an entry, and two kubelet restarts at once confuse each
+  other's verification.
+- The content hash that decides about kubelet restarts (ADR-0021) covered
+  the whole config file. With a shared file, every change by one install
+  would make every other install restart kubelet again on its next pod
+  start.
+- Kubelet behaviour this rests on, read in the Kubernetes source (master,
+  2026-09-27):
+  - `pkg/credentialprovider/plugin/config.go` rejects a provider name that
+    contains `/` or a space, is `.` or `..`, or occurs twice.
+  - `pkg/credentialprovider/plugin/plugin.go` resolves each provider to
+    `exec.LookPath(<bin-dir>/<name>)` at startup and fails when the binary
+    is missing; `pkg/kubelet/kuberuntime/kuberuntime_manager.go` then exits
+    kubelet (`os.Exit(1)`). An entry whose binary is gone keeps kubelet
+    from starting.
+  - `pkg/credentialprovider/plugin/plugins.go`
+    (`externalCredentialProviderKeyring.Lookup`) runs every provider whose
+    `matchImages` match the image and pools their credentials;
+    `pkg/kubelet/kuberuntime/kuberuntime_image.go` tries them in turn until
+    a pull succeeds. A provider that fails is logged and contributes
+    nothing.
+
+## Decision
+
+1. **`plugin.providerName`** (default `harbor-bridge-plugin`) names the
+   provider entry and the plugin binary. The chart requires a DNS label of
+   at most 63 characters: a subset of what kubelet accepts, safe as a file
+   name, and free of dots, which the file names in (3) rely on. The
+   installer reads it from `PROVIDER_NAME`, which the chart renders only
+   for a non-default name, validates it the same way, and refuses a
+   rendered config that has no entry of that name.
+2. **The default name keeps every node path.** Binary
+   `harbor-bridge-plugin`, `harbor-bridge-ca.crt`,
+   `harbor-bridge-client.crt`/`.key`, `installer-state.json`. An existing
+   install renders the same manifests after the upgrade and nothing moves
+   on the node.
+3. **Any other name derives the install's own files from the name:** binary
+   `<name>` in the bin dir; `<name>.ca.crt`, `<name>.client.crt` and
+   `<name>.client.key` in `plugin.hostConfigDir`;
+   `<name>.installer-state.json` in `plugin.install.stateDir`. A name has no
+   dot, so two names never share a file and no derived name equals one of
+   the default name's files. (`<name>-ca.crt` would not be injective: the
+   name `harbor-bridge` would own the default install's CA file.)
+4. **Each installer owns exactly its own entry.**
+   - Patch and none mode now merge into the chart-owned config like merge
+     mode does. While the file holds no other provider, the rendered config
+     is written verbatim, as before; otherwise only the entry of this name
+     is replaced or appended, and every other entry and unknown field
+     round-trips (`map[string]any`, ADR-0021). A chart-owned file that
+     cannot be parsed is replaced, as before.
+   - An existing entry of this name that is not a bridge entry (no
+     `HARBOR_BRIDGE_ENDPOINT` env) is never replaced.
+   - For a non-default name, an existing `<bin-dir>/<name>` is replaced
+     only when the config already holds a bridge entry of that name or the
+     file already has exactly the bytes the installer would write. GKE keeps
+     `kubelet` itself in its credential-provider bin dir; a name like
+     `kubelet` is refused instead of overwriting it.
+5. **Locks.** Every read-modify-write of a shared file and every kubelet
+   restart runs under an exclusive `flock(2)`:
+   - the node lock `/run/harbor-bridge-installer.lock`, a fixed path that
+     every install finds whatever its values, held by auto, merge and patch
+     mode for the whole pass: discovery, merge, restart, verification,
+     state;
+   - the config lock `<provider config>.lock` next to the file it guards,
+     taken in every mode before the config is read. none mode mounts only
+     its two directories and takes only this lock; the order is always node
+     lock, then config lock, so it cannot deadlock.
+
+   Lock files are created and opened under the installer's file rules
+   (`os.Root`, Lstat, `O_NOFOLLOW`, `os.SameFile`; ADR-0021, audit H6). A
+   flock dies with its process, so a crashed installer leaves no stale
+   lock. A waiting installer gives up after ten minutes and fails its pod,
+   which retries.
+6. **Restart responsibility is per install.** The state hash covers this
+   install's entry, and in patch mode `/etc/default/kubelet`, not the whole
+   shared file. A kubelet restart is still due whenever the pass changed a
+   file. A state file written before this ADR records a whole-file hash;
+   when that hash matches the file as it is now, the installer converts
+   the record without restarting kubelet.
+7. **Identities do not follow the name.** The mTLS client certificate keeps
+   its CN `<release>-plugin`, which already differs per release; the bridge
+   only logs it (identity checks are open item O2). The plugin binary reads
+   everything from its entry's env and needs no change.
+
+## Consequences
+
+- Several releases, each with its own bridge and its own chart-managed
+  DaemonSet, coexist on a node. Per release they need a distinct
+  `plugin.providerName`, release name, `service.nodePort`,
+  `plugin.audience` and `bridge.harborAccessSelector` (and `clusterName`
+  when they share a Harbor, ADR-0026). In patch and none mode they must use
+  the same `plugin.hostBinaryDir` and `plugin.hostConfigDir`, because
+  kubelet reads one config from one bin dir. In auto mode a later install
+  merges into whatever config kubelet already runs.
+- `plugin.matchImages` of different installs should not overlap. They still
+  work when they do, but every matching plugin runs for each pull: a bridge
+  without a HarborAccess for the pod answers 403, its plugin returns no
+  credentials and no cache entry, and that bridge logs a denial for every
+  such pull.
+- `helm uninstall` removes nothing on the nodes, as before: the entry, the
+  binary, the CA and mTLS files, the state file and the lock files stay.
+  Kubelet keeps running the orphaned plugin for its `matchImages`; the
+  plugin cannot reach the removed bridge (a new service on the same port
+  would also need a certificate from the pinned CA) and contributes no
+  credentials. Cleanup is manual: remove the entry before, or together
+  with, the binary, then restart kubelet. Renaming `plugin.providerName`
+  leaves the old entry behind in the same way. There is no small, safe
+  automatic cleanup: DaemonSet pods also stop on every re-roll and drain,
+  where removing the entry would be wrong.
+- Every install on a node must run an installer with this ADR before a
+  second install is added. An older installer in patch or none mode
+  rewrites the shared config with its own entry alone.
+- Two installs with the same `plugin.providerName` still overwrite each
+  other; the installer cannot tell them apart from an upgrade.
+- Every node gets two empty lock files, also with a single install.
+
+## Alternatives considered
+
+- **One config file per install.** Kubelet reads exactly one.
+- **A subdirectory per install under `plugin.hostConfigDir`.** The sync
+  container and any pod with a hostPath on that directory can write there;
+  a symlink planted in place of the subdirectory would redirect the
+  installer's root writes and need another layer of checks. Flat file
+  names reuse the existing per-file rules.
+- **Locking the shared file itself.** It is replaced by rename, so a lock
+  on it would sit on an inode that is no longer the file.
+- **Locking directories (`/run`, the config directory).** Works with
+  flock, but couples the installer to anything else that locks those
+  directories and hides the lock from operators.
+- **Only the node lock.** none mode cannot reach it without a third
+  hostPath mount, which would widen the least-privilege mode.
+- **Removing the entry when the pod stops (preStop).** Runs on every
+  re-roll and drain, not only on uninstall.
+- **Always rendering `PROVIDER_NAME`.** Changes the pod template of every
+  existing DaemonSet, re-rolling it on upgrade for no effect.
