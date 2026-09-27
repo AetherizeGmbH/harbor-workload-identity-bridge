@@ -95,7 +95,10 @@ func run() error {
 	for k, v := range cfg.Sanitized() {
 		setupLog.Info("config", "key", k, "value", v)
 	}
-	logWeakTokenValidation(setupLog, cfg)
+	// Built here so the startup warnings describe the token policy the
+	// validator actually receives in step 7 (ADR-0028).
+	validatorCfg := validatorConfig(cfg)
+	logWeakTokenValidation(setupLog, validatorCfg)
 
 	// Step 2: build the scheme. clientgo gives us the core resources;
 	// harborv1alpha1 is our CRD. Also resolve the rest.Config for the
@@ -198,16 +201,9 @@ func run() error {
 	// misconfigured BRIDGE_OIDC_ISSUER fails at startup, not on the
 	// first kubelet request. When BRIDGE_OIDC_JWKS_URL is set, discovery
 	// is skipped in favour of that URL — see config.go for the local-dev
-	// rationale.
+	// rationale. validatorCfg (step 1) already holds the issuer, the JWKS
+	// URL and the token policy; only the HTTP client is added here.
 	startupCtx := ctrl.SetupSignalHandler()
-	validatorCfg := dataplane.Config{
-		Issuer:                 cfg.OIDCIssuer.String(),
-		MaxTokenLifetime:       cfg.TokenMaxLifetime,
-		AllowNonPodBoundTokens: !cfg.RequirePodBoundToken,
-	}
-	if cfg.OIDCJWKSURL != nil {
-		validatorCfg.JWKSURL = cfg.OIDCJWKSURL.String()
-	}
 	// In-cluster the OIDC issuer is the apiserver: discovery and JWKS
 	// fetch need the cluster CA in trust AND an authenticated caller
 	// (the apiserver gates /.well-known/openid-configuration behind
@@ -278,16 +274,33 @@ func run() error {
 	return nil
 }
 
+// validatorConfig maps the bridge config onto the validator's, all but the
+// HTTP client. BRIDGE_REQUIRE_POD_BOUND_TOKEN and AllowNonPodBoundTokens
+// mean opposite things (the validator's zero value is the strict one), so
+// the mapping lives here, under test (ADR-0028).
+func validatorConfig(cfg *controlplane.Config) dataplane.Config {
+	vc := dataplane.Config{
+		Issuer:                 cfg.OIDCIssuer.String(),
+		MaxTokenLifetime:       cfg.TokenMaxLifetime,
+		AllowNonPodBoundTokens: !cfg.RequirePodBoundToken,
+	}
+	if cfg.OIDCJWKSURL != nil {
+		vc.JWKSURL = cfg.OIDCJWKSURL.String()
+	}
+	return vc
+}
+
 // logWeakTokenValidation warns about token-validation settings that either
-// weaken the bridge or refuse kubelet's own tokens (ADR-0028).
-func logWeakTokenValidation(log logr.Logger, cfg *controlplane.Config) {
-	if !cfg.RequirePodBoundToken {
+// weaken the bridge or refuse kubelet's own tokens (ADR-0028). It reads the
+// validator's config, not the bridge's, so it warns about what is enforced.
+func logWeakTokenValidation(log logr.Logger, vc dataplane.Config) {
+	if vc.AllowNonPodBoundTokens {
 		log.Info("tokens not bound to a pod are accepted; this weakens the bridge and is meant for local development only",
 			"env", controlplane.EnvRequirePodBoundToken)
 	}
-	if cfg.TokenMaxLifetime < kubeletTokenLifetime {
+	if vc.MaxTokenLifetime < kubeletTokenLifetime {
 		log.Info("the maximum token lifetime is below the lifetime of kubelet's tokens; every kubelet request will be refused unless the token issuer caps lifetimes lower",
-			"env", controlplane.EnvTokenMaxLifetime, "max", cfg.TokenMaxLifetime.String(), "kubelet", kubeletTokenLifetime.String())
+			"env", controlplane.EnvTokenMaxLifetime, "max", vc.MaxTokenLifetime.String(), "kubelet", kubeletTokenLifetime.String())
 	}
 }
 
