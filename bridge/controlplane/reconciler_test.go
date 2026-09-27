@@ -299,6 +299,13 @@ func (m *mockHarbor) Update(_ context.Context, current *harbor.Robot, descriptio
 	if m.errOnUpdate != nil {
 		return m.errOnUpdate
 	}
+	// The real client refuses to send a project Harbor would misread
+	// (validatePermissions), e.g. a pre-0.5.5 "*".
+	for _, p := range perms {
+		if err := harbor.ValidateProjectName(p.Project); err != nil {
+			return fmt.Errorf("update robot %d: %w", current.ID, err)
+		}
+	}
 	r, ok := m.robots[current.ID]
 	if !ok {
 		return fmt.Errorf("update robot %d: 404", current.ID)

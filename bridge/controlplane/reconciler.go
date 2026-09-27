@@ -221,9 +221,11 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 			"spec is missing: a HarborAccess needs spec.serviceAccountRef, spec.trustPolicy and spec.permissions")
 	}
 
-	// 1. Issuer match — refuse early if the CR was applied to the wrong cluster.
+	// 1. Issuer match — refuse early if the CR was applied to the wrong
+	// cluster. Refusals (steps 1-3) suspend whatever robot the HarborAccess
+	// already has (refuse, ADR-0030).
 	if ha.Spec.TrustPolicy.Issuer != r.Config.OIDCIssuer.String() {
-		return r.markNotReady(ctx, ha, ReasonIssuerMismatch,
+		return r.refuse(ctx, ha, ReasonIssuerMismatch,
 			fmt.Sprintf("CR trustPolicy.issuer %q does not match cluster issuer %q",
 				ha.Spec.TrustPolicy.Issuer, r.Config.OIDCIssuer.String()))
 	}
@@ -232,7 +234,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	// make every token of that ServiceAccount minted for it, e.g. the
 	// apiserver's default audience, redeemable for Harbor credentials.
 	if ha.Spec.TrustPolicy.Audience != r.Config.Audience {
-		return r.markNotReady(ctx, ha, ReasonAudienceMismatch,
+		return r.refuse(ctx, ha, ReasonAudienceMismatch,
 			fmt.Sprintf("CR trustPolicy.audience %q is not the audience this bridge serves (%q)",
 				ha.Spec.TrustPolicy.Audience, r.Config.Audience))
 	}
@@ -241,7 +243,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	// The CRD rejects longer names; this guards objects admitted before
 	// that rule existed, which could otherwise never create their Secret.
 	if len(ha.Name) > HarborAccessNameMaxLen {
-		return r.markNotReady(ctx, ha, ReasonInvalidSpec, fmt.Sprintf(
+		return r.refuse(ctx, ha, ReasonInvalidSpec, fmt.Sprintf(
 			"metadata.name is %d characters; HarborAccess names must be at most %d (the name is a label value on the robot Secret) — recreate the CR under a shorter name",
 			len(ha.Name), HarborAccessNameMaxLen))
 	}
@@ -250,7 +252,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	// admitted before it existed. "*" would grant every project.
 	for _, p := range ha.Spec.Permissions {
 		if err := harbor.ValidateProjectName(p.Project); err != nil {
-			return r.markNotReady(ctx, ha, ReasonInvalidSpec, "spec.permissions: "+err.Error())
+			return r.refuse(ctx, ha, ReasonInvalidSpec, "spec.permissions: "+err.Error())
 		}
 	}
 
@@ -263,7 +265,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	// 3. Compute desired robot identity.
 	robotName, err := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
 	if err != nil {
-		return r.markNotReady(ctx, ha, ReasonInvalidSpec, err.Error())
+		return r.refuse(ctx, ha, ReasonInvalidSpec, err.Error())
 	}
 
 	// 4. Defensive invariant (ADR-0009): name must be in our ownership prefix.
@@ -295,13 +297,35 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		return res, err
 	}
 
+	// 6b. Resume a robot the bridge suspended while this HarborAccess was
+	// refused (ADR-0030). The Secret goes first: a password from before
+	// the suspension must never work again, and a missing Secret forces
+	// the rotation below even if this pass stops after the update.
+	resumed := false
+	if !created && robot.Disabled && RobotSuspended(robot.Description) {
+		if secret != nil {
+			if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
+				return r.markTransientError(ctx, ha, fmt.Errorf("delete the robot Secret of a suspended robot: %w", err))
+			}
+			secret = nil
+		}
+		enabled := *robot
+		enabled.Disabled = false
+		logger.Info("resuming Harbor robot suspended while the HarborAccess was refused", "robot", robotName)
+		if err := r.Harbor.Update(ctx, &enabled, desiredDescription, desiredPerms); err != nil {
+			return r.markTransientError(ctx, ha, fmt.Errorf("resume suspended robot: %w", err))
+		}
+		robot.Disabled, robot.Description = false, desiredDescription
+		resumed = true
+	}
+
 	// 7. Converge the robot to the spec. Level-triggered: this compares
 	// against what Harbor actually holds, so a permission change is
 	// applied (and retried) until it sticks, and drift made in the Harbor
 	// UI is reverted. The password is NOT rotated for a spec change —
 	// Harbor applies the new grants to the existing robot, and a rotation
 	// would invalidate every password kubelet still has cached.
-	if !created && (!harbor.PermissionsMatch(robot, desiredPerms) ||
+	if !created && !resumed && (!harbor.PermissionsMatch(robot, desiredPerms) ||
 		robot.Description != desiredDescription ||
 		robot.ExpiresAt != harborNeverExpires) {
 		logger.Info("updating Harbor robot to match spec", "robot", robotName)
@@ -352,6 +376,96 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	}
 
 	return r.markReady(ctx, ha, robot, rotatedAt, r.requeueAfter(ha, notBefore, now))
+}
+
+// refuse reports a HarborAccess the bridge will not serve (issuer or
+// audience mismatch, invalid spec) and suspends what it already owns
+// (ADR-0030): a robot provisioned before the HarborAccess became refused
+// would otherwise keep its grants and a password that is never rotated
+// again. Refused objects are re-checked every ResyncInterval, so a
+// suspended robot an administrator re-enables is disabled again. A failed
+// suspension keeps the refusal reason and is retried with backoff.
+func (r *Reconciler) refuse(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
+	suspendErr := r.suspend(ctx, ha)
+	if suspendErr != nil {
+		message += fmt.Sprintf("; suspending its robot failed and is retried: %v", suspendErr)
+	}
+	meta.SetStatusCondition(&ha.Status.Conditions, metav1.Condition{
+		Type:               harborv1alpha1.ConditionRobotProvisioned,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            "no usable robot while the HarborAccess is refused; a robot it had is disabled in Harbor (ADR-0030)",
+		ObservedGeneration: ha.Generation,
+	})
+	if err := r.setNotReady(ctx, ha, reason, message); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
+	}
+	if suspendErr != nil {
+		return ctrl.Result{}, suspendErr
+	}
+	return ctrl.Result{RequeueAfter: ResyncInterval}, nil
+}
+
+// suspend disables the robot a refused HarborAccess owns and deletes its
+// robot Secret (ADR-0030). Only the robot its serviceAccountRef maps to
+// can be enabled and serving; robots of an earlier serviceAccountRef and
+// pre-ADR-0018 robots are the janitor's (it deletes them). A robot that
+// is already disabled stays as it is: suspended before, or disabled by an
+// administrator, whose decision the bridge never overrides.
+func (r *Reconciler) suspend(ctx context.Context, ha *harborv1alpha1.HarborAccess) error {
+	logger := log.FromContext(ctx)
+	cluster := r.Config.ClusterName
+	robotName, nameErr := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
+	if nameErr == nil && harbor.OwnsRobot(cluster, robotName) {
+		robot, err := r.Harbor.GetByName(ctx, robotName)
+		switch {
+		case errors.Is(err, harbor.ErrRobotNotFound):
+		case err != nil:
+			return fmt.Errorf("look up robot: %w", err)
+		case !robotOwnedBy(cluster, robot, ha.Namespace, ha.Name), robot.Disabled:
+		case canWriteBack(robot.Permissions):
+			disabled := *robot
+			disabled.Disabled = true
+			if err := r.Harbor.Update(ctx, &disabled, SuspendedRobotDescription(cluster, ha.Namespace, ha.Name), robot.Permissions); err != nil {
+				return fmt.Errorf("disable robot %q: %w", robot.WireName, err)
+			}
+			logger.Info("suspended Harbor robot of a refused HarborAccess", "robot", robot.WireName, "id", robot.ID)
+		default:
+			// Harbor's update replaces the grants with the ones sent, and
+			// the bridge never sends a project it refuses (such as a
+			// pre-0.5.5 "*"). A robot it cannot disable is revoked.
+			if err := r.Harbor.Delete(ctx, robot.ID); err != nil {
+				return fmt.Errorf("delete robot %q: %w", robot.WireName, err)
+			}
+			logger.Info("deleted Harbor robot of a refused HarborAccess: its grants cannot be written back to disable it",
+				"robot", robot.WireName, "id", robot.ID)
+		}
+	}
+
+	// The Secret goes whether or not a robot was found: its password is
+	// dead or about to be, and the data plane must have nothing to serve.
+	secret, err := r.getRobotSecret(ctx, ha)
+	if err != nil {
+		return fmt.Errorf("read robot Secret: %w", err)
+	}
+	if secret != nil && r.secretConflict(ha, secret, robotName) == "" {
+		if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete robot Secret: %w", err)
+		}
+		logger.Info("deleted robot Secret of a refused HarborAccess", "secret", secret.Name)
+	}
+	return nil
+}
+
+// canWriteBack reports whether perms can be sent back to Harbor unchanged:
+// at least one grant, and only project names the bridge writes.
+func canWriteBack(perms []harbor.ProjectPermission) bool {
+	for _, p := range perms {
+		if harbor.ValidateProjectName(p.Project) != nil {
+			return false
+		}
+	}
+	return len(perms) > 0
 }
 
 // harborNeverExpires is Harbor's expires_at for a robot created with
@@ -610,7 +724,7 @@ func (r *Reconciler) blockDeletion(ctx context.Context, ha *harborv1alpha1.Harbo
 	msg := fmt.Sprintf("cannot revoke the Harbor robot yet, deletion is waiting: %v. "+
 		"If Harbor is gone for good, remove the %q finalizer by hand; the janitor deletes the orphaned robot once Harbor is reachable",
 		cause, r.Config.Finalizer())
-	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, ReasonDeletionBlocked, msg); err != nil {
+	if err := r.setNotReady(ctx, ha, ReasonDeletionBlocked, msg); err != nil {
 		log.FromContext(ctx).V(1).Info("could not record deletion-blocked status", "err", err.Error())
 	}
 	return ctrl.Result{}, cause
@@ -835,25 +949,24 @@ func (r *Reconciler) markReady(
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// markNotReady writes Ready=False for operator errors that only a change
-// to the CR or to the bridge's configuration resolves (issuer or audience
-// mismatch, invalid spec). Both produce an event (a CR update, a restart),
-// so it returns nil without a requeue.
+// markNotReady writes Ready=False for spec errors only a change to the CR
+// resolves (a missing spec, a tokenTTL that is not a Go duration). The CR
+// update produces an event, so it returns nil without a requeue.
 func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
-	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, reason, message); err != nil {
+	if err := r.setNotReady(ctx, ha, reason, message); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
 	return ctrl.Result{}, nil
 }
 
-// markNotReadyWithRequeue is markNotReady for conditions resolved outside
-// the CR: a robot disabled in Harbor, or a robot or Secret that belongs to
-// someone else (RobotConflict). No event on this CR announces that they
-// are gone, so the object is re-checked on the resync interval
-// (resyncAfter).
+// markNotReadyWithRequeue writes Ready=False for conditions resolved
+// outside the CR: a robot disabled in Harbor, or a robot or Secret that
+// belongs to someone else (RobotConflict). No event on this CR announces
+// that they are gone, so the object is re-checked on the resync interval
+// (resyncAfter). (Refusals go through refuse, which also requeues.)
 func (r *Reconciler) markNotReadyWithRequeue(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
-	if _, err := r.markNotReady(ctx, ha, reason, message); err != nil {
-		return ctrl.Result{}, err
+	if err := r.setNotReady(ctx, ha, reason, message); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
 	return ctrl.Result{RequeueAfter: resyncAfter(ha)}, nil
 }
@@ -863,7 +976,7 @@ func (r *Reconciler) markNotReadyWithRequeue(ctx context.Context, ha *harborv1al
 // Use for Harbor API failures, network errors, and any condition where a
 // later attempt could plausibly succeed without operator intervention.
 func (r *Reconciler) markTransientError(ctx context.Context, ha *harborv1alpha1.HarborAccess, cause error) (ctrl.Result, error) {
-	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, ReasonHarborError, cause.Error()); err != nil {
+	if err := r.setNotReady(ctx, ha, ReasonHarborError, cause.Error()); err != nil {
 		// Status update itself failed; surface that error instead of cause
 		// so the controller manager logs the real blocker.
 		return ctrl.Result{}, fmt.Errorf("update status while reporting transient error %q: %w", cause.Error(), err)
@@ -871,17 +984,12 @@ func (r *Reconciler) markTransientError(ctx context.Context, ha *harborv1alpha1.
 	return ctrl.Result{}, cause
 }
 
-// updateReadyCondition sets the Ready condition. It deliberately does not
-// touch status.observedGeneration (see markReady).
-func (r *Reconciler) updateReadyCondition(
-	ctx context.Context,
-	ha *harborv1alpha1.HarborAccess,
-	status metav1.ConditionStatus,
-	reason, message string,
-) error {
+// setNotReady sets Ready=False. It deliberately does not touch
+// status.observedGeneration (see markReady).
+func (r *Reconciler) setNotReady(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) error {
 	meta.SetStatusCondition(&ha.Status.Conditions, metav1.Condition{
 		Type:               harborv1alpha1.ConditionReady,
-		Status:             status,
+		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: ha.Generation,

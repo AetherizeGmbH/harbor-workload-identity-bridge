@@ -72,7 +72,11 @@ For the operator:
 - **One rotation point.** The bridge rotates every robot's password
   every 24h, without breaking a single cached credential (kubelet is
   never told to cache past the next rotation). The whole cluster's
-  blast-radius window is 24h, no matter how many namespaces.
+  blast-radius window is 24h, no matter how many namespaces. A
+  `HarborAccess` the bridge refuses (wrong audience or issuer, invalid
+  spec) gets its robot disabled in Harbor and its Secret deleted until it
+  is fixed; fixing it re-enables the robot with a new password
+  ([ADR-0030](docs/adr/0030-refused-harboraccess-suspends-its-robot.md)).
 - **Revocation you can rely on.** Editing a `HarborAccess` changes the
   robot's grants in Harbor on the next reconcile (and reverts edits made
   in the Harbor UI); pointing it at another ServiceAccount or deleting it

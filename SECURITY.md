@@ -90,7 +90,8 @@ The audience (`aud`) claim must carry the one audience the bridge
 serves (`plugin.audience`, [ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)),
 and the matching `HarborAccess` must name exactly that audience. A CR
 that names another audience gets `Ready=False, reason=AudienceMismatch`
-and no credentials: otherwise a CR author could name, say, the
+and no credentials (a robot it already had is disabled, see *Credential
+lifetime, rotation, and revocation*): otherwise a CR author could name, say, the
 apiserver's default audience and make every automounted token of that
 ServiceAccount, including tokens leaked to third-party webhooks,
 redeemable for Harbor credentials. The convention is
@@ -602,6 +603,16 @@ their own RBAC.
   password. The janitor sweeps for anything left behind
   every 5 minutes. While Harbor is unreachable, the finalizer holds and
   the HarborAccess reports `reason=DeletionBlocked`.
+- **Refused HarborAccess.** A HarborAccess reported as
+  `AudienceMismatch`, `IssuerMismatch` or `InvalidSpec` gets no usable
+  robot ([ADR-0030](docs/adr/0030-refused-harboraccess-suspends-its-robot.md)).
+  If it already had one, the bridge disables it in Harbor (description
+  token `suspended=true`), or deletes it when its grants cannot be written
+  back (a pre-0.5.5 `*`), and deletes its Secret, so a password handed out
+  earlier stops working at once. Fixing the HarborAccess re-enables the
+  robot with a new password. A wrong `plugin.audience` therefore suspends
+  every robot until it is corrected. A robot an administrator disabled is
+  left disabled.
 - **Residual window.** The bridge stops issuing credentials for a
   HarborAccess the moment it is marked for deletion (`credential denied`,
   `reason=harboraccess_deleting`), even while the deletion is blocked.

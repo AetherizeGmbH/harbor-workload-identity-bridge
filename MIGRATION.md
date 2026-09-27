@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### Unreleased: a refused HarborAccess suspends its robot (ADR-0030)
+
+| Change | What to do |
+| --- | --- |
+| A HarborAccess reported as `AudienceMismatch`, `IssuerMismatch` or `InvalidSpec` that already had a robot (for example one that named another audience before 0.6.0, or `*` before 0.5.5) now has the robot disabled in Harbor, or deleted if it carries a `*` grant, and its robot Secret deleted. Fixing the HarborAccess re-enables the robot with a new password | Before upgrading, find objects with `Ready=False` (`kubectl get harboraccess -A`), check their reason (`kubectl describe`), and fix the refused ones a workload still pulls through. Check `plugin.audience` on every upgrade: a wrong value now suspends every robot until it is corrected. |
+
 ### Unreleased: HarborAccess tokenTTL syntax, required spec
 
 | Change | What to do |
