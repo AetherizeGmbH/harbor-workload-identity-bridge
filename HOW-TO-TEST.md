@@ -522,7 +522,7 @@ the bridge used to emit the kubelet-invalid `"ServiceAccount"`.
 | `401 invalid token`, audit line `category=not_pod_bound` or `category=excessive_lifetime` | Token minted without `--bound-object-kind=Pod`, or with a `--duration` above `BRIDGE_TOKEN_MAX_LIFETIME` | Mint it as in Phase 3. `BRIDGE_REQUIRE_POD_BOUND_TOKEN=false` accepts unbound tokens, but weakens the bridge; keep it to local development. |
 | `/v1/credentials` returns `403 no matching HarborAccess` | SA subject mismatch OR audience mismatch | Compare `kubectl get sa image-puller -n test-pull` subject to CR's `serviceAccountRef`. Compare token's `--audience` to `trustPolicy.audience`. |
 | `/v1/credentials` returns `503 credentials not yet available` | Robot Secret hasn't materialised | `kubectl get harboraccess -n harbor-bridge-system test-access -o yaml` until `Ready=True`. |
-| Reconciler logs `tls: failed to verify certificate` against Harbor | Harbor's cert signed by a CA your system trust store doesn't know | Trust Harbor's CA at the OS level, or use a Harbor with a publicly-trusted cert. `BRIDGE_HARBOR_CA_FILE` is on the backlog. |
+| Reconciler logs `tls: failed to verify certificate` against Harbor | Harbor's cert signed by a CA your system trust store doesn't know | Set `BRIDGE_HARBOR_CA_FILE` to Harbor's CA bundle (PEM); it then is the only trust root for Harbor (chart: `harbor.caSecret`). |
 | `crane pull` 401 from Harbor | Wrong creds, or robot's password rotated between Phase 3 and 4 | Re-run Phase 3, use the fresh password. |
 | `kubectl proxy` exits with `error: error upgrading connection` | Background job got SIGHUP or kubeconfig context changed | Restart `make proxy` and re-fetch JWKS to confirm health. |
 

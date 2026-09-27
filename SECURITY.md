@@ -513,8 +513,10 @@ switches off the SDK's wire dumps, which the go-openapi runtime would
 otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
 bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
-Failures (token rejected, no matching CR, Secret missing) log at
-`V(1)` with the same shape minus the fields that don't apply.
+Denials (token rejected, no matching CR, Secret owner mismatch) are the
+`credential denied` lines above, on the same fixed-info audit logger. A
+robot Secret that does not exist yet (`503`) and Kubernetes API errors
+(`500`) go to the regular log.
 
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never
