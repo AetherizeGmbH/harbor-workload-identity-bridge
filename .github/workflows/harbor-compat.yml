@@ -34,6 +34,12 @@ jobs:
     outputs:
       charts: ${{ steps.pick.outputs.charts }}
     steps:
+      # Only the harbor module: it holds the chart PR e2e installs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: test/e2e/modules/harbor/main.tf
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - id: pick
         env:
           INPUT_CHARTS: ${{ inputs.charts }}
@@ -46,8 +52,18 @@ jobs:
             echo "charts=$INPUT_CHARTS" >> "$GITHUB_OUTPUT"
           else
             # floor candidate + two mid + ceiling (chart 1.N -> Harbor 2.(N-4)):
-            # 1.13.5=2.9.5  1.15.2=2.11.2  1.17.5=2.13.5  1.19.1=2.15.1
-            echo 'charts=["1.13.5","1.15.2","1.17.5","1.19.1"]' >> "$GITHUB_OUTPUT"
+            # 1.13.5=2.9.5  1.15.2=2.11.2  1.17.5=2.13.5
+            # The ceiling is the chart PR e2e installs: the harbor module's
+            # default, which Renovate bumps. A hand-kept copy here lagged
+            # behind it, so the table claimed a lower ceiling than every PR
+            # tests (ADR-0020 §4: PR e2e stays on the ceiling).
+            module=test/e2e/modules/harbor/main.tf
+            ceiling=$(sed -n 's/^[[:space:]]*default_version_harbor[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$module")
+            [[ "$ceiling" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::cannot read default_version_harbor from $module (got '$ceiling')"; exit 1; }
+            charts=$(jq -cn --arg ceiling "$ceiling" \
+              '["1.13.5","1.15.2","1.17.5"] | if any(.[]; . == $ceiling) then . else . + [$ceiling] end')
+            echo "charts=$charts" | tee -a "$GITHUB_OUTPUT"
           fi
 
   matrix:
