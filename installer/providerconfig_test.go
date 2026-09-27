@@ -399,3 +399,29 @@ func mustEntry(t *testing.T, rendered, name string) map[string]any {
 	}
 	return entry
 }
+
+// TestProviderName_YAMLAmbiguousNamesStayStrings: the chart quotes every
+// non-default provider name because YAML 1.1 reads DNS labels such as
+// "yes" or "123" as a boolean or a number. The quoted name must be found
+// in the rendered config and stay a string through a merge; unquoted it
+// would not be found at all.
+func TestProviderName_YAMLAmbiguousNamesStayStrings(t *testing.T) {
+	for _, name := range []string{"yes", "on", "123", "1e3"} {
+		quoted := strings.Replace(renderedConfig, "name: harbor-bridge-plugin", `name: "`+name+`"`, 1)
+		entry, err := renderedProvider([]byte(quoted), name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		merged, _, err := mergeProvider([]byte(gkeConfig), entry)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !hasBridgeProvider(merged, name) {
+			t.Fatalf("%s: the merged config lost the name's string type:\n%s", name, merged)
+		}
+		bare := strings.Replace(renderedConfig, "name: harbor-bridge-plugin", "name: "+name, 1)
+		if _, err := renderedProvider([]byte(bare), name); err == nil {
+			t.Fatalf("%s: an unquoted name was found; the chart's quoting would be unnecessary", name)
+		}
+	}
+}

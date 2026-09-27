@@ -279,12 +279,27 @@ plugin:
     digest: ""
     pullPolicy: IfNotPresent
 
+  # Name of this install's kubelet credential-provider entry and of the
+  # plugin binary on the nodes (kubelet runs <bin dir>/<name>). Change it
+  # only to run several installs of this chart on one cluster, one per
+  # bridge (ADR-0029): every install needs its own name, and every other
+  # entry in kubelet's config stays untouched. A DNS label: lower-case
+  # letters, digits and "-", at most 63 characters. A name other than the
+  # default also names the install's other node files:
+  # <hostConfigDir>/<name>.ca.crt (and .client.crt/.client.key with
+  # mTLS) and <install.stateDir>/<name>.installer-state.json. Renaming an
+  # existing install leaves the old entry and files on the nodes (README,
+  # "Several installs per cluster").
+  providerName: harbor-bridge-plugin
+
   # Where on each node the plugin binary and config are written in
   # patch/none modes. In every mode hostConfigDir also carries the
   # bridge CA (and mTLS client pair) — the provider entry references
   # them by absolute path. In merge mode the binary and provider entry
   # instead go into the paths discovered from kubelet's own flags, so
-  # hostBinaryDir is unused there.
+  # hostBinaryDir is unused there. Several installs on one cluster share
+  # the config file in hostConfigDir (kubelet reads one): in patch/none
+  # mode they must use the same two directories.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 
@@ -329,7 +344,8 @@ plugin:
     configFile: ""
     # Systemd unit the installer restarts.
     kubeletUnit: kubelet
-    # Node directory holding the installer's idempotency state file.
+    # Node directory holding the installer's idempotency state file
+    # (installer-state.json, or <providerName>.installer-state.json).
     stateDir: /var/lib/harbor-bridge
 
   # URL the on-node plugin uses to reach the bridge. Empty renders the
