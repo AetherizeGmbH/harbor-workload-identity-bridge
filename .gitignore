@@ -1,5 +1,7 @@
 bin/
 dist/
+# Local generated state (make run-local-tls).
+/.gen/
 cover.out
 *.test
 *.out

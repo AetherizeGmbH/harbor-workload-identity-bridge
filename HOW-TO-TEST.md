@@ -332,11 +332,12 @@ curl -s http://127.0.0.1:8001/openid/v1/jwks | jq .keys[0].kid
 kubectl apply -f config/crd/bases/harbor.aetherize.io_harboraccesses.yaml
 kubectl create namespace harbor-bridge-system
 
-# Drop Harbor admin creds where the bridge expects them.
-mkdir -p /tmp/harbor-admin
-printf '%s' 'admin' > /tmp/harbor-admin/username
-printf '%s' 'YOUR_HARBOR_ADMIN_PASSWORD' > /tmp/harbor-admin/password
-chmod 600 /tmp/harbor-admin/*
+# Drop Harbor admin creds where the bridge expects them: owner-only,
+# inside the checkout (.gen/ is gitignored), not in shared /tmp.
+( umask 077 && mkdir -p .gen/harbor-admin \
+  && printf '%s' 'admin' > .gen/harbor-admin/username \
+  && printf '%s' 'YOUR_HARBOR_ADMIN_PASSWORD' > .gen/harbor-admin/password )
+chmod 700 .gen/harbor-admin && chmod 600 .gen/harbor-admin/*
 
 # Run the bridge.
 BRIDGE_CLUSTER_NAME=dev \
@@ -345,13 +346,14 @@ BRIDGE_OIDC_ISSUER="$(kubectl get --raw /.well-known/openid-configuration | jq -
 BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks \
 BRIDGE_AUDIENCE=harbor-bridge \
 BRIDGE_HARBOR_URL=https://your-harbor.example.com \
-BRIDGE_HARBOR_ADMIN_DIR=/tmp/harbor-admin \
+BRIDGE_HARBOR_ADMIN_DIR="$PWD/.gen/harbor-admin" \
 BRIDGE_LOG_LEVEL=debug \
 make run-local
 ```
 
-What `make run-local` does for you: generates a 1-day self-signed TLS
-cert in `/tmp/bridge-tls` if absent, sets `BRIDGE_TLS_CERT_FILE` /
+What `make run-local` does for you: keeps a self-signed TLS cert in
+`.gen/run-local-tls/` (owner-only; a new 7-day cert when it is missing or
+expires within an hour), sets `BRIDGE_TLS_CERT_FILE` /
 `BRIDGE_TLS_KEY_FILE` / `BRIDGE_LISTEN_ADDR=:8443` /
 `BRIDGE_HEALTH_ADDR=:8081`, and refuses to start if
 `BRIDGE_OIDC_ISSUER` looks cluster-internal but `BRIDGE_OIDC_JWKS_URL`
@@ -488,7 +490,7 @@ PLUGIN_RESP=$(jq -n --arg tok "$TOKEN" --arg img "your-harbor/your-project/whate
     image:$img,
     serviceAccountToken:$tok}' \
   | HARBOR_BRIDGE_ENDPOINT=https://localhost:8443 \
-    HARBOR_BRIDGE_CA_BUNDLE=/tmp/bridge-tls/tls.crt \
+    HARBOR_BRIDGE_CA_BUNDLE=.gen/run-local-tls/tls.crt \
     bin/harbor-bridge-plugin)
 
 echo "$PLUGIN_RESP" | jq .
