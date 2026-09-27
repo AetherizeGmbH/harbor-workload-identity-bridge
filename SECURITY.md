@@ -395,11 +395,26 @@ container:
   for the whole pass, and a `.lock` file next to the provider config), so
   concurrent installers neither lose each other's entries nor restart
   kubelet at the same time. The lock files follow the same file rules as
-  above. The provider name is a chart value that becomes a file name in
-  kubelet's bin dir, where GKE keeps kubelet itself: the installer never
-  replaces a provider entry of that name that is not a bridge entry, and,
-  for a non-default name, never replaces a file of that name that is not
-  this plugin.
+  above.
+- in `patch` and `none` mode keeps the chart-owned config
+  (`<plugin.hostConfigDir>/credential-provider-config.yaml`) the chart's.
+  The sync container of every release can write that directory, and
+  kubelet runs every entry of the file after its next restart. Each pass
+  rewrites the file to this install's entry plus the other installs'
+  entries, which it recognises by their executable binary in
+  `plugin.hostBinaryDir` (no sync container mounts that directory), and
+  drops everything else, as it replaced the whole file before ADR-0029.
+  Residual: a writer of `plugin.hostConfigDir` can change another
+  install's entry, whose name and binary are genuine; the other installs
+  keep that change until the owning installer's next pass, and a kubelet
+  restart in between runs it. In `patch` mode the installer also refuses
+  to point kubelet at its own directories while the config kubelet reads
+  holds another install's entry.
+- treats the provider name, a chart value, as a file name in kubelet's
+  bin dir, where GKE keeps kubelet itself: in a cloud's config (`merge`
+  mode) it never replaces a provider entry of that name that is not a
+  bridge entry, and, for a non-default name, it never replaces a file of
+  that name that is not this plugin.
 
 This privilege model is what installing a credential provider on
 nodes requires — managed node images (EKS, GKE, AKS) pre-wire their
@@ -530,7 +545,7 @@ it.
 ```
 credential issued
   source=10.0.3.17                       # TCP peer (the node, via the NodePort)
-  client_cert=CN=harbor-bridge-plugin    # with mTLS; the CN is <release>-plugin
+  client_cert=CN=harbor-bridge-plugin    # with mTLS; the CN is <fullname>-plugin
   subject=system:serviceaccount:flux-system:source-controller
   pod=source-controller-7d9f  pod_uid=3f2c…  node=node-a   # bound-token claims
   audience=harbor.example.com

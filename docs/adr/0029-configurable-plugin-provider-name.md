@@ -59,9 +59,15 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
    name, and free of dots, which the file names in (3) rely on. The
    installer reads it from `PROVIDER_NAME`, which the chart renders only
    for a non-default name, validates it the same way, and refuses a
-   rendered config that has no entry of that name. The chart quotes a
-   non-default name in the rendered entry: YAML 1.1 reads labels such as
-   `yes` or `123` as a boolean or a number.
+   rendered config that has no entry of that name. The value must be a
+   string: values files and `--set` read an unquoted `yes` or `123` as a
+   boolean or a number before any template runs, so the chart refuses
+   such a value (quote it, or use `--set-string`) instead of rendering a
+   name the operator did not write. A missing value renders the default:
+   `helm upgrade --reuse-values` from an older chart renders with that
+   chart's values, which lack the key. The chart also quotes a
+   non-default name in the rendered entry, because the installer's YAML
+   parser reads `yes` or `123` the same way.
 2. **The default name keeps every node path.** Binary
    `harbor-bridge-plugin`, `harbor-bridge-ca.crt`,
    `harbor-bridge-client.crt`/`.key`, `installer-state.json`. An existing
@@ -75,14 +81,27 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
    the default name's files. (`<name>-ca.crt` would not be injective: the
    name `harbor-bridge` would own the default install's CA file.)
 4. **Each installer owns exactly its own entry.**
-   - Patch and none mode now merge into the chart-owned config like merge
-     mode does. While the file holds no other provider, the rendered config
-     is written verbatim, as before; otherwise only the entry of this name
-     is replaced or appended, and every other entry and unknown field
-     round-trips (`map[string]any`, ADR-0021). A chart-owned file that
-     cannot be parsed is replaced, as before.
-   - An existing entry of this name that is not a bridge entry (no
-     `HARBOR_BRIDGE_ENDPOINT` env) is never replaced.
+   - Merge mode edits the cloud's config: it replaces or appends only the
+     entry of this name, and every other entry and unknown field
+     round-trips (`map[string]any`, ADR-0021). An existing entry of this
+     name that is not a bridge entry (no `HARBOR_BRIDGE_ENDPOINT` env) is
+     never replaced.
+   - Patch and none mode keep the chart-owned config
+     (`<plugin.hostConfigDir>/credential-provider-config.yaml`)
+     authoritative. That directory is writable by the sync container of
+     every release and by any pod with a hostPath on it, and kubelet runs
+     every entry of the file after its next restart, which the installer
+     triggers itself. Installers before this ADR replaced the file with the
+     rendered config on every pass, which removed anything planted there.
+     Each pass now writes the rendered config plus the entries of the other
+     installs, in place: bridge entries with a valid provider name whose
+     binary is an executable regular file in `plugin.hostBinaryDir`, which
+     no such writer mounts (another install writes its binary before its
+     entry). This install's entry is replaced whatever it holds; every other
+     entry, a repeated name and unknown top-level fields are dropped. While
+     no other install's entry is in the file, it is the rendered config
+     byte for byte, as before. A chart-owned file that cannot be parsed is
+     replaced, as before.
    - For a non-default name, an existing `<bin-dir>/<name>` is replaced
      only when the config already holds a bridge entry of that name or the
      file already has exactly the bytes the installer would write. GKE keeps
@@ -111,8 +130,9 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
    when that hash matches the file as it is now, the installer converts
    the record without restarting kubelet.
 7. **Identities do not follow the name.** The mTLS client certificate keeps
-   its CN `<release>-plugin`, which already differs per release; the bridge
-   only logs it (identity checks are open item O2). The plugin binary reads
+   its CN `<fullname>-plugin` (the release name unless `fullnameOverride`
+   is set), which already differs per release; the bridge only logs it
+   (identity checks are open item O2). The plugin binary reads
    everything from its entry's env and needs no change.
 
 ## Consequences
@@ -121,17 +141,28 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   DaemonSet, coexist on a node. Per release they need a distinct
   `plugin.providerName`, release name, `service.nodePort`,
   `plugin.audience` and `bridge.harborAccessSelector` (and `clusterName`
-  when they share a Harbor, ADR-0026). In patch and none mode they must use
-  the same `plugin.hostBinaryDir` and `plugin.hostConfigDir`, because
-  kubelet reads one config from one bin dir. In auto mode a later install
-  merges into whatever config kubelet already runs.
+  when they share a Harbor, ADR-0026). The release name (or
+  `fullnameOverride`) names the cluster-scoped audience ClusterRole and
+  ClusterRoleBinding (without the namespace), the mTLS CN and the default
+  `bridge.instance`; two releases of the same name collide even in
+  different namespaces. In patch and none mode they must use the same
+  `plugin.hostBinaryDir` and `plugin.hostConfigDir`, because kubelet reads
+  one config from one bin dir: patch mode reads kubelet's wiring first and
+  refuses to move kubelet to its own directories while the config kubelet
+  reads (a file, or the files of a directory) holds a bridge entry of
+  another name; a single install that changed its own directories still
+  moves. In auto mode a later install merges into whatever config kubelet
+  already runs.
 - `plugin.matchImages` of different installs should not overlap. They still
   work when they do, but every matching plugin runs for each pull: a bridge
   without a HarborAccess for the pod answers 403, its plugin returns no
   credentials and no cache entry, and that bridge logs a denial for every
   such pull.
 - `helm uninstall` removes nothing on the nodes, as before: the entry, the
-  binary, the CA and mTLS files, the state file and the lock files stay.
+  binary, the CA and mTLS files, the state file, the lock files and the
+  `.bak` copies of every file the installer replaced (the binary's is an
+  executable earlier plugin in kubelet's bin dir; also the shared config's
+  and, in patch mode, `/etc/default/kubelet`'s) stay.
   Kubelet keeps running the orphaned plugin for its `matchImages`; the
   plugin cannot reach the removed bridge (a new service on the same port
   would also need a certificate from the pinned CA) and contributes no
@@ -146,6 +177,14 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   rewrites the shared config with its own entry alone.
 - Two installs with the same `plugin.providerName` still overwrite each
   other; the installer cannot tell them apart from an upgrade.
+- A writer of `plugin.hostConfigDir` can still change another install's
+  entry in the shared file: its name and binary are genuine, so the other
+  installers keep the change until the owning installer's next pass
+  replaces it, and a kubelet restart in between runs it, also one that
+  another installer triggers for its own entry. With a single install, a
+  planted change lasts until that install's next pass, as before this ADR.
+  An install in auto mode that merges into another install's chart-owned
+  file (other directories) keeps whatever that file holds, like any merge.
 - Every node gets two empty lock files, also with a single install.
 
 ## Alternatives considered

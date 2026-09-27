@@ -22,12 +22,15 @@
 
 No action is needed for existing installs: with the default
 `plugin.providerName` the chart renders the same manifests, every node
-file keeps its path, and the upgrade restarts no kubelet.
+file keeps its path, and the upgrade restarts no kubelet. This includes
+`helm upgrade --reuse-values` from 0.10.0: the reused values lack
+`plugin.providerName`, and a missing name renders the default.
 
 | Change | What to do |
 | --- | --- |
-| New `plugin.providerName` (default `harbor-bridge-plugin`, a DNS label) names the kubelet provider entry and the plugin binary; a non-default name also names the install's CA, mTLS and state files | Nothing for a single install. To run a second bridge with its own chart-managed plugin, upgrade every existing release first, then install the new one with its own `plugin.providerName`, `service.nodePort`, `plugin.audience` and non-overlapping `plugin.matchImages`, and give every release a `bridge.harborAccessSelector` (README, "Several installs per cluster"). Changing the name of an existing install leaves its old entry and files on the nodes; remove them as described under "Uninstalling". |
-| Patch and none mode merge into the chart-owned provider config once it holds another provider, instead of overwriting it | Nothing. While only this install's entry is in the file, it is written as before. |
+| New `plugin.providerName` (default `harbor-bridge-plugin`, a DNS label) names the kubelet provider entry and the plugin binary; a non-default name also names the install's CA, mTLS and state files | Nothing for a single install. To run a second bridge with its own chart-managed plugin, upgrade every existing release first, then install the new one under a release name of its own (it names the cluster-scoped audience RBAC, the mTLS CN and the default `bridge.instance`) with its own `plugin.providerName`, `service.nodePort`, `plugin.audience` and non-overlapping `plugin.matchImages`, and give every release a `bridge.harborAccessSelector` (README, "Several installs per cluster"). The name must be a string: quote a name such as `"123"`, or use `--set-string`. Changing the name of an existing install leaves its old entry and files on the nodes; remove them as described under "Uninstalling". |
+| Patch and none mode keep other installs' entries in the chart-owned provider config (recognised by their binary in `plugin.hostBinaryDir`) instead of overwriting them; everything else in the file is still dropped | Nothing. While no other install's entry is in the file, it is written as before. |
+| Patch mode refuses to point kubelet at its own directories while the config kubelet reads holds another install's entry | Nothing for a single install. Give every release in patch mode the same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. |
 | The installer takes a lock on each node (`/run/harbor-bridge-installer.lock`, and `<provider config>.lock` next to the provider config) and records a per-install hash in its state file | Nothing. The state file of the previous version is converted on the first pass without a kubelet restart. |
 | A second bridge installed by hand with `plugin.enabled=false` (the workaround so far) | Optional: switch it to the chart's DaemonSet with the same provider name. The installer adopts an existing bridge entry of that name. |
 

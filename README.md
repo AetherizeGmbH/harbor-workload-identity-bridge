@@ -302,8 +302,9 @@ yourself when you are done.
 
 `helm uninstall` removes nothing on the nodes. The provider entry named
 `plugin.providerName` stays in kubelet's credential-provider config, and
-the plugin binary, the CA (and mTLS) files, the state file and the lock
-files stay on disk. Kubelet keeps running the plugin for its
+the plugin binary, the CA (and mTLS) files, the state file, the lock
+files and the `.bak` copies the installer keeps of every file it
+replaced stay on disk. Kubelet keeps running the plugin for its
 `matchImages`; with the bridge gone the plugin fails and adds no
 credentials, so those pulls go ahead with whatever other credentials
 apply (a later service on the same NodePort would also need a
@@ -322,7 +323,13 @@ clean a node:
    missing.
 3. Delete `<bin-dir>/<providerName>`, the CA and mTLS files in
    `plugin.hostConfigDir` and the state file in `plugin.install.stateDir`
-   (file names in [Several installs per cluster](#several-installs-per-cluster-adr-0029)).
+   (file names in [Several installs per cluster](#several-installs-per-cluster-adr-0029)),
+   each with its `.bak` copy. The binary's `.bak` is an earlier plugin
+   binary, executable, in kubelet's bin dir.
+4. Once the last install is gone from the node, also delete the backups
+   of the shared files (`<provider config>.bak`; in patch mode
+   `/etc/default/kubelet.bak`) and the lock files
+   (`/run/harbor-bridge-installer.lock`, `<provider config>.lock`).
 
 ### How the node install works — modes and upgrades (ADR-0021)
 
@@ -356,12 +363,14 @@ file per install, see below):
 
 A cluster can run several bridges, for example one per Harbor instance
 ([ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)).
-Each is a Helm release with its own plugin DaemonSet. Kubelet has one
-credential-provider config and one bin dir, so the releases share them:
-on every node, each release's installer adds and updates only the
-provider entry named by its `plugin.providerName` and leaves every other
-entry alone: the other releases' and the cloud's. Values for a second
-release next to a first one that keeps the default provider name:
+Each is a Helm release with a release name of its own and its own
+plugin DaemonSet. Kubelet has one credential-provider config and one bin
+dir, so the releases share them: on every node, each release's installer
+adds and updates only the provider entry named by its
+`plugin.providerName` and leaves every other entry alone: the other
+releases' and the cloud's. Values for a second
+release (`helm install harbor-bridge-eu …`) next to a first one that
+keeps the default provider name:
 
 ```yaml
 clusterName: prod-eu-west-2          # distinct when both bridges use the same Harbor
@@ -376,6 +385,11 @@ service:
   nodePort: 31444                    # the first release keeps 31443
 ```
 
+- **A release name per release.** The release name (or
+  `fullnameOverride`) names the chart's cluster-scoped RBAC for the
+  kubelet audience, the plugin's mTLS client CN and, by default,
+  `bridge.instance`, the bridge's finalizer. Two releases with the same
+  name, even in different namespaces, collide.
 - **Selectors on every release.** A bridge without
   `bridge.harborAccessSelector` sees every HarborAccess and marks the
   other bridge's objects `AudienceMismatch`. Label each HarborAccess for
@@ -390,8 +404,10 @@ service:
   version with ADR-0029 before you add the second: an older installer in
   patch or none mode rewrites the shared config with only its own entry.
 - **Same directories.** In patch and none mode all releases must use the
-  same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. In auto mode a
-  later release merges into whatever config kubelet already runs.
+  same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
+  refuses to point kubelet at other directories while the config kubelet
+  reads holds another release's entry. In auto mode a later release
+  merges into whatever config kubelet already runs.
 - **Disjoint `matchImages`.** Kubelet runs every provider whose
   `matchImages` match an image, pools their credentials and tries them
   in order until a pull succeeds (read in the kubelet source; see
@@ -402,10 +418,15 @@ service:
   `/run/harbor-bridge-installer.lock` and on a `.lock` file next to the
   provider config, and each restarts kubelet only for changes to its own
   entry.
-- **The installer refuses names it does not own**: a provider entry of
-  that name that is not a bridge entry, or a file of that name in
-  kubelet's bin dir that is not this plugin (GKE keeps kubelet itself
-  there).
+- **The chart-owned config stays the chart's.** In patch and none mode
+  each pass rewrites `<plugin.hostConfigDir>/credential-provider-config.yaml`
+  to its own entry plus the other releases' entries, recognised by their
+  binary in `plugin.hostBinaryDir`, and drops anything else, as the
+  single install always did.
+- **The installer refuses names it does not own**: in a cloud's config
+  (merge mode), a provider entry of that name that is not a bridge
+  entry; for a non-default name, a file of that name in kubelet's bin
+  dir that is not this plugin (GKE keeps kubelet itself there).
 - Removing one release, or renaming its provider, leaves its entry on
   the nodes: see [Uninstalling](#uninstalling).
 

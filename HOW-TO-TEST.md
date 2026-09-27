@@ -96,8 +96,9 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 The harness installs one release. Several releases on one node (ADR-0029)
 are covered by the installer's unit tests (`installer/coexist_test.go`: two
 of our providers next to a foreign one in merge, patch and none mode, both
-locks, two installers at once) and by the chart's golden case
-`second-instance`, not by a kubelet-driven run.
+locks, two installers at once, entries planted in the chart-owned config,
+patch mode refusing to move kubelet away from another install's entry) and
+by the chart's golden case `second-instance`, not by a kubelet-driven run.
 
 ## Pause-for-inspection mode
 
