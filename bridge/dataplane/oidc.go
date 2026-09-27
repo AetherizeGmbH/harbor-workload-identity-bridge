@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // Validator verifies a Kubernetes service-account token's signature,
@@ -180,6 +181,12 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
 		}
 		allowIfAPIServer(u)
+		// No discovery document names the issuer's algorithms, so accept
+		// every one the key set verifies: an apiserver with an ECDSA
+		// signing key issues ES256/384/512 tokens. go-jose binds the
+		// algorithm to the key's type, so this admits no algorithm
+		// confusion; HS* and none are not in the list.
+		algs = algNames(jwtSigningAlgs)
 	} else {
 		provider, err := oidc.NewProvider(oidc.ClientContext(ctx, httpClient), cfg.Issuer)
 		if err != nil {
@@ -221,8 +228,17 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	}, nil
 }
 
+func algNames(algs []jose.SignatureAlgorithm) []string {
+	out := make([]string, len(algs))
+	for i, a := range algs {
+		out[i] = string(a)
+	}
+	return out
+}
+
 // supportedAlgs keeps the discovery-advertised algorithms the key set can
-// verify. Empty means the verifier's default, RS256.
+// verify. Empty (discovery advertises none of them) means the verifier's
+// default, RS256.
 func supportedAlgs(advertised []string) []string {
 	var out []string
 	for _, a := range advertised {
