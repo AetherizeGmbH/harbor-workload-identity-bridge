@@ -31,19 +31,12 @@ const (
 	hashSuffixLen = 16
 
 	// robotNamePrefix is the constant the bridge prepends to every robot
-	// it owns. Combined with the cluster name (and a trailing dash) it
+	// it owns. Combined with the cluster name (and a trailing dot) it
 	// forms the ownership prefix that gates every Harbor write call.
+	// Harbor's own robot_name_prefix ("robot$") is a different thing: the
+	// client strips it on read paths (see DefaultRobotPrefix and
+	// WithRobotPrefix), so every name in this file is an internal name.
 	robotNamePrefix = "bridge-"
-
-	// HarborRobotPrefix is the literal Harbor prepends server-side to
-	// every system-level robot name on read paths (GET /robots,
-	// GET /robots/{id}). POST /robots accepts the un-prefixed name and
-	// Harbor adds the prefix on store. So the bridge sends
-	// "bridge-<cluster>.<ns>.<sa>" to Create but reads back
-	// "robot$bridge-<cluster>.<ns>.<sa>". Every comparison between an
-	// internally-constructed name and a name from Harbor must reckon
-	// with this asymmetry — see OwnsRobot and GetByName.
-	HarborRobotPrefix = "robot$"
 )
 
 // robotNameRegex mirrors Harbor's server-side validateName check:
@@ -126,10 +119,12 @@ func ClusterPrefix(cluster string) string {
 // the given cluster. A bridge MUST NOT list, modify, or delete a robot for
 // which OwnsRobot returns false; this is enforced at every Harbor write site.
 //
-// Accepts both the internal name (what RobotName returns, what we send to
-// POST /robots) and the Harbor-on-wire name (what List/Get return,
-// "robot$<internal>"). Callers should not have to know which form they
-// hold — this is the single normalization point.
+// robotName must be an internal name: what RobotName returns, or
+// Robot.Name from the client, which strips Harbor's robot_name_prefix on
+// every read path (ADR-0023). Never pass Robot.WireName: with any prefix
+// the answer would be false, and stripping a hard-coded "robot$" here
+// would claim unstripped names under a prefix mismatch, which the client
+// reports as ErrRobotPrefixMismatch instead.
 //
 // The ownership prefix is "bridge-<cluster>." (dot-terminated, ADR-0018).
 // Because the cluster field is a dot-free DNS label, distinct cluster names
@@ -143,8 +138,7 @@ func OwnsRobot(cluster, robotName string) bool {
 	if cluster == "" {
 		return false
 	}
-	n := strings.TrimPrefix(robotName, HarborRobotPrefix)
-	return strings.HasPrefix(n, ClusterPrefix(cluster))
+	return strings.HasPrefix(robotName, ClusterPrefix(cluster))
 }
 
 // OwnsLegacyRobot reports whether robotName is a robot this cluster's
@@ -160,13 +154,13 @@ func OwnsRobot(cluster, robotName string) bool {
 // none, and every current name has one right after the cluster field),
 // and callers MUST additionally require the description's cluster tag
 // to equal cluster exactly (RobotBelongsToCluster). That tag is what
-// tells "prod"'s legacy robots apart from "prod-eu"'s.
+// tells "prod"'s legacy robots apart from "prod-eu"'s. Like OwnsRobot it
+// takes the internal name (Robot.Name), never the on-wire name.
 func OwnsLegacyRobot(cluster, robotName string) bool {
 	if cluster == "" {
 		return false
 	}
-	n := strings.TrimPrefix(robotName, HarborRobotPrefix)
-	rest, ok := strings.CutPrefix(n, robotNamePrefix+cluster+"-")
+	rest, ok := strings.CutPrefix(robotName, robotNamePrefix+cluster+"-")
 	return ok && rest != "" && !strings.Contains(rest, ".")
 }
 

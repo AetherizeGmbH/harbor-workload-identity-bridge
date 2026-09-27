@@ -80,7 +80,7 @@ type Robot struct {
 
 	// Name is the bridge-internal robot name: what RobotName returns and
 	// what Create sends. The client strips Harbor's configured robot name
-	// prefix (default "robot$", ADR-0014) on every read path, so callers
+	// prefix (default "robot$", ADR-0023) on every read path, so callers
 	// compare internal names only and never handle the prefix themselves.
 	Name string
 
@@ -127,6 +127,14 @@ var ErrRobotNotFound = errors.New("robot not found")
 // See ADR-0003 for the persistent-robot lifecycle.
 var ErrRobotAlreadyExists = errors.New("robot already exists")
 
+// ErrRobotPrefixMismatch is returned when Harbor reports a robot name that
+// the configured robot prefix (WithRobotPrefix) cannot account for: Harbor
+// is configured with another robot_name_prefix. The bridge would then
+// fail to recognise its own robots, which silently breaks lookups (a
+// create/409 loop), revocation on HarborAccess deletion, and the janitor,
+// so every read path fails closed with this error instead.
+var ErrRobotPrefixMismatch = errors.New("robot name prefix does not match Harbor's robot_name_prefix")
+
 // Client is the small surface the reconciler and janitor need against
 // Harbor. The bridge's ownership-prefix safety invariant (ADR-0009) is the
 // caller's responsibility; Client is intentionally cluster-agnostic so its
@@ -147,10 +155,16 @@ type Client interface {
 // Option configures NewClient.
 type Option func(*goClient)
 
+// DefaultRobotPrefix is Harbor's default robot_name_prefix, the client's
+// default for WithRobotPrefix.
+const DefaultRobotPrefix = "robot$"
+
 // WithRobotPrefix sets the robot name prefix the Harbor instance is
-// configured with (Harbor's robot_name_prefix setting, default "robot$").
-// Harbor stores robot names without it and prepends it on every read
-// path; the client strips it again so callers only see internal names.
+// configured with (Harbor's robot_name_prefix setting, default
+// DefaultRobotPrefix). Harbor stores robot names without it and prepends
+// it on every read path and in the create response; the client strips it
+// again so callers only see internal names (ADR-0023). A prefix that does
+// not match Harbor's makes the client return ErrRobotPrefixMismatch.
 func WithRobotPrefix(prefix string) Option {
 	return func(c *goClient) { c.robotPrefix = prefix }
 }
@@ -260,7 +274,7 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 
 	c := &goClient{
 		robots:      sdkrobot.New(rt, strfmt.Default, httptransport.BasicAuth(username, password)),
-		robotPrefix: HarborRobotPrefix,
+		robotPrefix: DefaultRobotPrefix,
 		callTimeout: DefaultCallTimeout,
 	}
 	for _, o := range opts {
@@ -291,10 +305,10 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 		Duration:    robotDurationNeverExpires,
 		Permissions: toHarborPermissions(perms),
 	}
-	ctx, cancel := c.call(ctx)
+	callCtx, cancel := c.call(ctx)
 	defer cancel()
-	params := sdkrobot.NewCreateRobotParamsWithContext(ctx).WithRobot(body)
-	resp, err := c.robots.CreateRobot(ctx, params)
+	params := sdkrobot.NewCreateRobotParamsWithContext(callCtx).WithRobot(body)
+	resp, err := c.robots.CreateRobot(callCtx, params)
 	if err != nil {
 		return nil, wrapHarborOp(fmt.Sprintf("create robot %q", name), err)
 	}
@@ -303,9 +317,25 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 		// next scheduled rotation, 24h later.
 		return nil, fmt.Errorf("create robot %q: Harbor returned no secret", name)
 	}
+	// Harbor answers with <its robot_name_prefix><name>. An empty name or
+	// the bare input name (ADR-0014 recorded a Harbor echoing it) carries
+	// no information about the prefix; anything else must be exactly the
+	// configured prefix plus name.
 	wire := resp.Payload.Name
-	if wire == "" {
+	switch wire {
+	case "", name:
 		wire = c.robotPrefix + name
+	case c.robotPrefix + name:
+	default:
+		// The bridge could not recognise this robot on any later read
+		// (lookup, deletion, janitor), so it must not stay alive with a
+		// valid password. Delete it before reporting the mismatch.
+		mismatch := fmt.Errorf("create robot %q: %w: Harbor named the new robot %q, the configured prefix %q expects %q; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+			name, ErrRobotPrefixMismatch, wire, c.robotPrefix, c.robotPrefix+name)
+		if derr := c.Delete(ctx, resp.Payload.ID); derr != nil {
+			return nil, fmt.Errorf("%w; deleting the new robot (id %d) failed too, delete it in Harbor: %w", mismatch, resp.Payload.ID, derr)
+		}
+		return nil, mismatch
 	}
 	return &Robot{
 		ID:          resp.Payload.ID,
@@ -351,7 +381,11 @@ func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
 			if r == nil {
 				continue
 			}
-			out = append(out, c.fromHarborRobot(r))
+			robot, err := c.fromHarborRobot(r)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, robot)
 		}
 		if int64(len(resp.Payload)) < size {
 			return out, nil
@@ -385,6 +419,19 @@ func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
 	}
 	if r := matchName(robots, name); r != nil {
 		return r, nil
+	}
+	// The filter matched the stored name exactly, so Harbor reports that
+	// robot as <its prefix><name>. A hit of that shape that the configured
+	// prefix does not strip to name means the two prefixes differ in a way
+	// list() cannot see: Harbor's is the configured one plus characters a
+	// robot name may start with (configured "robot", Harbor "robotx$").
+	// Without this check the lookup would report NotFound and drive a
+	// create/409 loop.
+	for i := range robots {
+		if wire := robots[i].WireName; strings.HasSuffix(wire, name) && wire != c.robotPrefix+name {
+			return nil, fmt.Errorf("look up robot %q: %w: Harbor reports it as %q, the configured prefix %q expects %q; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+				name, ErrRobotPrefixMismatch, wire, c.robotPrefix, c.robotPrefix+name)
+		}
 	}
 	robots, err = c.List(ctx)
 	if err != nil {
@@ -548,10 +595,24 @@ func toHarborPermissions(perms []ProjectPermission) []*models.RobotPermission {
 	return out
 }
 
-// fromHarborRobot converts a Harbor read-path robot. The prefix is
-// stripped only when present, so legacy (v1, non-editable) robots whose
-// names Harbor returns raw keep their names.
-func (c *goClient) fromHarborRobot(r *models.Robot) Robot {
+// fromHarborRobot converts a Harbor read-path robot. Harbor prepends its
+// robot_name_prefix to the name of every editable (v2) robot and returns
+// legacy (v1, non-editable) robots raw (goharbor/harbor
+// src/controller/robot/controller.go populate), so the prefix is stripped
+// only when present. Harbor also refuses to create a robot whose name does
+// not start with a lower-case letter or digit (validateName in
+// src/server/v2.0/handler/robot.go, since robot accounts v2 in 2.2). An
+// editable robot that lacks the configured prefix, or that does not start
+// with such a character once it is stripped (configured "robot", Harbor
+// "robot$"), proves that Harbor uses another prefix: ErrRobotPrefixMismatch.
+func (c *goClient) fromHarborRobot(r *models.Robot) (Robot, error) {
+	if r.Editable {
+		rest, ok := strings.CutPrefix(r.Name, c.robotPrefix)
+		if !ok || rest == "" || !isLowerAlnum(rest[0]) {
+			return Robot{}, fmt.Errorf("%w: Harbor reports robot %q (id %d), which the configured prefix %q does not account for; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+				ErrRobotPrefixMismatch, r.Name, r.ID, c.robotPrefix)
+		}
+	}
 	out := Robot{
 		ID:          r.ID,
 		Name:        strings.TrimPrefix(r.Name, c.robotPrefix),
@@ -582,7 +643,11 @@ func (c *goClient) fromHarborRobot(r *models.Robot) Robot {
 		}
 	}
 	out.Permissions = normalizePermissions(perms)
-	return out
+	return out, nil
+}
+
+func isLowerAlnum(b byte) bool {
+	return ('a' <= b && b <= 'z') || ('0' <= b && b <= '9')
 }
 
 // harborStatusErr is the interface every generated go-client error response

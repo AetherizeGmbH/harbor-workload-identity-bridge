@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
 )
 
 // Environment variable names. Constants so wiring (Helm chart, Deployment
@@ -52,9 +53,6 @@ const (
 	clusterNamePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	clusterNameMaxLen  = 63
 	defaultLogLevel    = "info"
-
-	// defaultHarborRobotPrefix is Harbor's default robot_name_prefix.
-	defaultHarborRobotPrefix = "robot$"
 
 	// defaultTokenMaxLifetime admits kubelet's credential-provider tokens,
 	// which carry the TokenRequest default lifetime of one hour (ADR-0028).
@@ -135,9 +133,9 @@ type Config struct {
 	// HarborRobotPrefix is the robot name prefix the Harbor instance is
 	// configured with (Harbor's robot_name_prefix, default "robot$").
 	// Harbor stores robot names without it and reports them with it; the
-	// Harbor client strips it on read paths (ADR-0014). Set it when the
-	// Harbor administrator changed the prefix — otherwise the bridge cannot
-	// recognise its own robots when it lists them.
+	// Harbor client strips it on read paths (ADR-0023). Set it when the
+	// Harbor administrator changed the prefix — otherwise the Harbor client
+	// fails every read with ErrRobotPrefixMismatch.
 	HarborRobotPrefix string
 
 	// ForceLocalValidation gates whether the data plane performs full local
@@ -211,7 +209,7 @@ func LoadFromEnv() (*Config, error) {
 	cfg := &Config{
 		LogLevel:             defaultLogLevel,
 		ForceLocalValidation: true,
-		HarborRobotPrefix:    defaultHarborRobotPrefix,
+		HarborRobotPrefix:    harbor.DefaultRobotPrefix,
 		TokenMaxLifetime:     defaultTokenMaxLifetime,
 		RequirePodBoundToken: true,
 	}

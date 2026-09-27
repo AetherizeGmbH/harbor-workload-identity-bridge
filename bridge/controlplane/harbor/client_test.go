@@ -69,11 +69,15 @@ func newFakeHarbor(t *testing.T) *fakeHarbor {
 	}
 }
 
-// render returns the read-path view of a stored robot (prefixed name, no
-// secret — Harbor never returns secrets on read paths).
+// render returns the read-path view of a stored robot: no secret (Harbor
+// never returns secrets on read paths), and the prefixed name for an
+// editable (v2) robot only — Harbor returns legacy v1 robots raw
+// (src/controller/robot/controller.go populate).
 func (f *fakeHarbor) render(r *models.Robot) *models.Robot {
 	out := *r
-	out.Name = f.prefix + r.Name
+	if r.Editable {
+		out.Name = f.prefix + r.Name
+	}
 	out.Secret = ""
 	return &out
 }
@@ -414,6 +418,96 @@ func TestClient_ReadPathsStripRobotPrefix(t *testing.T) {
 	}
 }
 
+// A bridge whose robot prefix differs from Harbor's robot_name_prefix
+// cannot recognise its own robots: the lookup would miss (a create/409
+// loop), and HarborAccess deletion and the janitor would skip the robot,
+// release the finalizer and leave it alive with a valid password. Every
+// read path must fail with ErrRobotPrefixMismatch instead, and Create must
+// not leave a robot behind that the bridge could never find again.
+func TestClient_RobotPrefixMismatchFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ harbor, bridge string }{
+		{"robot_", "robot$"}, // Harbor admin changed the prefix
+		{"robot$", "robot_"}, // bridge configured with a prefix Harbor does not use
+		{"robot$", "robot"},  // one prefix is a prefix of the other
+		{"robot", "robot$"},
+	} {
+		t.Run(tc.harbor+"/"+tc.bridge, func(t *testing.T) {
+			fake := newFakeHarbor(t)
+			fake.prefix = tc.harbor
+			srv := fake.server()
+			defer srv.Close()
+			u, _ := url.Parse(srv.URL)
+			c, err := NewClient(u, "", "", srv.Client().Transport, WithRobotPrefix(tc.bridge))
+			if err != nil {
+				t.Fatal(err)
+			}
+			perms := []ProjectPermission{{Project: "p", Action: "pull"}}
+
+			if _, err := c.Create(context.Background(), "bridge-prod.ns.new", "", perms); !errors.Is(err, ErrRobotPrefixMismatch) {
+				t.Errorf("Create: err = %v, want ErrRobotPrefixMismatch", err)
+			}
+			for id, r := range fake.mu.robots {
+				t.Errorf("Create left robot %d %q in Harbor that the bridge cannot recognise", id, r.Name)
+			}
+
+			// A robot that already exists, e.g. from before the Harbor
+			// administrator changed the prefix.
+			fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod.ns.sa", Editable: true, Description: "d"}
+			if _, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotPrefixMismatch) {
+				t.Errorf("GetByName: err = %v, want ErrRobotPrefixMismatch (not NotFound, which drives a create/409 loop)", err)
+			}
+			// HarborAccess deletion and the janitor list every robot: a
+			// listing under names the bridge does not recognise would make
+			// them skip the robot and release the finalizer.
+			if robots, err := c.List(context.Background()); !errors.Is(err, ErrRobotPrefixMismatch) {
+				t.Errorf("List: robots = %+v, err = %v, want ErrRobotPrefixMismatch", robots, err)
+			}
+		})
+	}
+}
+
+// When Harbor's prefix is the configured one plus more characters that a
+// robot name may start with, the listing cannot tell (configured "robot",
+// Harbor "robotx$" lists "robotx$bridge-…" as "x$bridge-…"). The exact
+// name query can: its hit must be exactly <configured prefix><name>.
+func TestClient_GetByName_DetectsPrefixMismatchTheListingCannot(t *testing.T) {
+	fake := newFakeHarbor(t)
+	fake.prefix = "robotx$"
+	srv := fake.server()
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c, err := NewClient(u, "", "", srv.Client().Transport, WithRobotPrefix("robot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod.ns.sa", Editable: true}
+	if _, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotPrefixMismatch) {
+		t.Fatalf("GetByName: err = %v, want ErrRobotPrefixMismatch", err)
+	}
+}
+
+// Legacy (v1, non-editable) robots are returned without Harbor's prefix;
+// they must not trip the prefix check.
+func TestClient_List_AcceptsLegacyRobotsWithoutPrefix(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod-ns-sa", Editable: false}
+	fake.mu.robots[2] = &models.Robot{ID: 2, Name: "bridge-prod.ns.sa", Editable: true}
+	robots, err := c.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range robots {
+		got[r.Name] = r.WireName
+	}
+	if got["bridge-prod-ns-sa"] != "bridge-prod-ns-sa" || got["bridge-prod.ns.sa"] != "robot$bridge-prod.ns.sa" {
+		t.Errorf("listed names (internal -> wire) = %v", got)
+	}
+}
+
 // TestClient_GetByName_UsesExactNameQuery pins the O(1) lookup: the client
 // asks Harbor for q=name=<internal name> instead of paging every robot.
 func TestClient_GetByName_UsesExactNameQuery(t *testing.T) {
@@ -612,8 +706,9 @@ func TestPermissionsMatch(t *testing.T) {
 
 func TestFromHarborRobot_FlagsForeignAccess(t *testing.T) {
 	c := &goClient{robotPrefix: "robot$"}
-	r := c.fromHarborRobot(&models.Robot{
-		Name: "robot$bridge-a.b.c",
+	r, err := c.fromHarborRobot(&models.Robot{
+		Name:     "robot$bridge-a.b.c",
+		Editable: true,
 		Permissions: []*models.RobotPermission{
 			{Kind: "project", Namespace: "p", Access: []*models.Access{
 				{Resource: "repository", Action: "pull"},
@@ -621,16 +716,23 @@ func TestFromHarborRobot_FlagsForeignAccess(t *testing.T) {
 			}},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !r.ForeignAccess {
 		t.Error("an artifact:delete grant must be flagged as foreign access")
 	}
 	if r.Name != "bridge-a.b.c" {
 		t.Errorf("Name = %q", r.Name)
 	}
-	r = c.fromHarborRobot(&models.Robot{
+	r, err = c.fromHarborRobot(&models.Robot{
 		Name:        "robot$bridge-a.b.c",
+		Editable:    true,
 		Permissions: []*models.RobotPermission{{Kind: "system", Namespace: "/", Access: []*models.Access{{Resource: "robot", Action: "create"}}}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !r.ForeignAccess {
 		t.Error("a system-kind grant must be flagged as foreign access")
 	}

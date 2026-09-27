@@ -177,7 +177,11 @@ A `HarborAccess` is cleaned up via finalizer:
 
 There is no path where the CR is gone but the robot persists. If the
 bridge crashes between steps, the janitor catches the orphan robot
-within one sweep interval (default 5 minutes).
+within one sweep interval (default 5 minutes). If
+`harbor.robotNamePrefix` does not match Harbor's `robot_name_prefix`,
+the bridge cannot recognise its robots, so it refuses to act on the
+listing: deletion waits (`reason=DeletionBlocked`) until the prefix is
+corrected.
 
 ### Credential leakage via logs
 
@@ -492,7 +496,7 @@ their own RBAC.
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
-| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`; otherwise the janitor cannot recognise the bridge's robots |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error naming both prefixes: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor does not sweep. A robot created under a mismatch is deleted again at once |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
