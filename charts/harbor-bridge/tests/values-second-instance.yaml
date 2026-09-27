@@ -4,12 +4,13 @@
 # clusterName because it shares the Harbor. mTLS is on so the per-install
 # client file names render too.
 #
-# A real second install has its own release name (helm install
-# harbor-bridge-eu ...), which names its cluster-scoped RBAC, its objects,
-# the plugin's mTLS CN and its finalizer instance. The golden cases all
-# render as release harbor-bridge, so fullnameOverride and bridge.instance
-# stand in for that release name here.
-fullnameOverride: harbor-bridge-eu
+# It renders as a release of its own, next to the default golden's
+# harbor-bridge in harbor-bridge-system: release harbor-bridge-eu in
+# namespace harbor-bridge-eu (Makefile, CHART_CASES). The release name
+# names its objects, cluster-scoped RBAC, selector labels, the plugin's
+# mTLS CN and its finalizer instance; the namespace keeps its
+# leader-election Lease and its robot Secrets apart (README, "Several
+# installs per cluster").
 clusterName: prod-eu-west-2
 
 harbor:
@@ -24,7 +25,6 @@ plugin:
   audience: harbor-bridge-prod-eu-west-2
 
 bridge:
-  instance: harbor-bridge-eu
   harborAccessSelector:
     harbor.aetherize.io/bridge: harbor-eu
   mTLS:
