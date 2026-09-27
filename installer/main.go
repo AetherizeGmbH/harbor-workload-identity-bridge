@@ -177,7 +177,7 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	// plugin.hostConfigDir is writable by the sync container of every
 	// release (and any pod with a hostPath on it). The bin dir holds the
 	// binaries kubelet runs, which the installer also takes as proof of
-	// another install's entry (siblingEntry), and the state file decides
+	// another install's entry (siblingIn), and the state file decides
 	// about kubelet restarts: neither may be where those writers reach.
 	for name, dir := range map[string]string{"HOST_BIN_DIR": c.HostBinDir, "INSTALL_MERGE_BIN_DIR": c.MergeBinDir} {
 		if dir != "" && dirsOverlap(dir, c.HostConfigDir) {

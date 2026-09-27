@@ -17,7 +17,7 @@ import (
 // entryRecord is the content of an install's record, <bin dir>/<name>.entry
 // (filesFor, ADR-0029): what that install's installer wrote into kubelet's
 // credential-provider config, kept next to its binary, where no writer of
-// plugin.hostConfigDir reaches. siblingEntry keeps another install's entry
+// plugin.hostConfigDir reaches. siblingIn keeps another install's entry
 // only when its record holds it, and checkBinaryOwnership takes the
 // record's presence as proof that the binary next to it is this install's.
 //

@@ -916,11 +916,11 @@ func TestRun_ChartOwnedConfigDropsPlantedEntries(t *testing.T) {
 	}
 }
 
-// TestSiblingEntry: an entry in the chart-owned config counts as another
+// TestSiblingIn: an entry in the chart-owned config counts as another
 // install's only if it is exactly what that install's installer wrote:
 // its binary and its record are in the bin dir, which no writer of
 // plugin.hostConfigDir can write, and the record holds the entry.
-func TestSiblingEntry(t *testing.T) {
+func TestSiblingIn(t *testing.T) {
 	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	eu := mustEntry(t, renderedConfigFor(euName), euName)
 	euBin := env.cfg.hostPath(binDir + "/" + euName)
