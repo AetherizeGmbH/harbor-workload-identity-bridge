@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -49,8 +50,16 @@ func newPKI(t *testing.T) *pki {
 	return &pki{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
 }
 
-// issue returns PEM cert + key for a leaf with the given usage.
+// issue returns PEM cert + key for a leaf with the given usage, valid for
+// 127.0.0.1.
 func (p *pki) issue(t *testing.T, usage x509.ExtKeyUsage) (certPEM, keyPEM []byte) {
+	t.Helper()
+	return p.issueFor(t, usage, []net.IP{net.ParseIP("127.0.0.1")}, nil)
+}
+
+// issueFor returns PEM cert + key for a leaf valid for exactly the given
+// IP addresses and DNS names.
+func (p *pki) issueFor(t *testing.T, usage x509.ExtKeyUsage, ips []net.IP, dnsNames []string) (certPEM, keyPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -60,7 +69,7 @@ func (p *pki) issue(t *testing.T, usage x509.ExtKeyUsage) (certPEM, keyPEM []byt
 		SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: "leaf"},
 		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage},
-		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses: ips, DNSNames: dnsNames,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.cert, &key.PublicKey, p.key)
 	if err != nil {
@@ -88,12 +97,20 @@ func writeFile(t *testing.T, name string, data []byte) string {
 func startBridge(t *testing.T, ca *pki, clientCA *pki) string {
 	t.Helper()
 	certPEM, keyPEM := ca.issue(t, x509.ExtKeyUsageServerAuth)
+	return serveBridge(t, certPEM, keyPEM, clientCA)
+}
+
+// serveBridge serves a canned credential response on 127.0.0.1 with the
+// given server certificate, optionally requiring a client cert from
+// clientCA.
+func serveBridge(t *testing.T, certPEM, keyPEM []byte, clientCA *pki) string {
+	t.Helper()
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Registry"})
+		_ = json.NewEncoder(w).Encode(bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: secs(60), CacheKeyType: "Registry"})
 	}))
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
 	if clientCA != nil {
@@ -164,6 +181,48 @@ func TestNewBridgeClient_PresentsClientCertForMTLS(t *testing.T) {
 	}
 	if _, err := with.fetch("h/x:1", "tok"); err != nil {
 		t.Fatalf("fetch with a client cert: %v", err)
+	}
+}
+
+// With a $(NODE_IP) endpoint the chart sets HARBOR_BRIDGE_SERVER_NAME to
+// the bridge Service's DNS name: the bridge certificate names the Service,
+// never a node IP. The handshake must verify the certificate against that
+// name, and against no other.
+func TestNewBridgeClient_VerifiesAgainstServerName(t *testing.T) {
+	const serviceName = "harbor-bridge.harbor-bridge-system.svc"
+	ca := newPKI(t)
+	certPEM, keyPEM := ca.issueFor(t, x509.ExtKeyUsageServerAuth, nil, []string{serviceName})
+	// The endpoint's host, 127.0.0.1, is not in the certificate.
+	url := serveBridge(t, certPEM, keyPEM, nil)
+
+	for _, tc := range []struct {
+		name       string
+		serverName string
+		wantOK     bool
+	}{
+		{"endpoint host only", "", false},
+		{"bridge service name", serviceName, true},
+		{"another name", "other.harbor-bridge-system.svc", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bc, err := newBridgeClient(&config{Endpoint: url, CABundle: string(ca.pem), ServerName: tc.serverName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = bc.fetch("h/x:1", "tok")
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("fetch with server name %q: %v", tc.serverName, err)
+				}
+				return
+			}
+			// A hostname mismatch, not some other failure: the CA is right,
+			// only the name is not.
+			var hostErr x509.HostnameError
+			if !errors.As(err, &hostErr) {
+				t.Fatalf("err = %v, want an x509 hostname mismatch", err)
+			}
+		})
 	}
 }
 

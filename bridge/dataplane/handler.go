@@ -42,8 +42,11 @@ const maxRequestBodyBytes = 64 << 10 // 64 KiB
 // (one Harbor robot per HarborAccess CR has permissions across one project,
 // so all repos sharing the same registry host can re-use the same creds).
 // NOTE: this is DIFFERENT from the kubelet credential-provider config's
-// `tokenAttributes.cacheType: ServiceAccount` (ADR-0006) — that controls
-// kubelet's SA-token cache, this controls the credential cache.
+// `tokenAttributes.cacheType: ServiceAccount` (ADR-0006). With
+// tokenAttributes set, kubelet keys its credential cache per ServiceAccount
+// (namespace, name, UID, listed annotations) under either cacheType;
+// `Token` would add the token's hash. This picks the image, registry or
+// global part of the same key.
 const cacheKeyTypeRegistry = "Registry"
 
 // Request is the HTTP API the kubelet plugin POSTs to the bridge. The SA

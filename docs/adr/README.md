@@ -16,8 +16,8 @@
 | 0012 | [Robot description as the cross-component reconciler↔janitor contract](0012-robot-description-as-component-contract.md) | Accepted |
 | 0013 | [Return robot Basic Auth credentials, not pre-minted Docker JWTs](0013-return-robot-basic-auth-credentials.md) | Accepted (supersedes 0005, supersedes 0007) |
 | 0014 | [Handle Harbor's `robot$` prefix asymmetry at the comparison boundary](0014-harbor-robot-dollar-prefix-handling.md) | Accepted (normalization point moved into the Harbor client by 0023) |
-| 0015 | [The plugin duplicates wire types instead of importing them](0015-plugin-duplicates-wire-types.md) | Accepted (enum-mismatch reasoning corrected by 0016) |
-| 0016 | [`cacheKeyType` in the credential-provider response is `Registry`, not `ServiceAccount`](0016-credential-provider-cache-key-type.md) | Accepted (supersedes the enum claim in 0015) |
+| 0015 | [The plugin duplicates wire types instead of importing them](0015-plugin-duplicates-wire-types.md) | Accepted (enum-mismatch reasoning corrected by 0016; since #111 the plugin does validate `cacheKeyType`; the JSON keys are pinned by the golden files in `bridge/dataplane/testdata`, read by both sides' tests) |
+| 0016 | [`cacheKeyType` in the credential-provider response is `Registry`, not `ServiceAccount`](0016-credential-provider-cache-key-type.md) | Accepted (supersedes the enum claim in 0015; `tokenAttributes.cacheType` is no SA-token cache: with `tokenAttributes` set kubelet keys cached credentials per ServiceAccount under either value, `Token` only adds the token's hash; and `cacheDuration`, not the token lifetime, bounds plugin runs) |
 | 0017 | [The chart provisions audience-scoped RBAC for kubelet token requests](0017-chart-provisions-audience-rbac.md) | Accepted |
 | 0018 | [Dot-delimited robot and Secret names for collision-free identity mapping](0018-dot-delimited-naming.md) | Accepted (supersedes 0009 naming scheme) |
 | 0019 | [Code conventions and CI quality gates](0019-code-conventions-and-ci-quality-gates.md) | Accepted |

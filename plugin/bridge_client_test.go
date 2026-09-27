@@ -49,7 +49,7 @@ func TestFetch_OK(t *testing.T) {
 			t.Errorf("image in body = %q", body.Image)
 		}
 		_ = json.NewEncoder(w).Encode(bridgeResponse{
-			Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Image",
+			Username: "u", Password: "p", ExpiresInSecs: secs(60), CacheKeyType: "Image",
 		})
 	})
 
@@ -57,8 +57,40 @@ func TestFetch_OK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if resp.Username != "u" || resp.Password != "p" || resp.ExpiresInSecs != 60 {
+	if resp.Username != "u" || resp.Password != "p" || resp.ExpiresInSecs == nil || *resp.ExpiresInSecs != 60 {
 		t.Errorf("response = %+v", resp)
+	}
+}
+
+// A 200 without expires_in is a contract break, not "do not cache": read
+// as 0 it would silently turn kubelet's credential cache off.
+func TestFetch_200WithoutExpiresIn_Errors(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing": `{"username":"u","password":"p","cache_key_type":"Registry"}`,
+		"null":    `{"username":"u","password":"p","expires_in":null,"cache_key_type":"Registry"}`,
+		"renamed": `{"username":"u","password":"p","expiresIn":3600,"cache_key_type":"Registry"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bc, _ := newTestBridge(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, body)
+			})
+			_, err := bc.fetch("harbor.example.com/x:1", "tok")
+			if err == nil || !strings.Contains(err.Error(), "expires_in") {
+				t.Fatalf("got %v, want a missing-expires_in error", err)
+			}
+		})
+	}
+}
+
+// expires_in 0 is legitimate: the bridge sends it once a rotation promise
+// has passed, and the plugin then tells kubelet not to cache.
+func TestFetch_200WithZeroExpiresIn_IsAccepted(t *testing.T) {
+	bc, _ := newTestBridge(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"username":"u","password":"p","expires_in":0,"cache_key_type":"Registry"}`)
+	})
+	resp, err := bc.fetch("harbor.example.com/x:1", "tok")
+	if err != nil || resp.ExpiresInSecs == nil || *resp.ExpiresInSecs != 0 {
+		t.Fatalf("resp = %+v, err = %v; want expires_in 0 accepted", resp, err)
 	}
 }
 
@@ -90,7 +122,7 @@ func TestFetch_503ThenOK_RetriesOnce(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(bridgeResponse{
-			Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Image",
+			Username: "u", Password: "p", ExpiresInSecs: secs(60), CacheKeyType: "Image",
 		})
 	})
 
@@ -149,7 +181,7 @@ func TestFetch_500_IsNotRetried(t *testing.T) {
 func TestFetch_200WithEmptyCreds_Errors(t *testing.T) {
 	bc, _ := newTestBridge(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(bridgeResponse{
-			Username: "", Password: "", ExpiresInSecs: 60, CacheKeyType: "Image",
+			Username: "", Password: "", ExpiresInSecs: secs(60), CacheKeyType: "Image",
 		})
 	})
 	_, err := bc.fetch("harbor.example.com/x:1", "tok")

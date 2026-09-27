@@ -42,7 +42,7 @@ func TestRun_HappyPath(t *testing.T) {
 	fetcher := &fakeFetcher{resp: &bridgeResponse{
 		Username:      "robot$bridge-prod-foo",
 		Password:      "s3cret",
-		ExpiresInSecs: 3600,
+		ExpiresInSecs: secs(3600),
 		CacheKeyType:  "Image",
 	}}
 
@@ -87,7 +87,7 @@ func TestRun_HostWithPort(t *testing.T) {
 	}
 	body, _ := json.Marshal(req)
 	fetcher := &fakeFetcher{resp: &bridgeResponse{
-		Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Image",
+		Username: "u", Password: "p", ExpiresInSecs: secs(60), CacheKeyType: "Image",
 	}}
 
 	var stdout bytes.Buffer
