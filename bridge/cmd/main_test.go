@@ -84,6 +84,23 @@ func TestValidatorConfig_TokenPolicy(t *testing.T) {
 	}
 }
 
+// The data plane refuses a robot Secret whose username is not this one,
+// so it must be exactly what Harbor reports for the robot the reconciler
+// creates: the configured prefix plus harbor.RobotName.
+func TestRobotUsername(t *testing.T) {
+	for _, tc := range []struct {
+		prefix, want string
+	}{
+		{"robot$", "robot$bridge-prod.flux-system.source-controller"},
+		{"svc+", "svc+bridge-prod.flux-system.source-controller"},
+	} {
+		got, err := robotUsername(&controlplane.Config{ClusterName: "prod", HarborRobotPrefix: tc.prefix})("flux-system", "source-controller")
+		if err != nil || got != tc.want {
+			t.Errorf("prefix %q: robotUsername = %q, %v; want %q", tc.prefix, got, err, tc.want)
+		}
+	}
+}
+
 func TestLogWeakTokenValidation(t *testing.T) {
 	const (
 		unbound = "tokens not bound to a pod are accepted"

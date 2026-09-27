@@ -87,6 +87,12 @@ type HandlerConfig struct {
 	// Audience is the only token audience served (ADR-0026). Empty
 	// serves nothing.
 	Audience string
+
+	// RobotUsername returns the username the control plane stores in the
+	// robot Secret of the given ServiceAccount: the Harbor robot prefix
+	// plus the robot name (ADR-0018). A Secret holding another username is
+	// not served. Required; nil serves nothing.
+	RobotUsername func(saNamespace, saName string) (string, error)
 }
 
 // Handler is the HTTP handler that validates an SA token, looks up the
@@ -349,7 +355,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Tell kubelet how long it may cache these credentials: the CR's
+	// 4. The Secret must hold the robot of the CR's current identity.
+	// After a serviceAccountRef change it holds the previous identity's
+	// robot until the control plane has created the new one, and deletes
+	// the old one right after. Handing that password to the new identity
+	// would leave kubelet caching a dead password for up to tokenTTL
+	// (ADR-0023); 503 makes the plugin retry and cache nothing.
+	want, err := h.robotUsername(matched)
+	if err != nil {
+		logger.Error(err, "robot username for HarborAccess",
+			"harboraccess", matched.Namespace+"/"+matched.Name)
+		h.audit(logger).Info("credential unavailable", append(append(caller, claimFields(claims)...),
+			"reason", "robot_name_unknown", "harboraccess", matched.Namespace+"/"+matched.Name,
+			"err", truncate(err.Error(), 200),
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.recordResult(ResultServerError)
+		return
+	}
+	if creds.username != want {
+		h.audit(logger).Info("credential unavailable", append(append(caller, claimFields(claims)...),
+			"reason", "secret_for_previous_identity", "harboraccess", matched.Namespace+"/"+matched.Name,
+			"robot", creds.username, "expected_robot", want,
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
+		http.Error(w, "credentials not yet available; retry", http.StatusServiceUnavailable)
+		h.recordResult(ResultUnavailable)
+		return
+	}
+
+	// 5. Tell kubelet how long it may cache these credentials: the CR's
 	// spec.tokenTTL, cut short so no cache outlives the password. The
 	// control plane promises (rotation-not-before) not to rotate before a
 	// given instant; caching past it would hand containerd a dead password
@@ -535,6 +569,14 @@ func cacheDuration(tokenTTL time.Duration, notBefore time.Time, hasNotBefore boo
 		return remaining.Truncate(time.Second)
 	}
 	return ttl
+}
+
+// robotUsername is the username the robot Secret of ha must hold.
+func (h *Handler) robotUsername(ha *harborv1alpha1.HarborAccess) (string, error) {
+	if h.Config.RobotUsername == nil {
+		return "", errors.New("HandlerConfig.RobotUsername is not set")
+	}
+	return h.Config.RobotUsername(ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
 }
 
 func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.HarborAccess) (*robotCreds, error) {

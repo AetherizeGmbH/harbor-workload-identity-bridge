@@ -591,7 +591,9 @@ their own RBAC.
   (also robots of an earlier `serviceAccountRef` and dash-named robots
   from 0.2.x) and its Secret before the finalizer is released. Changing
   `serviceAccountRef` deletes the previous identity's robot as soon as
-  the new one is in place. The janitor sweeps for anything left behind
+  the new one is in place; until then the new ServiceAccount gets `503`
+  (`reason=secret_for_previous_identity`), never the old robot's
+  password. The janitor sweeps for anything left behind
   every 5 minutes. While Harbor is unreachable, the finalizer holds and
   the HarborAccess reports `reason=DeletionBlocked`.
 - **Residual window.** The bridge stops issuing credentials for a
@@ -623,7 +625,7 @@ their own RBAC.
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
-| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once. An empty Harbor `robot_name_prefix` cannot be matched (an empty value selects `robot$`) |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once. An empty Harbor `robot_name_prefix` cannot be matched (an empty value selects `robot$`) The data plane then serves no robot Secret (`503`, `reason=secret_for_previous_identity`). |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
@@ -652,7 +654,7 @@ credential denied
 
 credential unavailable                   # valid token, nothing issued: 503 or 500
   source=…  subject=…  pod=…  node=…
-  reason=secret_missing|secret_unreadable|harboraccess_lookup_failed
+  reason=secret_missing|secret_for_previous_identity|secret_unreadable|harboraccess_lookup_failed|robot_name_unknown
   (harboraccess once matched, err for a 500) requested_image=…
 
 credential unavailable                   # token not judged: signing keys unavailable, 503

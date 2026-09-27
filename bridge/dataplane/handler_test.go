@@ -86,6 +86,21 @@ func newTestRobotSecret() *corev1.Secret {
 	}
 }
 
+// testRobotUsername is the robot username main wires for cluster "prod"
+// with Harbor's default prefix: the fixture Secret holds it.
+func testRobotUsername(saNamespace, saName string) (string, error) {
+	return "robot$bridge-prod." + saNamespace + "." + saName, nil
+}
+
+func testHandlerConfig() HandlerConfig {
+	return HandlerConfig{
+		BridgeNamespace:      hTestBridgeNS,
+		ForceLocalValidation: true,
+		Audience:             hTestAudience,
+		RobotUsername:        testRobotUsername,
+	}
+}
+
 func newTestClaims() *Claims {
 	return &Claims{
 		Subject:  hTestSubject,
@@ -135,11 +150,7 @@ func newHandlerFixture(t *testing.T, extras ...client.Object) *handlerFixture {
 		Handler: &Handler{
 			K8sClient: k8s,
 			Validator: validator,
-			Config: HandlerConfig{
-				BridgeNamespace:      hTestBridgeNS,
-				ForceLocalValidation: true,
-				Audience:             hTestAudience,
-			},
+			Config:    testHandlerConfig(),
 		},
 	}
 }
@@ -333,7 +344,7 @@ func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
 			items: []harborv1alpha1.HarborAccess{mk("zzz-dup", "pull,push"), mk("aaa-dup", "pull")},
 		},
 		Validator: &stubValidator{claims: newTestClaims()},
-		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+		Config:    testHandlerConfig(),
 	}
 	for i := 0; i < 5; i++ {
 		matched, aud, _, err := h.findHarborAccess(context.Background(), newTestClaims())
@@ -404,7 +415,7 @@ func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 			h := &Handler{
 				K8sClient: k8s,
 				Validator: &stubValidator{},
-				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+				Config:    testHandlerConfig(),
 			}
 			claims := &Claims{Subject: hTestSubject, Audience: tc.claimsAud, Issuer: tc.claimsIssuer}
 			matched, _, _, err := h.findHarborAccess(context.Background(), claims)
@@ -438,7 +449,7 @@ func TestHandler_HarborAccessBeingDeleted_NotServed(t *testing.T) {
 	h := &Handler{
 		K8sClient: k8s,
 		Validator: &stubValidator{claims: newTestClaims()},
-		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+		Config:    testHandlerConfig(),
 		Audit:     audit.logger(),
 	}
 	w := httptest.NewRecorder()
@@ -464,7 +475,7 @@ func TestFindHarborAccess_SkipsHarborAccessBeingDeleted(t *testing.T) {
 	live.Name = "zzz-live"
 	h := &Handler{
 		K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(gone, live).Build(),
-		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+		Config:    testHandlerConfig(),
 	}
 	matched, _, deleting, err := h.findHarborAccess(context.Background(), newTestClaims())
 	if err != nil {
@@ -472,6 +483,52 @@ func TestFindHarborAccess_SkipsHarborAccessBeingDeleted(t *testing.T) {
 	}
 	if matched == nil || matched.Name != "zzz-live" || deleting != nil {
 		t.Fatalf("matched %v, deleting %v; want the live CR and no deleting one", matched, deleting)
+	}
+}
+
+// After a serviceAccountRef change, the robot Secret still holds the
+// previous identity's robot until the control plane has created the new
+// one; it deletes the old robot right after. The new identity must not be
+// handed that password: kubelet would cache it for tokenTTL and fail
+// every pull once the robot is gone.
+func TestHandler_SecretForPreviousIdentity_503(t *testing.T) {
+	var audit captured
+	ha := newTestHA()
+	ha.Spec.ServiceAccountRef = harborv1alpha1.ServiceAccountRef{Namespace: "team-b", Name: "new-sa"}
+	claims := newTestClaims()
+	claims.Subject = "system:serviceaccount:team-b:new-sa"
+	h := &Handler{
+		K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).
+			WithObjects(ha, newTestRobotSecret()).Build(), // still robot$bridge-prod.flux-system.source-controller
+		Validator: &stubValidator{claims: claims},
+		Config:    testHandlerConfig(),
+		Audit:     audit.logger(),
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), hTestRobotPass) {
+		t.Fatalf("status %d body %q, want 503 without credentials", w.Code, w.Body.String())
+	}
+	out := audit.joined()
+	for _, want := range []string{`"credential unavailable"`, `"reason"="secret_for_previous_identity"`,
+		`"robot"="` + hTestRobotUser + `"`, `"expected_robot"="robot$bridge-prod.team-b.new-sa"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("audit line lacks %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, hTestRobotPass) {
+		t.Fatal("audit line carries the robot password")
+	}
+}
+
+// Without a way to tell which robot a Secret must hold, nothing is served.
+func TestHandler_RobotUsernameUnset_ServesNothing(t *testing.T) {
+	fx := newHandlerFixture(t)
+	fx.Handler.Config.RobotUsername = nil
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), hTestRobotPass) {
+		t.Fatalf("status %d body %q, want 500 without credentials", w.Code, w.Body.String())
 	}
 }
 
@@ -486,11 +543,7 @@ func TestHandler_MissingRobotSecret_503(t *testing.T) {
 	h := &Handler{
 		K8sClient: k8s,
 		Validator: &stubValidator{claims: newTestClaims()},
-		Config: HandlerConfig{
-			BridgeNamespace:      hTestBridgeNS,
-			ForceLocalValidation: true,
-			Audience:             hTestAudience,
-		},
+		Config:    testHandlerConfig(),
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, bearerReq(t, "img"))
@@ -520,11 +573,7 @@ func TestHandler_SecretInWrongNamespace_503(t *testing.T) {
 	h := &Handler{
 		K8sClient: k8s,
 		Validator: &stubValidator{claims: newTestClaims()},
-		Config: HandlerConfig{
-			BridgeNamespace:      hTestBridgeNS,
-			ForceLocalValidation: true,
-			Audience:             hTestAudience,
-		},
+		Config:    testHandlerConfig(),
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, bearerReq(t, "img"))
@@ -682,7 +731,7 @@ func TestHandler_CacheNeverOutlivesTheRotationPromise(t *testing.T) {
 			h := &Handler{
 				K8sClient: k8s,
 				Validator: &stubValidator{claims: newTestClaims()},
-				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+				Config:    testHandlerConfig(),
 				Now:       func() time.Time { return now },
 			}
 			w := httptest.NewRecorder()
@@ -754,11 +803,7 @@ func TestHandler_ForeignAudienceCR_NotServed(t *testing.T) {
 	h := &Handler{
 		K8sClient: k8s,
 		Validator: &stubValidator{claims: claims},
-		Config: HandlerConfig{
-			BridgeNamespace:      hTestBridgeNS,
-			ForceLocalValidation: true,
-			Audience:             hTestAudience,
-		},
+		Config:    testHandlerConfig(),
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, bearerReq(t, "img"))
@@ -795,7 +840,7 @@ func TestHandler_UnmanagedSecret_NotServed(t *testing.T) {
 	h := &Handler{
 		K8sClient: k8s,
 		Validator: &stubValidator{claims: newTestClaims()},
-		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+		Config:    testHandlerConfig(),
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, bearerReq(t, "img"))
@@ -830,7 +875,7 @@ func TestHandler_TokenPolicyDenialsAreAuditedByCategory(t *testing.T) {
 			h := &Handler{
 				K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(ha, newTestRobotSecret()).Build(),
 				Validator: newValidatorFor(t, fi),
-				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+				Config:    testHandlerConfig(),
 				Metrics:   NewMetrics(reg),
 				Audit:     audit.logger(),
 			}
