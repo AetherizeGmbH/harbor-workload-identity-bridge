@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,6 +50,10 @@ type fakeHarbor struct {
 
 	// queries records every q value GET /robots received.
 	queries []string
+
+	// afterGet, if set, runs after GET /robots has computed its page,
+	// before it responds: another actor changing Harbor between pages.
+	afterGet func()
 }
 
 type fakeHarborState struct {
@@ -152,24 +157,49 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			Secret: stored.Secret,
 		})
 	case http.MethodGet:
-		// Honor page / page_size so the wrapper's pagination walk
-		// actually terminates. Harbor pages are 1-indexed.
+		// Like Harbor (src/lib/orm/query.go QuerySetter): filter, sort,
+		// then LIMIT/OFFSET. Pages are 1-indexed; each request is a
+		// separate query, so robots deleted between two requests shift
+		// the offsets.
 		page := parseInt64Default(r.URL.Query().Get("page"), 1)
 		size := parseInt64Default(r.URL.Query().Get("page_size"), 10)
-		// Stable order so pagination is deterministic.
 		ids := make([]int64, 0, len(f.mu.robots))
 		for id := range f.mu.robots {
 			ids = append(ids, id)
 		}
-		sortInt64s(ids)
-		// q=name=<exact> filters on the STORED (un-prefixed) name, like
-		// Harbor's ORM filter on the robot.name column.
+		// Harbor's default order is the stored name (src/pkg/robot/model
+		// Name `sort:"default"`); sort=id orders by ID.
+		if r.URL.Query().Get("sort") == "id" {
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		} else {
+			sort.Slice(ids, func(i, j int) bool { return f.mu.robots[ids[i]].Name < f.mu.robots[ids[j]].Name })
+		}
+		// q holds comma-separated terms, ANDed (src/lib/q Build):
+		// name=<exact> filters on the STORED (un-prefixed) name like
+		// Harbor's ORM filter on the robot.name column; id=[min~] is a
+		// range on the ID.
 		if q := r.URL.Query().Get("q"); q != "" {
 			f.queries = append(f.queries, q)
-			if want, ok := strings.CutPrefix(q, "name="); ok && !f.ignoreQuery {
+			for _, term := range strings.Split(q, ",") {
+				if f.ignoreQuery {
+					break
+				}
+				key, value, _ := strings.Cut(term, "=")
+				keep := func(*models.Robot) bool { return true }
+				switch key {
+				case "name":
+					keep = func(r *models.Robot) bool { return r.Name == value }
+				case "id":
+					minID, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(value, "["), "~]"), 10, 64)
+					if err != nil {
+						writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid query string value: "+value)
+						return
+					}
+					keep = func(r *models.Robot) bool { return r.ID >= minID }
+				}
 				kept := ids[:0]
 				for _, id := range ids {
-					if f.mu.robots[id].Name == want {
+					if keep(f.mu.robots[id]) {
 						kept = append(kept, id)
 					}
 				}
@@ -187,6 +217,9 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			out = append(out, f.render(f.mu.robots[id]))
+		}
+		if f.afterGet != nil {
+			f.afterGet()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
@@ -825,11 +858,8 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 	defer srv.Close()
 	c := newClientFor(t, srv, "", "")
 
-	// Create more robots than one page would hold to verify the wrapper
-	// keeps walking. Page size in production is 100; the fake ignores
-	// page params and returns all robots in one shot, so we can't truly
-	// test pagination round-trips here, but we can at least assert the
-	// wrapper returns all of them.
+	// More robots than one page holds (pageSize is 100): the client must
+	// walk two pages and return every robot once.
 	for i := 0; i < 150; i++ {
 		if _, err := c.Create(context.Background(),
 			fmt.Sprintf("bridge-x-y-z%d", i), "",
@@ -844,6 +874,55 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 	if len(robots) != 150 {
 		t.Errorf("List returned %d robots, want 150", len(robots))
 	}
+	if len(fake.queries) != 1 || fake.queries[0] != fmt.Sprintf("id=[%d~]", robots[99].ID+1) {
+		t.Errorf("queries = %q, want one keyset query for the second page", fake.queries)
+	}
+}
+
+// Another actor (the janitor, another cluster's bridge on the same Harbor,
+// an administrator) deletes a robot while the client walks the listing.
+// With offset paging over Harbor's name order every later robot shifts one
+// place forward and the one at the page boundary is never listed, so
+// HarborAccess deletion would release its finalizer with that robot alive.
+// Keyset paging must still list every robot that exists throughout.
+func TestClient_List_ConcurrentDeleteHidesNoRobot(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	for i := 0; i < 150; i++ {
+		if _, err := c.Create(context.Background(), fmt.Sprintf("bridge-prod.ns.sa%03d", i), "",
+			[]ProjectPermission{{Project: "p", Action: "pull"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Created last, sorts first by name: cluster "a"'s robot.
+	victim, err := c.Create(context.Background(), "bridge-a.ns.sa", "", []ProjectPermission{{Project: "p", Action: "pull"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	fake.afterGet = func() {
+		if gets++; gets == 1 {
+			delete(fake.mu.robots, victim.ID)
+		}
+	}
+	robots, err := c.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, r := range robots {
+		if listed[r.Name] {
+			t.Errorf("robot %q listed twice", r.Name)
+		}
+		listed[r.Name] = true
+	}
+	for _, r := range fake.mu.robots {
+		if !listed[r.Name] {
+			t.Errorf("robot %q exists throughout the walk but was not listed", r.Name)
+		}
+	}
 }
 
 func parseInt64Default(raw string, def int64) int64 {
@@ -855,14 +934,6 @@ func parseInt64Default(raw string, def int64) int64 {
 		return def
 	}
 	return v
-}
-
-func sortInt64s(s []int64) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
 }
 
 // TestFormatHarborMessage_TypedPayload exercises the decoder against the

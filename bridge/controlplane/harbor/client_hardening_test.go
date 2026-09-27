@@ -122,25 +122,32 @@ func TestClient_Create_RejectsEmptySecret(t *testing.T) {
 	}
 }
 
-// A Harbor (or proxy) that ignores the page parameter returns the same
-// full page forever; the walk must stop.
-func TestClient_List_StopsWhenPagingIsIgnored(t *testing.T) {
-	page := make([]*models.Robot, pageSize)
-	for i := range page {
-		page[i] = &models.Robot{ID: int64(i + 1), Name: "robot$other"}
+// A Harbor (or proxy) that ignores the keyset query (sort=id and the id
+// range) returns the same first page forever, or robots out of ID order;
+// either could hide robots, so the walk must stop with an error.
+func TestClient_List_FailsWhenTheKeysetQueryIsIgnored(t *testing.T) {
+	serve := func(page []*models.Robot) *httptest.Server {
+		var body bytes.Buffer
+		if err := json.NewEncoder(&body).Encode(page); err != nil {
+			t.Fatal(err)
+		}
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body.Bytes())
+		}))
 	}
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(page); err != nil {
-		t.Fatal(err)
+	full := make([]*models.Robot, pageSize)
+	for i := range full {
+		full[i] = &models.Robot{ID: int64(i + 1), Name: "robot$other"}
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body.Bytes())
-	}))
-	defer srv.Close()
-	c := newClientFor(t, srv, "", "")
-	if _, err := c.List(context.Background()); err == nil || !strings.Contains(err.Error(), "pages") {
-		t.Fatalf("err = %v, want the page-cap error", err)
+	unsorted := []*models.Robot{{ID: 7, Name: "robot$a"}, {ID: 3, Name: "robot$b"}}
+	for name, page := range map[string][]*models.Robot{"id range ignored": full, "sort ignored": unsorted} {
+		srv := serve(page)
+		c := newClientFor(t, srv, "", "")
+		if _, err := c.List(context.Background()); err == nil || !strings.Contains(err.Error(), "does not honour") {
+			t.Errorf("%s: err = %v, want the keyset refusal", name, err)
+		}
+		srv.Close()
 	}
 }
 

@@ -557,7 +557,10 @@ condition instead of blocking the controller. The Harbor client follows
 no redirects: net/http would re-send the admin credentials, and on
 307/308 the request body, to a redirect target on the same host even
 over plain http. A redirect fails the call with an error that names the
-target (`TestClient_RefusesRedirects`).
+target (`TestClient_RefusesRedirects`). Robot listings, which deletion
+and the janitor rely on to find every robot, page by robot ID rather
+than by offset, so a robot deleted by someone else during the walk
+cannot hide another one (`TestClient_List_ConcurrentDeleteHidesNoRobot`).
 
 OIDC discovery and JWKS fetches follow no redirects and are bounded
 (30s). The bridge's own ServiceAccount token, which the apiserver

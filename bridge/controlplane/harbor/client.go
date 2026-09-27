@@ -33,9 +33,10 @@ const (
 	// without hammering memory on huge fleets.
 	pageSize int64 = 100
 
-	// maxPages bounds one robot listing (maxPages*pageSize robots). A
-	// Harbor or proxy that ignores the page parameter would otherwise
-	// make the walk loop forever and grow memory without bound.
+	// maxPages bounds one robot listing (maxPages*pageSize robots), and
+	// with it the memory one listing can take. Every page must also
+	// advance the ID cursor (see list), so a Harbor or proxy that ignores
+	// the query cannot make the walk loop.
 	maxPages = 1000
 
 	// DefaultCallTimeout bounds one Harbor API call. The generated SDK
@@ -370,15 +371,37 @@ func (c *goClient) Delete(ctx context.Context, id int64) error {
 // List returns every system-level robot (Harbor's GET /robots without a
 // Level filter lists exactly those).
 func (c *goClient) List(ctx context.Context) ([]Robot, error) {
-	return c.list(ctx, nil)
+	return c.list(ctx, "")
 }
 
-func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
-	page := int64(1)
-	size := pageSize
+// list returns every robot matching filter (a Harbor q expression, or "").
+// It pages by keyset, not by offset: each request asks for the first page
+// of robots sorted by ID with an ID above the highest one seen so far
+// (sort=id, q=id=[<last+1>~]).
+//
+// Harbor pages with LIMIT/OFFSET over its default order, the robot name
+// (goharbor/harbor src/lib/orm/query.go QuerySetter, src/pkg/robot/model
+// Name `sort:"default"`), and every page is a separate query. A robot that
+// another actor deletes between two pages (the janitor, another cluster's
+// bridge on the same Harbor, an administrator) shifts every later robot
+// one place forward, so the robot at the page boundary is never listed:
+// HarborAccess deletion would then release its finalizer and leave that
+// robot alive with a valid password. IDs only grow, so a deletion cannot
+// move an unseen robot behind the cursor, and a robot created during the
+// walk is listed at most once. Harbor supports both parameters on
+// GET /robots in every version the bridge supports (the id column is
+// sortable and range-filterable: src/lib/orm/metadata.go, src/lib/q
+// parseRange). A server that ignores either shows up as an ID that does
+// not increase, and the listing fails instead of silently missing robots.
+func (c *goClient) list(ctx context.Context, filter string) ([]Robot, error) {
 	var out []Robot
-	for ; page <= maxPages; page++ {
-		resp, err := c.listPage(ctx, page, size, q)
+	var cursor int64 // highest robot ID seen; Harbor's IDs start at 1
+	for page := 1; page <= maxPages; page++ {
+		q := filter
+		if cursor > 0 {
+			q = joinQuery(filter, fmt.Sprintf("id=[%d~]", cursor+1))
+		}
+		resp, err := c.listPage(ctx, q)
 		if err != nil {
 			return nil, wrapHarborOp(fmt.Sprintf("list robots (page %d)", page), err)
 		}
@@ -386,26 +409,46 @@ func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
 			if r == nil {
 				continue
 			}
+			if r.ID <= cursor {
+				return nil, fmt.Errorf("list robots: Harbor returned robot id %d after id %d; the endpoint does not honour sort=id or the id range filter, refusing to continue with a listing that could miss robots", r.ID, cursor)
+			}
+			cursor = r.ID
 			robot, err := c.fromHarborRobot(r)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, robot)
 		}
-		if int64(len(resp.Payload)) < size {
+		if int64(len(resp.Payload)) < pageSize {
 			return out, nil
 		}
 	}
-	return nil, fmt.Errorf("list robots: more than %d pages of %d; refusing to continue (does the Harbor endpoint ignore the page parameter?)", maxPages, size)
+	return nil, fmt.Errorf("list robots: more than %d pages of %d robots; refusing to continue", maxPages, pageSize)
 }
 
-func (c *goClient) listPage(ctx context.Context, page, size int64, q *string) (*sdkrobot.ListRobotOK, error) {
+// joinQuery ANDs Harbor q terms ("k=v,k=[min~max]").
+func joinQuery(terms ...string) string {
+	kept := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if t != "" {
+			kept = append(kept, t)
+		}
+	}
+	return strings.Join(kept, ",")
+}
+
+// listPage requests the first page of robots matching q, sorted by ID.
+func (c *goClient) listPage(ctx context.Context, q string) (*sdkrobot.ListRobotOK, error) {
 	ctx, cancel := c.call(ctx)
 	defer cancel()
+	page, size, sortByID := int64(1), pageSize, "id"
 	params := sdkrobot.NewListRobotParamsWithContext(ctx).
 		WithPage(&page).
 		WithPageSize(&size).
-		WithQ(q)
+		WithSort(&sortByID)
+	if q != "" {
+		params = params.WithQ(&q)
+	}
 	return c.robots.ListRobot(ctx, params)
 }
 
@@ -417,8 +460,7 @@ func (c *goClient) listPage(ctx context.Context, page, size int64, q *string) (*
 // filter behaves differently degrades to the old O(robots) cost instead
 // of a create/409 loop.
 func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
-	q := "name=" + name
-	robots, err := c.list(ctx, &q)
+	robots, err := c.list(ctx, "name="+name)
 	if err != nil {
 		return nil, err
 	}
@@ -461,8 +503,7 @@ func (c *goClient) checkSuffixHit(ctx context.Context, name string, robots []Rob
 		if r.WireName == c.robotPrefix+name || !strings.HasSuffix(r.WireName, name) {
 			continue
 		}
-		q := "name=" + r.Name
-		again, err := c.list(ctx, &q)
+		again, err := c.list(ctx, "name="+r.Name)
 		if err != nil {
 			return err
 		}
