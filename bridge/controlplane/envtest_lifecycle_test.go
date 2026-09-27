@@ -54,6 +54,9 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 	if err := rec.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
+	if rec.APIReader != mgr.GetAPIReader() {
+		t.Fatal("SetupWithManager did not wire the uncached API reader for the robot Secret")
+	}
 	mgrCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mgrCtx) }()
@@ -81,6 +84,23 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 		return false
 	}
 	secretKey := types.NamespacedName{Namespace: testNS, Name: robotsecret.Name("tenant", "app")}
+	// storedMatchesHarbor: the Secret holds exactly the password Harbor
+	// accepts for the named robot, not merely some password.
+	storedMatchesHarbor := func(robot string) bool {
+		s := &corev1.Secret{}
+		if k8s.Get(ctx, secretKey, s) != nil || s.DeletionTimestamp != nil {
+			return false
+		}
+		mh.mu.Lock()
+		defer mh.mu.Unlock()
+		for _, r := range mh.robots {
+			if r.Name == robot {
+				return r.Secret != "" && string(s.Data["password"]) == r.Secret &&
+					string(s.Data["username"]) == r.WireName
+			}
+		}
+		return false
+	}
 
 	// The CRD rejects a name longer than 63 characters.
 	long := newHarborAccess()
@@ -98,8 +118,7 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 	firstRobot := "bridge-" + testCluster + ".flux-system.source-controller"
 	eventually("robot and Secret created, Ready", func() bool {
 		got := &harborv1alpha1.HarborAccess{}
-		return robotNamed(firstRobot) &&
-			k8s.Get(ctx, secretKey, &corev1.Secret{}) == nil &&
+		return robotNamed(firstRobot) && storedMatchesHarbor(firstRobot) &&
 			k8s.Get(ctx, client.ObjectKeyFromObject(ha), got) == nil && readyTrue(got)
 	})
 
@@ -107,9 +126,8 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 	if err := k8s.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: secretKey.Namespace, Name: secretKey.Name}}); err != nil {
 		t.Fatal(err)
 	}
-	eventually("Secret rebuilt after deletion", func() bool {
-		s := &corev1.Secret{}
-		return k8s.Get(ctx, secretKey, s) == nil && len(s.Data["password"]) > 0 && s.DeletionTimestamp == nil
+	eventually("Secret rebuilt after deletion with the password Harbor accepts", func() bool {
+		return storedMatchesHarbor(firstRobot)
 	})
 
 	// serviceAccountRef change: new robot, old robot revoked.
@@ -122,8 +140,8 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondRobot := "bridge-" + testCluster + ".flux-system.new-sa"
-	eventually("old robot revoked, new robot present", func() bool {
-		return robotNamed(secondRobot) && !robotNamed(firstRobot)
+	eventually("old robot revoked, new robot present, its password stored", func() bool {
+		return robotNamed(secondRobot) && !robotNamed(firstRobot) && storedMatchesHarbor(secondRobot)
 	})
 
 	// Deletion revokes every robot and the Secret, then releases the CR.

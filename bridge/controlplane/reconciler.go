@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,6 +58,16 @@ type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader reads the robot Secret uncached. Rotating a password in
+	// Harbor cannot be undone, so the decision to rotate, and the write
+	// that stores the new password, must see the Secret as it is: an
+	// informer cache that has not yet caught up with the previous pass's
+	// write would make the pass rotate again and fail to store the result,
+	// leaving a password Harbor rejects in a Secret that looks current.
+	// SetupWithManager sets mgr.GetAPIReader() when nil; tests that call
+	// Reconcile directly may leave it nil, which falls back to Client.
+	APIReader client.Reader
+
 	// Harbor is the Harbor API client wrapper. The interface form lets tests
 	// inject a mock without standing up an httptest server.
 	Harbor harbor.Client
@@ -74,6 +85,9 @@ type Reconciler struct {
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Clock == nil {
 		r.Clock = RealClock{}
+	}
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
 	}
 	return builder.ControllerManagedBy(mgr).
 		Named("harboraccess").
@@ -208,31 +222,15 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 			robotName, cluster)
 	}
 
-	// 5. Secret-name collision guard (audit F2). The Secret name is
-	// dot-joined ("robot-<haNs>.<haName>", ADR-0018) and therefore
-	// injective; this stays as defense-in-depth: if two CRs ever collapsed
-	// to one Secret name, overwriting it would let one workload's SA read
-	// the other's robot password. Refuse rather than overwrite; first owner
-	// wins.
+	// 5. Secret-name collision guard (audit F2), see secretConflict. The
+	// Secret is read uncached (APIReader): the rotation decision below is
+	// irreversible and must not rest on a lagging cache.
 	secret, err := r.getRobotSecret(ctx, ha)
 	if err != nil {
 		return r.markTransientError(ctx, ha, fmt.Errorf("read robot Secret: %w", err))
 	}
-	if secret != nil && robotsecret.StampedForOther(secret, ha.Namespace, ha.Name) {
-		return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
-			"robot-password Secret %q is already owned by a different HarborAccess (naming collision); refusing to overwrite",
-			robotsecret.Name(ha.Namespace, ha.Name)))
-	}
-	// A Secret at that name without the bridge's labels is adopted only
-	// when it holds this robot's credentials (a Secret from an older
-	// bridge). Anything else belongs to someone else: overwriting it would
-	// destroy it, and the data plane would otherwise serve it.
-	if secret != nil && !robotsecret.IsManaged(secret) {
-		if user, _, err := robotsecret.Credentials(secret); err != nil || user != r.Config.HarborRobotPrefix+robotName {
-			return r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
-				"Secret %q in %s is not managed by the bridge and does not hold this robot's credentials; refusing to adopt it. Rename or delete it",
-				robotsecret.Name(ha.Namespace, ha.Name), r.Config.Namespace))
-		}
+	if msg := r.secretConflict(ha, secret, robotName); msg != "" {
+		return r.markNotReady(ctx, ha, ReasonRobotConflict, msg)
 	}
 
 	desiredDescription := RobotDescription(cluster, ha.Namespace, ha.Name)
@@ -554,11 +552,46 @@ func (r *Reconciler) blockDeletion(ctx context.Context, ha *harborv1alpha1.Harbo
 	return ctrl.Result{}, cause
 }
 
-// getRobotSecret returns the robot Secret of ha, or nil when it does not
-// exist.
+// secretConflict returns why the Secret at ha's robot-Secret name belongs
+// to someone else, or "" when ha may write it. secret nil means absent.
+//
+// The Secret name is dot-joined ("robot-<haNs>.<haName>", ADR-0018) and
+// therefore injective; the stamped-for-other check stays as
+// defense-in-depth (audit F2): if two CRs ever collapsed to one Secret
+// name, overwriting it would let one workload's SA read the other's robot
+// password. Refuse rather than overwrite; first owner wins.
+//
+// A Secret at that name without the bridge's labels is adopted only when
+// it holds this robot's credentials (a Secret from an older bridge).
+// Anything else belongs to someone else: overwriting it would destroy it,
+// and the data plane would otherwise serve it.
+func (r *Reconciler) secretConflict(ha *harborv1alpha1.HarborAccess, secret *corev1.Secret, robotName string) string {
+	switch {
+	case secret == nil:
+		return ""
+	case robotsecret.StampedForOther(secret, ha.Namespace, ha.Name):
+		return fmt.Sprintf(
+			"robot-password Secret %q is already owned by a different HarborAccess (naming collision); refusing to overwrite",
+			robotsecret.Name(ha.Namespace, ha.Name))
+	case !robotsecret.IsManaged(secret):
+		if user, _, err := robotsecret.Credentials(secret); err != nil || user != r.Config.HarborRobotPrefix+robotName {
+			return fmt.Sprintf(
+				"Secret %q in %s is not managed by the bridge and does not hold this robot's credentials; refusing to adopt it. Rename or delete it",
+				robotsecret.Name(ha.Namespace, ha.Name), r.Config.Namespace)
+		}
+	}
+	return ""
+}
+
+// getRobotSecret returns the robot Secret of ha, read uncached, or nil when
+// it does not exist.
 func (r *Reconciler) getRobotSecret(ctx context.Context, ha *harborv1alpha1.HarborAccess) (*corev1.Secret, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	s := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: r.Config.Namespace, Name: robotsecret.Name(ha.Namespace, ha.Name)}, s)
+	err := reader.Get(ctx, client.ObjectKey{Namespace: r.Config.Namespace, Name: robotsecret.Name(ha.Namespace, ha.Name)}, s)
 	switch {
 	case apierrors.IsNotFound(err):
 		return nil, nil
@@ -573,7 +606,49 @@ func (r *Reconciler) getRobotSecret(ctx context.Context, ha *harborv1alpha1.Harb
 // annotations are converged — e.g. backfilling the rotation promise onto
 // a Secret written by an older bridge). The Secret lives in the bridge
 // namespace so workload SAs cannot read it (ADR-0011).
+//
+// A new password is the only one Harbor still accepts. When the Secret
+// changed since this pass read it (a Create that finds it created, an
+// Update that finds it modified or deleted), the Secret is read again and
+// the password stored on top of the current version, as long as the
+// Secret still belongs to ha. Dropping the password instead would leave
+// the Secret holding one Harbor rejects, and a promise not to rotate it
+// for a day. Without a new password a failed write loses nothing and is
+// retried on the next pass.
 func (r *Reconciler) writeRobotSecret(
+	ctx context.Context, ha *harborv1alpha1.HarborAccess, existing *corev1.Secret,
+	robot *harbor.Robot, password string, notBefore time.Time,
+) error {
+	if password == "" {
+		return r.putRobotSecret(ctx, ha, existing, robot, "", notBefore)
+	}
+	current := existing
+	return retry.OnError(retry.DefaultRetry, isSecretWriteRace, func() error {
+		err := r.putRobotSecret(ctx, ha, current, robot, password, notBefore)
+		if !isSecretWriteRace(err) {
+			return err
+		}
+		fresh, readErr := r.getRobotSecret(ctx, ha)
+		if readErr != nil {
+			return fmt.Errorf("re-read robot Secret to store the new password: %w", readErr)
+		}
+		if msg := r.secretConflict(ha, fresh, robot.Name); msg != "" {
+			return fmt.Errorf("cannot store the new password: %s", msg)
+		}
+		current = fresh
+		return err
+	})
+}
+
+// isSecretWriteRace reports whether a Secret write failed because the
+// Secret changed after it was read.
+func isSecretWriteRace(err error) bool {
+	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) || apierrors.IsNotFound(err)
+}
+
+// putRobotSecret creates the robot Secret (existing nil) or updates
+// existing, which carries the resourceVersion the update is conditional on.
+func (r *Reconciler) putRobotSecret(
 	ctx context.Context, ha *harborv1alpha1.HarborAccess, existing *corev1.Secret,
 	robot *harbor.Robot, password string, notBefore time.Time,
 ) error {
