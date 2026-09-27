@@ -1747,6 +1747,89 @@ func TestRun_InterruptedSiblingPassKeepsItsLiveEntry(t *testing.T) {
 	}
 }
 
+// TestRun_SiblingPassThatDiesAtItsConfigWriteKeepsItsLiveEntry: another
+// install's pass changes its entry and fails at the config write itself,
+// after its binary. Its record must still hold the entry that is in the
+// file: a pass reduces its record to the new entry only once the config
+// holds it (record.go). Had it done so before the config write, the next
+// installer would drop that install's live entry and restart kubelet
+// without it.
+func TestRun_SiblingPassThatDiesAtItsConfigWriteKeepsItsLiveEntry(t *testing.T) {
+	configPath := configDir + "/" + configFileName
+	for _, tc := range []struct {
+		name string
+		mode string
+		// dirs are the second install's plugin.hostBinaryDir and
+		// plugin.hostConfigDir.
+		binDir, configDir string
+	}{
+		{"patch", modePatch, binDir, configDir},
+		{"none", modeNone, binDir, configDir},
+		{"merge into a chart-owned config", modeAuto, "/etc/kubernetes/hb-eu-bin", "/etc/kubernetes/hb-eu"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+			b := newSiblingEnv(t, a, tc.mode, euName)
+			b.cfg.HostBinDir, b.cfg.HostConfigDir = tc.binDir, tc.configDir
+			for _, env := range []*testEnv{a, b} {
+				if err := run(env.cfg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, order := providersIn(t, a, configPath)
+			bEntry := renderedEntry(t, b)
+
+			// helm upgrade of the second install. Its config write fails:
+			// a directory is in the way of the backup of the old config.
+			upgraded := strings.Replace(renderedConfigFor(euName), "31444", "31445", 1)
+			if err := os.WriteFile(b.cfg.SourceConfig, []byte(upgraded), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			bak := a.cfg.hostPath(configPath + ".bak")
+			if err := os.RemoveAll(bak); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(bak, "in-the-way"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			err := run(b.cfg)
+			if err == nil || !strings.Contains(err.Error(), "write backup") {
+				t.Fatalf("got %v, want the second install's config write to fail", err)
+			}
+			if !reflect.DeepEqual(func() map[string]any { m, _ := providersIn(t, a, configPath); return m }(), before) {
+				t.Fatal("precondition: the failed pass changed the config")
+			}
+			if err := os.RemoveAll(bak); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := run(a.cfg); err != nil {
+				t.Fatal(err)
+			}
+			after, afterOrder := providersIn(t, a, configPath)
+			if !reflect.DeepEqual(afterOrder, order) || !reflect.DeepEqual(after, before) || !reflect.DeepEqual(after[euName], bEntry) {
+				t.Fatalf("providers = %v, want %v unchanged: the second install's live entry was dropped", afterOrder, order)
+			}
+			if a.restarts != 1 {
+				t.Fatalf("restarts = %d, want 1: nothing of the first install changed", a.restarts)
+			}
+
+			// The second install's next pass lands its entry and keeps only
+			// it in its record.
+			if err := run(b.cfg); err != nil {
+				t.Fatal(err)
+			}
+			after, _ = providersIn(t, a, configPath)
+			if !reflect.DeepEqual(after[euName], renderedEntry(t, b)) {
+				t.Fatal("the second install's entry was not updated")
+			}
+			if got, want := a.hostFile(t, binDir+"/"+filesFor(euName).Record), recordOf(t, configPath, renderedEntry(t, b)); got != want {
+				t.Fatalf("record = %s, want only the entry in the config %s", got, want)
+			}
+		})
+	}
+}
+
 // TestRun_OlderInstallerCannotReadANonDefaultNamesConfig: for a non-default
 // provider name the chart mounts the rendered config where installers
 // before ADR-0029 never look (golden second-instance.yaml: the ConfigMap
