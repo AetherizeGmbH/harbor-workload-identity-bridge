@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 )
@@ -195,6 +196,43 @@ func composeOwnConfig(existing, rendered []byte, entry map[string]any, sibling f
 		return nil, nil, fmt.Errorf("marshal credential-provider config: %w", err)
 	}
 	return out, dropped, nil
+}
+
+// kubeletStartProblems describes what in the CredentialProviderConfig doc
+// keeps kubelet from starting and does not depend on kubelet's version
+// (ADR-0029, Context; pkg/credentialprovider/plugin/config.go and
+// plugin.go): an entry that is not an object or has no string name, a name
+// with "/" or a space, "." or "..", a name that occurs twice, and, for
+// every name but own, whose binary this pass writes, a binary that
+// hasBinary does not find. It does not repeat kubelet's other schema checks.
+func kubeletStartProblems(doc []byte, own string, hasBinary func(name string) bool) ([]string, error) {
+	cfg := map[string]any{}
+	if err := yaml.Unmarshal(doc, &cfg); err != nil {
+		return nil, fmt.Errorf("parse credential-provider config: %w", err)
+	}
+	providers, err := providerList(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var problems []string
+	seen := map[string]bool{}
+	for i, p := range providers {
+		pm, _ := p.(map[string]any)
+		name, ok := pm["name"].(string)
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Sprintf("provider %d has no string name", i+1))
+			continue
+		case name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/ "):
+			problems = append(problems, fmt.Sprintf("kubelet refuses the provider name %q", name))
+		case seen[name]:
+			problems = append(problems, fmt.Sprintf("the provider name %q occurs more than once", name))
+		case name != own && !hasBinary(name):
+			problems = append(problems, fmt.Sprintf("the binary of provider %q is missing from kubelet's bin dir", name))
+		}
+		seen[name] = true
+	}
+	return problems, nil
 }
 
 // otherBridgeProviders returns the names of the harbor-bridge entries in

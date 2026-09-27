@@ -100,11 +100,36 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      entry of this name, and every other entry and unknown field
      round-trips (`map[string]any`, ADR-0021). An existing entry of this
      name that is not a bridge entry (no `HARBOR_BRIDGE_ENDPOINT` env) is
-     never replaced.
+     never replaced. Nor does it write, or restart kubelet onto, a config
+     kubelet exits on: an entry without a string name, a name with `/` or
+     a space, `.` or `..`, a name that occurs twice, or an entry other
+     than its own whose binary is not an executable file (or a symlink,
+     which kubelet follows on the node) in kubelet's bin dir. It refuses
+     instead; it does not remove the cloud's or another install's
+     entries. Kubelet's other schema checks depend on its version and are
+     not repeated.
+   - Merge mode can also meet a chart-owned config (next bullet but one)
+     as kubelet's config: this install's own, when only kubelet's bin dir
+     differs from this install's (auto mode) or merge mode is set
+     explicitly next to a patch-mode release with the same directories,
+     or another release's, when a release in auto mode has other
+     directories than the patch-mode release that wired kubelet. That
+     file is in a `plugin.hostConfigDir`, and the merge pass may restart
+     kubelet onto it. Merge mode then writes it as patch and none mode do:
+     its own entry plus the entries the records in kubelet's bin dir
+     vouch for, nothing else. A config counts as chart-owned when it is
+     this install's `<plugin.hostConfigDir>/credential-provider-config.yaml`
+     or a record in kubelet's bin dir names it: every patch- and none-mode
+     pass, and every merge pass into a chart-owned config, names that
+     config in its record (`chartOwnedConfig`). Any other kubelet config
+     inside this install's `plugin.hostConfigDir` is refused, and so are
+     `plugin.install.configFile` (`INSTALL_MERGE_CONFIG_FILE`) inside it:
+     the override names a cloud's config.
    - Every pass keeps a record `<bin-dir>/<name>.entry` next to the
      binary: a JSON object whose `entries` hold the canonical bytes of
      the entries (JSON with sorted keys) this install may have in the
-     config. The record and the config are two files that no pass can
+     config, and whose `chartOwnedConfig` names the chart-owned config it
+     writes into (empty for a cloud's config). The record and the config are two files that no pass can
      replace together, so a pass first adds the entry it is about to
      write to the entries the record holds, then writes the binary and
      the entry, and only then reduces the record to that entry. A pass
@@ -157,8 +182,13 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      like `kubelet` is refused instead of overwriting it.
    - A pass that refuses (a foreign entry or file of this name, a config
      it cannot use, another install's entry in the way of patch mode)
-     refuses before it writes anything: the CA and mTLS files, the record
-     and the binary come after every check.
+     refuses before it changes any config, binary, record, CA, mTLS or
+     state file: those writes come after every check. Only the lock files
+     it has taken by then (decision 5) and their directories may be new:
+     the node lock; in merge mode the lock next to kubelet's config, which
+     is usually the cloud's; in patch mode the lock next to kubelet's
+     current config and this install's own config lock; in none mode
+     that own config lock.
 5. **Locks.** Every read-modify-write of a shared file and every kubelet
    restart runs under an exclusive `flock(2)`:
    - the node lock `/run/harbor-bridge-installer.lock`, a fixed path that

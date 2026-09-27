@@ -127,7 +127,7 @@ func run(cfg *config) error {
 	case modePatch:
 		return runPatch(cfg, rendered, entry)
 	case modeMerge:
-		return runMerge(cfg, entry, wiring)
+		return runMerge(cfg, rendered, entry, wiring)
 	default:
 		return fmt.Errorf("unreachable mode %q", mode)
 	}
@@ -150,14 +150,14 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if err := installFiles(cfg, cfg.HostBinDir, entryJSON); err != nil {
+	if err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
 	changed, err := writeFileAtomic(cfg.hostPath(configPath), desired, 0o644)
 	if err != nil {
 		return err
 	}
-	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON); err != nil {
+	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
 	logf("mode none: files installed (config changed: %v); kubelet wiring is the operator's responsibility", changed)
@@ -190,14 +190,14 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 		return err
 	}
 
-	if err := installFiles(cfg, cfg.HostBinDir, entryJSON); err != nil {
+	if err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
 	configChanged, err := writeFileAtomic(cfg.hostPath(configPath), desiredConfig, 0o644)
 	if err != nil {
 		return err
 	}
-	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON); err != nil {
+	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
 	envChanged, err := writeFileAtomic(cfg.hostPath(defaultKubeletPath), desiredEnv, 0o644)
@@ -361,14 +361,8 @@ func configDocs(path string) ([][]byte, error) {
 }
 
 // ownConfig reads the chart-owned provider config of patch and none mode
-// and returns the content it must have after this install. The caller
-// holds the config lock.
-//
-// The file is the chart's: installers before ADR-0029 replaced it with
-// the rendered config on every pass. It still gets exactly that while it
-// holds no other install's entry. Other installs' entries (siblingEntry)
-// stay in place; this install's entry is replaced whatever it holds;
-// everything else is dropped, as it always was.
+// and returns the content it must have after this install
+// (chartOwnedConfig). The caller holds the config lock.
 func ownConfig(cfg *config, rendered []byte, entry map[string]any) ([]byte, error) {
 	path := cfg.ownConfigPath()
 	existing, err := readHostFile(cfg.hostPath(path))
@@ -378,58 +372,90 @@ func ownConfig(cfg *config, rendered []byte, entry map[string]any) ([]byte, erro
 	case err != nil:
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	desired, dropped, err := composeOwnConfig(existing, rendered, entry, cfg.siblingEntry)
+	return chartOwnedConfig(path, existing, rendered, entry, cfg.siblingIn(cfg.HostBinDir)), nil
+}
+
+// chartOwnedConfig returns the content a chart-owned provider config at
+// path (a node path) must have after this install, from its content
+// existing. sibling tells another install's entry (siblingIn).
+//
+// The file is the chart's: installers before ADR-0029 replaced it with
+// the rendered config on every pass. It still gets exactly that while it
+// holds no other install's entry. Other installs' entries stay in place;
+// this install's entry is replaced whatever it holds; everything else is
+// dropped, as it always was.
+func chartOwnedConfig(path string, existing, rendered []byte, entry map[string]any, sibling func(map[string]any) bool) []byte {
+	desired, dropped, err := composeOwnConfig(existing, rendered, entry, sibling)
 	if err != nil {
 		// Kubelet cannot start with this file either. It is the chart's
 		// own file and was always replaced; it still is.
 		logf("replacing %s, which is not a credential-provider config to merge into: %v", path, err)
-		return rendered, nil
+		return rendered
 	}
 	for _, name := range dropped {
 		logf("dropping provider %s from %s: not an entry of another harbor-bridge install on this node, or not as that install recorded it", name, path)
 	}
-	return desired, nil
+	return desired
 }
 
-// siblingEntry reports whether entry, found in the chart-owned config of
-// patch and none mode, is another install's (ADR-0029) and stays there.
-// That file is in plugin.hostConfigDir, which the sync container of every
-// release and any pod with a hostPath on that directory can write, and
-// kubelet runs whatever entry it holds after its next restart, which this
-// installer may trigger itself. An entry therefore stays only when it is
-// exactly what another installer wrote: a bridge entry with a valid
-// provider name, whose binary is an executable regular file in
-// plugin.hostBinaryDir and whose record there (entryRecord) holds the
-// entry's canonical bytes. No writer of plugin.hostConfigDir can write
-// that directory (loadConfig refuses overlapping directories). Every
-// installer adds its entry to its record and writes its binary before it
-// writes the entry, and drops an earlier entry from the record only after
-// the config holds the new one, so the entry another install has in the
-// file passes, also after that install's pass died halfway, while a
-// planted entry, or another install's entry changed in the file into
-// anything that install did not write, never does.
-func (c *config) siblingEntry(entry map[string]any) bool {
-	name, ok := entry["name"].(string)
-	if !ok || name == c.ProviderName || validProviderName(name) != nil || !isBridgeProvider(entry) {
-		return false
+// siblingIn returns the function that reports whether entry, found in a
+// chart-owned config whose binaries kubelet runs from binDir (a node
+// path), is another install's (ADR-0029) and stays there. That file is in
+// a plugin.hostConfigDir, which the sync container of every release and
+// any pod with a hostPath on that directory can write, and kubelet runs
+// whatever entry it holds after its next restart, which this installer may
+// trigger itself. An entry therefore stays only when it is exactly what
+// another installer wrote: a bridge entry with a valid provider name,
+// whose binary is an executable regular file in binDir and whose record
+// there (entryRecord) holds the entry's canonical bytes. binDir is
+// plugin.hostBinaryDir in patch and none mode and kubelet's bin dir in
+// merge mode; no writer of plugin.hostConfigDir can write it (loadConfig
+// and run refuse overlapping directories). Every installer adds its entry
+// to its record and writes its binary before it writes the entry, and
+// drops an earlier entry from the record only after the config holds the
+// new one, so the entry another install has in the file passes, also
+// after that install's pass died halfway, while a planted entry, or
+// another install's entry changed in the file into anything that install
+// did not write, never does.
+func (c *config) siblingIn(binDir string) func(entry map[string]any) bool {
+	return func(entry map[string]any) bool {
+		name, ok := entry["name"].(string)
+		if !ok || name == c.ProviderName || validProviderName(name) != nil || !isBridgeProvider(entry) {
+			return false
+		}
+		files := filesFor(name)
+		if !isExecutableHostFile(c.hostPath(filepath.Join(binDir, files.Binary))) {
+			return false
+		}
+		got, err := entryBytes(entry)
+		return err == nil && c.readRecord(filepath.Join(binDir, files.Record)).holds(got)
 	}
-	files := filesFor(name)
-	if !isExecutableHostFile(c.hostPath(filepath.Join(c.HostBinDir, files.Binary))) {
-		return false
-	}
-	got, err := entryBytes(entry)
-	return err == nil && c.readRecord(filepath.Join(c.HostBinDir, files.Record)).holds(got)
 }
 
 // runMerge injects our provider entry into the node's existing
 // credential-provider config and drops the binary into the existing
 // bin dir; kubelet's flags are not touched.
-func runMerge(cfg *config, entry map[string]any, wiring kubeletWiring) error {
+//
+// Kubelet's config is usually a cloud's, and every other entry in it stays
+// as it is. It can also be the chart-owned config of a patch- or none-mode
+// install (ADR-0029): this install's own, when only kubelet's bin dir
+// differs from this install's, or another release's, whose directories
+// differ. That file is in a plugin.hostConfigDir, which pods other than
+// installers can write, and this pass may restart kubelet onto it; it then
+// keeps only the entries the records in kubelet's bin dir vouch for, as
+// patch and none mode do (chartOwnedConfig). Every patch- and none-mode
+// installer names its chart-owned config in its record
+// (entryRecord.ChartOwnedConfig).
+func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubeletWiring) error {
 	// Kubelet 1.34+ also accepts a directory of config files. The
 	// installer only edits a file; say so instead of failing on the read
 	// below (and before a lock file lands next to the directory).
 	if fi, err := os.Lstat(cfg.hostPath(wiring.ConfigFile)); err == nil && fi.IsDir() {
 		return fmt.Errorf("kubelet's credential-provider config %s is a directory, which the installer does not merge into; use plugin.install.mode=none and put the entry into a file of that directory yourself, or plugin.enabled=false", wiring.ConfigFile)
+	}
+	own := cfg.ownConfigPath()
+	if withinDir(wiring.ConfigFile, cfg.HostConfigDir) && wiring.ConfigFile != own {
+		return fmt.Errorf("kubelet's credential-provider config %s is inside plugin.hostConfigDir %s, which every release's sync container can write, and is not the chart-owned config there (%s); keep kubelet's config out of plugin.hostConfigDir, or choose another plugin.hostConfigDir", wiring.ConfigFile, cfg.HostConfigDir, own)
 	}
 	unlock, err := lockFile(cfg.hostPath(wiring.ConfigFile+lockSuffix), cfg.lockTimeout)
 	if err != nil {
@@ -445,23 +471,43 @@ func runMerge(cfg *config, entry map[string]any, wiring kubeletWiring) error {
 		// file, so on a live node this indicates a wrong override.
 		return fmt.Errorf("read node credential-provider config %s: %w", wiring.ConfigFile, err)
 	}
-	merged, mergeChanged, err := mergeProvider(existing, entry)
-	if err != nil {
-		return err
+	chartOwned := wiring.ConfigFile == own
+	if !chartOwned {
+		// Under the config's lock: a none-mode install writes its record
+		// under the lock of its chart-owned config.
+		if chartOwned, err = cfg.claimsChartOwned(wiring.BinDir, wiring.ConfigFile); err != nil {
+			return err
+		}
+	}
+	var merged []byte
+	var mergeChanged bool
+	claim := ""
+	if chartOwned {
+		claim = wiring.ConfigFile
+		logf("kubelet's credential-provider config %s is a chart-owned config: keeping only the entries the records in %s vouch for", wiring.ConfigFile, wiring.BinDir)
+		merged = chartOwnedConfig(wiring.ConfigFile, existing, rendered, entry, cfg.siblingIn(wiring.BinDir))
+		mergeChanged = !bytes.Equal(merged, existing)
+	} else {
+		if merged, mergeChanged, err = mergeProvider(existing, entry); err != nil {
+			return err
+		}
+		if err := cfg.checkKubeletCanStart(merged, wiring); err != nil {
+			return err
+		}
 	}
 	entryJSON, err := entryBytes(entry)
 	if err != nil {
 		return err
 	}
 
-	if err := installFiles(cfg, wiring.BinDir, entryJSON); err != nil {
+	if err := installFiles(cfg, wiring.BinDir, entryJSON, claim); err != nil {
 		return err
 	}
 	written, err := writeFileAtomic(cfg.hostPath(wiring.ConfigFile), merged, 0o644)
 	if err != nil {
 		return err
 	}
-	if err := cfg.commitRecord(wiring.BinDir, entryJSON); err != nil {
+	if err := cfg.commitRecord(wiring.BinDir, entryJSON, claim); err != nil {
 		return err
 	}
 	if mergeChanged {
@@ -474,6 +520,42 @@ func runMerge(cfg *config, entry map[string]any, wiring kubeletWiring) error {
 		fileHash:  contentHash(merged),
 	}
 	return finishWithRestart(cfg, t, mergeChanged || written, nil)
+}
+
+// checkKubeletCanStart refuses the merged config of a merge pass into a
+// cloud's config when kubelet would not start with it
+// (kubeletStartProblems), before this pass writes it or restarts kubelet
+// onto it: kubelet exits at startup on such a config (ADR-0029, Context).
+// The other entries are the cloud's and other installs', which this
+// installer does not remove. A binary counts when it is an executable
+// regular file in kubelet's bin dir, or a symlink, which kubelet follows
+// on the node and this installer cannot resolve from its mount.
+func (c *config) checkKubeletCanStart(merged []byte, wiring kubeletWiring) error {
+	root, err := os.OpenRoot(c.hostPath(wiring.BinDir))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("open kubelet's credential-provider bin dir %s: %w", wiring.BinDir, err)
+	}
+	if root != nil {
+		defer func() { _ = root.Close() }()
+	}
+	hasBinary := func(name string) bool {
+		if root == nil {
+			return false
+		}
+		fi, err := root.Lstat(name)
+		if err != nil {
+			return false
+		}
+		return fi.Mode()&fs.ModeSymlink != 0 || (fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0)
+	}
+	problems, err := kubeletStartProblems(merged, c.ProviderName, hasBinary)
+	if err != nil {
+		return err
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("kubelet would not start with the credential-provider config %s (bin dir %s) after this pass: %s; refusing to write it or restart kubelet. Fix the config or the bin dir on the node", wiring.ConfigFile, wiring.BinDir, strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // finishWithRestart applies the ADR-0021 restart policy: restart iff
@@ -537,11 +619,13 @@ const recordFileMode = 0o600
 // installFiles refuses a pass that would replace a file of another
 // program in binDir (a node path), and otherwise writes this install's
 // files that the provider entry depends on, before the caller writes the
-// entry: the CA and mTLS files in HostConfigDir, then the record and the
-// plugin binary in binDir. Everything that can refuse the pass (ownership,
-// a foreign entry, an unreadable config) runs before this, so a refused
-// pass writes nothing on the node.
-func installFiles(cfg *config, binDir string, entryJSON []byte) error {
+// entry into the config chartOwned (empty for a cloud's config): the CA
+// and mTLS files in HostConfigDir, then the record and the plugin binary
+// in binDir. Everything that can refuse the pass (ownership, a foreign
+// entry, an unreadable config) runs before this, so a refused pass changes
+// no config, binary, record, CA, mTLS or state file; only the lock files
+// it took (lock.go) and their directories may be new.
+func installFiles(cfg *config, binDir string, entryJSON []byte, chartOwned string) error {
 	if err := checkBinaryOwnership(cfg, binDir); err != nil {
 		return err
 	}
@@ -552,7 +636,7 @@ func installFiles(cfg *config, binDir string, entryJSON []byte) error {
 	if err := syncAuxFiles(cfg); err != nil {
 		return err
 	}
-	return installPluginBinary(cfg, binDir, entryJSON)
+	return installPluginBinary(cfg, binDir, entryJSON, chartOwned)
 }
 
 // installPluginBinary adds entryJSON, the canonical bytes of the entry this
@@ -564,9 +648,9 @@ func installFiles(cfg *config, binDir string, entryJSON []byte) error {
 // (checkBinaryOwnership), whatever version it then installs. The caller
 // reduces the record to entryJSON once the config holds it
 // (commitRecord).
-func installPluginBinary(cfg *config, binDir string, entryJSON []byte) error {
+func installPluginBinary(cfg *config, binDir string, entryJSON []byte, chartOwned string) error {
 	files := cfg.files()
-	if err := cfg.beginRecord(binDir, entryJSON); err != nil {
+	if err := cfg.beginRecord(binDir, entryJSON, chartOwned); err != nil {
 		return err
 	}
 	dst := filepath.Join(binDir, files.Binary)

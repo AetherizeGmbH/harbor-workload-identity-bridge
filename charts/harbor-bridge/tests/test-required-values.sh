@@ -56,6 +56,7 @@ cases=(
   "plugin.install.binDir inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/kubernetes/credential-provider-config/bin,plugin.install.configFile=/etc/cp.yaml|plugin.install.binDir=\"/etc/kubernetes/credential-provider-config/bin\" and plugin.hostConfigDir"
   "plugin.install.stateDir equal to plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config|plugin.install.stateDir=\"/etc/kubernetes/credential-provider-config\" must not be plugin.hostConfigDir"
   "plugin.install.stateDir inside plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config/state|must not be plugin.hostConfigDir"
+  "plugin.install.configFile inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml|plugin.install.configFile=\"/etc/kubernetes/credential-provider-config/credential-provider-config.yaml\" must not be inside plugin.hostConfigDir"
 )
 
 failed=0
@@ -179,8 +180,10 @@ fi
 # The overlap check compares per path segment: the defaults
 # /etc/kubernetes/credential-provider and
 # /etc/kubernetes/credential-provider-config share a string prefix but no
-# directory, and the state dir may be a parent of plugin.hostConfigDir.
-if render -f "${COMPLETE}" --set plugin.install.stateDir=/etc/kubernetes > /dev/null 2>&1; then
+# directory, and the state dir may be a parent of plugin.hostConfigDir. A
+# merge config whose name merely extends plugin.hostConfigDir is not in it.
+if render -f "${COMPLETE}" --set plugin.install.stateDir=/etc/kubernetes > /dev/null 2>&1 \
+   && render -f "${COMPLETE}" --set plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config.yaml > /dev/null 2>&1; then
   echo "PASS  plugin directories compared per path segment"
 else
   echo "FAIL  plugin directories compared per path segment"

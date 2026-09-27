@@ -187,6 +187,11 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	if withinDir(c.StateDir, c.HostConfigDir) {
 		return nil, fmt.Errorf("STATE_DIR %q must not be HOST_CONFIG_DIR %q or inside it: every release's sync container can write HOST_CONFIG_DIR", c.StateDir, c.HostConfigDir)
 	}
+	// The merge target is a cloud's config, whose entries merge mode keeps
+	// as they are; kubelet runs them after this installer's restart.
+	if c.MergeConfigFile != "" && withinDir(c.MergeConfigFile, c.HostConfigDir) {
+		return nil, fmt.Errorf("INSTALL_MERGE_CONFIG_FILE %q must not be inside HOST_CONFIG_DIR %q: every release's sync container can write HOST_CONFIG_DIR; the chart-owned config there is for patch and none mode", c.MergeConfigFile, c.HostConfigDir)
+	}
 	if err := validUnitName(c.KubeletUnit); err != nil {
 		return nil, fmt.Errorf("KUBELET_UNIT: %w", err)
 	}

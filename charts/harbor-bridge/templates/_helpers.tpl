@@ -236,7 +236,9 @@ harbor.aetherize.io/robot
 {{- /* plugin.hostConfigDir is writable by the sync container of every
        release. The installer trusts the plugin binaries and entry records
        in the bin dir, and its state file decides about kubelet restarts, so
-       neither may be in reach of it (ADR-0029). Compared per path segment:
+       neither may be in reach of it (ADR-0029). plugin.install.configFile
+       names a cloud's config, whose entries merge mode keeps as they are,
+       so it may not be inside it either. Compared per path segment:
        /a/b-c is not inside /a/b. The installer checks the same (loadConfig). */}}
 {{- $configDir := .Values.plugin.hostConfigDir -}}
 {{- range $k, $v := dict "plugin.hostBinaryDir" .Values.plugin.hostBinaryDir "plugin.install.binDir" $install.binDir -}}
@@ -246,6 +248,9 @@ harbor.aetherize.io/robot
 {{- end -}}
 {{- if and $install.stateDir $configDir (or (eq $install.stateDir $configDir) (hasPrefix (printf "%s/" $configDir) (toString $install.stateDir))) -}}
 {{- fail (printf "plugin.install.stateDir=%q must not be plugin.hostConfigDir=%q or inside it: the sync container of every release can write plugin.hostConfigDir, and the state file decides about kubelet restarts (ADR-0029)." (toString $install.stateDir) $configDir) -}}
+{{- end -}}
+{{- if and $install.configFile $configDir (hasPrefix (printf "%s/" $configDir) (toString $install.configFile)) -}}
+{{- fail (printf "plugin.install.configFile=%q must not be inside plugin.hostConfigDir=%q: the sync container of every release can write plugin.hostConfigDir, and merge mode keeps every other entry of that config for kubelet (ADR-0029). The chart-owned config there is for plugin.install.mode=patch or none." (toString $install.configFile) $configDir) -}}
 {{- end -}}
 {{- if not .Values.plugin.allowSelfMatchImages -}}
 {{- $pluginHost := include "harbor-bridge.registryHost" .Values.plugin.image.repository -}}

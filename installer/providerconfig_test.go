@@ -540,3 +540,43 @@ func TestProviderName_YAMLAmbiguousNamesStayStrings(t *testing.T) {
 		}
 	}
 }
+
+// TestKubeletStartProblems pins what merge mode refuses before it writes a
+// cloud's config or restarts kubelet onto it.
+func TestKubeletStartProblems(t *testing.T) {
+	present := map[string]bool{"auth-provider-gcp": true, "a.b": true}
+	hasBinary := func(name string) bool { return present[name] }
+	for name, tc := range map[string]struct {
+		doc  string
+		want []string
+	}{
+		"a cloud config with its binary":    {gkeConfig, nil},
+		"our own entry needs no binary yet": {gkeConfig + strings.TrimPrefix(renderedConfig, "apiVersion: kubelet.config.k8s.io/v1\nkind: CredentialProviderConfig\nproviders:\n"), nil},
+		"a dotted name kubelet accepts":     {"providers:\n  - name: a.b\n", nil},
+		"no providers":                      {"apiVersion: kubelet.config.k8s.io/v1\n", nil},
+		"missing binary":                    {"providers:\n  - name: gone\n", []string{`the binary of provider "gone" is missing from kubelet's bin dir`}},
+		"not an object":                     {"providers:\n  - just-a-string\n", []string{"provider 1 has no string name"}},
+		"number as name":                    {"providers:\n  - name: 123\n", []string{"provider 1 has no string name"}},
+		"no name":                           {"providers:\n  - apiVersion: x\n", []string{"provider 1 has no string name"}},
+		"empty name":                        {"providers:\n  - name: \"\"\n", []string{`kubelet refuses the provider name ""`}},
+		"dot":                               {"providers:\n  - name: .\n", []string{`kubelet refuses the provider name "."`}},
+		"dot dot":                           {"providers:\n  - name: ..\n", []string{`kubelet refuses the provider name ".."`}},
+		"slash":                             {"providers:\n  - name: a/b\n", []string{`kubelet refuses the provider name "a/b"`}},
+		"space":                             {"providers:\n  - name: a b\n", []string{`kubelet refuses the provider name "a b"`}},
+		"twice": {"providers:\n  - name: auth-provider-gcp\n  - name: auth-provider-gcp\n",
+			[]string{`the provider name "auth-provider-gcp" occurs more than once`}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := kubeletStartProblems([]byte(tc.doc), defaultProviderName, hasBinary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("problems = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if _, err := kubeletStartProblems([]byte("providers: 3\n"), defaultProviderName, hasBinary); err == nil {
+		t.Fatal("providers that are not a list were accepted")
+	}
+}

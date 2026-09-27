@@ -52,7 +52,7 @@ func filesFor(name string) nodeFiles {
 	if name == defaultProviderName {
 		return nodeFiles{
 			Binary:     defaultProviderName,
-			Record:     defaultProviderName + ".entry",
+			Record:     defaultProviderName + recordSuffix,
 			CA:         "harbor-bridge-ca.crt",
 			ClientCert: "harbor-bridge-client.crt",
 			ClientKey:  "harbor-bridge-client.key",
@@ -61,13 +61,16 @@ func filesFor(name string) nodeFiles {
 	}
 	return nodeFiles{
 		Binary:     name,
-		Record:     name + ".entry",
+		Record:     name + recordSuffix,
 		CA:         name + ".ca.crt",
 		ClientCert: name + ".client.crt",
 		ClientKey:  name + ".client.key",
 		State:      name + ".installer-state.json",
 	}
 }
+
+// recordSuffix ends the name of every install's record (nodeFiles.Record).
+const recordSuffix = ".entry"
 
 // The install container reads the rendered provider config from the
 // chart's ConfigMap, mounted at one of two layouts

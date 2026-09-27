@@ -126,13 +126,15 @@ func writeSiblingFiles(t *testing.T, env *testEnv, name string) {
 	if err := os.Chmod(env.cfg.hostPath(filepath.Join(binDir, name)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeHostFile(t, env, filepath.Join(binDir, filesFor(name).Record), recordOf(t, mustEntry(t, renderedConfigFor(name), name)))
+	writeHostFile(t, env, filepath.Join(binDir, filesFor(name).Record),
+		recordOf(t, configDir+"/"+configFileName, mustEntry(t, renderedConfigFor(name), name)))
 }
 
-// recordOf is the record (entryRecord) of an install that holds entries.
-func recordOf(t *testing.T, entries ...map[string]any) string {
+// recordOf is the record (entryRecord) of an install that holds entries and
+// writes them into the chart-owned config chartOwned ("" for a cloud's).
+func recordOf(t *testing.T, chartOwned string, entries ...map[string]any) string {
 	t.Helper()
-	var r entryRecord
+	r := entryRecord{ChartOwnedConfig: chartOwned}
 	for _, e := range entries {
 		raw, err := entryBytes(e)
 		if err != nil {
@@ -145,6 +147,21 @@ func recordOf(t *testing.T, entries ...map[string]any) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+// writeCloudConfig puts a cloud's credential-provider config doc at the
+// node path configPath and an executable binary for each of its providers
+// into cloudBinDir, as a managed node image has them.
+func writeCloudConfig(t *testing.T, env *testEnv, cloudBinDir, configPath, doc string) {
+	t.Helper()
+	writeHostFile(t, env, configPath, doc)
+	for _, p := range parseConfig(t, []byte(doc))["providers"].([]any) {
+		bin := filepath.Join(cloudBinDir, p.(map[string]any)["name"].(string))
+		writeHostFile(t, env, bin, "CLOUD-BINARY")
+		if err := os.Chmod(env.cfg.hostPath(bin), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func assertAbsent(t *testing.T, env *testEnv, nodePaths ...string) {
@@ -281,7 +298,7 @@ func TestRun_MergeInstallsKeepEachOtherAndTheCloudProvider(t *testing.T) {
 		"--image-credential-provider-bin-dir=/cloud/bin",
 		"--image-credential-provider-config=/cloud/config.json",
 	})
-	writeHostFile(t, a, "/cloud/config.json", eksConfig)
+	writeCloudConfig(t, a, "/cloud/bin", "/cloud/config.json", eksConfig)
 	b := newSiblingEnv(t, a, modeAuto, euName)
 
 	if err := run(a.cfg); err != nil {
@@ -397,7 +414,7 @@ func TestRun_RefusesToOverwriteAForeignBinary(t *testing.T) {
 		"--image-credential-provider-config=/etc/srv/kubernetes/cri_auth_config.yaml",
 	})
 	withName(t, env, "kubelet")
-	writeHostFile(t, env, "/etc/srv/kubernetes/cri_auth_config.yaml", gkeConfig)
+	writeCloudConfig(t, env, "/home/kubernetes/bin", "/etc/srv/kubernetes/cri_auth_config.yaml", gkeConfig)
 	writeHostFile(t, env, "/home/kubernetes/bin/kubelet", "KUBELET-BINARY")
 
 	err := run(env.cfg)
@@ -468,7 +485,7 @@ func TestRun_LegacyStateIsConvertedWithoutRestart(t *testing.T) {
 			env: func(t *testing.T) *testEnv {
 				e := newTestEnv(t, modeMerge, nil)
 				e.cfg.MergeBinDir, e.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
-				writeHostFile(t, e, "/cloud/config.yaml", gkeConfig)
+				writeCloudConfig(t, e, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
 				return e
 			},
 			legacy: func(t *testing.T, e *testEnv) *state {
@@ -582,7 +599,7 @@ var stateCompatCases = []struct {
 		env: func(t *testing.T) *testEnv {
 			e := newTestEnv(t, modeMerge, nil)
 			e.cfg.MergeBinDir, e.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
-			writeHostFile(t, e, "/cloud/config.yaml", gkeConfig)
+			writeCloudConfig(t, e, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
 			return e
 		},
 	},
@@ -906,20 +923,21 @@ func TestSiblingEntry(t *testing.T) {
 	eu := mustEntry(t, renderedConfigFor(euName), euName)
 	euBin := env.cfg.hostPath(binDir + "/" + euName)
 	euRecord := binDir + "/" + filesFor(euName).Record
-	record := recordOf(t, eu)
+	record := recordOf(t, configDir+"/"+configFileName, eu)
+	sibling := env.cfg.siblingIn(binDir)
 
-	if env.cfg.siblingEntry(eu) {
+	if sibling(eu) {
 		t.Fatal("an entry without a binary counts")
 	}
 	writeHostFile(t, env, binDir+"/"+euName, "ELF-fake-plugin")
 	writeHostFile(t, env, euRecord, record)
-	if env.cfg.siblingEntry(eu) {
+	if sibling(eu) {
 		t.Fatal("an entry whose binary kubelet cannot execute counts")
 	}
 	if err := os.Chmod(euBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if !env.cfg.siblingEntry(eu) {
+	if !sibling(eu) {
 		t.Fatal("another install's entry does not count")
 	}
 
@@ -929,22 +947,22 @@ func TestSiblingEntry(t *testing.T) {
 	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
 		t.Fatal(err)
 	}
-	if env.cfg.siblingEntry(eu) {
+	if sibling(eu) {
 		t.Fatal("an entry without a record counts")
 	}
 	changed := mustEntry(t, strings.Replace(renderedConfigFor(euName), "127.0.0.1:31444", "203.0.113.7:443", 1), euName)
 	writeHostFile(t, env, euRecord, record)
-	if env.cfg.siblingEntry(changed) {
+	if sibling(changed) {
 		t.Fatal("an entry that differs from its record counts")
 	}
 	// A pass that died between its record and its config holds the entry
 	// in the config and the one it meant to write: both count.
 	upgraded := mustEntry(t, strings.Replace(renderedConfigFor(euName), "31444", "31445", 1), euName)
-	writeHostFile(t, env, euRecord, recordOf(t, eu, upgraded))
-	if !env.cfg.siblingEntry(eu) || !env.cfg.siblingEntry(upgraded) {
+	writeHostFile(t, env, euRecord, recordOf(t, configDir+"/"+configFileName, eu, upgraded))
+	if !sibling(eu) || !sibling(upgraded) {
 		t.Fatal("an entry of a record with two entries does not count")
 	}
-	if env.cfg.siblingEntry(changed) {
+	if sibling(changed) {
 		t.Fatal("an entry that is in neither of the record's entries counts")
 	}
 	// A record that is not an installer's record vouches for nothing: the
@@ -955,7 +973,7 @@ func TestSiblingEntry(t *testing.T) {
 	}
 	for _, bad := range []string{string(raw), "{nope", `{"entries":"x"}`} {
 		writeHostFile(t, env, euRecord, bad)
-		if env.cfg.siblingEntry(eu) {
+		if sibling(eu) {
 			t.Fatalf("an entry counts under the record %q", bad)
 		}
 	}
@@ -969,7 +987,7 @@ func TestSiblingEntry(t *testing.T) {
 	if err := os.Symlink(env.cfg.hostPath("/tmp/record"), env.cfg.hostPath(euRecord)); err != nil {
 		t.Fatal(err)
 	}
-	if env.cfg.siblingEntry(eu) {
+	if sibling(eu) {
 		t.Fatal("an entry whose record is a symlink counts")
 	}
 	if err := os.Remove(env.cfg.hostPath(euRecord)); err != nil {
@@ -982,19 +1000,19 @@ func TestSiblingEntry(t *testing.T) {
 		noBridge[k] = v
 	}
 	delete(noBridge, "env")
-	if env.cfg.siblingEntry(noBridge) {
+	if sibling(noBridge) {
 		t.Fatal("an entry that is not a bridge entry counts")
 	}
 
 	ours := renderedEntry(t, env)
 	writeSiblingFiles(t, env, defaultProviderName)
-	if env.cfg.siblingEntry(ours) {
+	if sibling(ours) {
 		t.Fatal("this install's own entry counts as another install's")
 	}
 
 	dotted := mustEntry(t, renderedConfigFor(defaultProviderName+".bak"), defaultProviderName+".bak")
 	writeSiblingFiles(t, env, defaultProviderName+".bak")
-	if env.cfg.siblingEntry(dotted) {
+	if sibling(dotted) {
 		t.Fatal("an entry whose name is no provider name counts")
 	}
 
@@ -1005,7 +1023,7 @@ func TestSiblingEntry(t *testing.T) {
 	if err := os.Symlink(env.cfg.hostPath(binDir+"/"+defaultProviderName), euBin); err != nil {
 		t.Fatal(err)
 	}
-	if env.cfg.siblingEntry(eu) {
+	if sibling(eu) {
 		t.Fatal("an entry whose binary is a symlink counts")
 	}
 }
@@ -1252,7 +1270,7 @@ func TestRun_AutoMergeTakesTheConfigLock(t *testing.T) {
 		"--image-credential-provider-bin-dir=/cloud/bin",
 		"--image-credential-provider-config=/cloud/config.yaml",
 	})
-	writeHostFile(t, env, "/cloud/config.yaml", gkeConfig)
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
 	unlock, err := lockFile(env.cfg.hostPath("/cloud/config.yaml"+lockSuffix), time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -1264,10 +1282,14 @@ func TestRun_AutoMergeTakesTheConfigLock(t *testing.T) {
 	}
 	assertAbsent(t, env, "/cloud/bin/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt")
 
-	// The holder merges another install's entry.
+	// The holder installs its binary and merges its entry.
 	holder := renderedEntry(t, withName(t, newSiblingEnv(t, env, modeAuto, euName), euName))
 	merged, _, err := mergeProvider([]byte(gkeConfig), holder)
 	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, env, "/cloud/bin/"+euName, "ELF-fake-plugin")
+	if err := os.Chmod(env.cfg.hostPath("/cloud/bin/"+euName), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeHostFile(t, env, "/cloud/config.yaml", string(merged))
@@ -1465,7 +1487,7 @@ func TestRun_OwnBinaryUpgradeAfterTheEntryVanished(t *testing.T) {
 	t.Run("merge after the cloud rewrote its config", func(t *testing.T) {
 		env := withName(t, newTestEnv(t, modeMerge, nil), euName)
 		env.cfg.MergeBinDir, env.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
-		writeHostFile(t, env, "/cloud/config.yaml", gkeConfig)
+		writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
 		if err := run(env.cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -1541,7 +1563,7 @@ func TestRun_RecordHoldsTheEntry(t *testing.T) {
 				t.Fatalf("record mode = %v, want -rw-------", fi.Mode())
 			}
 			byName, _ := providersIn(t, env, configDir+"/"+configFileName)
-			if got, want := env.hostFile(t, recordPath), recordOf(t, byName[name].(map[string]any)); got != want {
+			if got, want := env.hostFile(t, recordPath), recordOf(t, configDir+"/"+configFileName, byName[name].(map[string]any)); got != want {
 				t.Fatalf("record = %s, want the entry in the config %s", got, want)
 			}
 		})
@@ -1558,7 +1580,7 @@ func TestEntryRecord_RoundTripsEveryEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.cfg.beginRecord(binDir, raw); err != nil {
+	if err := env.cfg.beginRecord(binDir, raw, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !env.cfg.readRecord(binDir + "/" + filesFor(defaultProviderName).Record).holds(raw) {
@@ -1617,7 +1639,7 @@ func TestRun_InterruptedSiblingPassKeepsItsLiveEntry(t *testing.T) {
 	if !reflect.DeepEqual(after[euName], renderedEntry(t, b)) {
 		t.Fatal("the second install's entry was not updated")
 	}
-	if got, want := a.hostFile(t, binDir+"/"+filesFor(euName).Record), recordOf(t, renderedEntry(t, b)); got != want {
+	if got, want := a.hostFile(t, binDir+"/"+filesFor(euName).Record), recordOf(t, configDir+"/"+configFileName, renderedEntry(t, b)); got != want {
 		t.Fatalf("record = %s, want only the entry in the config %s", got, want)
 	}
 }
@@ -1695,4 +1717,206 @@ func TestRun_NonDefaultNameRefusesTheLegacyLayout(t *testing.T) {
 		t.Fatalf("got %v, want a refusal naming the layout mismatch", err)
 	}
 	assertAbsent(t, env, binDir+"/"+euName, configDir+"/"+configFileName, configDir+"/harbor-bridge-eu.ca.crt", defaultKubeletPath)
+}
+
+// TestRun_MergeIntoAChartOwnedConfigKeepsOnlyRecordedEntries: merge mode
+// can meet a chart-owned config of patch or none mode, which lives in a
+// plugin.hostConfigDir that pods other than installers can write, and its
+// pass may restart kubelet onto it. It must then keep only the entries the
+// records in kubelet's bin dir vouch for, as patch and none mode do, not a
+// changed or planted entry: this install's own config with merge mode set
+// explicitly, and another release's config in auto mode with other
+// directories.
+func TestRun_MergeIntoAChartOwnedConfigKeepsOnlyRecordedEntries(t *testing.T) {
+	configPath := configDir + "/" + configFileName
+	for _, tc := range []struct {
+		name string
+		mode string
+		// dirs are the second install's plugin.hostBinaryDir and
+		// plugin.hostConfigDir.
+		binDir, configDir string
+	}{
+		{"explicit merge, same directories", modeMerge, binDir, configDir},
+		{"auto, other directories", modeAuto, "/etc/kubernetes/hb-eu-bin", "/etc/kubernetes/hb-eu"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+			if err := run(a.cfg); err != nil {
+				t.Fatal(err)
+			}
+			aEntry := renderedEntry(t, a)
+			// A writer of plugin.hostConfigDir points the first install's
+			// entry at another endpoint, and plants an entry for a program
+			// in the bin dir that no install recorded.
+			changed := mustEntry(t, strings.Replace(renderedConfig, "https://127.0.0.1:31443", "https://203.0.113.7:443", 1), defaultProviderName)
+			planted := mustEntry(t, "apiVersion: kubelet.config.k8s.io/v1\nproviders:\n"+plantedAs("evil"), "evil")
+			writeHostFile(t, a, configPath, string(configWith(t, changed, planted)))
+			writeHostFile(t, a, binDir+"/evil", "ELF-fake-plugin")
+			if err := os.Chmod(a.cfg.hostPath(binDir+"/evil"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			b := newSiblingEnv(t, a, tc.mode, euName)
+			b.cfg.HostBinDir, b.cfg.HostConfigDir = tc.binDir, tc.configDir
+			if err := run(b.cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := a.hostFile(t, configPath); got != renderedConfigFor(euName) {
+				t.Fatalf("the changed or the planted entry survived the merge pass:\n%s", got)
+			}
+			if b.restarts != 1 {
+				t.Fatalf("restarts = %d, want 1 (onto the file without them)", b.restarts)
+			}
+			// Kubelet's bin dir holds the second install's binary and its
+			// record, which names the chart-owned config it wrote into.
+			if got, want := a.hostFile(t, binDir+"/"+filesFor(euName).Record), recordOf(t, configPath, renderedEntry(t, b)); got != want {
+				t.Fatalf("record = %s, want %s", got, want)
+			}
+
+			// The first install's next pass writes its entry back and keeps
+			// the second one's.
+			if err := run(a.cfg); err != nil {
+				t.Fatal(err)
+			}
+			byName, order := providersIn(t, a, configPath)
+			if !reflect.DeepEqual(order, []string{euName, defaultProviderName}) ||
+				!reflect.DeepEqual(byName[defaultProviderName], aEntry) || !reflect.DeepEqual(byName[euName], renderedEntry(t, b)) {
+				t.Fatalf("providers = %v, want both entries as their installers wrote them", order)
+			}
+			// And a no-op pass of the second install keeps both.
+			if err := run(b.cfg); err != nil {
+				t.Fatal(err)
+			}
+			if after, _ := providersIn(t, a, configPath); !reflect.DeepEqual(after, byName) {
+				t.Fatal("a no-op merge pass changed the chart-owned config")
+			}
+		})
+	}
+}
+
+// TestRun_MergeRefusesAnotherConfigInHostConfigDir: a config in
+// plugin.hostConfigDir other than the chart-owned one is not the chart's,
+// and every release's sync container can write it.
+func TestRun_MergeRefusesAnotherConfigInHostConfigDir(t *testing.T) {
+	env := newTestEnv(t, modeAuto, []string{
+		"/usr/bin/kubelet",
+		"--image-credential-provider-bin-dir=/opt/cp-bin",
+		"--image-credential-provider-config=" + configDir + "/hand-written.yaml",
+	})
+	writeCloudConfig(t, env, "/opt/cp-bin", configDir+"/hand-written.yaml", gkeConfig)
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "is inside plugin.hostConfigDir") {
+		t.Fatalf("got %v, want a refusal", err)
+	}
+	if got := env.hostFile(t, configDir+"/hand-written.yaml"); got != gkeConfig {
+		t.Fatal("the config was changed")
+	}
+	assertAbsent(t, env, "/opt/cp-bin/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt", configDir+"/hand-written.yaml.lock")
+	if env.restarts != 0 {
+		t.Fatal("kubelet restarted after a refusal")
+	}
+}
+
+// TestRun_MergeRefusesAConfigKubeletCannotStartWith: merge mode keeps the
+// cloud's and other installs' entries, but does not write or restart
+// kubelet onto a config that kubelet exits on: a provider whose binary is
+// missing or not executable, a name that occurs twice, or a name kubelet
+// refuses.
+func TestRun_MergeRefusesAConfigKubeletCannotStartWith(t *testing.T) {
+	planted := func(name string) string {
+		return gkeConfig + strings.Replace(plantedEntry, "name: harbor-bridge-plugin.bak", "name: "+name, 1)
+	}
+	for _, tc := range []struct {
+		name    string
+		doc     string
+		prepare func(t *testing.T, env *testEnv)
+		want    string
+	}{
+		{"missing binary", planted("evil"), nil, `the binary of provider "evil" is missing`},
+		{"binary not executable", planted("evil"), func(t *testing.T, env *testEnv) {
+			writeHostFile(t, env, "/cloud/bin/evil", "#!/bin/sh")
+		}, `the binary of provider "evil" is missing`},
+		{"binary is a directory", planted("evil"), func(t *testing.T, env *testEnv) {
+			if err := os.MkdirAll(env.cfg.hostPath("/cloud/bin/evil"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, `the binary of provider "evil" is missing`},
+		{"name outside the bin dir", planted(`"../../../usr/bin/sh"`), nil, `kubelet refuses the provider name "../../../usr/bin/sh"`},
+		{"repeated name", planted("auth-provider-gcp"), nil, `the provider name "auth-provider-gcp" occurs more than once`},
+		{"repeated own name", gkeConfig + strings.TrimPrefix(renderedConfig, "apiVersion: kubelet.config.k8s.io/v1\nkind: CredentialProviderConfig\nproviders:\n") +
+			strings.TrimPrefix(renderedConfig, "apiVersion: kubelet.config.k8s.io/v1\nkind: CredentialProviderConfig\nproviders:\n"), nil,
+			`the provider name "harbor-bridge-plugin" occurs more than once`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t, modeMerge, nil)
+			env.cfg.MergeBinDir, env.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
+			writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
+			writeHostFile(t, env, "/cloud/config.yaml", tc.doc)
+			if tc.prepare != nil {
+				tc.prepare(t, env)
+			}
+			err := run(env.cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "kubelet would not start") {
+				t.Fatalf("got %v, want a refusal containing %q", err, tc.want)
+			}
+			if got := env.hostFile(t, "/cloud/config.yaml"); got != tc.doc {
+				t.Fatal("the config was changed")
+			}
+			assertAbsent(t, env, "/cloud/bin/"+defaultProviderName, "/cloud/bin/"+filesFor(defaultProviderName).Record, configDir+"/harbor-bridge-ca.crt")
+			if env.restarts != 0 {
+				t.Fatal("kubelet restarted after a refusal")
+			}
+		})
+	}
+
+	// A provider whose binary is an executable file or a symlink (which
+	// kubelet follows on the node) is fine, and so is a cloud's entry the
+	// installer does not know.
+	env := newTestEnv(t, modeMerge, nil)
+	env.cfg.MergeBinDir, env.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
+	doc := planted("evil") + strings.Replace(plantedEntry, "name: harbor-bridge-plugin.bak", "name: linked", 1)
+	writeHostFile(t, env, "/cloud/config.yaml", doc)
+	writeHostFile(t, env, "/cloud/bin/evil", "#!/bin/sh")
+	if err := os.Chmod(env.cfg.hostPath("/cloud/bin/evil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/libexec/linked", env.cfg.hostPath("/cloud/bin/linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, order := providersIn(t, env, "/cloud/config.yaml"); !reflect.DeepEqual(order, []string{"auth-provider-gcp", "evil", "linked", defaultProviderName}) {
+		t.Fatalf("providers = %v", order)
+	}
+}
+
+// TestRun_MergeKeepsAHandInstalledBridgeInACloudConfig: a bridge installed
+// by hand next to a chart-managed one (docs/install-external-plugin.md)
+// has an entry in the cloud's config and a binary, but no record. In a
+// cloud's config, which the writers of plugin.hostConfigDir cannot reach,
+// merge mode keeps it as it keeps every other entry there.
+func TestRun_MergeKeepsAHandInstalledBridgeInACloudConfig(t *testing.T) {
+	env := newTestEnv(t, modeAuto, []string{
+		"/usr/bin/kubelet",
+		"--image-credential-provider-bin-dir=/cloud/bin",
+		"--image-credential-provider-config=/cloud/config.json",
+	})
+	hand := mustEntry(t, renderedConfigFor(euName), euName)
+	merged, _, err := mergeProvider([]byte(eksConfig), hand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.json", string(merged))
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	byName, order := providersIn(t, env, "/cloud/config.json")
+	if !reflect.DeepEqual(order, []string{"ecr-credential-provider", euName, defaultProviderName}) || !reflect.DeepEqual(byName[euName], hand) {
+		t.Fatalf("providers = %v, want the hand-installed entry kept", order)
+	}
+	if got, want := env.hostFile(t, "/cloud/bin/"+filesFor(defaultProviderName).Record), recordOf(t, "", renderedEntry(t, env)); got != want {
+		t.Fatalf("record = %s, want %s: a cloud's config is not chart-owned", got, want)
+	}
 }

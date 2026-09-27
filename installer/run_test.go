@@ -237,13 +237,7 @@ func TestRun_AutoResolvesToMergeAndPreservesCloudProvider(t *testing.T) {
 		"--image-credential-provider-bin-dir=/cloud/bin",
 		"--image-credential-provider-config=/cloud/config.json",
 	})
-	cloudCfg := env.cfg.hostPath("/cloud/config.json")
-	if err := os.MkdirAll(filepath.Dir(cloudCfg), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cloudCfg, []byte(eksConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.json", eksConfig)
 
 	if err := run(env.cfg); err != nil {
 		t.Fatalf("merge run: %v", err)
@@ -314,13 +308,7 @@ func TestRun_MergeExplicitOverridesSkipDiscovery(t *testing.T) {
 	env := newTestEnv(t, modeMerge, nil)
 	env.cfg.MergeBinDir = "/cloud/bin"
 	env.cfg.MergeConfigFile = "/cloud/config.yaml"
-	cloudCfg := env.cfg.hostPath("/cloud/config.yaml")
-	if err := os.MkdirAll(filepath.Dir(cloudCfg), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cloudCfg, []byte(gkeConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +413,8 @@ func TestLoadConfig_Validation(t *testing.T) {
 		"config dir inside bin dir":        {"HOST_BIN_DIR": "/c", "HOST_CONFIG_DIR": "/c/config"},
 		"merge bin dir inside config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/c/bin", "INSTALL_MERGE_CONFIG_FILE": "/x.yaml"},
 		"merge bin dir equals config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/c", "INSTALL_MERGE_CONFIG_FILE": "/x.yaml"},
+		"merge config inside config dir":   {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/x", "INSTALL_MERGE_CONFIG_FILE": "/c/credential-provider-config.yaml"},
+		"merge config deep in config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/x", "INSTALL_MERGE_CONFIG_FILE": "/c/a/b.yaml"},
 		"state dir equals config dir":      {"STATE_DIR": "/c"},
 		"state dir inside config dir":      {"STATE_DIR": "/c/state"},
 		"default state dir in config dir":  {"HOST_CONFIG_DIR": "/var/lib"},
@@ -441,6 +431,7 @@ func TestLoadConfig_Validation(t *testing.T) {
 		"config dir name extends":    {"HOST_BIN_DIR": "/c", "HOST_CONFIG_DIR": "/cc"},
 		"state dir above config dir": {"STATE_DIR": "/var/lib", "HOST_CONFIG_DIR": "/var/lib/hb"},
 		"state dir name extends":     {"STATE_DIR": "/c-state"},
+		"merge config next to it":    {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/x", "INSTALL_MERGE_CONFIG_FILE": "/c.yaml"},
 	} {
 		if _, err := loadConfig(env(withBase(extra))); err != nil {
 			t.Errorf("%s: refused: %v", name, err)
