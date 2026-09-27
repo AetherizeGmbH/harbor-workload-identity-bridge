@@ -12,6 +12,7 @@
 | Change | What to do |
 | --- | --- |
 | The bridge no longer follows HTTP redirects from Harbor. A followed redirect re-sent the Harbor admin credentials (on 307/308 also the request body) to a redirect target on the same host or a subdomain of it, even over plain http | Nothing, unless reconciles fail with `refusing to follow a redirect to …`. Then set `harbor.url` (`BRIDGE_HARBOR_URL`) to the https scheme and host, plus any path prefix in front of `/api/v2.0`, at which Harbor's API answers without a redirect. The error shows the full request URL: keep only its origin and path prefix. If the redirect goes to `http://`, fix the proxy rather than switching the bridge to http. |
+| `harbor.url` (`BRIDGE_HARBOR_URL`) and `bridge.oidcIssuer` (`BRIDGE_OIDC_ISSUER`) must not contain `user:password@`; the bridge refuses to start | Remove it. It never took effect: the bridge authenticates to Harbor only with `harbor.adminCredsSecret`, and an issuer with credentials matches no token. The password was written to the startup log. |
 
 ### Unreleased: token lifetime cap and pod binding (ADR-0028)
 

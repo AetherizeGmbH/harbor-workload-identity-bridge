@@ -239,13 +239,20 @@ func LoadFromEnv() (*Config, error) {
 
 	if v, err := requireURL(os.Getenv(EnvOIDCIssuer), EnvOIDCIssuer); err != nil {
 		errs = append(errs, err)
+	} else if v.User != nil {
+		// The issuer is compared with each token's iss claim and each
+		// HarborAccess's trustPolicy.issuer, neither of which carries
+		// credentials: no token could ever match.
+		errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): a token's iss claim never carries them, so no token would match", EnvOIDCIssuer))
 	} else {
 		cfg.OIDCIssuer = v
 	}
 
 	if raw := strings.TrimSpace(os.Getenv(EnvOIDCJWKSURL)); raw != "" {
 		// Optional — when set, must still parse as a URL with a scheme
-		// and host. Same shape as the other URL knobs.
+		// and host. Same shape as the other URL knobs. Unlike them it may
+		// carry user:password@: net/http sends that as Basic auth to the
+		// JWKS endpoint. It is redacted wherever the URL is printed.
 		if v, err := requireURL(raw, EnvOIDCJWKSURL); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -267,8 +274,12 @@ func LoadFromEnv() (*Config, error) {
 	cfg.HarborAllowHTTP = envBoolOr(EnvHarborAllowHTTP, false)
 	if v, err := requireURL(os.Getenv(EnvHarborURL), EnvHarborURL); err != nil {
 		errs = append(errs, err)
+	} else if v.User != nil {
+		// The Harbor client never used URL credentials (the SDK takes only
+		// scheme, host and path); they would only end up in logs.
+		errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): the bridge ignores them and authenticates to Harbor with the credentials in %s (chart harbor.adminCredsSecret)", EnvHarborURL, EnvHarborAdminDir))
 	} else if v.Scheme == "http" && !cfg.HarborAllowHTTP {
-		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, v.String(), EnvHarborCAFile, EnvHarborAllowHTTP))
+		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, v.Redacted(), EnvHarborCAFile, EnvHarborAllowHTTP))
 	} else {
 		cfg.HarborURL = v
 	}
@@ -351,6 +362,10 @@ func LoadFromEnv() (*Config, error) {
 	return cfg, nil
 }
 
+// requireURL parses an http(s) URL setting. Its errors never repeat the
+// value: it may carry user:password@, and a value without a scheme
+// ("user:password@host") parses with the password in the opaque part,
+// which url.URL.Redacted does not hide.
 func requireURL(raw, name string) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -358,26 +373,32 @@ func requireURL(raw, name string) (*url.URL, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s %q: %w", name, raw, err)
+		// *url.Error repeats the whole input; keep only the cause.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return nil, fmt.Errorf("%s is not a valid URL: %w", name, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("%s %q must use http or https scheme", name, raw)
+		return nil, fmt.Errorf("%s must use http or https scheme (got scheme %q)", name, u.Scheme)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("%s %q must include a host", name, raw)
+		return nil, fmt.Errorf("%s must include a host", name)
 	}
 	return u, nil
 }
 
 // Sanitized returns a representation of the Config suitable for startup
 // logging. Admin credentials are deliberately excluded; only the path to the
-// secret mount is included.
+// secret mount is included. URLs are redacted: a password in one
+// (BRIDGE_OIDC_JWKS_URL may carry one) is replaced by "xxxxx".
 func (c *Config) Sanitized() map[string]string {
 	out := map[string]string{
 		EnvClusterName:          c.ClusterName,
 		EnvNamespace:            c.Namespace,
-		EnvOIDCIssuer:           c.OIDCIssuer.String(),
-		EnvHarborURL:            c.HarborURL.String(),
+		EnvOIDCIssuer:           c.OIDCIssuer.Redacted(),
+		EnvHarborURL:            c.HarborURL.Redacted(),
 		EnvHarborAdminDir:       c.HarborAdminDir,
 		EnvHarborRobotPrefix:    c.HarborRobotPrefix,
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
@@ -395,7 +416,7 @@ func (c *Config) Sanitized() map[string]string {
 		out[EnvInstance] = c.Instance
 	}
 	if c.OIDCJWKSURL != nil {
-		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.String()
+		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.Redacted()
 	}
 	if c.OIDCCAFile != "" {
 		out[EnvOIDCCAFile] = c.OIDCCAFile

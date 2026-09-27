@@ -187,6 +187,11 @@ robot username, and the requested image, but **never the robot
 password**. Admin credentials loaded at startup are read from disk
 and logged only as the directory path, never the values
 (see `Sanitized()` in [`bridge/controlplane/config.go`](bridge/controlplane/config.go)).
+`BRIDGE_HARBOR_URL` and `BRIDGE_OIDC_ISSUER` refuse a `user:password@`
+part at startup: the bridge never authenticated with it. Only
+`BRIDGE_OIDC_JWKS_URL` may carry one (it is sent as Basic auth to the
+JWKS endpoint). The startup log shows URLs with the password redacted,
+and configuration errors never repeat a URL's credentials.
 
 ## What the bridge does *not* defend against
 

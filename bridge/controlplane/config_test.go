@@ -383,3 +383,108 @@ func TestLoadFromEnv_HarborHTTPNeedsOptIn(t *testing.T) {
 		t.Fatalf("with opt-in: cfg=%+v err=%v", cfg, err)
 	}
 }
+
+// validURLEnv is a complete, valid configuration for the URL tests below.
+func validURLEnv() map[string]string {
+	return map[string]string{
+		EnvClusterName:    "prod",
+		EnvNamespace:      "harbor-bridge-system",
+		EnvOIDCIssuer:     "https://kubernetes.default.svc",
+		EnvHarborURL:      "https://harbor.example.com",
+		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		EnvAudience:       "harbor-bridge-prod",
+		EnvOIDCJWKSURL:    "",
+	}
+}
+
+// The Harbor client ignores user:password@ in BRIDGE_HARBOR_URL (it
+// authenticates with BRIDGE_HARBOR_ADMIN_DIR), and an issuer carrying one
+// can never match a token's iss claim: both are refused at startup, and
+// the refusal must not repeat the password.
+func TestLoadFromEnv_RejectsCredentialsInURLs(t *testing.T) {
+	for _, tc := range []struct{ env, value, mustHave string }{
+		{EnvHarborURL, "https://admin:s3cret@harbor.example.com", EnvHarborAdminDir},
+		{EnvOIDCIssuer, "https://admin:s3cret@kubernetes.default.svc", "iss claim"},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			clearAllEnv(t)
+			env := validURLEnv()
+			env[tc.env] = tc.value
+			setEnv(t, env)
+			_, err := LoadFromEnv()
+			if err == nil {
+				t.Fatalf("%s with credentials accepted", tc.env)
+			}
+			if !strings.Contains(err.Error(), tc.env) || !strings.Contains(err.Error(), "credentials") || !strings.Contains(err.Error(), tc.mustHave) {
+				t.Errorf("error %q does not explain the refusal of %s", err, tc.env)
+			}
+			if strings.Contains(err.Error(), "s3cret") {
+				t.Errorf("error repeats the password: %q", err)
+			}
+		})
+	}
+}
+
+// Every refusal of a URL setting must leave out a password the value
+// carries, including values that fail to parse or carry no scheme (then
+// the password sits in the opaque part, which URL.Redacted keeps).
+func TestLoadFromEnv_URLErrorsDoNotRepeatCredentials(t *testing.T) {
+	bad := []string{
+		"ftp://admin:s3cret@harbor.example.com",        // wrong scheme
+		"admin:s3cret@harbor.example.com",              // no scheme: opaque URL
+		"https://admin:s3cret@",                        // no host
+		"https://admin:s3cret@harbor.example.com:port", // parse error
+		"http://admin:s3cret@harbor.example.com",       // plain http without opt-in
+	}
+	for _, name := range []string{EnvHarborURL, EnvOIDCIssuer, EnvOIDCJWKSURL} {
+		for _, value := range bad {
+			t.Run(name+"="+value, func(t *testing.T) {
+				clearAllEnv(t)
+				_ = os.Unsetenv(EnvHarborAllowHTTP)
+				env := validURLEnv()
+				env[name] = value
+				setEnv(t, env)
+				cfg, err := LoadFromEnv()
+				if err == nil {
+					// http:// is valid for the OIDC settings; its
+					// password must then at least not be logged.
+					for k, v := range cfg.Sanitized() {
+						if strings.Contains(v, "s3cret") {
+							t.Errorf("Sanitized()[%s] = %q repeats the password", k, v)
+						}
+					}
+					return
+				}
+				if strings.Contains(err.Error(), "s3cret") {
+					t.Errorf("error repeats the password: %q", err)
+				}
+			})
+		}
+	}
+}
+
+// BRIDGE_OIDC_JWKS_URL may carry user:password@ (net/http sends it as
+// Basic auth to the JWKS endpoint), so it is accepted and kept, but the
+// startup log shows it redacted.
+func TestSanitized_RedactsURLCredentials(t *testing.T) {
+	clearAllEnv(t)
+	env := validURLEnv()
+	env[EnvOIDCJWKSURL] = "https://jwks:s3cret@jwks.example.com/keys"
+	setEnv(t, env)
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pw, _ := cfg.OIDCJWKSURL.User.Password(); pw != "s3cret" {
+		t.Fatalf("JWKS URL lost its credentials: %s", cfg.OIDCJWKSURL.Redacted())
+	}
+	got := cfg.Sanitized()
+	for k, v := range got {
+		if strings.Contains(v, "s3cret") {
+			t.Errorf("Sanitized()[%s] = %q repeats the password", k, v)
+		}
+	}
+	if got[EnvOIDCJWKSURL] != "https://jwks:xxxxx@jwks.example.com/keys" {
+		t.Errorf("Sanitized()[%s] = %q, want the redacted URL", EnvOIDCJWKSURL, got[EnvOIDCJWKSURL])
+	}
+}
