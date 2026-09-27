@@ -28,7 +28,8 @@ import (
 // TestEnvtest_Lifecycle runs the reconciler against a real apiserver
 // through a HarborAccess's whole life: create, a deleted Secret rebuilt via
 // the Secret watch, a serviceAccountRef change revoking the old robot, a
-// refusal suspending the robot and its end resuming it (ADR-0030), a
+// refusal suspending the robot and its end resuming it (ADR-0030), the
+// release of a refused object an older bridge finalized (ADR-0032), a
 // rename (a second HarborAccess for the same ServiceAccount takes over when
 // the first is deleted), and deletion revoking every robot before the
 // finalizer is released. It also
@@ -194,6 +195,34 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 	if err := k8s.Get(ctx, client.ObjectKeyFromObject(ha), cur); err != nil {
 		t.Fatal(err)
 	}
+
+	// A refused HarborAccess that an older bridge finalized, and that has
+	// no robot, loses the finalizer (ADR-0032): deleting it does not wait
+	// for this bridge.
+	refused := newHarborAccess()
+	refused.Namespace, refused.Name = "tenant", "refused"
+	refused.Spec.ServiceAccountRef.Name = "refused-sa"
+	refused.Spec.TrustPolicy.Audience = "another-bridge"
+	if err := k8s.Create(ctx, refused); err != nil { // holds FinalizerName
+		t.Fatal(err)
+	}
+	eventually("refused HarborAccess released, reported AudienceMismatch", func() bool {
+		got := &harborv1alpha1.HarborAccess{}
+		if k8s.Get(ctx, client.ObjectKeyFromObject(refused), got) != nil {
+			return false
+		}
+		c := meta.FindStatusCondition(got.Status.Conditions, harborv1alpha1.ConditionReady)
+		return len(got.Finalizers) == 0 && c != nil && c.Reason == ReasonAudienceMismatch
+	})
+	if robotNamed("bridge-" + testCluster + ".flux-system.refused-sa") {
+		t.Fatal("a robot was created for a refused HarborAccess")
+	}
+	if err := k8s.Delete(ctx, refused); err != nil {
+		t.Fatal(err)
+	}
+	eventually("refused HarborAccess deleted", func() bool {
+		return apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(refused), &harborv1alpha1.HarborAccess{}))
+	})
 
 	// Rename: a second HarborAccess for the same ServiceAccount is refused
 	// while the first owns the robot, and takes over once the first is
