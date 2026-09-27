@@ -11,7 +11,7 @@
 
 | Change | What to do |
 | --- | --- |
-| The bridge no longer follows HTTP redirects from Harbor. Each call carried the Harbor admin credentials to the redirect target, even when the target was plain http | Nothing, unless reconciles fail with `refusing to follow a redirect to …`: then set `harbor.url` (`BRIDGE_HARBOR_URL`) to the https address Harbor's API answers on directly, e.g. the redirect target shown in the error. |
+| The bridge no longer follows HTTP redirects from Harbor. A followed redirect re-sent the Harbor admin credentials (on 307/308 also the request body) to a redirect target on the same host or a subdomain of it, even over plain http | Nothing, unless reconciles fail with `refusing to follow a redirect to …`. Then set `harbor.url` (`BRIDGE_HARBOR_URL`) to the https scheme and host, plus any path prefix in front of `/api/v2.0`, at which Harbor's API answers without a redirect. The error shows the full request URL: keep only its origin and path prefix. If the redirect goes to `http://`, fix the proxy rather than switching the bridge to http. |
 
 ### Unreleased: token lifetime cap and pod binding (ADR-0028)
 

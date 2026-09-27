@@ -195,8 +195,16 @@ func TestClient_RefusesRedirects(t *testing.T) {
 		c := newClientFor(t, tlsSrv, "admin", "ADMIN-PW")
 		for name, op := range ops {
 			err := op(c)
-			if err == nil || !strings.Contains(err.Error(), "redirect") {
+			if err == nil || !strings.Contains(err.Error(), "refusing to follow a redirect") {
 				t.Errorf("%s after a %d redirect: err = %v, want a refused-redirect error", name, status, err)
+				continue
+			}
+			// The operator needs the setting and what to put there: the
+			// target is a full request URL, not a base URL to copy.
+			for _, want := range []string{"BRIDGE_HARBOR_URL", "path prefix in front of /api/v2.0"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s after a %d redirect: error %q does not mention %q", name, status, err, want)
+				}
 			}
 		}
 		tlsSrv.Close()

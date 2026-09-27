@@ -276,7 +276,8 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 func refuseRedirect(req *http.Request, _ []*http.Request) error {
 	return fmt.Errorf("refusing to follow a redirect to %s: the Harbor client follows no redirects "+
 		"(it would re-send the Harbor admin credentials); set the Harbor URL (BRIDGE_HARBOR_URL, chart harbor.url) "+
-		"to the https address Harbor's API answers on directly", req.URL.Redacted())
+		"to the https scheme and host, plus any path prefix in front of %s, at which Harbor's API answers without a redirect",
+		req.URL.Redacted(), harborBasePath)
 }
 
 func (c *goClient) Create(ctx context.Context, name, description string, perms []ProjectPermission) (*Robot, error) {
