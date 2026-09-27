@@ -54,6 +54,12 @@ default.
 | A plain-http `bridge.oidcJWKSURL`, a plain-http `bridge.oidcIssuer` used for discovery, or a plain-http `jwks_uri` in the discovery document fails at startup unless the host is `127.0.0.1`, `::1` or `localhost` | Use https (the chart's defaults and `https://kubernetes.default.svc/openid/v1/jwks` already do). `make run-local` through `kubectl proxy` on `127.0.0.1` keeps working. |
 | The data plane serves a robot Secret only when its username is the robot of the HarborAccess's current `serviceAccountRef` (`harbor.robotNamePrefix` plus `bridge-<clusterName>.<namespace>.<name>`); otherwise `503`, `reason=secret_for_previous_identity` | Nothing, if `harbor.robotNamePrefix` matches Harbor's `robot_name_prefix`. If it does not, every pull now fails with `503` (the reconciler already reported `Ready=False`): set it to Harbor's prefix. |
 
+### Unreleased: bridge process lifecycle
+
+| Change | What to do |
+| --- | --- |
+| The credential port (`8443`, exposed by the NodePort) no longer answers `GET /healthz`; it serves only `POST /v1/credentials` | Nothing for the chart: its probes use the health port (`8081`). Point any health check of your own at `/healthz` or `/readyz` on the health port. |
+
 ### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 
 | Change | What to do |

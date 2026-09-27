@@ -246,18 +246,12 @@ func run() error {
 		return fmt.Errorf("index HarborAccess by subject: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle(dataplane.CredentialsPath, handler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
 	server, err := dataplane.NewServer(dataplane.ServerConfig{
 		ListenAddr:   envOrDefault(envListenAddr, defaultListenAddr),
 		CertFile:     envOrDefault(envTLSCertFile, defaultTLSCertFile),
 		KeyFile:      envOrDefault(envTLSKeyFile, defaultTLSKeyFile),
 		ClientCAFile: os.Getenv(envTLSClientCAFile),
-		Handler:      mux,
+		Handler:      credentialMux(handler),
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
@@ -277,6 +271,15 @@ func run() error {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
+}
+
+// credentialMux routes the credential listener, which the NodePort exposes
+// on every node: it serves the credential endpoint and nothing else
+// (ADR-0025). Health, readiness and /metrics have their own ports.
+func credentialMux(credentials http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle(dataplane.CredentialsPath, credentials)
+	return mux
 }
 
 // validatorConfig maps the bridge config onto the validator's, all but the

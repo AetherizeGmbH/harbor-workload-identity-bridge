@@ -4,6 +4,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -143,5 +145,33 @@ func TestLogWeakTokenValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCredentialMux_ServesOnlyTheCredentialEndpoint pins what the NodePort
+// exposes on every node: the credential endpoint and nothing else
+// (ADR-0025). An unauthenticated /healthz used to sit next to it, outside
+// the per-source rate limit, unused by any probe.
+func TestCredentialMux_ServesOnlyTheCredentialEndpoint(t *testing.T) {
+	credentials := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	mux := credentialMux(credentials)
+	tests := []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodPost, dataplane.CredentialsPath, http.StatusTeapot},
+		{http.MethodGet, "/healthz", http.StatusNotFound},
+		{http.MethodGet, "/readyz", http.StatusNotFound},
+		{http.MethodGet, "/metrics", http.StatusNotFound},
+		{http.MethodGet, "/", http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
+		if rec.Code != tt.want {
+			t.Errorf("%s %s = %d, want %d", tt.method, tt.path, rec.Code, tt.want)
+		}
 	}
 }

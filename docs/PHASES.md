@@ -184,7 +184,7 @@ Originally-planned section (kept for archaeology):
 1. `bridge/dataplane/server.go`
    - Wraps `http.Server` with TLS from disk and graceful shutdown.
    - `NewServer(cfg ServerConfig) (*Server, error)` returns something that implements `sigs.k8s.io/controller-runtime/pkg/manager.Runnable` so it can be added to the manager.
-   - `ServerConfig`: ListenAddr (default `:8443`), CertFile, KeyFile, ClientCAFile (optional, enables mTLS — ADR-0008 mention), the assembled `http.Handler` (mux containing the credential handler + healthz + metrics endpoint).
+   - `ServerConfig`: ListenAddr (default `:8443`), CertFile, KeyFile, ClientCAFile (optional, enables mTLS — ADR-0008 mention), the assembled `http.Handler` (mux containing the credential handler + healthz + metrics endpoint). *Superseded:* the handler carries only the credential endpoint; health, readiness and `/metrics` have their own ports (ADR-0025).
    - On Start(ctx): start listener; on ctx.Done() perform `srv.Shutdown(timeout)` with a 10s timeout. Returning from Start signals manager shutdown.
    - TLS files reload? Defer to cert-manager handling (Phase 5) — cert-manager rotates the underlying Secret, the pod mounts via projected volume, cert change triggers a pod restart from cert-manager's renewBefore. Phase 5 may add `kubernetes-sigs/controller-runtime/pkg/certwatcher` for in-process reload if pod restarts are too disruptive.
 

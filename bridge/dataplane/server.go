@@ -46,8 +46,9 @@ type ServerConfig struct {
 	// OIDC) but ADR-0008 leaves the door open.
 	ClientCAFile string
 
-	// Handler is the HTTP handler. Typically a mux carrying the
-	// credential endpoint, /metrics, and /healthz.
+	// Handler is the HTTP handler: the credential endpoint only. The
+	// listener is exposed on every node (NodePort), so health, readiness
+	// and /metrics are served on their own ports (ADR-0025).
 	Handler http.Handler
 
 	// ShutdownTimeout bounds graceful shutdown when ctx cancels.
