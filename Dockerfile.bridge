@@ -6,14 +6,20 @@
 # compiles via GOARCH much faster than QEMU emulates the whole toolchain.
 # Without this, arm64 builds on an amd64 runner stall for 30+ min on
 # k8s.io/client-go alone (real outage we hit on v0.0.0).
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
+# The tag names the exact Go release: the image sets GOTOOLCHAIN=local, so
+# this Go builds the binary and go.mod's `toolchain` line is ignored.
+# Renovate bumps the image together with that line (group "Go toolchain").
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
 
 # Cache modules separately so source edits don't bust the layer.
+# go.mod's `toolchain` line is a security floor; toolchaincheck fails the
+# build when this image's Go is older than it.
 COPY go.mod go.sum ./
-RUN go mod download
+COPY hack/toolchaincheck ./hack/toolchaincheck
+RUN go run ./hack/toolchaincheck && go mod download
 
 COPY bridge ./bridge
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' \

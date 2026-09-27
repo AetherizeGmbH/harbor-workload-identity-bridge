@@ -105,6 +105,13 @@
       "enabled": false
     },
     {
+      "description": "The go.mod `toolchain` directive (a security floor) and the golang builder image in Dockerfile.bridge / Dockerfile.plugin move in one PR. The image sets GOTOOLCHAIN=local, so its Go builds the release binaries, and hack/toolchaincheck fails the Docker build (and `go test`) when the image is older than the toolchain line. Grouped, a toolchain bump never waits for a separate image PR. Placed after the gomod group rule so it overrides that group for the toolchain; the `go` directive (also depName `go`) stays disabled by the rule above.",
+      "matchManagers": ["gomod", "dockerfile"],
+      "matchPackageNames": ["go", "golang"],
+      "groupName": "Go toolchain",
+      "groupSlug": "go-toolchain"
+    },
+    {
       "description": "controller-gen stamps its version into the CRDs (controller-gen.kubebuilder.io/version). A bump fails `make verify-generated` until someone runs `make generate manifests` and commits the result, so it never automerges.",
       "matchPackageNames": ["sigs.k8s.io/controller-tools"],
       "automerge": false
