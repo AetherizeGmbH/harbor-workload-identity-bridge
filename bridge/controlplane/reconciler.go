@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -413,9 +414,10 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 // would otherwise keep its grants and a password that is never rotated
 // again. Refused objects are re-checked every resyncAfter, so a suspended
 // robot an administrator re-enables is disabled again. A failed
-// suspension keeps the refusal reason and is retried with backoff.
+// suspension keeps the refusal reason and is retried with backoff. Once
+// nothing of this bridge is left, its finalizers are released (ADR-0032).
 func (r *Reconciler) refuse(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
-	outcome, suspendErr := r.suspend(ctx, ha)
+	outcome, releasable, suspendErr := r.suspend(ctx, ha)
 	if suspendErr != nil {
 		message += fmt.Sprintf("; suspending its robot failed and is retried: %v", suspendErr)
 		outcome = "suspending the robot failed and is retried: " + suspendErr.Error()
@@ -433,63 +435,141 @@ func (r *Reconciler) refuse(ctx context.Context, ha *harborv1alpha1.HarborAccess
 	if suspendErr != nil {
 		return ctrl.Result{}, suspendErr
 	}
+	if releasable {
+		if err := r.releaseRefused(ctx, ha); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{RequeueAfter: resyncAfter(ha)}, nil
 }
 
 // suspend deletes the robot Secret of a refused HarborAccess and disables
 // the robot it owns (ADR-0030). It returns what happened to the robot, for
-// the RobotProvisioned condition.
+// the RobotProvisioned condition, and whether nothing of this bridge may
+// be left, so that its finalizers can go (releaseRefused).
 //
 // The Secret goes first and whatever Harbor answers: deleting it needs only
 // the apiserver, its password is dead or about to be, and the data plane
 // still matches an InvalidSpec HarborAccess and would hand the Secret out.
 //
-// Only the robot its serviceAccountRef maps to can be enabled and serving;
-// robots of an earlier serviceAccountRef and pre-ADR-0018 robots are the
-// janitor's (it deletes them). A robot that is already disabled stays as it
-// is: suspended before, or disabled by an administrator, whose decision the
-// bridge never overrides.
-func (r *Reconciler) suspend(ctx context.Context, ha *harborv1alpha1.HarborAccess) (string, error) {
+// Harbor is asked only while the object holds a finalizer this bridge may
+// have set (ADR-0032). A robot never exists without one: ensureFinalizer
+// runs right before the robot can be created, and older bridges added it
+// before anything else. Refusing an object that never had a robot here
+// (another bridge's audience, another cluster's issuer) costs no Harbor
+// call.
+func (r *Reconciler) suspend(ctx context.Context, ha *harborv1alpha1.HarborAccess) (outcome string, releasable bool, err error) {
+	robotName, nameErr := harbor.RobotName(r.Config.ClusterName, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
+	secretErr := r.deleteOwnRobotSecret(ctx, ha, robotName)
+	if !slices.ContainsFunc(r.Config.ReleasedFinalizers(), func(f string) bool { return controllerutil.ContainsFinalizer(ha, f) }) {
+		return noRobotOfThisBridge, false, secretErr
+	}
+	if nameErr != nil {
+		robotName = ""
+	}
+	outcome, kept, err := r.suspendRobot(ctx, ha, robotName)
+	if err != nil {
+		return "", false, errors.Join(secretErr, err)
+	}
+	return outcome, !kept && secretErr == nil, secretErr
+}
+
+// noRobotOfThisBridge is the RobotProvisioned outcome of a refused
+// HarborAccess without a robot of this bridge.
+const noRobotOfThisBridge = "it has no robot of this bridge"
+
+// suspendRobot disables the robot at robotName ("" = none) if ha owns it,
+// and reports whether a robot of ha is kept there (disabled). Only the
+// robot its serviceAccountRef maps to can be enabled and serving; robots
+// of an earlier serviceAccountRef and pre-ADR-0018 robots are the
+// janitor's (it deletes them). A robot that is already disabled stays as
+// it is: suspended before, or disabled by an administrator, whose decision
+// the bridge never overrides.
+func (r *Reconciler) suspendRobot(ctx context.Context, ha *harborv1alpha1.HarborAccess, robotName string) (outcome string, kept bool, err error) {
 	logger := log.FromContext(ctx)
 	cluster := r.Config.ClusterName
-	robotName, nameErr := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
-
-	secretErr := r.deleteOwnRobotSecret(ctx, ha, robotName)
-
-	if nameErr != nil || !harbor.OwnsRobot(cluster, robotName) {
-		return "its ServiceAccount maps to no robot name of this bridge", secretErr
+	if robotName == "" || !harbor.OwnsRobot(cluster, robotName) {
+		return "its ServiceAccount maps to no robot name of this bridge", false, nil
 	}
 	robot, err := r.Harbor.GetByName(ctx, robotName)
 	switch {
 	case errors.Is(err, harbor.ErrRobotNotFound):
-		return "it has no robot in Harbor", secretErr
+		return noRobotOfThisBridge, false, nil
 	case err != nil:
-		return "", errors.Join(secretErr, fmt.Errorf("look up robot: %w", err))
+		return "", false, fmt.Errorf("look up robot: %w", err)
 	case !robotOwnedBy(cluster, robot, ha.Namespace, ha.Name):
-		return fmt.Sprintf("Harbor robot %q is not this HarborAccess's and is left alone", robot.WireName), secretErr
+		return fmt.Sprintf("Harbor robot %q is not this HarborAccess's and is left alone", robot.WireName), false, nil
 	case robot.Disabled && RobotSuspended(robot.Description):
-		return fmt.Sprintf("Harbor robot %q is suspended (disabled) until the HarborAccess is accepted again", robot.WireName), secretErr
+		return fmt.Sprintf("Harbor robot %q is suspended (disabled) until the HarborAccess is accepted again", robot.WireName), true, nil
 	case robot.Disabled:
-		return fmt.Sprintf("Harbor robot %q was disabled in Harbor by an administrator and stays disabled", robot.WireName), secretErr
+		return fmt.Sprintf("Harbor robot %q was disabled in Harbor by an administrator and stays disabled", robot.WireName), true, nil
 	case canWriteBack(robot.Permissions):
 		disabled := *robot
 		disabled.Disabled = true
 		if err := r.Harbor.Update(ctx, &disabled, SuspendedRobotDescription(cluster, ha.Namespace, ha.Name), robot.Permissions); err != nil {
-			return "", errors.Join(secretErr, fmt.Errorf("disable robot %q: %w", robot.WireName, err))
+			return "", false, fmt.Errorf("disable robot %q: %w", robot.WireName, err)
 		}
 		logger.Info("suspended Harbor robot of a refused HarborAccess", "robot", robot.WireName, "id", robot.ID)
-		return fmt.Sprintf("Harbor robot %q is suspended (disabled) until the HarborAccess is accepted again", robot.WireName), secretErr
+		return fmt.Sprintf("Harbor robot %q is suspended (disabled) until the HarborAccess is accepted again", robot.WireName), true, nil
 	default:
 		// Harbor's update replaces the grants with the ones sent, and the
 		// bridge never sends a project it refuses (such as a pre-0.5.5
 		// "*"). A robot it cannot disable is revoked.
 		if err := r.Harbor.Delete(ctx, robot.ID); err != nil {
-			return "", errors.Join(secretErr, fmt.Errorf("delete robot %q: %w", robot.WireName, err))
+			return "", false, fmt.Errorf("delete robot %q: %w", robot.WireName, err)
 		}
 		logger.Info("deleted Harbor robot of a refused HarborAccess: its grants cannot be written back to disable it",
 			"robot", robot.WireName, "id", robot.ID)
-		return fmt.Sprintf("Harbor robot %q was deleted: its grants cannot be written back to disable it", robot.WireName), secretErr
+		return fmt.Sprintf("Harbor robot %q was deleted: its grants cannot be written back to disable it", robot.WireName), false, nil
 	}
+}
+
+// releaseRefused removes this bridge's finalizers from a refused
+// HarborAccess once no robot of it is left in Harbor, so that deleting it
+// no longer waits for this bridge and its Harbor (ADR-0032). Bridges
+// before ADR-0032 added the finalizer to every object they selected, also
+// to those they refused. A robot of an earlier serviceAccountRef or a
+// pre-ADR-0018 one keeps the finalizers; the janitor deletes it, and a
+// later pass releases them. If the object is accepted again,
+// ensureFinalizer adds the finalizer back before any robot is created.
+//
+// With a selector only the per-instance finalizer is released: a bridge
+// without a selector that serves the object sets the shared one too
+// (overlapping selectors, ADR-0026), and would add it back at once.
+func (r *Reconciler) releaseRefused(ctx context.Context, ha *harborv1alpha1.HarborAccess) error {
+	var release []string
+	for _, f := range r.Config.ReleasedFinalizers() {
+		if controllerutil.ContainsFinalizer(ha, f) && (f != FinalizerName || r.Config.Finalizer() == FinalizerName) {
+			release = append(release, f)
+		}
+	}
+	if len(release) == 0 {
+		return nil
+	}
+	robots, err := r.Harbor.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list robots before releasing the finalizer of a refused HarborAccess: %w", err)
+	}
+	for i := range robots {
+		robot := &robots[i]
+		if ns, name, err := misnamedRobot(r.Config.ClusterName, robot); err != nil && ns == ha.Namespace && name == ha.Name {
+			// Ours by description, not by name: the bridge can neither
+			// suspend it nor take it for absent, so the finalizers stay.
+			return err
+		}
+		if robotOwnedBy(r.Config.ClusterName, robot, ha.Namespace, ha.Name) {
+			return nil
+		}
+	}
+	patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	for _, f := range release {
+		controllerutil.RemoveFinalizer(ha, f)
+	}
+	if err := r.Patch(ctx, ha, patch); err != nil {
+		return client.IgnoreNotFound(fmt.Errorf("release the finalizer of a refused HarborAccess: %w", err))
+	}
+	log.FromContext(ctx).Info("released a refused HarborAccess without a robot of this bridge", "finalizers", release)
+	return nil
 }
 
 // deleteOwnRobotSecret deletes ha's robot Secret if ha owns it
@@ -510,7 +590,7 @@ func (r *Reconciler) deleteOwnRobotSecret(ctx context.Context, ha *harborv1alpha
 	if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete robot Secret: %w", err)
 	}
-	log.FromContext(ctx).Info("deleted robot Secret of a refused HarborAccess", "secret", secret.Name)
+	log.FromContext(ctx).Info("deleted robot Secret", "secret", secret.Name)
 	return nil
 }
 
@@ -745,22 +825,14 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 		logger.Info("deleted Harbor robot", "robot", robot.WireName, "id", robot.ID)
 	}
 
-	// Delete the password Secret if it belongs to this HarborAccess, by the
-	// rule reconcileNormal writes by (secretConflict): never another CR's
-	// Secret (collision backstop), never one the bridge refused to adopt.
-	// A Secret left behind is never served (the data plane serves only
-	// Secrets stamped for the HarborAccess it matched).
-	secret, err := r.getRobotSecret(ctx, ha)
-	if err != nil {
-		return r.blockDeletion(ctx, ha, held, fmt.Errorf("read robot Secret: %w", err))
-	}
+	// Delete the password Secret if it belongs to this HarborAccess
+	// (secretDeleteConflict): never another CR's Secret (collision
+	// backstop), never one the bridge refused to adopt, never one stamped
+	// for another cluster. A Secret left behind is never served (the data
+	// plane serves only Secrets stamped for the HarborAccess it matched).
 	robotName, _ := harbor.RobotName(r.Config.ClusterName, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
-	if msg := r.secretConflict(ha, secret, robotName); secret != nil && msg == "" {
-		if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
-			return r.blockDeletion(ctx, ha, held, fmt.Errorf("delete robot Secret: %w", err))
-		}
-	} else if secret != nil {
-		logger.Info("keeping a Secret at the robot Secret's name that does not belong to this HarborAccess", "secret", secret.Name, "reason", msg)
+	if err := r.deleteOwnRobotSecret(ctx, ha, robotName); err != nil {
+		return r.blockDeletion(ctx, ha, held, err)
 	}
 
 	patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})

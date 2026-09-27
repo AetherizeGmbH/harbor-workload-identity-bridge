@@ -142,6 +142,7 @@ type mockHarbor struct {
 	updateCalls  []mockUpdateCall
 	refreshCalls []int64
 	listCalls    int
+	getByName    int // GetByName calls
 
 	// errOnGetByName, if non-nil, is returned from GetByName for the
 	// matching name (use to simulate Harbor errors mid-reconcile).
@@ -261,6 +262,7 @@ func (m *mockHarbor) List(_ context.Context) ([]harbor.Robot, error) {
 func (m *mockHarbor) GetByName(_ context.Context, name string) (*harbor.Robot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.getByName++
 	if err, ok := m.errOnGetByName[name]; ok && err != nil {
 		return nil, err
 	}

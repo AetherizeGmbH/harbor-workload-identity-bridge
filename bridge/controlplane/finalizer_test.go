@@ -18,6 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
 // A HarborAccess the bridge refuses never gets a robot of its own, so it
@@ -87,17 +89,22 @@ func TestReconcile_RefusedHarborAccessKeepsItsFinalizer(t *testing.T) {
 func TestReconcile_Delete_DeletesOnlyASecretThatBelongsToTheHarborAccess(t *testing.T) {
 	for name, tc := range map[string]struct {
 		username string
+		labels   map[string]string
 		wantKept bool
 	}{
 		"someone else's unmanaged Secret":                   {username: "someone-else", wantKept: true},
 		"unmanaged Secret holding this robot's credentials": {username: testRobotName, wantKept: false},
+		"its Secret": {username: testRobotName, labels: robotsecret.Labels(testCluster, testHANamespace, testHAName), wantKept: false},
+		// A bridge with another clusterName that shares the namespace
+		// writes the same Secret names; the Secret is that bridge's.
+		"a Secret stamped for another cluster": {username: testRobotName, labels: robotsecret.Labels("other-cluster", testHANamespace, testHAName), wantKept: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ha := newHarborAccess()
 			now := metav1.Now()
 			ha.DeletionTimestamp = &now
 			s := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: testSecretKey.Name},
+				ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: testSecretKey.Name, Labels: tc.labels},
 				Data:       map[string][]byte{"username": []byte(tc.username), "password": []byte("pw")},
 			}
 			r := newReconciler(t, newMockHarbor(), fixedClock{time.Now()}, ha, s)
@@ -233,5 +240,120 @@ func TestJanitor_ReleasesTheSharedFinalizerOfObjectsItServed(t *testing.T) {
 		if !slices.Equal(got.Finalizers, tc.want) {
 			t.Errorf("%s: finalizers %v, want %v", tc.ha.Name, got.Finalizers, tc.want)
 		}
+	}
+}
+
+// Bridges before ADR-0032 added the finalizer to every object they
+// selected, also to those they refused and never gave a robot. Such an
+// object must not keep depending on this bridge and its Harbor to be
+// deleted: once no robot of it is left, the finalizer goes.
+func TestReconcile_RefusedHarborAccessReleasesTheFinalizerOfAnOlderBridge(t *testing.T) {
+	ha := newHarborAccess() // holds FinalizerName
+	ha.Spec.TrustPolicy.Audience = "another-bridge"
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	got := getHA(t, r)
+	if len(got.Finalizers) != 0 {
+		t.Fatalf("refused HarborAccess without a robot keeps finalizers %v", got.Finalizers)
+	}
+
+	// Later passes do not ask Harbor at all, and the deletion does not
+	// wait for Harbor.
+	mh.getByName, mh.listCalls = 0, 0
+	mh.errOnList = errors.New("harbor unreachable")
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if mh.getByName+mh.listCalls != 0 {
+		t.Errorf("a pass over a refused HarborAccess without a finalizer of this bridge asked Harbor %d times", mh.getByName+mh.listCalls)
+	}
+	if err := r.Delete(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, &harborv1alpha1.HarborAccess{}); err == nil {
+		t.Error("deleting the refused HarborAccess waits for this bridge")
+	}
+}
+
+// A refused object that never held a finalizer of this bridge has no
+// robot of it: the pass asks Harbor nothing (overlapping selectors and
+// fleet-wide GitOps can make many such objects).
+func TestReconcile_RefusedHarborAccessWithoutAFinalizerAsksHarborNothing(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Finalizers = nil
+	ha.Spec.TrustPolicy.Issuer = "https://other-cluster.example.com"
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mh.getByName+mh.listCalls != 0 {
+		t.Errorf("%d Harbor lookups for a refused HarborAccess this bridge never provisioned", mh.getByName+mh.listCalls)
+	}
+}
+
+// A robot of the refused object that the suspension does not cover (one of
+// an earlier serviceAccountRef, which the janitor deletes) keeps the
+// finalizer: its revocation on deletion is still due.
+func TestReconcile_RefusedHarborAccessKeepsTheFinalizerWhileARobotIsLeft(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.TrustPolicy.Audience = "another-bridge"
+	mh := newMockHarbor()
+	earlier, err := harbor.RobotName(testCluster, testSANamespace, "previous-sa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mh.preexisting(earlier, RobotDescription(testCluster, ha.Namespace, ha.Name), harbor.ProjectPermission{Project: "production", Action: "pull"})
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if got := getHA(t, r); !controllerutil.ContainsFinalizer(got, FinalizerName) {
+		t.Errorf("finalizer released while a robot of the HarborAccess is left: %v", got.Finalizers)
+	}
+}
+
+// A robot the bridge's description claims for the refused object but whose
+// name the ownership prefix does not cover (configured robot prefix shorter
+// than Harbor's) can be neither suspended nor taken for absent: releasing
+// the finalizer would let a deletion skip a robot with a valid password.
+func TestReconcile_RefusedHarborAccessKeepsTheFinalizerForARobotItCannotRecogniseByName(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.TrustPolicy.Audience = "another-bridge"
+	mh := newMockHarbor()
+	mh.preexisting("ci-bridge-prod-eu-west.flux-system.source-controller", RobotDescription(testCluster, ha.Namespace, ha.Name),
+		harbor.ProjectPermission{Project: "production", Action: "pull"})
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); !errors.Is(err, harbor.ErrRobotPrefixMismatch) {
+		t.Fatalf("Reconcile err = %v, want ErrRobotPrefixMismatch so the pass is retried", err)
+	}
+	if len(mh.deleteCalls)+len(mh.updateCalls) != 0 {
+		t.Errorf("robot outside the ownership prefix touched: deletes %v, updates %d", mh.deleteCalls, len(mh.updateCalls))
+	}
+	if got := getHA(t, r); !controllerutil.ContainsFinalizer(got, FinalizerName) {
+		t.Errorf("finalizer released while a robot of the HarborAccess survives: %v", got.Finalizers)
+	}
+}
+
+// With a selector the bridge releases only its per-instance finalizer from
+// a refused object: a bridge without a selector that serves the object
+// sets the shared one too, and would add it back at once.
+func TestReconcile_SelectiveBridgeReleasesOnlyItsInstanceFinalizerFromARefusedObject(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Labels = map[string]string{"harbor.aetherize.io/bridge": "a"}
+	ha.Finalizers = []string{FinalizerName + "-bridge-a", FinalizerName}
+	ha.Spec.TrustPolicy.Audience = "another-bridge"
+	r := newReconciler(t, newMockHarbor(), fixedClock{time.Now()}, ha)
+	selective(r.Config)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	if got := getHA(t, r).Finalizers; !slices.Equal(got, []string{FinalizerName}) {
+		t.Errorf("finalizers %v, want only the shared one left", got)
 	}
 }
