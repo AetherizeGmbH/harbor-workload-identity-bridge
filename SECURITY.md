@@ -471,7 +471,7 @@ their own RBAC.
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
 | Harbor transport (`harbor.url`) | https required | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
-| `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
+| `tokenTTL` | per-CR, 5m–24h, a Go duration (`30m`, `1h`; no days) | Use 1h or less unless you have a measured pull-rate problem |
 | `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
 | `plugin.install.mode` | `auto` | `none` for the least privilege (no `hostPID`, no privileged container, two narrow hostPath mounts; you wire the kubelet flags). `plugin.enabled: false` for no node agent at all |
 | `plugin.audienceRBAC.create` | `true` | Keep `true` unless you're providing a tighter binding via admission webhook; the chart's binding is audience-narrow but `system:nodes`-broad |
@@ -506,7 +506,7 @@ credential issued
   requested_image=harbor.example.com/production/myimg:v1   # asserted by the caller, max 512 chars
 
 credential denied
-  source=…  reason=invalid_token|no_matching_harboraccess|secret_owner_mismatch
+  source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch
   category=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other   # invalid_token only
   (subject, pod, node, audiences once the token is valid) requested_image=…
 ```

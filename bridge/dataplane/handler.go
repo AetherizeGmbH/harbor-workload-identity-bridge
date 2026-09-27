@@ -257,6 +257,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.recordResult(ResultForbidden)
 		return
 	}
+	// The reconciler reports such a HarborAccess as InvalidSpec and leaves
+	// its robot as it was: spec edits are not applied, the password is not
+	// rotated. Serving the robot's Secret would hand out those stale
+	// grants. The matched object is refused, not skipped: skipping would
+	// silently switch to another HarborAccess for the same identity, with
+	// other permissions (see findHarborAccess on several matches).
+	if err := specError(matched); err != nil {
+		h.audit(logger).Info("credential denied", append(append(caller, claimFields(claims)...),
+			"reason", "invalid_harboraccess_spec", "harboraccess", matched.Namespace+"/"+matched.Name,
+			"err", truncate(err.Error(), 200),
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
+		http.Error(w, "the matching HarborAccess has an invalid spec; see its Ready condition", http.StatusForbidden)
+		h.recordResult(ResultForbidden)
+		return
+	}
 
 	// 3. Read the robot's Basic Auth credentials from the bridge-namespace
 	// Secret (ADR-0011) and hand them to the plugin. Containerd will do
@@ -423,6 +438,16 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 		)
 	}
 	return matches[0].ha, matches[0].aud, nil
+}
+
+// specError reports a spec the reconciler rejects as InvalidSpec although
+// the CRD admitted it: the rule that now rejects it did not exist when the
+// object was stored.
+func specError(ha *harborv1alpha1.HarborAccess) error {
+	if err := ha.Spec.TokenTTL.Err(); err != nil {
+		return fmt.Errorf("spec.tokenTTL: %w", err)
+	}
+	return nil
 }
 
 // robotCreds carries the username and password read from a robot Secret.

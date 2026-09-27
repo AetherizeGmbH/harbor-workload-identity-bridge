@@ -146,6 +146,14 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	logger := log.FromContext(ctx)
 	cluster := r.Config.ClusterName
 
+	// The CRD requires spec; this guards objects stored before that rule
+	// existed, which would otherwise be reported as an issuer mismatch.
+	if ha.Spec.ServiceAccountRef == (harborv1alpha1.ServiceAccountRef{}) &&
+		ha.Spec.TrustPolicy == (harborv1alpha1.TrustPolicy{}) && len(ha.Spec.Permissions) == 0 {
+		return r.markNotReady(ctx, ha, ReasonInvalidSpec,
+			"spec is missing: a HarborAccess needs spec.serviceAccountRef, spec.trustPolicy and spec.permissions")
+	}
+
 	// 1. Issuer match — refuse early if the CR was applied to the wrong cluster.
 	if ha.Spec.TrustPolicy.Issuer != r.Config.OIDCIssuer.String() {
 		return r.markNotReady(ctx, ha, ReasonIssuerMismatch,
@@ -177,6 +185,12 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		if err := harbor.ValidateProjectName(p.Project); err != nil {
 			return r.markNotReady(ctx, ha, ReasonInvalidSpec, "spec.permissions: "+err.Error())
 		}
+	}
+
+	// The CRD admits only Go durations; this guards values such as "1d"
+	// admitted before that rule existed, which decode to a zero TTL.
+	if err := ha.Spec.TokenTTL.Err(); err != nil {
+		return r.markNotReady(ctx, ha, ReasonInvalidSpec, "spec.tokenTTL: "+err.Error())
 	}
 
 	// 3. Compute desired robot identity.

@@ -124,12 +124,16 @@ spec:
                   the bridge returns for this HarborAccess (the credential provider's
                   cacheDuration). The bridge shortens it further so no cache outlives
                   the next scheduled password rotation (ADR-0023). Min 5m, max 24h.
-                  Defaults to 1h.
-                format: duration
+                  Defaults to 1h. A Go duration: units h, m, s, ms, us or ns, e.g.
+                  30m, 1h or 1h30m. Days ("1d") and ISO 8601 ("PT1H") are rejected.
+                maxLength: 64
                 type: string
                 x-kubernetes-validations:
-                - message: tokenTTL must be between 5m and 24h
-                  rule: duration(self) >= duration('5m') && duration(self) <= duration('24h')
+                - message: tokenTTL must be a Go duration between 5m and 24h such
+                    as 30m, 1h or 1h30m (units h, m, s, ms, us, ns; days are not supported)
+                  optionalOldSelf: true
+                  rule: (oldSelf.hasValue() && self == oldSelf.value()) || (duration(self)
+                    >= duration('5m') && duration(self) <= duration('24h'))
               trustPolicy:
                 description: TrustPolicy declares which SA tokens may receive credentials
                   via this CR.
@@ -268,6 +272,11 @@ spec:
         - message: 'metadata.name must be at most 63 characters: it is stamped as
             a label value on the robot Secret'
           rule: size(self.metadata.name) <= 63
+        - fieldPath: .spec
+          message: 'spec is required: serviceAccountRef, trustPolicy and permissions'
+          optionalOldSelf: true
+          reason: FieldValueRequired
+          rule: has(self.spec) || (oldSelf.hasValue() && !has(oldSelf.value().spec))
     served: true
     storage: true
     subresources:

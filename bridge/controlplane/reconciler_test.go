@@ -103,7 +103,7 @@ func newHarborAccess() *harborv1alpha1.HarborAccess {
 			Permissions: []harborv1alpha1.ProjectPermission{
 				{Project: "production", Action: "pull"},
 			},
-			TokenTTL: metav1.Duration{Duration: time.Hour},
+			TokenTTL: harborv1alpha1.Duration{Duration: time.Hour},
 		},
 	}
 }

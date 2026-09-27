@@ -98,12 +98,13 @@ type HarborAccessSpec struct {
 	// the bridge returns for this HarborAccess (the credential provider's
 	// cacheDuration). The bridge shortens it further so no cache outlives
 	// the next scheduled password rotation (ADR-0023). Min 5m, max 24h.
-	// Defaults to 1h.
+	// Defaults to 1h. A Go duration: units h, m, s, ms, us or ns, e.g.
+	// 30m, 1h or 1h30m. Days ("1d") and ISO 8601 ("PT1H") are rejected.
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:default="1h"
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m') && duration(self) <= duration('24h')",message="tokenTTL must be between 5m and 24h"
-	TokenTTL metav1.Duration `json:"tokenTTL,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="(oldSelf.hasValue() && self == oldSelf.value()) || (duration(self) >= duration('5m') && duration(self) <= duration('24h'))",message="tokenTTL must be a Go duration between 5m and 24h such as 30m, 1h or 1h30m (units h, m, s, ms, us, ns; days are not supported)",optionalOldSelf=true
+	TokenTTL Duration `json:"tokenTTL,omitempty"`
 }
 
 // RobotRef references the Harbor robot account managed for this HarborAccess.
@@ -172,6 +173,7 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ha,categories={harbor}
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters: it is stamped as a label value on the robot Secret"
+// +kubebuilder:validation:XValidation:rule="has(self.spec) || (oldSelf.hasValue() && !has(oldSelf.value().spec))",message="spec is required: serviceAccountRef, trustPolicy and permissions",fieldPath=".spec",reason="FieldValueRequired",optionalOldSelf=true
 // +kubebuilder:printcolumn:name="SA",type="string",JSONPath=".spec.serviceAccountRef.name"
 // +kubebuilder:printcolumn:name="SA-Namespace",type="string",JSONPath=".spec.serviceAccountRef.namespace",priority=1
 // +kubebuilder:printcolumn:name="Robot",type="string",JSONPath=".status.robot.name"
@@ -181,6 +183,13 @@ const (
 type HarborAccess struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// spec is required by the CEL rule above, not by +required (which
+	// dropping omitempty would also emit): the apiserver does not ratchet
+	// `required`, so a spec-less object stored before the rule existed
+	// could no longer be written, not even to release its finalizer. The
+	// rule rejects creating an object without spec and removing spec from
+	// one, but leaves such an old object writable.
 
 	Spec   HarborAccessSpec   `json:"spec,omitempty"`
 	Status HarborAccessStatus `json:"status,omitempty"`

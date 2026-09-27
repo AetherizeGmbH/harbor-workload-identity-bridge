@@ -66,7 +66,7 @@ func newTestHA() *harborv1alpha1.HarborAccess {
 			Permissions: []harborv1alpha1.ProjectPermission{
 				{Project: "production", Action: "pull"},
 			},
-			TokenTTL: metav1.Duration{Duration: time.Hour},
+			TokenTTL: harborv1alpha1.Duration{Duration: time.Hour},
 		},
 	}
 }
@@ -205,7 +205,7 @@ func TestHandler_RespectsTokenTTL(t *testing.T) {
 	ha := &harborv1alpha1.HarborAccess{}
 	_ = fx.K8s.Get(context.Background(),
 		client.ObjectKey{Namespace: hTestHANs, Name: hTestHAName}, ha)
-	ha.Spec.TokenTTL = metav1.Duration{Duration: 15 * time.Minute}
+	ha.Spec.TokenTTL = harborv1alpha1.Duration{Duration: 15 * time.Minute}
 	_ = fx.K8s.Update(context.Background(), ha)
 
 	w := httptest.NewRecorder()
