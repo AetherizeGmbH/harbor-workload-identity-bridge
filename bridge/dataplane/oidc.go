@@ -72,11 +72,19 @@ type Claims struct {
 	Node   string
 }
 
-// ErrInvalidToken wraps every Validate failure so callers can branch on
-// "invalid for any reason" without inspecting the underlying go-oidc
-// error category. Specific causes (expiry, signature, issuer mismatch)
-// are surfaced in the wrapped error message for log readability.
+// ErrInvalidToken wraps every Validate failure but
+// ErrSigningKeysUnavailable, so callers can branch on "invalid for any
+// reason" without inspecting the underlying go-oidc error category.
+// Specific causes (expiry, signature, issuer mismatch) are surfaced in
+// the wrapped error message for log readability.
 var ErrInvalidToken = errors.New("invalid token")
+
+// ErrSigningKeysUnavailable marks a token Validate could not judge: its
+// signing key is not among the keys the bridge holds, and the bridge
+// could not fetch the current key set (the JWKS endpoint failed, or the
+// request ended while the fetch ran). A server-side outage, not a bad
+// token; not wrapped in ErrInvalidToken.
+var ErrSigningKeysUnavailable = errors.New("token signing keys unavailable")
 
 // ErrTokenLifetime marks a token whose lifetime (exp - iat) exceeds the
 // maximum or cannot be determined (ADR-0028). Wrapped in ErrInvalidToken.
@@ -131,10 +139,11 @@ type Config struct {
 
 // NewValidator constructs a Validator that verifies tokens issued by
 // cfg.Issuer. When cfg.JWKSURL is empty, the constructor performs OIDC
-// discovery synchronously so a misconfigured issuer fails at bridge
-// startup, not on the first kubelet request. When cfg.JWKSURL is set,
-// discovery is skipped and the validator goes straight to the supplied
-// JWKS endpoint with cfg.Issuer as the expected iss claim.
+// discovery; when it is set, discovery is skipped and the validator goes
+// straight to the supplied JWKS endpoint with cfg.Issuer as the expected
+// iss claim. Either way it fetches the signing keys once before it
+// returns, so a misconfigured issuer, JWKS URL, CA or RBAC fails at
+// bridge startup, not on the first kubelet request.
 func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	if cfg.Issuer == "" {
 		return nil, errors.New("oidc: issuer is required")
@@ -196,12 +205,17 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		algs = supportedAlgs(meta.Algs)
 	}
 
-	verifier := oidc.NewVerifier(cfg.Issuer, newCachedKeySet(jwksURL, httpClient), &oidc.Config{
+	keys := newCachedKeySet(jwksURL, httpClient)
+	if err := keys.prime(ctx); err != nil {
+		return nil, fmt.Errorf("oidc: fetch the token signing keys from %q: %w", jwksURL, err)
+	}
+	verifier := oidc.NewVerifier(cfg.Issuer, keys, &oidc.Config{
 		SkipClientIDCheck:    true,
 		SupportedSigningAlgs: algs,
 	})
 	return &goOIDCValidator{
 		verifier:               verifier,
+		keys:                   keys,
 		maxLifetime:            cfg.MaxTokenLifetime,
 		allowNonPodBoundTokens: cfg.AllowNonPodBoundTokens,
 	}, nil
@@ -224,13 +238,18 @@ func supportedAlgs(advertised []string) []string {
 
 type goOIDCValidator struct {
 	verifier               *oidc.IDTokenVerifier
+	keys                   *cachedKeySet // the verifier's key set; tests steer its clock
 	maxLifetime            time.Duration
 	allowNonPodBoundTokens bool
 }
 
 func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claims, error) {
-	idToken, err := v.verifier.Verify(ctx, rawToken)
+	verifyCtx, outcome := withVerifyOutcome(ctx)
+	idToken, err := v.verifier.Verify(verifyCtx, rawToken)
 	if err != nil {
+		if outcome.keysUnavailable {
+			return nil, fmt.Errorf("%w: %w", ErrSigningKeysUnavailable, err)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	var raw rawClaims

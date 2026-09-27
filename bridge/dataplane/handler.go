@@ -228,6 +228,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Validate the SA token (signature, expiry, issuer, lifetime, pod
 	// binding; ADR-0028).
 	claims, err := h.Validator.Validate(ctx, rawToken)
+	if errors.Is(err, ErrSigningKeysUnavailable) {
+		// The bridge could not judge the token: an outage on the JWKS
+		// side, not a bad token. 503 lets the plugin retry and then fail
+		// visibly, where a 401 would read as a refusal.
+		h.audit(logger).Info("credential unavailable", append(caller,
+			"reason", "signing_keys_unavailable", "err", truncate(err.Error(), 200),
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
+		http.Error(w, "token signing keys unavailable; retry", http.StatusServiceUnavailable)
+		h.recordOIDCFailure(OIDCReasonKeysUnavailable)
+		h.recordResult(ResultUnavailable)
+		return
+	}
 	if err != nil {
 		category := classifyOIDCError(err)
 		h.audit(logger).Info("credential denied", append(caller,

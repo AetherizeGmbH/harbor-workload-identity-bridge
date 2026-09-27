@@ -25,7 +25,8 @@ const (
 )
 
 // Label values for bridge_oidc_validation_failures_total{reason}, also
-// the audit line's category for invalid_token. go-oidc/v3 returns error
+// the audit line's category for invalid_token (keys_unavailable is a
+// "credential unavailable" line instead). go-oidc/v3 returns error
 // strings; we substring-match into these stable buckets because go-oidc
 // does not expose typed error categories. The validator's own checks
 // (ADR-0028) return sentinel errors and are matched with errors.Is. If
@@ -38,7 +39,10 @@ const (
 	OIDCReasonMalformed         = "malformed"
 	OIDCReasonExcessiveLifetime = "excessive_lifetime"
 	OIDCReasonNotPodBound       = "not_pod_bound"
-	OIDCReasonOther             = "other"
+	// OIDCReasonKeysUnavailable is not a bad token: the bridge could not
+	// fetch the signing keys to judge it (ErrSigningKeysUnavailable).
+	OIDCReasonKeysUnavailable = "keys_unavailable"
+	OIDCReasonOther           = "other"
 )
 
 // Metrics is the set of Prometheus collectors exported by the data plane.
@@ -94,7 +98,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited} {
 		m.Issuances.WithLabelValues(r)
 	}
-	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonOther} {
+	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonKeysUnavailable, OIDCReasonOther} {
 		m.OIDCValidationFailures.WithLabelValues(r)
 	}
 	return m
@@ -123,19 +127,24 @@ func classifyOIDCError(err error) string {
 		return OIDCReasonExcessiveLifetime
 	case errors.Is(err, ErrTokenNotPodBound):
 		return OIDCReasonNotPodBound
+	case errors.Is(err, ErrSigningKeysUnavailable):
+		return OIDCReasonKeysUnavailable
 	}
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "expired"):
 		return OIDCReasonExpired
+	// Before "signature": go-oidc's "oidc: malformed jwt: unexpected
+	// signature algorithm ..." (an alg=none or HS256 probe) names both.
+	case strings.Contains(s, "malformed"):
+		return OIDCReasonMalformed
 	case strings.Contains(s, "signature"):
 		return OIDCReasonBadSignature
 	// go-oidc's real message is "oidc: id token issued by a different
 	// provider, expected %q got %q" — it never contains "issuer".
 	case strings.Contains(s, "different provider"), strings.Contains(s, "issuer"):
 		return OIDCReasonWrongIssuer
-	case strings.Contains(s, "malformed"),
-		strings.Contains(s, "parse"),
+	case strings.Contains(s, "parse"),
 		strings.Contains(s, "invalid json"):
 		return OIDCReasonMalformed
 	default:

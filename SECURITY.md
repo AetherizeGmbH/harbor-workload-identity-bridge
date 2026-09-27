@@ -650,6 +650,9 @@ credential unavailable                   # valid token, nothing issued: 503 or 5
   source=…  subject=…  pod=…  node=…
   reason=secret_missing|secret_unreadable|harboraccess_lookup_failed
   (harboraccess once matched, err for a 500) requested_image=…
+
+credential unavailable                   # token not judged: signing keys unavailable, 503
+  source=…  reason=signing_keys_unavailable  err=…  requested_image=…
 ```
 
 The pod and node come from the `kubernetes.io` claim of the token. The
@@ -674,7 +677,9 @@ Denials (token rejected, no matching CR, Secret owner mismatch) are the
 request with a valid token that gets no credentials for another reason
 is a `credential unavailable` line: the robot Secret does not exist yet
 (`503`, the plugin retries), or it is incomplete or the Kubernetes API
-failed (`500`, also on the regular log with the full error). Requests
+failed (`500`, also on the regular log with the full error). So is a
+token the bridge could not judge because it could not fetch the signing
+keys (`503`, see below). Requests
 refused before the token is checked (rate limit, missing bearer, bad
 body) are counted in the metrics below but not logged one by one.
 
@@ -702,12 +707,17 @@ once per request. A token signed by a key the bridge already holds never
 waits for a fetch: keys older than 10 minutes are refreshed in the
 background, and while the apiserver is slow or unreachable, or answers
 with no public key, the last keys fetched stay in use, including a key
-the issuer has since rotated out.
+the issuer has since rotated out. The bridge fetches the keys once at
+startup and exits if it cannot, so a wrong `bridge.oidcJWKSURL`, CA or
+RBAC stops the rollout instead of denying every request. A token signed
+by a key the bridge does not hold, while it cannot fetch the current
+keys, is answered `503` and counted as `reason=keys_unavailable`, not as
+an invalid token.
 
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 
 - `bridge_credential_issuances_total{result=ok|unauthorized|forbidden|unavailable|bad_request|server_error|rate_limited}`
-- `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other}`
+- `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|keys_unavailable|other}`
 - `bridge_harboraccess_lookup_failures_total`
 - `bridge_robot_secret_missing_total`
 - `bridge_credential_issuance_duration_seconds`

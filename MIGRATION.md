@@ -50,6 +50,7 @@ default.
 | Change | What to do |
 | --- | --- |
 | A request with a valid token that gets `503` or `500` is logged as a `credential unavailable` audit line (`reason=secret_missing`, `secret_unreadable` or `harboraccess_lookup_failed`, with source, subject, pod and node). The regular log's `robot Secret not yet available` line is gone | Match `credential unavailable` instead of `robot Secret not yet available` in log queries. |
+| The bridge fetches the token signing keys at startup and exits when it cannot, also with `bridge.oidcJWKSURL` set. A token whose key the bridge does not hold while the JWKS cannot be fetched gets `503` and `bridge_oidc_validation_failures_total{reason="keys_unavailable"}` (was `401` and `bad_signature`); an unexpected signature algorithm counts as `malformed` (was `bad_signature`) | A bridge that now exits at startup could never validate a token: fix the JWKS URL, the CA (`bridge.oidcCAFile`) or the RBAC its error names. Alert on `keys_unavailable` as an outage, not as forged tokens. |
 
 ### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 

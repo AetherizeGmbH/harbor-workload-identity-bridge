@@ -110,9 +110,19 @@ func (k *cachedKeySet) VerifySignature(ctx context.Context, raw string) ([]byte,
 	// fetch error such as an expired TLS certificate would relabel a
 	// forged token as expired.
 	if refreshErr != nil && !holdsKey(cached, keyID) && !holdsKey(keys, keyID) {
+		// The bridge holds no current key set to judge a key it does not
+		// know.
+		markKeysUnavailable(ctx)
 		return nil, fmt.Errorf("failed to verify token signature: %w", refreshErr)
 	}
 	return nil, errors.New("failed to verify token signature")
+}
+
+// prime fetches the keys once and waits for the result, so a bridge that
+// cannot reach its JWKS fails at startup rather than on every request.
+func (k *cachedKeySet) prime(ctx context.Context) error {
+	_, err := k.refreshedKeys(ctx)
+	return err
 }
 
 // holdsKey reports whether keys include one with the ID keyID. A token
@@ -127,6 +137,27 @@ func holdsKey(keys []jose.JSONWebKey, keyID string) bool {
 		}
 	}
 	return false
+}
+
+// verifyOutcome records, for one Validate call, whether the signature
+// check failed because no current key set was available. go-oidc wraps
+// every key set error with %v, so the classification travels in the
+// context instead of the error chain.
+type verifyOutcome struct {
+	keysUnavailable bool
+}
+
+type verifyOutcomeKey struct{}
+
+func withVerifyOutcome(ctx context.Context) (context.Context, *verifyOutcome) {
+	o := &verifyOutcome{}
+	return context.WithValue(ctx, verifyOutcomeKey{}, o), o
+}
+
+func markKeysUnavailable(ctx context.Context) {
+	if o, ok := ctx.Value(verifyOutcomeKey{}).(*verifyOutcome); ok {
+		o.keysUnavailable = true
+	}
 }
 
 func verifyWith(jws *jose.JSONWebSignature, keys []jose.JSONWebKey, keyID string) ([]byte, bool) {
