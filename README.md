@@ -403,9 +403,20 @@ service:
   `plugin.install.stateDir`. Every install also keeps a record of its
   entry next to its binary, `<name>.entry` (`harbor-bridge-plugin.entry`
   for the default name, mode `0600`).
-- **Upgrade first.** Every release on the cluster must run a chart
-  version with ADR-0029 before you add the second: an older installer in
-  patch or none mode rewrites the shared config with only its own entry.
+- **Upgrade first, chart and plugin image.** Every release on the
+  cluster must run a chart version with ADR-0029 **and a plugin image
+  with its installer** before you add the second. The installer runs from
+  `plugin.image` (`plugin.image.tag`, which defaults to the chart's
+  version, or `plugin.image.digest`): a release that pins an older tag or
+  digest keeps the older installer after the chart upgrade. With the
+  default provider name, an older installer in patch or none mode
+  rewrites the shared config with only its own entry, takes no locks and
+  writes no record, so the other installs drop its entry in turn. With a
+  non-default `plugin.providerName`, an older installer stops before it
+  touches the node: the install container fails with
+  `read rendered credential-provider config: open /config/credential-provider-config.yaml: no such file or directory`,
+  the pods stay in `Init:CrashLoopBackOff`, and nothing changes on the
+  node until the release gets a plugin image with ADR-0029.
 - **Same directories.** In patch and none mode all releases must use the
   same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
   refuses to point kubelet at other directories while the config kubelet

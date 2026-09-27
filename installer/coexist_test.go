@@ -5,6 +5,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1468,4 +1470,79 @@ func TestRun_RecordHoldsTheEntry(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRun_OlderInstallerCannotReadANonDefaultNamesConfig: for a non-default
+// provider name the chart mounts the rendered config where installers
+// before ADR-0029 never look (golden second-instance.yaml: the ConfigMap
+// key credential-provider-config.v2.yaml at /config-v2). Such an installer
+// (an older plugin image) ignores PROVIDER_NAME; had it read the config, it
+// would install the entry of the new name without a binary of that name,
+// and kubelet does not start with that entry.
+func TestRun_OlderInstallerCannotReadANonDefaultNamesConfig(t *testing.T) {
+	env := withName(t, newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}), euName)
+	pod := t.TempDir() // the install container's file system
+	rendered, err := os.ReadFile(env.cfg.SourceConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(pod, v2SourceConfig)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pod, v2SourceConfig), rendered, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// An installer before ADR-0029 starts every pass by reading the fixed
+	// path /config/credential-provider-config.yaml (0.10.0:
+	// installer/main.go loadConfig, installer/run.go run) and exits when
+	// that fails. Its first step fails here, before any other.
+	if _, err := os.ReadFile(filepath.Join(pod, legacySourceConfig)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the path installers before ADR-0029 read exists (err %v)", err)
+	}
+	older := *env.cfg
+	older.ProviderName = defaultProviderName // it knows no PROVIDER_NAME
+	older.SourceConfig = filepath.Join(pod, legacySourceConfig)
+	if err := run(&older); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("got %v, want the read of the rendered config to fail", err)
+	}
+	assertAbsent(t, env, binDir+"/"+defaultProviderName, binDir+"/"+euName, configDir+"/"+configFileName,
+		configDir+"/harbor-bridge-ca.crt", defaultKubeletPath, stateDir+"/installer-state.json")
+	if env.restarts != 0 {
+		t.Fatal("kubelet restarted")
+	}
+
+	// This installer derives the path from PROVIDER_NAME.
+	env.cfg.SourceConfig = filepath.Join(pod, sourceConfigPath(euName))
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.hostFile(t, configDir+"/"+configFileName); got != string(rendered) {
+		t.Fatalf("config = %q", got)
+	}
+}
+
+// TestRun_NonDefaultNameRefusesTheLegacyLayout: a non-default name whose
+// rendered config is missing at the ADR-0029 path means that the chart and
+// the plugin image disagree about the layout; the pass says so and writes
+// nothing.
+func TestRun_NonDefaultNameRefusesTheLegacyLayout(t *testing.T) {
+	env := withName(t, newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}), euName)
+	pod := t.TempDir()
+	rendered, err := os.ReadFile(env.cfg.SourceConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(pod, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pod, legacySourceConfig), rendered, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.cfg.SourceConfig = filepath.Join(pod, sourceConfigPath(euName))
+	err = run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "ADR-0029") || !strings.Contains(err.Error(), "plugin.image") {
+		t.Fatalf("got %v, want a refusal naming the layout mismatch", err)
+	}
+	assertAbsent(t, env, binDir+"/"+euName, configDir+"/"+configFileName, configDir+"/harbor-bridge-eu.ca.crt", defaultKubeletPath)
 }

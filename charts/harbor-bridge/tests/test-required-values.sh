@@ -138,6 +138,32 @@ else
   failed=$((failed+1))
 fi
 
+# ADR-0029: a non-default provider name publishes the rendered config under
+# a ConfigMap key and at a mount path that installers before ADR-0029 never
+# read (they read /config/credential-provider-config.yaml), so an older
+# plugin image fails at that read, before it writes anything on the node.
+# The default name keeps the layout every installer reads.
+out=$(render -f "${COMPLETE}" --set plugin.providerName=harbor-bridge-eu 2>&1 || true)
+if echo "${out}" | grep -qxF '  credential-provider-config.v2.yaml: |' \
+   && ! echo "${out}" | grep -qxF '  credential-provider-config.yaml: |' \
+   && [ "$(echo "${out}" | grep -cxE ' +mountPath: /config-v2')" -eq 2 ] \
+   && ! echo "${out}" | grep -qxE ' +mountPath: /config'; then
+  echo "PASS  non-default plugin.providerName: rendered config where older installers never read"
+else
+  echo "FAIL  non-default plugin.providerName: rendered config where older installers never read"
+  echo "${out}" | grep -E 'credential-provider-config|mountPath: /config|Error' | head -5
+  failed=$((failed+1))
+fi
+out=$(render -f "${COMPLETE}" 2>&1 || true)
+if echo "${out}" | grep -qxF '  credential-provider-config.yaml: |' \
+   && [ "$(echo "${out}" | grep -cxE ' +mountPath: /config')" -eq 2 ] \
+   && ! echo "${out}" | grep -qE 'config-v2|config\.v2'; then
+  echo "PASS  default plugin.providerName keeps the rendered config's layout"
+else
+  echo "FAIL  default plugin.providerName keeps the rendered config's layout"
+  failed=$((failed+1))
+fi
+
 # A missing plugin.providerName renders exactly the default. `helm upgrade
 # --reuse-values` from a chart before ADR-0029 renders with that chart's
 # values, which lack the key; a null value removes the key the same way.

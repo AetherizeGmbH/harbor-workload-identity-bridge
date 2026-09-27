@@ -139,7 +139,6 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		NodeIP:           getenv("NODE_IP"),
 		ProviderName:     def("PROVIDER_NAME", defaultProviderName),
 		SourcePlugin:     "/plugin/harbor-bridge-plugin",
-		SourceConfig:     "/config/credential-provider-config.yaml",
 		SourceCA:         "/tls/ca.crt",
 		SourceClientCert: "/mtls/tls.crt",
 		SourceClientKey:  "/mtls/tls.key",
@@ -149,6 +148,7 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		verify:           defaultVerifyTiming,
 		lockTimeout:      defaultLockTimeout,
 	}
+	c.SourceConfig = sourceConfigPath(c.ProviderName)
 	switch c.Mode {
 	case modeAuto, modeMerge, modePatch, modeNone:
 	default:

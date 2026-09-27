@@ -236,7 +236,7 @@ same addressing works without a host-root mount.
 {{/* Read-only inputs both containers copy from. */}}
 {{- define "harbor-bridge.plugin.sourceMounts" -}}
 - name: kubelet-config
-  mountPath: /config
+  mountPath: {{ include "harbor-bridge.plugin.configMountPath" . }}
   readOnly: true
 - name: tls
   mountPath: /tls

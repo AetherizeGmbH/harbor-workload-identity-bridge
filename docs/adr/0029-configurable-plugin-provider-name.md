@@ -68,6 +68,21 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
    chart's values, which lack the key. The chart also quotes a
    non-default name in the rendered entry, because the installer's YAML
    parser reads `yes` or `123` the same way.
+
+   For a non-default name the chart publishes the rendered config under
+   the ConfigMap key `credential-provider-config.v2.yaml` and mounts the
+   ConfigMap at `/config-v2`; the installer reads
+   `/config-v2/credential-provider-config.v2.yaml` when `PROVIDER_NAME` is
+   set, and refuses when that file is missing, with an error that says
+   the chart and the plugin image must both have this ADR. The installer
+   runs from `plugin.image`, which a release may pin to an older version
+   than the chart. An installer before this ADR ignores `PROVIDER_NAME`;
+   had it read the config, in patch or none mode it would install the
+   entry of the new name next to a binary named `harbor-bridge-plugin`,
+   and kubelet does not start with an entry whose binary is missing. It reads only `/config/credential-provider-config.yaml`,
+   so it fails at that read, before it writes anything on the node, and
+   the pod's sync container never starts. The default name keeps the old
+   key and path, so existing installs render the same manifests.
 2. **The default name keeps every node path.** Binary
    `harbor-bridge-plugin`, `harbor-bridge-ca.crt`,
    `harbor-bridge-client.crt`/`.key`, `installer-state.json`. An existing

@@ -68,3 +68,26 @@ func filesFor(name string) nodeFiles {
 		State:      name + ".installer-state.json",
 	}
 }
+
+// The install container reads the rendered provider config from the
+// chart's ConfigMap, mounted at one of two layouts
+// (harbor-bridge.plugin.configKey and configMountPath). The default
+// provider name keeps the layout every installer reads. Any other name
+// uses a key and a mount path that installers before ADR-0029 never read:
+// such an installer ignores PROVIDER_NAME and would install the entry of
+// the new name without a binary of that name, which keeps kubelet from
+// starting. On this layout it fails at reading the config instead, before
+// it writes anything on the node.
+const (
+	legacySourceConfig = "/config/credential-provider-config.yaml"
+	v2SourceConfig     = "/config-v2/credential-provider-config.v2.yaml"
+)
+
+// sourceConfigPath is where the install container of provider name finds
+// the rendered provider config.
+func sourceConfigPath(name string) string {
+	if name == defaultProviderName {
+		return legacySourceConfig
+	}
+	return v2SourceConfig
+}

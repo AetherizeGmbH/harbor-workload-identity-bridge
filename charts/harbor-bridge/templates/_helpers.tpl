@@ -373,6 +373,35 @@ keep the names they had before provider names became configurable.
 {{- end -}}
 
 {{/*
+configKey and configMountPath name where the install container reads the
+rendered provider config: the ConfigMap key, and the directory the
+ConfigMap is mounted at. The default provider name keeps the layout every
+installer reads (/config/credential-provider-config.yaml), so existing
+installs render the same manifests. Any other name uses a key and a mount
+path that installers before ADR-0029 never read: such an installer (an
+older plugin image) ignores PROVIDER_NAME and would install the entry of
+the new name without a binary of that name, which keeps kubelet from
+starting. With this layout it fails at reading the rendered config, before
+it writes anything on the node, and its sync container never starts. The
+installer derives the same path (installer/names.go sourceConfigPath).
+*/}}
+{{- define "harbor-bridge.plugin.configKey" -}}
+{{- if include "harbor-bridge.plugin.legacyNames" . -}}
+credential-provider-config.yaml
+{{- else -}}
+credential-provider-config.v2.yaml
+{{- end -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.configMountPath" -}}
+{{- if include "harbor-bridge.plugin.legacyNames" . -}}
+/config
+{{- else -}}
+/config-v2
+{{- end -}}
+{{- end -}}
+
+{{/*
 providerNameYAML is the provider name as a YAML scalar. The default stays
 bare, as it always rendered (one changed byte in the rendered config would
 restart kubelet on upgrade); any other name is quoted, because YAML 1.1

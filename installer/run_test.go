@@ -448,10 +448,13 @@ func TestLoadConfig_Validation(t *testing.T) {
 	}
 	if c, err := loadConfig(env(base)); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
-	} else if c.ProviderName != defaultProviderName {
-		t.Fatalf("default provider name = %q", c.ProviderName)
+	} else if c.ProviderName != defaultProviderName || c.SourceConfig != "/config/credential-provider-config.yaml" {
+		t.Fatalf("default provider name = %q, rendered config at %q", c.ProviderName, c.SourceConfig)
 	}
-	if c, err := loadConfig(env(withBase(map[string]string{"PROVIDER_NAME": "harbor-bridge-eu"}))); err != nil || c.ProviderName != "harbor-bridge-eu" {
+	// A non-default name reads the rendered config where the chart puts it
+	// for such a name and installers before ADR-0029 never look.
+	if c, err := loadConfig(env(withBase(map[string]string{"PROVIDER_NAME": "harbor-bridge-eu"}))); err != nil ||
+		c.ProviderName != "harbor-bridge-eu" || c.SourceConfig != "/config-v2/credential-provider-config.v2.yaml" {
 		t.Fatalf("PROVIDER_NAME not taken: %+v, %v", c, err)
 	}
 	if _, err := loadConfig(env(map[string]string{"INSTALL_MODE": "yolo", "HOST_BIN_DIR": "/b", "HOST_CONFIG_DIR": "/c"})); err == nil {

@@ -30,7 +30,10 @@ func (c *config) ownConfigPath() string {
 // and the restart policy, ADR-0029 for several installs on one node.
 func run(cfg *config) error {
 	rendered, err := os.ReadFile(cfg.SourceConfig)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && cfg.ProviderName != defaultProviderName:
+		return fmt.Errorf("read rendered credential-provider config: %w: for a plugin.providerName other than %s the chart publishes it at %s (ADR-0029); the chart and the plugin image (plugin.image.tag/digest) must both be a version with ADR-0029", err, defaultProviderName, cfg.SourceConfig)
+	case err != nil:
 		return fmt.Errorf("read rendered credential-provider config: %w", err)
 	}
 	rendered, err = substituteNodeIP(rendered, cfg.NodeIP)

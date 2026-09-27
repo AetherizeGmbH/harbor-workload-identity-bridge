@@ -7,6 +7,10 @@ merges its one entry into the config kubelet already reads (merge
 mode). With several installs per cluster each installer owns only the
 entry named plugin.providerName (ADR-0029).
 
+A non-default plugin.providerName publishes the config under another key
+(harbor-bridge.plugin.configKey), which installers before ADR-0029 never
+read.
+
 `cacheType: ServiceAccount` is the KEP-4412 beta (k8s 1.34) field
 that tells kubelet to project an SA-bound token per pod rather than
 caching one credential per image.
@@ -20,7 +24,7 @@ metadata:
   labels:
     {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
 data:
-  credential-provider-config.yaml: |
+  {{ include "harbor-bridge.plugin.configKey" . }}: |
     apiVersion: kubelet.config.k8s.io/v1
     kind: CredentialProviderConfig
     providers:

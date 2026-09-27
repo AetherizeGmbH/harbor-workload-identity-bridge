@@ -276,6 +276,14 @@ plugin:
     tag: ""
     # Pin by digest (sha256:...); kubelet runs this binary as root on
     # every node. When set, tag is ignored.
+    #
+    # The image also carries the node installer. With several installs
+    # per cluster (providerName, ADR-0029), every release's plugin image
+    # (tag or digest), not only the chart, must be a version with
+    # ADR-0029. An older installer with a non-default providerName fails
+    # before it touches the node (the pods stay in Init:CrashLoopBackOff);
+    # with the default name it rewrites the shared kubelet config in
+    # patch/none mode with only its own entry.
     digest: ""
     pullPolicy: IfNotPresent
 

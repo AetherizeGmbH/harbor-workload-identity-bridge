@@ -75,7 +75,7 @@ metadata:
     app.kubernetes.io/instance: harbor-bridge
     app.kubernetes.io/component: plugin
 data:
-  credential-provider-config.yaml: |
+  credential-provider-config.v2.yaml: |
     apiVersion: kubelet.config.k8s.io/v1
     kind: CredentialProviderConfig
     providers:
@@ -341,7 +341,7 @@ spec:
         # then converges kubelet) or when the TLS wiring changes (which
         # Secret, mTLS on/off). CA/cert ROTATION does not re-roll: the sync
         # container copies rotated files in place (ADR-0021).
-        plugin.harbor.aetherize.io/config-checksum: f6d26f194315eea73f72a6d2349f185826df0092de2bff2da1db57fa7cb88ae8
+        plugin.harbor.aetherize.io/config-checksum: 5cba3b4d9b96ed644e8d1b6dede175f98c32e72db5fe5bb88e76242296352774
         plugin.harbor.aetherize.io/tls-checksum: 57e56ec1ae9a392310d6e30eeb777a8116efd367dca74943f17b1d83282a1cd2
     spec:
       serviceAccountName: harbor-bridge-eu-plugin
@@ -389,7 +389,7 @@ spec:
             - name: host-root
               mountPath: /host
             - name: kubelet-config
-              mountPath: /config
+              mountPath: /config-v2
               readOnly: true
             - name: tls
               mountPath: /tls
@@ -441,7 +441,7 @@ spec:
             - name: host-config
               mountPath: /host/etc/kubernetes/credential-provider-config
             - name: kubelet-config
-              mountPath: /config
+              mountPath: /config-v2
               readOnly: true
             - name: tls
               mountPath: /tls
