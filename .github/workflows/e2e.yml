@@ -12,6 +12,9 @@ on:
       - "charts/harbor-bridge/**"
       - "test/e2e/**"
       - "Dockerfile.*"
+      # Both Dockerfiles run it in the builder stage; this is the only PR
+      # workflow that builds the images.
+      - "hack/toolchaincheck/**"
       - ".github/workflows/e2e.yml"
   push:
     branches: [main]

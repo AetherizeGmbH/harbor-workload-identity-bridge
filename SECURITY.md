@@ -484,7 +484,7 @@ their own RBAC.
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
 | `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`; otherwise the janitor cannot recognise the bridge's robots |
-| Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release; Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
+| Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
 

@@ -7,14 +7,18 @@
 
 # Pin the builder to the native build platform — under buildx, Go cross-
 # compiles via GOARCH much faster than QEMU emulates the whole toolchain.
-# (See Dockerfile.bridge for the v0.0.0 hang that motivated this.)
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
+# (See Dockerfile.bridge for the v0.0.0 hang that motivated this, and for
+# why the tag names the exact Go release.)
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
 
+# toolchaincheck fails the build when this image's Go is older than
+# go.mod's `toolchain` line (a security floor; see Dockerfile.bridge).
 COPY go.mod go.sum ./
-RUN go mod download
+COPY hack/toolchaincheck ./hack/toolchaincheck
+RUN go run ./hack/toolchaincheck && go mod download
 
 COPY plugin ./plugin
 COPY installer ./installer
