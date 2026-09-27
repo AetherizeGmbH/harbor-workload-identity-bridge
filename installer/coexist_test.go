@@ -1005,3 +1005,64 @@ func TestRun_PatchReadsAConfigDirectoryBeforeMovingKubelet(t *testing.T) {
 		t.Fatal("kubelet restarted after a refusal")
 	}
 }
+
+// TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt: a none-mode
+// install takes only the config lock of the config it writes, and kubelet
+// may read exactly that config (a file, or since Kubernetes 1.34 the
+// directory it writes into). Patch mode with other directories must wait
+// for that lock before it reads the config (checkRewire), or it moves
+// kubelet away from an entry the none-mode install adds meanwhile.
+func TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// flag is kubelet's --image-credential-provider-config; the
+		// none-mode install's plugin.hostConfigDir is noneDir.
+		flag, noneDir string
+	}{
+		{"config file", "/opt/cp/" + configFileName, "/opt/cp"},
+		{"config directory", "/opt/cp.d", "/opt/cp.d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestEnv(t, modePatch, []string{
+				"/usr/bin/kubelet",
+				"--image-credential-provider-bin-dir=/opt/cp-bin",
+				"--image-credential-provider-config=" + tc.flag,
+			})
+			if err := os.MkdirAll(b.cfg.hostPath(tc.noneDir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			noneConfig := tc.noneDir + "/" + configFileName
+			// The none-mode install is in the middle of its pass.
+			unlock, err := lockFile(b.cfg.hostPath(noneConfig+lockSuffix), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			done := make(chan error, 1)
+			go func() { done <- run(b.cfg) }()
+			time.Sleep(3 * lockPollInterval)
+			select {
+			case err := <-done:
+				t.Fatalf("patch pass finished while the current config's lock was held (err %v)", err)
+			default:
+			}
+
+			// It writes its binary and its entry, then releases the lock.
+			writeHostFile(t, b, "/opt/cp-bin/"+euName, "ELF-fake-plugin")
+			writeHostFile(t, b, noneConfig, renderedConfigFor(euName))
+			unlock()
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("patch pass did not continue after the lock was released")
+			}
+			if err == nil || !strings.Contains(err.Error(), `holds the provider entries "harbor-bridge-eu"`) {
+				t.Fatalf("got %v, want a refusal naming the entry written under the lock", err)
+			}
+			if b.restarts != 0 {
+				t.Fatal("kubelet restarted after a refusal")
+			}
+			assertAbsent(t, b, binDir+"/"+defaultProviderName, configDir+"/"+configFileName, defaultKubeletPath)
+		})
+	}
+}

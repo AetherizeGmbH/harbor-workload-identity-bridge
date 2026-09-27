@@ -115,8 +115,18 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      state;
    - the config lock `<provider config>.lock` next to the file it guards,
      taken in every mode before the config is read. none mode mounts only
-     its two directories and takes only this lock; the order is always node
-     lock, then config lock, so it cannot deadlock.
+     its two directories and takes only this lock.
+   - in patch mode, when kubelet reads another config than this install's
+     own, also that config's lock (`<file>.lock`; for a directory of
+     config files, the lock a none-mode install whose `hostConfigDir` is
+     that directory takes), before the installer reads it to decide
+     whether moving kubelet is safe, held until the pass ends. Otherwise a
+     none-mode install could add its entry to that config after the check
+     and before kubelet moves away from it.
+
+   The order is always node lock, then the current config's lock, then
+   this install's config lock; none mode holds one lock at a time, so no
+   two installers wait for each other in a cycle.
 
    Lock files are created and opened under the installer's file rules
    (`os.Root`, Lstat, `O_NOFOLLOW`, `os.SameFile`; `installer/files.go`). A

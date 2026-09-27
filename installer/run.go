@@ -100,6 +100,13 @@ func run(cfg *config) error {
 	}
 
 	if mode == modePatch {
+		// Held until the pass ends: no installer may add an entry to the
+		// config kubelet reads now between checkRewire and the rewire.
+		unlock, err := lockCurrentConfig(cfg, wiring)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 		if err := checkRewire(cfg, wiring); err != nil {
 			return err
 		}
@@ -129,7 +136,7 @@ func run(cfg *config) error {
 // leaves kubelet alone — the operator owns the flags.
 func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 	configPath := cfg.ownConfigPath()
-	unlock, err := lockFile(cfg.hostPath(configPath+lockSuffix), cfg.lockTimeout)
+	unlock, err := lockConfig(cfg, configPath+lockSuffix)
 	if err != nil {
 		return err
 	}
@@ -154,7 +161,7 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 // content changed.
 func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	configPath := cfg.ownConfigPath()
-	unlock, err := lockFile(cfg.hostPath(configPath+lockSuffix), cfg.lockTimeout)
+	unlock, err := lockConfig(cfg, configPath+lockSuffix)
 	if err != nil {
 		return err
 	}
@@ -213,14 +220,37 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	return finishWithRestart(cfg, t, configChanged || envChanged, verify)
 }
 
+// lockCurrentConfig takes the config lock of the config kubelet reads now
+// (current) when patch mode's own config has another one, and returns the
+// function that releases it (a no-op when there is nothing to lock). The
+// caller holds the node lock, which every auto, merge and patch installer
+// takes for its whole pass; a none-mode installer takes only the config
+// lock of the config it writes, and that config can be the one kubelet
+// reads. Without this lock such an installer could add its entry to
+// current after checkRewire read it and before this pass points kubelet
+// elsewhere. The order is node lock, current config lock, own config lock
+// (lock.go).
+func lockCurrentConfig(cfg *config, current kubeletWiring) (func(), error) {
+	if !current.wired() {
+		return func() {}, nil
+	}
+	lock := cfg.configLockPath(current.ConfigFile)
+	if lock == cfg.ownConfigPath()+lockSuffix {
+		// runPatch takes it; a second flock on it would wait for itself.
+		return func() {}, nil
+	}
+	return lockConfig(cfg, lock)
+}
+
 // checkRewire refuses a patch-mode pass that would point kubelet away from
 // the config it reads now (current) while that config holds another
 // install's entry (ADR-0029). Kubelet has one config and one bin dir:
 // moving the config drops that install's entry, and moving only the bin
 // dir leaves kubelet without that install's binary, so that kubelet does
 // not start. A single install that changed its own directories still
-// moves. The caller holds the node lock, which every installer that merges
-// into a config also holds.
+// moves. The caller holds the node lock and the config lock of current
+// (lockCurrentConfig) until the pass ends, so no installer adds an entry
+// to current between this read and the rewire.
 func checkRewire(cfg *config, current kubeletWiring) error {
 	want := kubeletWiring{BinDir: cfg.HostBinDir, ConfigFile: cfg.ownConfigPath()}
 	if !current.wired() || current == want {

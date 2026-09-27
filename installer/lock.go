@@ -17,17 +17,23 @@ import (
 // node, possibly at the same moment. They share kubelet's one
 // credential-provider config, /etc/default/kubelet and the kubelet unit, so
 // every read-modify-write of those files and every kubelet restart runs
-// under an exclusive flock(2). Two locks, always taken in this order:
+// under an exclusive flock(2). The locks, always taken in this order:
 //
 //   - the node lock (nodeLockPath), a fixed node path that every install
 //     finds whatever its chart values. Every mode that may touch kubelet
 //     (auto, merge, patch) holds it for the whole pass: discovery, the
 //     edits, the restart, its verification and the state file.
-//   - the config lock, <provider config>+lockSuffix next to the file it
-//     guards, taken in every mode before the config is read. none mode,
-//     whose pod mounts only the two plugin directories, can take only this
-//     one, and never holds it while waiting for the node lock, so the order
-//     cannot deadlock.
+//   - config locks (configLockPath), <provider config>+lockSuffix next to
+//     the file they guard. Every mode takes the lock of the config it edits
+//     before it reads it. Patch mode, which may point kubelet away from the
+//     config kubelet reads now, first takes that config's lock too
+//     (lockCurrentConfig), then its own: none mode, whose pod mounts only
+//     the two plugin directories, takes only its own config lock and
+//     cannot see the node lock, and could otherwise add an entry to the
+//     current config after patch mode checked it (checkRewire).
+//
+// none mode holds one lock at a time and every other mode takes the node
+// lock first, so no two installers wait for each other in a cycle.
 //
 // A flock belongs to the open file and dies with the process: a crashed
 // installer never leaves a stale lock behind.
@@ -75,6 +81,30 @@ func lockFile(path string, timeout time.Duration) (unlock func(), err error) {
 	}
 	// Closing the file releases the flock.
 	return func() { _ = f.Close() }, nil
+}
+
+// configLockPath returns the node path of the config lock that guards the
+// credential-provider config at configPath (a node path): <file>.lock next
+// to a file. For a directory of config files, which kubelet reads since
+// Kubernetes 1.34, it is the lock a none-mode install whose
+// plugin.hostConfigDir is that directory takes before it writes its
+// chart-owned config there.
+func (c *config) configLockPath(configPath string) string {
+	if fi, err := os.Lstat(c.hostPath(configPath)); err == nil && fi.IsDir() {
+		return filepath.Join(configPath, configFileName) + lockSuffix
+	}
+	return configPath + lockSuffix
+}
+
+// lockConfig takes the config lock at lockPath (a node path). Its
+// directory is created when missing, as writeFileAtomic creates the
+// directory of the config it writes: an installer must be able to lock a
+// config before it exists.
+func lockConfig(cfg *config, lockPath string) (unlock func(), err error) {
+	if err := mkdirNodeDir(filepath.Dir(cfg.hostPath(lockPath))); err != nil {
+		return nil, fmt.Errorf("lock %s: %w", lockPath, err)
+	}
+	return lockFile(cfg.hostPath(lockPath), cfg.lockTimeout)
 }
 
 // openLockFile creates the lock file when it is missing and opens it under

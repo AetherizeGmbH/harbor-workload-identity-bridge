@@ -105,6 +105,17 @@ func isExecutableHostFile(path string) bool {
 	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
 }
 
+// mkdirNodeDir creates the node directory dir (a host path) and its
+// parents when missing, with the node's usual mode (/etc/kubernetes is
+// 0755). The parents are root-owned node directories (or the installer's
+// own mount points), outside what a pod on the node can write.
+func mkdirNodeDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	return nil
+}
+
 // writeFileAtomic writes data to path via a same-directory temp file +
 // rename so a reader (kubelet, containerd) never sees a torn write.
 // When replacing different content it first preserves the old bytes at
@@ -114,10 +125,8 @@ func isExecutableHostFile(path string) bool {
 // instead of writing through it.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) (changed bool, err error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
-	// The parents are root-owned node directories (or the installer's
-	// own mount points), outside what a pod on the node can write.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, fmt.Errorf("mkdir %s: %w", dir, err)
+	if err := mkdirNodeDir(dir); err != nil {
+		return false, err
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
