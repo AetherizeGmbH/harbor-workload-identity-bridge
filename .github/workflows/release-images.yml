@@ -17,8 +17,8 @@ on:
         type: string
 
 # Read-only default. Every job below grants itself exactly the rights it
-# needs (build, attest) or none (sbom); a job added without its own block
-# must not inherit the signing identity or push rights.
+# needs (build, latest, attest) or none (sbom); a job added without its own
+# block must not inherit the signing identity or push rights.
 permissions:
   contents: read
 
@@ -76,9 +76,10 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ steps.tag.outputs.owner_lc }}/${{ matrix.image }}
+          # Only the version tag. `latest` is moved by the `latest` job
+          # below, which never points it at an older release.
           tags: |
             type=raw,value=${{ steps.tag.outputs.tag }}
-            type=raw,value=latest
           labels: |
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.source=${{ github.event.repository.html_url }}
@@ -131,6 +132,79 @@ jobs:
           path: out/
           if-no-files-found: error
           retention-days: 1
+
+  # `latest` names the highest released version, not the most recent build.
+  # Pushing it from the build job moved it backwards whenever an older
+  # version was rebuilt ad hoc, or when two releases cut minutes apart
+  # finished their builds out of order. This job reads the highest vX.Y.Z
+  # tag when it runs and points `latest` at the digest that version already
+  # has in the registry: a retag, no rebuild, so the signature and the
+  # attestations (bound to the digest) cover `latest` too. If the highest
+  # version is still building, the job leaves `latest` alone; that
+  # version's own run moves it. One concurrency group across all tags
+  # serialises the retags. GitHub keeps only one pending job per group, so
+  # a burst of runs can cancel a pending `latest` job; that is harmless,
+  # because the job that replaces it does the same work.
+  latest:
+    name: point latest at the highest release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # list the release tags
+      packages: write  # retag in ghcr.io
+    concurrency:
+      group: release-images-latest
+      cancel-in-progress: false
+    steps:
+      - name: Find the highest release
+        id: max
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # Strict x.y.z only: a stray non-semver tag must not sort highest.
+          version=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref' \
+            | grep -E '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's#^refs/tags/v##' | sort -V | tail -n 1)
+          [ -n "$version" ] || { echo "::error::no vX.Y.Z release tag found"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Login to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Retag latest
+        env:
+          OWNER: ${{ steps.max.outputs.owner_lc }}
+          VERSION: ${{ steps.max.outputs.version }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          digest_of() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -er .digest
+          }
+          for image in harbor-workload-identity-bridge harbor-workload-identity-bridge-plugin; do
+            ref="ghcr.io/${OWNER}/${image}"
+            if ! digest=$(digest_of "${ref}:${VERSION}"); then
+              # This run just pushed ${TAG}; if that is the highest release,
+              # its image must be there.
+              if [ "$VERSION" = "$TAG" ]; then
+                echo "::error::cannot resolve ${ref}:${VERSION}, which this run pushed"
+                exit 1
+              fi
+              echo "::notice::${ref}:${VERSION} is not pushed yet; its own run moves latest"
+              continue
+            fi
+            if [ "$(digest_of "${ref}:latest" 2>/dev/null || true)" = "$digest" ]; then
+              echo "${ref}:latest already points at ${VERSION} (${digest})"
+              continue
+            fi
+            docker buildx imagetools create --tag "${ref}:latest" "${ref}@${digest}"
+            echo "${ref}:latest -> ${VERSION} (${digest})"
+          done
 
   # Trivy runs in a job of its own with no token: the images are public,
   # and a compromised scanner binary must not hold the signing identity
