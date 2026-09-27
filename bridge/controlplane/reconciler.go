@@ -21,8 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
@@ -95,25 +97,76 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// The robot Secret lives in the bridge namespace while its
 		// HarborAccess may live anywhere, and cross-namespace owner
 		// references are invalid — so Owns() would never map an event.
-		// The Secret's ownership labels carry the mapping instead: a
-		// deleted or tampered Secret is rebuilt on its own event rather
-		// than at the next resync.
+		// The Secret's ownership labels and its name carry the mapping
+		// instead: a deleted or tampered Secret is rebuilt on its own
+		// event rather than at the next resync.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToHarborAccess)).
+		// A HarborAccess that shares its serviceAccountRef with a deleted
+		// one reported RobotConflict while the deleted one owned the
+		// robot. The deletion released the robot (the finalizer revokes
+		// it before the object goes), so re-check the survivors now.
+		Watches(&harborv1alpha1.HarborAccess{},
+			handler.EnqueueRequestsFromMapFunc(r.sameServiceAccount),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(event.CreateEvent) bool { return false },
+				UpdateFunc:  func(event.UpdateEvent) bool { return false },
+				DeleteFunc:  func(event.DeleteEvent) bool { return true },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			})).
 		Complete(r)
 }
 
-// secretToHarborAccess maps a bridge-managed robot Secret of this cluster
-// to the HarborAccess it belongs to.
+// secretToHarborAccess maps a Secret in the bridge namespace to the
+// HarborAccess objects it concerns: the one its bridge labels name (this
+// cluster's Secrets only), and the one whose robot-Secret name it
+// occupies. The second mapping is what lets a HarborAccess in
+// RobotConflict notice at once that the Secret blocking it was renamed or
+// deleted, which is what its condition asks for; such a Secret carries no
+// bridge labels, or labels naming another HarborAccess.
 func (r *Reconciler) secretToHarborAccess(_ context.Context, obj client.Object) []reconcile.Request {
 	s, ok := obj.(*corev1.Secret)
-	if !ok || s.Namespace != r.Config.Namespace || s.Labels[robotsecret.LabelCluster] != r.Config.ClusterName {
+	if !ok || s.Namespace != r.Config.Namespace {
 		return nil
 	}
-	ns, name, ok := robotsecret.Owner(s)
+	var reqs []reconcile.Request
+	if s.Labels[robotsecret.LabelCluster] == r.Config.ClusterName {
+		if ns, name, ok := robotsecret.Owner(s); ok {
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}})
+		}
+	}
+	if ns, name, ok := robotsecret.ParseName(s.Name); ok {
+		key := types.NamespacedName{Namespace: ns, Name: name}
+		if len(reqs) == 0 || reqs[0].NamespacedName != key {
+			reqs = append(reqs, reconcile.Request{NamespacedName: key})
+		}
+	}
+	return reqs
+}
+
+// sameServiceAccount maps a HarborAccess to the other HarborAccess objects
+// with the same serviceAccountRef: they map to the same robot name, so at
+// most one of them owns the robot and the others report RobotConflict.
+func (r *Reconciler) sameServiceAccount(ctx context.Context, obj client.Object) []reconcile.Request {
+	gone, ok := obj.(*harborv1alpha1.HarborAccess)
 	if !ok {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}}
+	var list harborv1alpha1.HarborAccessList
+	if err := r.List(ctx, &list); err != nil {
+		log.FromContext(ctx).Error(err, "list HarborAccess objects sharing a serviceAccountRef",
+			"harboraccess", gone.Namespace+"/"+gone.Name)
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		ha := &list.Items[i]
+		if (ha.Namespace == gone.Namespace && ha.Name == gone.Name) ||
+			ha.Spec.ServiceAccountRef != gone.Spec.ServiceAccountRef {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: ha.Namespace, Name: ha.Name}})
+	}
+	return reqs
 }
 
 // The bridge's RBAC is hand-maintained in
@@ -230,7 +283,7 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		return r.markTransientError(ctx, ha, fmt.Errorf("read robot Secret: %w", err))
 	}
 	if msg := r.secretConflict(ha, secret, robotName); msg != "" {
-		return r.markNotReady(ctx, ha, ReasonRobotConflict, msg)
+		return r.markNotReadyWithRequeue(ctx, ha, ReasonRobotConflict, msg)
 	}
 
 	desiredDescription := RobotDescription(cluster, ha.Namespace, ha.Name)
@@ -350,20 +403,24 @@ func (r *Reconciler) ensureRobot(
 	// description does not mark it as this cluster's. Catches the
 	// prefix-collision class even when the name prefix matches.
 	if !RobotBelongsToCluster(existing.Description, r.Config.ClusterName) {
-		res, err := r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+		res, err := r.markNotReadyWithRequeue(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
 			"Harbor robot %q exists but its description does not mark it as belonging to cluster %q; refusing to adopt",
 			robotName, r.Config.ClusterName))
 		return nil, false, res, err
 	}
-	// Robot-name collision guard (audit F2). The dot-joined name is
-	// injective except on the hash-truncation overflow path; if the robot
-	// names a different HarborAccess, adopting it would let two CRs fight
-	// over one robot (permission overwrite, and a rotation that breaks the
-	// other's stored password). Refuse.
+	// Robot-name collision guard (audit F2). The robot name is derived
+	// from the serviceAccountRef alone, so two HarborAccess objects for the
+	// same ServiceAccount map to the same robot (and, on the hash-truncation
+	// overflow path, two ServiceAccounts could). If the robot names a
+	// different HarborAccess, adopting it would let two CRs fight over one
+	// robot (permission overwrite, and a rotation that breaks the other's
+	// stored password). Refuse; deleting the other HarborAccess releases
+	// the robot and re-checks this one (sameServiceAccount).
 	if descNS, descName, ok := ParseRobotDescription(existing.Description); ok && (descNS != ha.Namespace || descName != ha.Name) {
-		res, err := r.markNotReady(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
-			"Harbor robot %q belongs to HarborAccess %s/%s, not %s/%s (robot-name collision); refusing to adopt",
-			robotName, descNS, descName, ha.Namespace, ha.Name))
+		res, err := r.markNotReadyWithRequeue(ctx, ha, ReasonRobotConflict, fmt.Sprintf(
+			"Harbor robot %q (the robot of ServiceAccount %s/%s) belongs to HarborAccess %s/%s, not %s/%s; refusing to adopt. A ServiceAccount is served through one HarborAccess",
+			robotName, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name,
+			descNS, descName, ha.Namespace, ha.Name))
 		return nil, false, res, err
 	}
 	return existing, false, ctrl.Result{}, nil
@@ -771,10 +828,10 @@ func (r *Reconciler) markReady(
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// markNotReady writes Ready=False for terminal (operator-error) failures
-// that retrying cannot fix: issuer mismatch, invalid spec, foreign robot
-// conflict. Returns nil so controller-runtime treats the reconcile as
-// successful and waits for the next CR event.
+// markNotReady writes Ready=False for operator errors that only a change
+// to the CR or to the bridge's configuration resolves (issuer or audience
+// mismatch, invalid spec). Both produce an event (a CR update, a restart),
+// so it returns nil without a requeue.
 func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
 	if err := r.updateReadyCondition(ctx, ha, metav1.ConditionFalse, reason, message); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
@@ -782,9 +839,10 @@ func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.Harbor
 	return ctrl.Result{}, nil
 }
 
-// markNotReadyWithRequeue is markNotReady for conditions that change
-// outside Kubernetes (a robot disabled in Harbor): no CR event announces
-// their resolution, so the object is re-checked on the resync interval.
+// markNotReadyWithRequeue is markNotReady for conditions resolved outside
+// the CR: a robot disabled in Harbor, or a robot or Secret that belongs to
+// someone else (RobotConflict). No event on this CR announces that they
+// are gone, so the object is re-checked on the resync interval.
 func (r *Reconciler) markNotReadyWithRequeue(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
 	if _, err := r.markNotReady(ctx, ha, reason, message); err != nil {
 		return ctrl.Result{}, err

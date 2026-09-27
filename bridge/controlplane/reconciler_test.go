@@ -499,12 +499,12 @@ func TestReconcile_SecretNameCollision_RefusesToOverwrite(t *testing.T) {
 	}
 }
 
-// AUDIT.md F2 (robot-name collision): the robot name
-// "bridge-<cluster>-<saNs>-<saName>" is dash-joined and ambiguous, so two
-// distinct SA refs can collapse onto one robot. When the existing robot's
-// description names a different HarborAccess, the reconciler must refuse to
-// adopt it — no permission overwrite, no password rotation that would break
-// the rightful owner's stored Secret.
+// AUDIT.md F2 (robot-name collision): the robot name is derived from the
+// serviceAccountRef alone, so two HarborAccess objects for the same
+// ServiceAccount map to one robot. When the existing robot's description
+// names a different HarborAccess, the reconciler must refuse to adopt it —
+// no permission overwrite, no password rotation that would break the
+// rightful owner's stored Secret.
 func TestReconcile_RobotNameCollision_RefusesForeignHarborAccess(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()

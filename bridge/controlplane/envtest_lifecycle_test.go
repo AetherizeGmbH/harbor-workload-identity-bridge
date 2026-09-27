@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -25,8 +26,10 @@ import (
 
 // TestEnvtest_Lifecycle runs the reconciler against a real apiserver
 // through a HarborAccess's whole life: create, a deleted Secret rebuilt via
-// the Secret watch, a serviceAccountRef change revoking the old robot, and
-// deletion revoking every robot before the finalizer is released. It also
+// the Secret watch, a serviceAccountRef change revoking the old robot, a
+// rename (a second HarborAccess for the same ServiceAccount takes over when
+// the first is deleted), and deletion revoking every robot before the
+// finalizer is released. It also
 // proves the CRD rejects names that could never be reconciled.
 func TestEnvtest_Lifecycle(t *testing.T) {
 	cfg := setupEnvtest(t)
@@ -144,13 +147,46 @@ func TestEnvtest_Lifecycle(t *testing.T) {
 		return robotNamed(secondRobot) && !robotNamed(firstRobot) && storedMatchesHarbor(secondRobot)
 	})
 
+	// Rename: a second HarborAccess for the same ServiceAccount is refused
+	// while the first owns the robot, and takes over once the first is
+	// deleted, through the deletion event rather than a resync.
+	v2 := newHarborAccess()
+	v2.Namespace, v2.Name, v2.Finalizers = "tenant", "app-v2", nil
+	v2.Spec.ServiceAccountRef.Name = "new-sa"
+	if err := k8s.Create(ctx, v2); err != nil {
+		t.Fatal(err)
+	}
+	eventually("second HarborAccess for the same ServiceAccount reports RobotConflict", func() bool {
+		got := &harborv1alpha1.HarborAccess{}
+		if k8s.Get(ctx, client.ObjectKeyFromObject(v2), got) != nil {
+			return false
+		}
+		c := meta.FindStatusCondition(got.Status.Conditions, harborv1alpha1.ConditionReady)
+		return c != nil && c.Reason == ReasonRobotConflict
+	})
+
 	// Deletion revokes every robot and the Secret, then releases the CR.
 	if err := k8s.Delete(ctx, cur); err != nil {
 		t.Fatal(err)
 	}
-	eventually("HarborAccess gone, no robots, no Secret", func() bool {
+	eventually("HarborAccess gone, its Secret gone", func() bool {
 		return apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(ha), &harborv1alpha1.HarborAccess{})) &&
-			!robotNamed(secondRobot) &&
 			apierrors.IsNotFound(k8s.Get(ctx, secretKey, &corev1.Secret{}))
+	})
+	v2SecretKey := types.NamespacedName{Namespace: testNS, Name: robotsecret.Name("tenant", "app-v2")}
+	eventually("the renamed HarborAccess took the robot over", func() bool {
+		got := &harborv1alpha1.HarborAccess{}
+		s := &corev1.Secret{}
+		return k8s.Get(ctx, client.ObjectKeyFromObject(v2), got) == nil && readyTrue(got) &&
+			robotNamed(secondRobot) && k8s.Get(ctx, v2SecretKey, s) == nil && len(s.Data["password"]) > 0
+	})
+
+	if err := k8s.Delete(ctx, v2); err != nil {
+		t.Fatal(err)
+	}
+	eventually("both HarborAccess objects gone, no robots, no Secrets", func() bool {
+		return apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(v2), &harborv1alpha1.HarborAccess{})) &&
+			!robotNamed(secondRobot) &&
+			apierrors.IsNotFound(k8s.Get(ctx, v2SecretKey, &corev1.Secret{}))
 	})
 }
