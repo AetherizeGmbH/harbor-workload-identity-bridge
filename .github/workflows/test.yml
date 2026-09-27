@@ -81,6 +81,15 @@ jobs:
           cache: true
       - run: make fuzz FUZZTIME=30s
 
+  hack-scripts:
+    # hack/render-compat-table.py writes the README compatibility table.
+    # harbor-compat.yml only runs weekly, so its tests run here on every PR.
+    name: hack script tests (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python3 -B -m unittest discover -s hack -p '*_test.py' -v
+
   release-notes:
     # The release job runs only on main; this proves on every PR that the
     # semantic-release plugins pinned in release.yml still render notes.

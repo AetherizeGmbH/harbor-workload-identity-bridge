@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Render the Harbor compatibility table into README.md from e2e result files.
+"""Render the Harbor compatibility table from harbor-compat e2e result files.
 
 Consumes one result JSON per harbor-compat matrix leg (see
 .github/workflows/harbor-compat.yml), each shaped:
 
     {"chart": "1.19.1", "app": "2.15.1", "status": "pass", "date": "2026-06-21"}
 
-and splices a version-sorted markdown table between the HARBOR-COMPAT markers in
-README.md. Floor = lowest-versioned *passing* Harbor; ceiling = highest passing
-(ADR-0020). Idempotent: re-running with the same inputs leaves README byte-identical.
+and renders a version-sorted markdown table. Floor = lowest-versioned *passing*
+Harbor; ceiling = highest passing (ADR-0020).
 
-Usage: render-compat-table.py '<results-glob>' <readme-path>
+Usage:
+  render-compat-table.py '<results-glob>' <readme-path>
+      Splice the table between the HARBOR-COMPAT markers in README.md.
+      Idempotent: re-running with the same inputs leaves README byte-identical.
+  render-compat-table.py --summary '<results-glob>'
+      Print the table to stdout (for $GITHUB_STEP_SUMMARY); touches no file.
+      Probe runs with a custom chart list use this: their results must not
+      replace the README table.
 """
 import glob
 import json
@@ -25,45 +31,55 @@ BEGIN_LINE = (
 END_LINE = "<!-- END HARBOR-COMPAT -->"
 
 
+UNKNOWN = (-1,)
+
+
 def semver(v):
-    """Parse 'X.Y.Z' into a comparable tuple; unknown/garbage sorts lowest."""
+    """Parse 'X.Y.Z' into a comparable tuple; unknown/garbage is UNKNOWN and sorts lowest."""
     try:
         return tuple(int(x) for x in v.split(".")[:3])
     except (ValueError, AttributeError):
-        return (-1,)
+        return UNKNOWN
 
 
-def main(results_glob, readme_path):
+def load_rows(results_glob):
     rows = []
     for path in sorted(glob.glob(results_glob)):
         with open(path, encoding="utf-8") as fh:
             rows.append(json.load(fh))
-    if not rows:
-        print(f"no result files matched {results_glob!r}", file=sys.stderr)
-        return 1
+    return rows
 
-    rows.sort(key=lambda r: semver(r["app"]), reverse=True)
-    passing = [semver(r["app"]) for r in rows if r["status"] == "pass"]
+
+def render_table(rows):
+    """Return (markdown table lines, floor, ceiling) for the result rows."""
+    rows = sorted(rows, key=lambda r: semver(r["app"]), reverse=True)
+    # A leg whose Harbor version is unknown (`helm show chart` failed) says
+    # nothing about the range, even when it passed.
+    passing = [semver(r["app"]) for r in rows if r["status"] == "pass" and semver(r["app"]) != UNKNOWN]
     floor = min(passing, default=None)
     ceiling = max(passing, default=None)
 
     lines = [
-        BEGIN_LINE,
-        "",
         "| Harbor | Chart | Tested | Last run (UTC) |",
         "| --- | --- | --- | --- |",
     ]
     for r in rows:
         v = semver(r["app"])
-        tag = ""
-        if v == ceiling:
-            tag = " (ceiling)"
-        elif v == floor:
-            tag = " (floor)"
+        # A single passing row is both; one tag must not hide the other.
+        marks = [name for name, bound in (("floor", floor), ("ceiling", ceiling)) if v == bound]
+        tag = f" ({', '.join(marks)})" if marks else ""
         mark = "✅" if r["status"] == "pass" else "❌"
         lines.append(f"| {r['app']}{tag} | {r['chart']} | {mark} | {r['date']} |")
-    lines += ["", END_LINE]
-    table = "\n".join(lines)
+    return lines, floor, ceiling
+
+
+def splice_readme(results_glob, readme_path):
+    rows = load_rows(results_glob)
+    if not rows:
+        print(f"no result files matched {results_glob!r}", file=sys.stderr)
+        return 1
+    table_lines, floor, ceiling = render_table(rows)
+    table = "\n".join([BEGIN_LINE, ""] + table_lines + ["", END_LINE])
 
     with open(readme_path, encoding="utf-8") as fh:
         content = fh.read()
@@ -80,8 +96,24 @@ def main(results_glob, readme_path):
     return 0
 
 
+def print_summary(results_glob):
+    rows = load_rows(results_glob)
+    if not rows:
+        print(f"no result files matched {results_glob!r}", file=sys.stderr)
+        return 1
+    table_lines, _, _ = render_table(rows)
+    print("\n".join(table_lines))
+    return 0
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] == "--summary":
+        return print_summary(argv[2])
+    if len(argv) == 3 and not argv[1].startswith("-"):
+        return splice_readme(argv[1], argv[2])
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print(__doc__, file=sys.stderr)
-        sys.exit(2)
-    sys.exit(main(sys.argv[1], sys.argv[2]))
+    sys.exit(main(sys.argv))
