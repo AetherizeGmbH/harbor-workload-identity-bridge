@@ -199,6 +199,7 @@ FUZZ_TARGETS ?= \
 	./installer:FuzzMergeProvider \
 	./installer:FuzzMergeExtraArgs \
 	./installer:FuzzKubeletCmdline \
+	./installer:FuzzNodeFiles_Injective \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \
 	./bridge/internal/robotsecret:FuzzName_Injective \
 	./bridge/dataplane:FuzzJSONAudience \

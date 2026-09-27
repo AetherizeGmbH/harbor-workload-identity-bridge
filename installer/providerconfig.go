@@ -22,6 +22,11 @@ import (
 
 const credentialProviderConfigAPIVersion = "kubelet.config.k8s.io/v1"
 
+// bridgeEndpointEnv is the env var every harbor-bridge provider entry sets
+// (the plugin cannot run without it). It tells a bridge entry apart from a
+// foreign provider that happens to have the same name.
+const bridgeEndpointEnv = "HARBOR_BRIDGE_ENDPOINT"
+
 // renderedProvider extracts the provider entry named name from the
 // chart-rendered CredentialProviderConfig bytes.
 func renderedProvider(rendered []byte, name string) (map[string]any, error) {
@@ -75,6 +80,13 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 			continue
 		}
 		if pm["name"] == name {
+			// Every other install and every foreign provider keeps its
+			// entry; ours replaces only an entry that is a bridge entry
+			// too (ADR-0029). A non-default provider name can otherwise
+			// take over a cloud provider's entry (and its binary).
+			if !isBridgeProvider(pm) {
+				return nil, false, fmt.Errorf("the node credential-provider config already has a provider named %q that is not a harbor-bridge plugin (no %s env) — refusing to replace it; choose another plugin.providerName", name, bridgeEndpointEnv)
+			}
 			providers[i] = entry
 			replaced = true
 			break
@@ -104,6 +116,73 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 		return nil, false, fmt.Errorf("marshal merged credential-provider config: %w", err)
 	}
 	return out, true, nil
+}
+
+// isBridgeProvider reports whether a provider entry belongs to a
+// harbor-bridge plugin: it sets bridgeEndpointEnv.
+func isBridgeProvider(entry map[string]any) bool {
+	env, _ := entry["env"].([]any)
+	for _, e := range env {
+		if m, ok := e.(map[string]any); ok && m["name"] == bridgeEndpointEnv {
+			return true
+		}
+	}
+	return false
+}
+
+// hasBridgeProvider reports whether the CredentialProviderConfig in doc
+// holds a harbor-bridge entry named name. A document it cannot read holds
+// none.
+func hasBridgeProvider(doc []byte, name string) bool {
+	cfg := map[string]any{}
+	if err := yaml.Unmarshal(doc, &cfg); err != nil {
+		return false
+	}
+	providers, err := providerList(cfg)
+	if err != nil {
+		return false
+	}
+	for _, p := range providers {
+		if pm, ok := p.(map[string]any); ok && pm["name"] == name {
+			return isBridgeProvider(pm)
+		}
+	}
+	return false
+}
+
+// otherProviders counts the providers in the CredentialProviderConfig in
+// doc that are not named name: the entries of other installs (ADR-0029)
+// and of anything else. It refuses what mergeProvider refuses.
+func otherProviders(doc []byte, name string) (int, error) {
+	cfg := map[string]any{}
+	if err := yaml.Unmarshal(doc, &cfg); err != nil {
+		return 0, fmt.Errorf("parse: %w", err)
+	}
+	if av, ok := cfg["apiVersion"].(string); !ok || av != credentialProviderConfigAPIVersion {
+		return 0, fmt.Errorf("apiVersion is %v, want %s", cfg["apiVersion"], credentialProviderConfigAPIVersion)
+	}
+	providers, err := providerList(cfg)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, p := range providers {
+		if pm, ok := p.(map[string]any); !ok || pm["name"] != name {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// entryBytes is the canonical form of a provider entry for the state hash:
+// JSON with sorted keys, so it depends on the entry's content only, not on
+// the formatting of the file it sits in.
+func entryBytes(entry map[string]any) ([]byte, error) {
+	out, err := json.Marshal(entry)
+	if err != nil {
+		return nil, fmt.Errorf("marshal provider entry: %w", err)
+	}
+	return out, nil
 }
 
 // marshalMatching renders cfg in the format the node file uses, so a

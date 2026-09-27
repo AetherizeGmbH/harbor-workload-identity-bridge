@@ -24,6 +24,11 @@
 // idempotency via a host state file). CA/mTLS rotation and binary
 // updates never restart kubelet.
 //
+// Several installs of the chart can share a node (ADR-0029): each has its
+// own provider name (PROVIDER_NAME), entry, binary and files, owns only its
+// own entry in the shared credential-provider config, and edits the shared
+// files and restarts kubelet only under a node-wide lock (lock.go).
+//
 // With --sync the installer instead runs as the DaemonSet's
 // long-running container: it re-copies the CA/mTLS files to the host
 // whenever the mounted Secret volumes rotate. It never touches kubelet.
@@ -95,18 +100,22 @@ type config struct {
 	StateDir    string // STATE_DIR: node path, default /var/lib/harbor-bridge.
 	NodeIP      string // NODE_IP: substituted for the literal $(NODE_IP) in the rendered config.
 
+	// ProviderName names this install's provider entry and plugin binary,
+	// and derives its other node files (filesFor, ADR-0029).
+	ProviderName string // PROVIDER_NAME, default harbor-bridge-plugin.
+
 	// Fixed locations inside the plugin image / pod.
 	SourcePlugin     string
 	SourceConfig     string
 	SourceCA         string
 	SourceClientCert string
 	SourceClientKey  string
-	ProviderName     string
 	ProcRoot         string
 	SyncInterval     time.Duration
 
-	kubelet kubeletControl
-	verify  verifyTiming
+	kubelet     kubeletControl
+	verify      verifyTiming
+	lockTimeout time.Duration
 }
 
 func loadConfig(getenv func(string) string) (*config, error) {
@@ -127,16 +136,17 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		KubeletUnit:      def("KUBELET_UNIT", "kubelet"),
 		StateDir:         def("STATE_DIR", "/var/lib/harbor-bridge"),
 		NodeIP:           getenv("NODE_IP"),
+		ProviderName:     def("PROVIDER_NAME", defaultProviderName),
 		SourcePlugin:     "/plugin/harbor-bridge-plugin",
 		SourceConfig:     "/config/credential-provider-config.yaml",
 		SourceCA:         "/tls/ca.crt",
 		SourceClientCert: "/mtls/tls.crt",
 		SourceClientKey:  "/mtls/tls.key",
-		ProviderName:     "harbor-bridge-plugin",
 		ProcRoot:         "/proc",
 		SyncInterval:     60 * time.Second,
 		kubelet:          nsenterControl{},
 		verify:           defaultVerifyTiming,
+		lockTimeout:      defaultLockTimeout,
 	}
 	switch c.Mode {
 	case modeAuto, modeMerge, modePatch, modeNone:
@@ -166,6 +176,9 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	if err := validUnitName(c.KubeletUnit); err != nil {
 		return nil, fmt.Errorf("KUBELET_UNIT: %w", err)
 	}
+	if err := validProviderName(c.ProviderName); err != nil {
+		return nil, fmt.Errorf("PROVIDER_NAME: %w", err)
+	}
 	return c, nil
 }
 
@@ -189,6 +202,11 @@ func validNodePath(p string) error {
 // at, under the HostRoot mount.
 func (c *config) hostPath(nodePath string) string {
 	return filepath.Join(c.HostRoot, filepath.Clean("/"+nodePath))
+}
+
+// files returns this install's own node file names.
+func (c *config) files() nodeFiles {
+	return filesFor(c.ProviderName)
 }
 
 func logf(format string, args ...any) {

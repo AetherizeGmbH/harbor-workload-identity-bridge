@@ -108,15 +108,25 @@ func newTestEnv(t *testing.T, mode string, kubeletCmdline []string) *testEnv {
 		SourceCA:         filepath.Join(src, "tls", "ca.crt"),
 		SourceClientCert: filepath.Join(src, "mtls", "tls.crt"),
 		SourceClientKey:  filepath.Join(src, "mtls", "tls.key"),
-		ProviderName:     "harbor-bridge-plugin",
+		ProviderName:     defaultProviderName,
 		KubeletUnit:      "kubelet",
 		StateDir:         "/var/lib/harbor-bridge",
 		ProcRoot:         fakeProc(t, procs),
 		verify:           verifyTiming{timeout: time.Second, interval: time.Millisecond, settle: time.Millisecond},
+		lockTimeout:      10 * time.Second,
 	}}
+	// Every systemd node has /run, where the node lock lives.
+	if err := os.MkdirAll(env.cfg.hostPath("/run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	env.kubelet = &fakeKubelet{t: t, env: env, baseArgs: base}
 	env.cfg.kubelet = env.kubelet
 	return env
+}
+
+// statePath is where this env's installer keeps its state file.
+func (e *testEnv) statePath() string {
+	return e.cfg.hostPath(filepath.Join(e.cfg.StateDir, e.cfg.files().State))
 }
 
 func (e *testEnv) hostFile(t *testing.T, nodePath string) string {
@@ -206,7 +216,7 @@ func TestRun_PatchCrashWindowRetriesRestart(t *testing.T) {
 	}
 	// Simulate the crash between write and restart on a previous pass:
 	// files are current but the state file records nothing.
-	if err := os.Remove(env.cfg.hostPath(filepath.Join(env.cfg.StateDir, stateFileName))); err != nil {
+	if err := os.Remove(env.statePath()); err != nil {
 		t.Fatal(err)
 	}
 	if err := run(env.cfg); err != nil {
@@ -330,7 +340,7 @@ func TestRun_NoneInstallsFilesOnly(t *testing.T) {
 	if _, err := os.Stat(env.cfg.hostPath(defaultKubeletPath)); err == nil {
 		t.Fatal("mode none must not touch /etc/default/kubelet")
 	}
-	if _, err := os.Stat(env.cfg.hostPath(filepath.Join(env.cfg.StateDir, stateFileName))); err == nil {
+	if _, err := os.Stat(env.statePath()); err == nil {
 		t.Fatal("mode none must not write a state file")
 	}
 }
@@ -396,13 +406,20 @@ func TestLoadConfig_Validation(t *testing.T) {
 		"shell in unit name":   {"KUBELET_UNIT": "kubelet; reboot"},
 		"option as unit name":  {"KUBELET_UNIT": "--help"},
 		"relative merge paths": {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "bin", "INSTALL_MERGE_CONFIG_FILE": "/c.yaml"},
+		"provider name dot":    {"PROVIDER_NAME": "harbor.bridge"},
+		"provider name slash":  {"PROVIDER_NAME": "../kubelet"},
 	} {
 		if _, err := loadConfig(env(withBase(extra))); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := loadConfig(env(base)); err != nil {
+	if c, err := loadConfig(env(base)); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
+	} else if c.ProviderName != defaultProviderName {
+		t.Fatalf("default provider name = %q", c.ProviderName)
+	}
+	if c, err := loadConfig(env(withBase(map[string]string{"PROVIDER_NAME": "harbor-bridge-eu"}))); err != nil || c.ProviderName != "harbor-bridge-eu" {
+		t.Fatalf("PROVIDER_NAME not taken: %+v, %v", c, err)
 	}
 	if _, err := loadConfig(env(map[string]string{"INSTALL_MODE": "yolo", "HOST_BIN_DIR": "/b", "HOST_CONFIG_DIR": "/c"})); err == nil {
 		t.Fatal("invalid mode must fail")
@@ -422,37 +439,55 @@ func TestLoadConfig_Validation(t *testing.T) {
 }
 
 func TestStateRoundtripAndCorruption(t *testing.T) {
-	dir := t.TempDir()
-	want := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "h"}
-	if err := saveState(dir, want); err != nil {
+	path := filepath.Join(t.TempDir(), "installer-state.json")
+	want := target{mode: modePatch, binDir: "/b", configFile: "/c", hash: "h", legacyHash: "l"}
+	if err := saveState(path, want.state()); err != nil {
 		t.Fatal(err)
 	}
-	got, err := loadState(dir)
+	got, err := loadState(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.matches(modePatch, "/b", "/c", "h") {
+	if !got.matches(want) {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
-	if got.matches(modeMerge, "/b", "/c", "h") {
+	if got.matchesLegacy(want) {
+		t.Fatal("a per-install record must not match as legacy")
+	}
+	otherMode := want
+	otherMode.mode = modeMerge
+	if got.matches(otherMode) {
 		t.Fatal("matches must be mode-sensitive")
 	}
 
-	// Corrupt state must degrade to nil, not error.
-	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte("{nope"), 0o600); err != nil {
+	// A record without hashScheme is from an installer before ADR-0029:
+	// it matches only the legacy (whole-file) hash.
+	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "l"}
+	if err := saveState(path, legacy); err != nil {
 		t.Fatal(err)
 	}
-	got, err = loadState(dir)
+	if got, err = loadState(path); err != nil {
+		t.Fatal(err)
+	}
+	if got.matches(want) || !got.matchesLegacy(want) {
+		t.Fatalf("legacy record: matches=%v matchesLegacy=%v", got.matches(want), got.matchesLegacy(want))
+	}
+
+	// Corrupt state must degrade to nil, not error.
+	if err := os.WriteFile(path, []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = loadState(path)
 	if err != nil || got != nil {
 		t.Fatalf("corrupt state must load as nil, got %+v err %v", got, err)
 	}
 
 	// Absent state → nil, no error. (*state)(nil).matches must be safe.
-	got, err = loadState(t.TempDir())
+	got, err = loadState(filepath.Join(t.TempDir(), "installer-state.json"))
 	if err != nil || got != nil {
 		t.Fatalf("absent state must load as nil, got %+v err %v", got, err)
 	}
-	if got.matches(modePatch, "/b", "/c", "h") {
+	if got.matches(want) || got.matchesLegacy(want) {
 		t.Fatal("nil state must not match")
 	}
 }
@@ -489,7 +524,7 @@ func TestRun_AutoStaysPatchAfterOwnInstall(t *testing.T) {
 	if env.restarts != 1 {
 		t.Fatalf("no-op re-roll restarted kubelet (restarts = %d)", env.restarts)
 	}
-	st, err := loadState(env.cfg.hostPath(env.cfg.StateDir))
+	st, err := loadState(env.statePath())
 	if err != nil || st == nil || st.Mode != modePatch {
 		t.Fatalf("state mode = %+v (err %v), want patch", st, err)
 	}
@@ -508,7 +543,7 @@ func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
 		t.Fatalf("got %v, want a verification failure", err)
 	}
-	if st, _ := loadState(env.cfg.hostPath(env.cfg.StateDir)); st != nil {
+	if st, _ := loadState(env.statePath()); st != nil {
 		t.Fatal("success state recorded for an unverified restart")
 	}
 }
@@ -541,7 +576,7 @@ func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
 	if err := run(env.cfg); err == nil {
 		t.Fatal("restart failure swallowed")
 	}
-	if st, _ := loadState(env.cfg.hostPath(env.cfg.StateDir)); st != nil {
+	if st, _ := loadState(env.statePath()); st != nil {
 		t.Fatal("success state recorded although the restart failed")
 	}
 }

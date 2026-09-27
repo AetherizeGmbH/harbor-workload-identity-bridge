@@ -4,6 +4,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -303,4 +304,98 @@ func parseConfig(t *testing.T, doc []byte) map[string]any {
 		t.Fatalf("parse merged doc: %v\n%s", err, doc)
 	}
 	return out
+}
+
+// TestMergeProvider_TwoBridgeInstallsAndAForeignProvider: each install
+// replaces or appends only its own entry; the other install's and the
+// cloud's entries round-trip untouched, in place (ADR-0029).
+func TestMergeProvider_TwoBridgeInstallsAndAForeignProvider(t *testing.T) {
+	a, err := renderedProvider([]byte(renderedConfig), defaultProviderName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := renderedProvider([]byte(renderedConfigFor("harbor-bridge-eu")), "harbor-bridge-eu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _, err := mergeProvider([]byte(eksConfig), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, changed, err := mergeProvider(doc, b)
+	if err != nil || !changed {
+		t.Fatalf("second install: changed=%v err=%v", changed, err)
+	}
+	before := parseConfig(t, doc)["providers"].([]any)
+	if len(before) != 3 {
+		t.Fatalf("want 3 providers, got %d", len(before))
+	}
+
+	// Upgrade the first install: only providers[1] may change.
+	a2 := map[string]any{}
+	for k, v := range a {
+		a2[k] = v
+	}
+	a2["matchImages"] = []any{"harbor-alt.example.com"}
+	doc, changed, err = mergeProvider(doc, a2)
+	if err != nil || !changed {
+		t.Fatalf("upgrade: changed=%v err=%v", changed, err)
+	}
+	after := parseConfig(t, doc)["providers"].([]any)
+	if len(after) != 3 {
+		t.Fatalf("upgrade changed the provider count to %d", len(after))
+	}
+	if !reflect.DeepEqual(after[0], before[0]) {
+		t.Fatal("the cloud provider's entry changed")
+	}
+	if !reflect.DeepEqual(after[2], before[2]) {
+		t.Fatal("the other install's entry changed")
+	}
+	if !reflect.DeepEqual(after[1], a2) {
+		t.Fatalf("our entry was not replaced in place: %v", after[1])
+	}
+}
+
+func TestMergeProvider_RefusesToReplaceAForeignProvider(t *testing.T) {
+	entry, err := renderedProvider([]byte(renderedConfigFor("ecr-credential-provider")), "ecr-credential-provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mergeProvider([]byte(eksConfig), entry); err == nil || !strings.Contains(err.Error(), "not a harbor-bridge plugin") {
+		t.Fatalf("got %v, want a refusal to replace the ECR provider", err)
+	}
+}
+
+func TestOtherProvidersAndHasBridgeProvider(t *testing.T) {
+	doc, _, err := mergeProvider([]byte(gkeConfig), mustEntry(t, renderedConfig, defaultProviderName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := otherProviders(doc, defaultProviderName); err != nil || n != 1 {
+		t.Fatalf("otherProviders = %d, %v; want 1 (the GKE provider)", n, err)
+	}
+	if n, err := otherProviders([]byte(renderedConfig), defaultProviderName); err != nil || n != 0 {
+		t.Fatalf("otherProviders(own rendered config) = %d, %v; want 0", n, err)
+	}
+	if _, err := otherProviders([]byte("apiVersion: kubelet.config.k8s.io/v9\n"), defaultProviderName); err == nil {
+		t.Fatal("unknown schema accepted")
+	}
+	if !hasBridgeProvider(doc, defaultProviderName) {
+		t.Fatal("our entry not recognised")
+	}
+	if hasBridgeProvider(doc, "auth-provider-gcp") {
+		t.Fatal("the GKE provider taken for a bridge entry")
+	}
+	if hasBridgeProvider(nil, defaultProviderName) || hasBridgeProvider([]byte("{nope"), defaultProviderName) {
+		t.Fatal("an absent or unreadable config holds no entry")
+	}
+}
+
+func mustEntry(t *testing.T, rendered, name string) map[string]any {
+	t.Helper()
+	entry, err := renderedProvider([]byte(rendered), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entry
 }
