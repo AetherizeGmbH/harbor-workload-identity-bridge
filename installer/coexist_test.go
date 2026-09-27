@@ -1066,3 +1066,131 @@ func TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt(t *testing.T) {
 		})
 	}
 }
+
+// waitBlocked starts a pass of env's installer and fails the test unless it
+// is still waiting after a few lock polls. The returned channel delivers
+// the pass's result.
+func waitBlocked(t *testing.T, env *testEnv, what string) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- run(env.cfg) }()
+	time.Sleep(3 * lockPollInterval)
+	select {
+	case err := <-done:
+		t.Fatalf("pass finished while %s was held (err %v)", what, err)
+	default:
+	}
+	return done
+}
+
+func awaitPass(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pass did not continue after the lock was released")
+	}
+}
+
+// TestRun_PatchTakesTheConfigLock: with only the config lock held (a
+// none-mode install mid-pass holds no node lock), a patch pass neither
+// reads nor writes the chart-owned config, and afterwards keeps the entry
+// the holder wrote.
+func TestRun_PatchTakesTheConfigLock(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	configPath := configDir + "/" + configFileName
+	if err := os.MkdirAll(env.cfg.hostPath(configDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockFile(env.cfg.hostPath(configPath+lockSuffix), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := waitBlocked(t, env, "the config lock")
+	assertAbsent(t, env, configPath, binDir+"/"+defaultProviderName, defaultKubeletPath)
+
+	writeSiblingBinary(t, env, euName)
+	writeHostFile(t, env, configPath, renderedConfigFor(euName))
+	unlock()
+	awaitPass(t, done)
+	_, order := providersIn(t, env, configPath)
+	if !reflect.DeepEqual(order, []string{euName, defaultProviderName}) {
+		t.Fatalf("providers = %v: the pass read the config before it held the lock", order)
+	}
+	if env.restarts != 1 {
+		t.Fatalf("restarts = %d, want 1", env.restarts)
+	}
+}
+
+// TestRun_AutoMergeTakesTheConfigLock: auto mode resolved to merge edits
+// the cloud's config only under that config's lock, and merges into the
+// file as the holder left it.
+func TestRun_AutoMergeTakesTheConfigLock(t *testing.T) {
+	env := newTestEnv(t, modeAuto, []string{
+		"/usr/bin/kubelet",
+		"--image-credential-provider-bin-dir=/cloud/bin",
+		"--image-credential-provider-config=/cloud/config.yaml",
+	})
+	writeHostFile(t, env, "/cloud/config.yaml", gkeConfig)
+	unlock, err := lockFile(env.cfg.hostPath("/cloud/config.yaml"+lockSuffix), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := waitBlocked(t, env, "the cloud config's lock")
+	if got := env.hostFile(t, "/cloud/config.yaml"); got != gkeConfig {
+		t.Fatal("the cloud config changed while its lock was held")
+	}
+	assertAbsent(t, env, "/cloud/bin/"+defaultProviderName)
+
+	// The holder merges another install's entry.
+	holder := renderedEntry(t, withName(t, newSiblingEnv(t, env, modeAuto, euName), euName))
+	merged, _, err := mergeProvider([]byte(gkeConfig), holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, env, "/cloud/config.yaml", string(merged))
+	unlock()
+	awaitPass(t, done)
+	byName, order := providersIn(t, env, "/cloud/config.yaml")
+	if len(order) != 3 || order[1] != euName || order[2] != defaultProviderName {
+		t.Fatalf("providers = %v: the pass read the config before it held the lock", order)
+	}
+	if !reflect.DeepEqual(byName[euName], holder) {
+		t.Fatal("the holder's entry changed")
+	}
+}
+
+// TestRun_ConcurrentNoneAndPatchInstallsBothLand: a none-mode and a
+// patch-mode install with the same directories, started at once, share
+// the chart-owned config through its lock.
+func TestRun_ConcurrentNoneAndPatchInstallsBothLand(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+		b := newSiblingEnv(t, a, modeNone, euName)
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for j, env := range []*testEnv{a, b} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[j] = run(env.cfg)
+			}()
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		byName, _ := providersIn(t, a, configDir+"/"+configFileName)
+		if len(byName) != 2 || byName[defaultProviderName] == nil || byName[euName] == nil {
+			names, _ := json.Marshal(byName)
+			t.Fatalf("run %d: providers after concurrent installs: %s", i, names)
+		}
+	}
+}
