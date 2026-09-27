@@ -111,11 +111,12 @@ type Handler struct {
 	Limiter *SourceLimiter
 
 	// Audit receives one line per request that reached token validation:
-	// issued, denied, or unavailable (a 503 or 500 after the token was
-	// checked), with the caller's attribution. Refusals before that are
-	// not logged, so a flood cannot flood the log: a rate-limited request,
-	// a missing bearer or a bad body is counted in the metrics, a wrong
-	// method or path is not counted either. main wires a logger
+	// issued, denied, or unavailable (a 503 or 500 without credentials,
+	// also for a token that could not be judged because the signing keys
+	// were unavailable), with the caller's attribution. Refusals before
+	// that are not logged, so a flood cannot flood the log: a rate-limited
+	// request, a missing bearer or a bad body is counted in the metrics, a
+	// wrong method or path is not counted either. main wires a logger
 	// fixed at info level, so BRIDGE_LOG_LEVEL=warn cannot silence the
 	// audit trail. Unset falls back to the request logger.
 	Audit logr.Logger
