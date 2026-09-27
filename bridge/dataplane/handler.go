@@ -255,7 +255,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 2. Find the HarborAccess whose serviceAccountRef-derived subject
 	// matches claims.sub AND whose trustPolicy.audience appears in
 	// claims.aud.
-	matched, audMatched, err := h.findHarborAccess(ctx, claims)
+	matched, audMatched, deleting, err := h.findHarborAccess(ctx, claims)
 	if err != nil {
 		logger.Error(err, "list HarborAccess", "subject", claims.Subject)
 		h.audit(logger).Info("credential unavailable", append(append(caller, claimFields(claims)...),
@@ -266,6 +266,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.Metrics.HarborAccessLookupFailures.Inc()
 		}
 		h.recordResult(ResultServerError)
+		return
+	}
+	if matched == nil && deleting != nil {
+		// Deleting a HarborAccess is the revocation. Its robot may outlive
+		// the deletion for a while (Harbor unreachable: DeletionBlocked),
+		// but no new node or pod gets its password from here.
+		h.audit(logger).Info("credential denied", append(append(caller, claimFields(claims)...),
+			"reason", "harboraccess_deleting", "harboraccess", deleting.Namespace+"/"+deleting.Name,
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
+		http.Error(w, "the HarborAccess for the requesting service account is being deleted",
+			http.StatusForbidden)
+		h.recordResult(ResultForbidden)
 		return
 	}
 	if matched == nil {
@@ -370,7 +382,12 @@ func (h *Handler) recordOIDCFailure(category string) {
 
 // findHarborAccess returns the HarborAccess CR whose serviceAccountRef
 // matches the token's sub AND whose trustPolicy.audience appears in the
-// token's aud claim. Returns (nil, "", nil) when nothing matches.
+// token's aud claim. Returns a nil CR when nothing matches.
+//
+// A CR that is being deleted (deletionTimestamp set) never matches:
+// deletion is the revocation, and its finalizer can hold it in the cache
+// for as long as Harbor refuses the robot's deletion. When nothing else
+// matches, the first such CR is returned as deleting, for the audit log.
 //
 // The audience value that matched is also returned so the audit log
 // records the exact aud string the kubelet projected the token with.
@@ -385,16 +402,16 @@ func (h *Handler) recordOIDCFailure(category string) {
 // a workload could intermittently receive a more- or less-privileged
 // robot than intended. We therefore pick the namespace/name-sorted first
 // match and log the ambiguity so an operator can resolve it.
-func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harborv1alpha1.HarborAccess, string, error) {
+func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched *harborv1alpha1.HarborAccess, audience string, deleting *harborv1alpha1.HarborAccess, err error) {
 	var list harborv1alpha1.HarborAccessList
 	if err := h.K8sClient.List(ctx, &list); err != nil {
-		return nil, "", fmt.Errorf("list HarborAccess: %w", err)
+		return nil, "", nil, fmt.Errorf("list HarborAccess: %w", err)
 	}
 	type match struct {
 		ha  *harborv1alpha1.HarborAccess
 		aud string
 	}
-	var matches []match
+	var matches, deletingMatches []match
 	for i := range list.Items {
 		ha := &list.Items[i]
 		// Defense-in-depth (AUDIT.md F13): a CR with an empty audience or
@@ -434,20 +451,31 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 				continue
 			}
 			if aud == ha.Spec.TrustPolicy.Audience {
-				matches = append(matches, match{ha: ha, aud: aud})
+				if ha.DeletionTimestamp.IsZero() {
+					matches = append(matches, match{ha: ha, aud: aud})
+				} else {
+					deletingMatches = append(deletingMatches, match{ha: ha, aud: aud})
+				}
 				break
 			}
 		}
 	}
-	if len(matches) == 0 {
-		return nil, "", nil
+	byName := func(ms []match) {
+		sort.Slice(ms, func(i, j int) bool {
+			if ms[i].ha.Namespace != ms[j].ha.Namespace {
+				return ms[i].ha.Namespace < ms[j].ha.Namespace
+			}
+			return ms[i].ha.Name < ms[j].ha.Name
+		})
 	}
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].ha.Namespace != matches[j].ha.Namespace {
-			return matches[i].ha.Namespace < matches[j].ha.Namespace
+	if len(matches) == 0 {
+		if len(deletingMatches) == 0 {
+			return nil, "", nil, nil
 		}
-		return matches[i].ha.Name < matches[j].ha.Name
-	})
+		byName(deletingMatches)
+		return nil, "", deletingMatches[0].ha, nil
+	}
+	byName(matches)
 	if len(matches) > 1 {
 		names := make([]string, len(matches))
 		for i, m := range matches {
@@ -461,7 +489,7 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (*harbor
 			"selected", names[0],
 		)
 	}
-	return matches[0].ha, matches[0].aud, nil
+	return matches[0].ha, matches[0].aud, nil, nil
 }
 
 // specError reports a spec the reconciler rejects as InvalidSpec although

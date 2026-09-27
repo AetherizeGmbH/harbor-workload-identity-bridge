@@ -594,11 +594,14 @@ their own RBAC.
   the new one is in place. The janitor sweeps for anything left behind
   every 5 minutes. While Harbor is unreachable, the finalizer holds and
   the HarborAccess reports `reason=DeletionBlocked`.
-- **Residual window.** kubelet can keep cached credentials of a revoked
-  identity for up to the CR's `tokenTTL`, but they stop working the moment
-  the robot is deleted in Harbor. They keep working only while the
-  deletion is blocked (Harbor unreachable) — keep `tokenTTL` short and
-  alert on `reason=DeletionBlocked`.
+- **Residual window.** The bridge stops issuing credentials for a
+  HarborAccess the moment it is marked for deletion (`credential denied`,
+  `reason=harboraccess_deleting`), even while the deletion is blocked.
+  kubelet can keep cached credentials of a revoked identity for up to the
+  CR's `tokenTTL`, but they stop working the moment the robot is deleted
+  in Harbor. They keep working only while the deletion is blocked (the
+  Harbor API unreachable, or refusing the bridge's admin credential) —
+  keep `tokenTTL` short and alert on `reason=DeletionBlocked`.
 
 ## Hardening the bridge
 
@@ -643,7 +646,7 @@ credential issued
   requested_image=harbor.example.com/production/myimg:v1   # asserted by the caller, max 512 chars
 
 credential denied
-  source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch
+  source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch|harboraccess_deleting
   category=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other   # invalid_token only
   (subject, pod, node, audiences once the token is valid) requested_image=…
 
@@ -673,16 +676,16 @@ switches off the SDK's wire dumps, which the go-openapi runtime would
 otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
 bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
-Denials (token rejected, no matching CR, Secret owner mismatch) are the
-`credential denied` lines above, on the same fixed-info audit logger. A
-request with a valid token that gets no credentials for another reason
-is a `credential unavailable` line: the robot Secret does not exist yet
-(`503`, the plugin retries), or it is incomplete or the Kubernetes API
-failed (`500`, also on the regular log with the full error). So is a
-token the bridge could not judge because it could not fetch the signing
-keys (`503`, see below). Requests
-refused before the token is checked (rate limit, missing bearer, bad
-body) are counted in the metrics below but not logged one by one.
+Denials (token rejected, no matching CR, CR being deleted, Secret owner
+mismatch) are the `credential denied` lines above, on the same
+fixed-info audit logger. A request with a valid token that gets no
+credentials for another reason is a `credential unavailable` line: the
+robot Secret does not exist yet (`503`, the plugin retries), or it is
+incomplete or the Kubernetes API failed (`500`, also on the regular log
+with the full error). So is a token the bridge could not judge because
+it could not fetch the signing keys (`503`, see below). Requests refused
+before the token is checked (rate limit, missing bearer, bad body) are
+counted in the metrics below but not logged one by one.
 
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never

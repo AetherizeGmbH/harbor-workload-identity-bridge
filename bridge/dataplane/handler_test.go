@@ -336,7 +336,7 @@ func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
 		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
 	}
 	for i := 0; i < 5; i++ {
-		matched, aud, err := h.findHarborAccess(context.Background(), newTestClaims())
+		matched, aud, _, err := h.findHarborAccess(context.Background(), newTestClaims())
 		if err != nil {
 			t.Fatalf("iteration %d: findHarborAccess: %v", i, err)
 		}
@@ -407,7 +407,7 @@ func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
 			}
 			claims := &Claims{Subject: hTestSubject, Audience: tc.claimsAud, Issuer: tc.claimsIssuer}
-			matched, _, err := h.findHarborAccess(context.Background(), claims)
+			matched, _, _, err := h.findHarborAccess(context.Background(), claims)
 			if err != nil {
 				t.Fatalf("findHarborAccess: %v", err)
 			}
@@ -415,6 +415,63 @@ func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 				t.Fatalf("empty audience/issuer must not match; got CR %s/%s", matched.Namespace, matched.Name)
 			}
 		})
+	}
+}
+
+// deletingHA is the fixture CR after `kubectl delete` while the bridge's
+// finalizer holds it (e.g. Harbor refuses the robot's deletion).
+func deletingHA() *harborv1alpha1.HarborAccess {
+	ha := newTestHA()
+	now := metav1.Now()
+	ha.DeletionTimestamp = &now
+	ha.Finalizers = []string{"harbor.aetherize.io/robot"}
+	return ha
+}
+
+// Deleting a HarborAccess revokes it at once: the data plane stops
+// handing out the robot's password although the CR and its Secret stay
+// until the finalizer is released.
+func TestHandler_HarborAccessBeingDeleted_NotServed(t *testing.T) {
+	var audit captured
+	k8s := fake.NewClientBuilder().WithScheme(handlerTestScheme).
+		WithObjects(deletingHA(), newTestRobotSecret()).Build()
+	h := &Handler{
+		K8sClient: k8s,
+		Validator: &stubValidator{claims: newTestClaims()},
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+		Audit:     audit.logger(),
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), hTestRobotPass) {
+		t.Fatalf("status %d body %q, want 403 without credentials", w.Code, w.Body.String())
+	}
+	out := audit.joined()
+	for _, want := range []string{`"credential denied"`, `"reason"="harboraccess_deleting"`, `"harboraccess"="harbor-bridge-system/flux-access"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("audit line lacks %s:\n%s", want, out)
+		}
+	}
+}
+
+// A CR being deleted also drops out of the duplicate-CR selection, so a
+// live CR for the same identity is served, even when the deleting one
+// sorts first.
+func TestFindHarborAccess_SkipsHarborAccessBeingDeleted(t *testing.T) {
+	gone := deletingHA()
+	gone.Name = "aaa-deleting"
+	live := newTestHA()
+	live.Name = "zzz-live"
+	h := &Handler{
+		K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(gone, live).Build(),
+		Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+	}
+	matched, _, deleting, err := h.findHarborAccess(context.Background(), newTestClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched == nil || matched.Name != "zzz-live" || deleting != nil {
+		t.Fatalf("matched %v, deleting %v; want the live CR and no deleting one", matched, deleting)
 	}
 }
 
