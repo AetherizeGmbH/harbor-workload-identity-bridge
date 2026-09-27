@@ -235,6 +235,12 @@ func ownConfig(cfg *config, rendered []byte, entry map[string]any) (existing, de
 // credential-provider config and drops the binary into the existing
 // bin dir; kubelet's flags are not touched.
 func runMerge(cfg *config, entry map[string]any, wiring kubeletWiring) error {
+	// Kubelet 1.34+ also accepts a directory of config files. The
+	// installer only edits a file; say so instead of failing on the read
+	// below (and before a lock file lands next to the directory).
+	if fi, err := os.Lstat(cfg.hostPath(wiring.ConfigFile)); err == nil && fi.IsDir() {
+		return fmt.Errorf("kubelet's credential-provider config %s is a directory, which the installer does not merge into; use plugin.install.mode=none and put the entry into a file of that directory yourself, or plugin.enabled=false", wiring.ConfigFile)
+	}
 	unlock, err := lockFile(cfg.hostPath(wiring.ConfigFile+lockSuffix), cfg.lockTimeout)
 	if err != nil {
 		return err

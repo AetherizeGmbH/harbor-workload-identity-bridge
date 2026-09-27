@@ -684,3 +684,24 @@ func TestRunSync_RejectsNonPositiveInterval(t *testing.T) {
 		t.Fatal("zero interval accepted")
 	}
 }
+
+// TestRun_MergeRefusesAConfigDirectory: kubelet 1.34+ accepts a directory
+// for --image-credential-provider-config. The installer does not merge
+// into one; it says so before it writes anything.
+func TestRun_MergeRefusesAConfigDirectory(t *testing.T) {
+	env := newTestEnv(t, modeMerge, nil)
+	env.cfg.MergeBinDir = "/cloud/bin"
+	env.cfg.MergeConfigFile = "/cloud/providers.d"
+	if err := os.MkdirAll(env.cfg.hostPath("/cloud/providers.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("got %v, want a refusal naming the directory", err)
+	}
+	for _, p := range []string{"/cloud/providers.d.lock", "/cloud/bin/harbor-bridge-plugin"} {
+		if _, err := os.Lstat(env.cfg.hostPath(p)); !os.IsNotExist(err) {
+			t.Errorf("%s written although the merge was refused (err %v)", p, err)
+		}
+	}
+}
