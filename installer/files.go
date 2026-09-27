@@ -93,6 +93,18 @@ func readAllCapped(f *os.File) ([]byte, error) {
 	return data, nil
 }
 
+// isExecutableHostFile reports whether path is a regular file with an
+// execute bit, without following a symlink in its last component.
+func isExecutableHostFile(path string) bool {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	fi, err := root.Lstat(filepath.Base(path))
+	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
+}
+
 // writeFileAtomic writes data to path via a same-directory temp file +
 // rename so a reader (kubelet, containerd) never sees a torn write.
 // When replacing different content it first preserves the old bytes at

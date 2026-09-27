@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 
 	"sigs.k8s.io/yaml"
 )
@@ -150,28 +151,92 @@ func hasBridgeProvider(doc []byte, name string) bool {
 	return false
 }
 
-// otherProviders counts the providers in the CredentialProviderConfig in
-// doc that are not named name: the entries of other installs (ADR-0029)
-// and of anything else. It refuses what mergeProvider refuses.
-func otherProviders(doc []byte, name string) (int, error) {
+// composeOwnConfig builds the chart-owned credential-provider config of
+// patch and none mode (ADR-0029) from the rendered config and the file as
+// it is (existing). The result holds this install's rendered entry and
+// every entry of existing that sibling accepts as another install's, in the
+// order of existing: the rendered entry takes the place of the first entry
+// of its name, or comes last. Every other entry of existing, including a
+// second one of a kept name (kubelet refuses duplicate names), is dropped
+// and described in dropped. With nothing kept the result is rendered byte
+// for byte, which is what installers before ADR-0029 always wrote; when the
+// result equals existing it is existing byte for byte (no rewrite, no
+// restart). It refuses what mergeProvider refuses as a document.
+func composeOwnConfig(existing, rendered []byte, entry map[string]any, sibling func(map[string]any) bool) (out []byte, dropped []string, err error) {
+	cur := map[string]any{}
+	if err := yaml.Unmarshal(existing, &cur); err != nil {
+		return nil, nil, fmt.Errorf("parse: %w", err)
+	}
+	if av, ok := cur["apiVersion"].(string); !ok || av != credentialProviderConfigAPIVersion {
+		return nil, nil, fmt.Errorf("apiVersion is %v, want %s", cur["apiVersion"], credentialProviderConfigAPIVersion)
+	}
+	providers, err := providerList(cur)
+	if err != nil {
+		return nil, nil, err
+	}
+	name, ok := entry["name"].(string)
+	if !ok || name == "" {
+		return nil, nil, fmt.Errorf("provider entry has no name")
+	}
+
+	kept := []any{}
+	seen := map[string]bool{}
+	for _, p := range providers {
+		pm, isMap := p.(map[string]any)
+		pname, _ := pm["name"].(string)
+		switch {
+		case isMap && pname == name && !seen[name]:
+			kept = append(kept, entry)
+			seen[name] = true
+		case isMap && pname != name && !seen[pname] && sibling(pm):
+			kept = append(kept, pm)
+			seen[pname] = true
+		default:
+			dropped = append(dropped, strconv.Quote(pname))
+		}
+	}
+	if !seen[name] {
+		kept = append(kept, entry)
+	}
+	if len(kept) == 1 {
+		return rendered, dropped, nil
+	}
+
+	doc := map[string]any{}
+	if err := yaml.Unmarshal(rendered, &doc); err != nil {
+		return nil, nil, fmt.Errorf("parse rendered credential-provider config: %w", err)
+	}
+	doc["providers"] = kept
+	if reflect.DeepEqual(cur, doc) {
+		return existing, dropped, nil
+	}
+	out, err = yaml.Marshal(doc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal credential-provider config: %w", err)
+	}
+	return out, dropped, nil
+}
+
+// otherBridgeProviders returns the names of the harbor-bridge entries in
+// the CredentialProviderConfig in doc that are not named name: the
+// entries of other installs (ADR-0029). A document it cannot read holds
+// none.
+func otherBridgeProviders(doc []byte, name string) []string {
 	cfg := map[string]any{}
 	if err := yaml.Unmarshal(doc, &cfg); err != nil {
-		return 0, fmt.Errorf("parse: %w", err)
-	}
-	if av, ok := cfg["apiVersion"].(string); !ok || av != credentialProviderConfigAPIVersion {
-		return 0, fmt.Errorf("apiVersion is %v, want %s", cfg["apiVersion"], credentialProviderConfigAPIVersion)
+		return nil
 	}
 	providers, err := providerList(cfg)
 	if err != nil {
-		return 0, err
+		return nil
 	}
-	n := 0
+	var names []string
 	for _, p := range providers {
-		if pm, ok := p.(map[string]any); !ok || pm["name"] != name {
-			n++
+		if pm, ok := p.(map[string]any); ok && pm["name"] != name && isBridgeProvider(pm) {
+			names = append(names, fmt.Sprint(pm["name"]))
 		}
 	}
-	return n, nil
+	return names
 }
 
 // entryBytes is the canonical form of a provider entry for the state hash:

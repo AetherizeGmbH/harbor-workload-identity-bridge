@@ -201,10 +201,11 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 // and returns it (nil when absent) together with the content it must
 // have after this install. The caller holds the config lock.
 //
-// While no other provider is in the file, that content is the rendered
-// config verbatim, byte for byte what installers before ADR-0029 wrote.
-// Once other installs share the file, only this install's entry is
-// replaced or appended; theirs round-trip untouched.
+// The file is the chart's: installers before ADR-0029 replaced it with
+// the rendered config on every pass. It still gets exactly that while it
+// holds no other install's entry. Other installs' entries (siblingEntry)
+// stay in place; this install's entry is replaced whatever it holds;
+// everything else is dropped, as it always was.
 func ownConfig(cfg *config, rendered []byte, entry map[string]any) (existing, desired []byte, err error) {
 	path := cfg.ownConfigPath()
 	existing, err = readHostFile(cfg.hostPath(path))
@@ -214,21 +215,35 @@ func ownConfig(cfg *config, rendered []byte, entry map[string]any) (existing, de
 	case err != nil:
 		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	others, err := otherProviders(existing, cfg.ProviderName)
+	desired, dropped, err := composeOwnConfig(existing, rendered, entry, cfg.siblingEntry)
 	if err != nil {
 		// Kubelet cannot start with this file either. It is the chart's
 		// own file and was always replaced; it still is.
 		logf("replacing %s, which is not a credential-provider config to merge into: %v", path, err)
 		return existing, rendered, nil
 	}
-	if others == 0 {
-		return existing, rendered, nil
+	for _, name := range dropped {
+		logf("dropping provider %s from %s: not an entry of another harbor-bridge install on this node", name, path)
 	}
-	merged, _, err := mergeProvider(existing, entry)
-	if err != nil {
-		return nil, nil, fmt.Errorf("merge into %s: %w", path, err)
+	return existing, desired, nil
+}
+
+// siblingEntry reports whether entry, found in the chart-owned config of
+// patch and none mode, is another install's (ADR-0029) and stays there.
+// That file is in plugin.hostConfigDir, which the sync container of every
+// release and any pod with a hostPath on that directory can write, and
+// kubelet runs whatever entry it holds after its next restart, which this
+// installer may trigger itself. An entry therefore stays only when such a
+// writer alone cannot have made it: a bridge entry with a valid provider
+// name whose binary is an executable regular file in plugin.hostBinaryDir,
+// which none of them mounts. Another install writes its binary before its
+// entry, so its entry always passes.
+func (c *config) siblingEntry(entry map[string]any) bool {
+	name, ok := entry["name"].(string)
+	if !ok || name == c.ProviderName || validProviderName(name) != nil || !isBridgeProvider(entry) {
+		return false
 	}
-	return existing, merged, nil
+	return isExecutableHostFile(c.hostPath(filepath.Join(c.HostBinDir, name)))
 }
 
 // runMerge injects our provider entry into the node's existing

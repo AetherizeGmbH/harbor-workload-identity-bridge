@@ -115,6 +115,17 @@ func writeHostFile(t *testing.T, env *testEnv, nodePath, content string) {
 	}
 }
 
+// writeSiblingBinary puts the plugin binary of another install named name
+// into the chart's bin dir, as that install's installer does before it
+// writes its entry.
+func writeSiblingBinary(t *testing.T, env *testEnv, name string) {
+	t.Helper()
+	writeHostFile(t, env, filepath.Join(binDir, name), "ELF-fake-plugin")
+	if err := os.Chmod(env.cfg.hostPath(filepath.Join(binDir, name)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertAbsent(t *testing.T, env *testEnv, nodePaths ...string) {
 	t.Helper()
 	for _, p := range nodePaths {
@@ -479,7 +490,8 @@ func TestRun_TakesTheNodeLockBeforeReadingSharedFiles(t *testing.T) {
 	}
 	assertAbsent(t, env, configDir+"/harbor-bridge-ca.crt", binDir+"/harbor-bridge-plugin")
 
-	// Meanwhile, the lock holder installs its own entry.
+	// Meanwhile, the lock holder installs its binary and its entry.
+	writeSiblingBinary(t, env, euName)
 	writeHostFile(t, env, configDir+"/"+configFileName, renderedConfigFor(euName))
 	unlock()
 	select {
@@ -517,6 +529,7 @@ func TestRun_NoneTakesTheConfigLock(t *testing.T) {
 	default:
 	}
 	assertAbsent(t, env, binDir+"/harbor-bridge-plugin", configPath)
+	writeSiblingBinary(t, env, euName)
 	writeHostFile(t, env, configPath, renderedConfigFor(euName))
 	unlock()
 	select {
@@ -559,5 +572,135 @@ func TestRun_ConcurrentInstallsBothLand(t *testing.T) {
 			names, _ := json.Marshal(byName)
 			t.Fatalf("run %d: providers after concurrent installs: %s", i, names)
 		}
+	}
+}
+
+// TestRun_ChartOwnedConfigDropsPlantedEntries: plugin.hostConfigDir, where
+// the chart-owned config of patch and none mode lives, is writable by the
+// sync container of every release and by any pod with a hostPath on it;
+// the bin dir is not. Installers before ADR-0029 replaced that file with
+// the rendered config on every pass, which removed anything planted there.
+// An entry planted next to ours must still not survive a pass, and in
+// patch mode the installer must restart kubelet onto the clean file, not
+// keep the planted entry for its next restart.
+func TestRun_ChartOwnedConfigDropsPlantedEntries(t *testing.T) {
+	configPath := configDir + "/" + configFileName
+	// A bridge entry with a valid name but no binary in the bin dir.
+	plantedNoBinary := strings.Replace(plantedEntry, "name: harbor-bridge-plugin.bak", "name: evil", 1)
+	for _, tc := range []struct {
+		mode         string
+		wantRestarts int
+	}{{modePatch, 2}, {modeNone, 0}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			env := newTestEnv(t, tc.mode, []string{"/usr/bin/kubelet"})
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			// A plugin upgrade leaves the old binary as <name>.bak in the
+			// bin dir: a working copy of our plugin under another name.
+			if err := os.WriteFile(env.cfg.SourcePlugin, []byte("ELF-fake-plugin-v2"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(env.cfg.hostPath(binDir + "/harbor-bridge-plugin.bak")); err != nil {
+				t.Fatalf("precondition: %v", err)
+			}
+
+			writeHostFile(t, env, configPath, renderedConfig+plantedEntry+plantedNoBinary)
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := env.hostFile(t, configPath); got != renderedConfig {
+				t.Fatalf("planted entries survived the pass:\n%s", got)
+			}
+			if env.restarts != tc.wantRestarts {
+				t.Fatalf("restarts = %d, want %d (onto the clean file)", env.restarts, tc.wantRestarts)
+			}
+		})
+	}
+
+	// With another install on the node, its entry stays and the planted
+	// ones still go.
+	a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	b := newSiblingEnv(t, a, modePatch, euName)
+	for _, env := range []*testEnv{a, b} {
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, order := providersIn(t, a, configPath)
+	planted := mustEntry(t, "apiVersion: kubelet.config.k8s.io/v1\nproviders:\n"+plantedNoBinary, "evil")
+	writeHostFile(t, a, configPath, string(configWith(t,
+		before[order[0]].(map[string]any), before[order[1]].(map[string]any), planted)))
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, afterOrder := providersIn(t, a, configPath)
+	if !reflect.DeepEqual(afterOrder, order) || !reflect.DeepEqual(after, before) {
+		t.Fatalf("providers = %v, want %v with their entries unchanged", afterOrder, order)
+	}
+	if a.restarts != 2 {
+		t.Fatalf("restarts = %d, want 2", a.restarts)
+	}
+}
+
+// TestSiblingEntry: an entry in the chart-owned config counts as another
+// install's only if a writer of plugin.hostConfigDir alone cannot have made
+// it.
+func TestSiblingEntry(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	eu := renderedEntry(t, withName(t, newSiblingEnv(t, env, modePatch, euName), euName))
+	euBin := env.cfg.hostPath(binDir + "/" + euName)
+
+	if env.cfg.siblingEntry(eu) {
+		t.Fatal("an entry without a binary counts")
+	}
+	writeHostFile(t, env, binDir+"/"+euName, "ELF-fake-plugin")
+	if env.cfg.siblingEntry(eu) {
+		t.Fatal("an entry whose binary kubelet cannot execute counts")
+	}
+	if err := os.Chmod(euBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !env.cfg.siblingEntry(eu) {
+		t.Fatal("another install's entry does not count")
+	}
+
+	noBridge := map[string]any{}
+	for k, v := range eu {
+		noBridge[k] = v
+	}
+	delete(noBridge, "env")
+	if env.cfg.siblingEntry(noBridge) {
+		t.Fatal("an entry that is not a bridge entry counts")
+	}
+
+	ours := renderedEntry(t, env)
+	writeSiblingBinary(t, env, defaultProviderName)
+	if env.cfg.siblingEntry(ours) {
+		t.Fatal("this install's own entry counts as another install's")
+	}
+
+	dotted := map[string]any{}
+	for k, v := range eu {
+		dotted[k] = v
+	}
+	dotted["name"] = defaultProviderName + ".bak"
+	writeSiblingBinary(t, env, defaultProviderName+".bak")
+	if env.cfg.siblingEntry(dotted) {
+		t.Fatal("an entry whose name is no provider name counts")
+	}
+
+	// A symlink in the bin dir is not a binary an install wrote.
+	if err := os.Remove(euBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(env.cfg.hostPath(binDir+"/"+defaultProviderName), euBin); err != nil {
+		t.Fatal(err)
+	}
+	if env.cfg.siblingEntry(eu) {
+		t.Fatal("an entry whose binary is a symlink counts")
 	}
 }
