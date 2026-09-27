@@ -132,12 +132,14 @@ func classifyOIDCError(err error) string {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(s, "expired"):
-		return OIDCReasonExpired
-	// Before "signature": go-oidc's "oidc: malformed jwt: unexpected
-	// signature algorithm ..." (an alg=none or HS256 probe) names both.
+	// First: go-oidc's "oidc: malformed jwt: ..." for a token go-jose
+	// cannot parse quotes the token's alg header, which the sender
+	// chooses (alg "expired" must not count as an expired token), and for
+	// an alg=none or HS256 probe it names the signature too.
 	case strings.Contains(s, "malformed"):
 		return OIDCReasonMalformed
+	case strings.Contains(s, "expired"):
+		return OIDCReasonExpired
 	case strings.Contains(s, "signature"):
 		return OIDCReasonBadSignature
 	// go-oidc's real message is "oidc: id token issued by a different

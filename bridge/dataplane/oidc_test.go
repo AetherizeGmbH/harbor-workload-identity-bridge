@@ -285,6 +285,31 @@ func TestValidator_RejectsMalformedToken(t *testing.T) {
 	}
 }
 
+// The alg header is the sender's, and go-oidc quotes it in its error for
+// an algorithm it does not accept. It must not choose the failure
+// category: alg "expired" counted as an expired token.
+func TestValidator_SenderChosenAlgCountsAsMalformed(t *testing.T) {
+	fi := newFixtureIssuer(t)
+	v := newValidatorFor(t, fi)
+	payload, err := json.Marshal(fi.standardClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	for _, alg := range []string{"expired", "HS256", "none"} {
+		t.Run(alg, func(t *testing.T) {
+			token := enc([]byte(`{"alg":"`+alg+`","kid":"`+fi.kid+`"}`)) + "." + enc(payload) + "." + enc([]byte("sig"))
+			_, err := v.Validate(context.Background(), token)
+			if !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("err = %v, want ErrInvalidToken", err)
+			}
+			if c := classifyOIDCError(err); c != OIDCReasonMalformed {
+				t.Fatalf("category = %q for %q, want %q", c, err, OIDCReasonMalformed)
+			}
+		})
+	}
+}
+
 func TestNewValidator_FailsOnUnreachableIssuer(t *testing.T) {
 	// Constructor must fail fast on a bad issuer URL so misconfiguration
 	// blocks the bridge from starting.

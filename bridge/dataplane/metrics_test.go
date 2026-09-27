@@ -112,6 +112,8 @@ func TestMetrics_OIDCFailureClassification(t *testing.T) {
 		// go-oidc/go-jose's message for an alg=none or HS256 probe names
 		// the signature too; it is a malformed token, not a bad signature.
 		{errors.New(`oidc: malformed jwt: unexpected signature algorithm "HS256"; expected ["RS256"]`), OIDCReasonMalformed, "unexpected_algorithm"},
+		// The sender chooses the quoted alg; it must not pick the bucket.
+		{errors.New(`oidc: malformed jwt: unexpected signature algorithm "expired"; expected ["RS256"]`), OIDCReasonMalformed, "alg_names_another_category"},
 		// ADR-0028: matched by sentinel, not by text; the message names
 		// an iat "issued" in the future, which must not read as an issuer.
 		{fmt.Errorf("%w: %w: issued in the future", ErrInvalidToken, ErrTokenLifetime), OIDCReasonExcessiveLifetime, "excessive_lifetime"},
