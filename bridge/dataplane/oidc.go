@@ -25,7 +25,8 @@ import (
 )
 
 // Validator verifies a Kubernetes service-account token's signature,
-// expiration, and issuer. Each Validator instance is bound at construction
+// expiration, and issuer, and enforces the maximum lifetime and the pod
+// binding (ADR-0028). Each Validator instance is bound at construction
 // time to one cluster's issuer (ADR-0009: one bridge per cluster, one
 // issuer per bridge), so per-request checks need only confirm audience
 // and subject — those are HarborAccess-CR-specific and live in the
@@ -37,7 +38,8 @@ type Validator interface {
 // Claims is the projection of JWT claims the data plane needs to make
 // its trust decision. Kubernetes-specific claims
 // (kubernetes.io/serviceaccount/*, groups, etc.) are intentionally
-// not exposed: the bridge only needs sub/aud/iss (go-oidc enforces exp).
+// not exposed: the bridge matches on sub/aud/iss; go-oidc enforces exp,
+// and Validate the lifetime and the pod binding (ADR-0028).
 type Claims struct {
 	// Subject is the sub claim. For Kubernetes SA tokens this is
 	// "system:serviceaccount:<namespace>:<name>".
@@ -56,9 +58,15 @@ type Claims struct {
 	// rejected expired tokens; exposed for logging and tests.
 	Expiry time.Time
 
-	// Pod, PodUID and Node come from the kubernetes.io claim of a bound
-	// ServiceAccount token (empty for unbound tokens). They are for the
-	// audit log only, never for a trust decision.
+	// IssuedAt is the iat claim. Validate has already checked that
+	// Expiry - IssuedAt is within the maximum token lifetime.
+	IssuedAt time.Time
+
+	// Pod, PodUID and Node come from the kubernetes.io claim of a
+	// pod-bound ServiceAccount token. Validate requires Pod and PodUID
+	// unless Config.AllowNonPodBoundTokens (ADR-0028); Node may be empty.
+	// Which pod a token names is for the audit log only: authorization
+	// stays with the ServiceAccount (ADR-0010).
 	Pod    string
 	PodUID string
 	Node   string
@@ -69,6 +77,20 @@ type Claims struct {
 // error category. Specific causes (expiry, signature, issuer mismatch)
 // are surfaced in the wrapped error message for log readability.
 var ErrInvalidToken = errors.New("invalid token")
+
+// ErrTokenLifetime marks a token whose lifetime (exp - iat) exceeds the
+// maximum or cannot be determined (ADR-0028). Wrapped in ErrInvalidToken.
+var ErrTokenLifetime = errors.New("token lifetime not accepted")
+
+// ErrTokenNotPodBound marks a token without the kubernetes.io pod claim
+// while pod binding is required (ADR-0028). Wrapped in ErrInvalidToken.
+var ErrTokenNotPodBound = errors.New("token not bound to a pod")
+
+// maxIssuedAtSkew is how far in the future a token's iat may lie: the
+// leeway go-oidc allows for nbf, which Kubernetes sets to iat. A token
+// issued further ahead could stay valid for longer than the maximum
+// lifetime from now.
+const maxIssuedAtSkew = 5 * time.Minute
 
 // Config supplies the knobs Validator construction needs.
 type Config struct {
@@ -94,6 +116,17 @@ type Config struct {
 	// client with a custom transport for httptest, mTLS, or audit
 	// instrumentation. nil means http.DefaultClient.
 	HTTPClient *http.Client
+
+	// MaxTokenLifetime is the longest lifetime (exp - iat) an accepted
+	// token may have. Required, positive. Kubelet's credential-provider
+	// tokens have exactly one hour, the TokenRequest default (ADR-0028).
+	MaxTokenLifetime time.Duration
+
+	// AllowNonPodBoundTokens accepts tokens without the kubernetes.io pod
+	// claim. The zero value requires the claim, which every kubelet token
+	// carries; true weakens the bridge and exists for hand-minted tokens
+	// in local development (ADR-0028).
+	AllowNonPodBoundTokens bool
 }
 
 // NewValidator constructs a Validator that verifies tokens issued by
@@ -105,6 +138,9 @@ type Config struct {
 func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	if cfg.Issuer == "" {
 		return nil, errors.New("oidc: issuer is required")
+	}
+	if cfg.MaxTokenLifetime <= 0 {
+		return nil, fmt.Errorf("oidc: max token lifetime must be positive, got %s", cfg.MaxTokenLifetime)
 	}
 	issuerURL, err := url.Parse(cfg.Issuer)
 	if err != nil {
@@ -164,7 +200,11 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		SkipClientIDCheck:    true,
 		SupportedSigningAlgs: algs,
 	})
-	return &goOIDCValidator{verifier: verifier}, nil
+	return &goOIDCValidator{
+		verifier:               verifier,
+		maxLifetime:            cfg.MaxTokenLifetime,
+		allowNonPodBoundTokens: cfg.AllowNonPodBoundTokens,
+	}, nil
 }
 
 // supportedAlgs keeps the discovery-advertised algorithms the key set can
@@ -183,7 +223,9 @@ func supportedAlgs(advertised []string) []string {
 }
 
 type goOIDCValidator struct {
-	verifier *oidc.IDTokenVerifier
+	verifier               *oidc.IDTokenVerifier
+	maxLifetime            time.Duration
+	allowNonPodBoundTokens bool
 }
 
 func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claims, error) {
@@ -195,15 +237,37 @@ func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claim
 	if err := idToken.Claims(&raw); err != nil {
 		return nil, fmt.Errorf("%w: parse claims: %w", ErrInvalidToken, err)
 	}
+	if err := checkLifetime(idToken.IssuedAt, idToken.Expiry, time.Now(), v.maxLifetime); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
+	}
+	if !v.allowNonPodBoundTokens && (raw.K8s.Pod.Name == "" || raw.K8s.Pod.UID == "") {
+		return nil, fmt.Errorf("%w: %w: no kubernetes.io pod name and uid", ErrInvalidToken, ErrTokenNotPodBound)
+	}
 	return &Claims{
 		Subject:  raw.Sub,
 		Audience: []string(raw.Aud),
 		Issuer:   idToken.Issuer,
 		Expiry:   idToken.Expiry,
+		IssuedAt: idToken.IssuedAt,
 		Pod:      raw.K8s.Pod.Name,
 		PodUID:   raw.K8s.Pod.UID,
 		Node:     raw.K8s.Node.Name,
 	}, nil
+}
+
+// checkLifetime enforces the lifetime cap (ADR-0028). go-oidc has already
+// checked exp against now. A token without iat has no determinable
+// lifetime; go-oidc leaves IssuedAt zero when the claim is absent.
+func checkLifetime(iat, exp, now time.Time, maxLifetime time.Duration) error {
+	switch {
+	case iat.IsZero():
+		return fmt.Errorf("%w: no iat claim", ErrTokenLifetime)
+	case iat.After(now.Add(maxIssuedAtSkew)):
+		return fmt.Errorf("%w: issued in the future (iat %s)", ErrTokenLifetime, iat.UTC().Format(time.RFC3339))
+	case exp.Sub(iat) > maxLifetime:
+		return fmt.Errorf("%w: lifetime %s exceeds the maximum %s", ErrTokenLifetime, exp.Sub(iat), maxLifetime)
+	}
+	return nil
 }
 
 // rawClaims is the JSON shape we unmarshal into when extracting claims

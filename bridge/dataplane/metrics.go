@@ -4,6 +4,7 @@
 package dataplane
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -23,17 +24,21 @@ const (
 	ResultRateLimited  = "rate_limited"
 )
 
-// Label values for bridge_oidc_validation_failures_total{reason}. The
-// validator (go-oidc/v3) returns error strings; we substring-match into
-// these stable buckets because go-oidc does not expose typed error
-// categories. If go-oidc later adds typed errors, swap the classifier in
+// Label values for bridge_oidc_validation_failures_total{reason}, also
+// the audit line's category for invalid_token. go-oidc/v3 returns error
+// strings; we substring-match into these stable buckets because go-oidc
+// does not expose typed error categories. The validator's own checks
+// (ADR-0028) return sentinel errors and are matched with errors.Is. If
+// go-oidc later adds typed errors, swap the classifier in
 // classifyOIDCError without churning callers.
 const (
-	OIDCReasonExpired      = "expired"
-	OIDCReasonBadSignature = "bad_signature"
-	OIDCReasonWrongIssuer  = "wrong_issuer"
-	OIDCReasonMalformed    = "malformed"
-	OIDCReasonOther        = "other"
+	OIDCReasonExpired           = "expired"
+	OIDCReasonBadSignature      = "bad_signature"
+	OIDCReasonWrongIssuer       = "wrong_issuer"
+	OIDCReasonMalformed         = "malformed"
+	OIDCReasonExcessiveLifetime = "excessive_lifetime"
+	OIDCReasonNotPodBound       = "not_pod_bound"
+	OIDCReasonOther             = "other"
 )
 
 // Metrics is the set of Prometheus collectors exported by the data plane.
@@ -89,7 +94,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited} {
 		m.Issuances.WithLabelValues(r)
 	}
-	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonOther} {
+	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonOther} {
 		m.OIDCValidationFailures.WithLabelValues(r)
 	}
 	return m
@@ -105,13 +110,19 @@ func PromHandler(g prometheus.Gatherer) http.Handler {
 }
 
 // classifyOIDCError buckets a Validate error into one of the OIDCReason*
-// label values. go-oidc does not expose typed error categories so we match
+// label values. The validator's own checks are matched by their sentinel
+// errors first. go-oidc does not expose typed error categories so we match
 // on the message prefix it emits. Anything we don't recognise falls into
 // "other" — that bucket should stay near zero in steady state; spikes
 // signal a new go-oidc error path worth adding to this classifier.
 func classifyOIDCError(err error) string {
-	if err == nil {
+	switch {
+	case err == nil:
 		return OIDCReasonOther
+	case errors.Is(err, ErrTokenLifetime):
+		return OIDCReasonExcessiveLifetime
+	case errors.Is(err, ErrTokenNotPodBound):
+		return OIDCReasonNotPodBound
 	}
 	s := strings.ToLower(err.Error())
 	switch {

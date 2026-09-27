@@ -167,6 +167,14 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- fail "bridge.mTLS.clientIssuerRef.kind must be ClusterIssuer when plugin.namespace is set: the plugin's client certificate is issued in the plugin namespace. ADR-0027." -}}
 {{- end -}}
 {{- end -}}
+{{- $tokenValidation := .Values.bridge.tokenValidation | default dict -}}
+{{- $maxLifetime := toString $tokenValidation.maxLifetime -}}
+{{- if or (not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" $maxLifetime)) (not (regexMatch "[1-9]" $maxLifetime)) -}}
+{{- fail (printf "bridge.tokenValidation.maxLifetime=%q must be a positive Go duration such as 1h (ADR-0028)." $maxLifetime) -}}
+{{- end -}}
+{{- if not (kindIs "bool" $tokenValidation.requirePodBinding) -}}
+{{- fail (printf "bridge.tokenValidation.requirePodBinding=%q must be true or false (ADR-0028)." (toString $tokenValidation.requirePodBinding)) -}}
+{{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}

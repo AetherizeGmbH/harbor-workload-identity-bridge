@@ -104,6 +104,38 @@ for an object that stops matching and releases its own per-instance
 finalizer. Bridges that share a Harbor must use different `clusterName`
 values (the robot ownership prefix).
 
+### Long-lived and unbound tokens
+
+The bridge validates tokens locally against the apiserver's signing keys
+([ADR-0006](docs/adr/0006-oidc-validation-and-audience.md)), so it cannot
+ask whether a token's pod still exists. It therefore limits which tokens
+it accepts ([ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md)):
+
+- **Lifetime cap.** A token whose lifetime (`exp - iat`) exceeds
+  `bridge.tokenValidation.maxLifetime` (default `1h`), that has no `iat`,
+  or whose `iat` lies more than five minutes in the future is refused.
+  Kubelet's credential-provider tokens last exactly one hour. Without the
+  cap, `kubectl create token <sa> --audience=<aud> --duration=8760h` by
+  anyone allowed to create tokens for that ServiceAccount yielded a
+  credential valid at the bridge for a year.
+- **Pod binding.** A token without the `kubernetes.io` pod claim (pod
+  name and UID) is refused; every kubelet token is bound to the pod that
+  pulls. `bridge.tokenValidation.requirePodBinding: false` turns this
+  off and weakens the bridge; it exists for hand-minted tokens in local
+  development only.
+
+Both are `401` with `reason=invalid_token` and the audit category
+`excessive_lifetime` or `not_pod_bound`. Which pod a token names is not
+used for authorization: the ServiceAccount is the identity
+([ADR-0010](docs/adr/0010-service-account-ref-as-identity.md)).
+
+Residual risk: a stolen kubelet token stays usable at the bridge for its
+remaining lifetime, at most one hour, after its pod or its ServiceAccount
+is deleted (only the apiserver's TokenReview checks the bound object).
+Whoever may create tokens for a ServiceAccount can still mint a pod-bound
+token for an existing pod of it, but must mint a new one every hour, each
+recorded as a TokenRequest in the apiserver audit log.
+
 ### Cross-cluster robot manipulation
 
 Bridges share a Harbor instance but never each other's robots:
@@ -238,7 +270,10 @@ The bridge cannot distinguish "the workload's process" from "a shell
 spawned in the workload's container". Mitigations are SA-token-scope
 choices the operator makes upstream: `automountServiceAccountToken:
 false` when not needed, short-lived projected tokens, audience-scoped
-tokens.
+tokens. The bridge accepts no token that lives longer than
+`bridge.tokenValidation.maxLifetime` (see *Long-lived and unbound
+tokens*), so a stolen token stops working at the bridge within that
+time.
 
 ### Replay of cached credentials after revocation
 
@@ -422,6 +457,7 @@ their own RBAC.
 | Harbor transport (`harbor.url`) | https required | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h | Use 1h or less unless you have a measured pull-rate problem |
+| `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
 | `plugin.install.mode` | `auto` | `none` for the least privilege (no `hostPID`, no privileged container, two narrow hostPath mounts; you wire the kubelet flags). `plugin.enabled: false` for no node agent at all |
 | `plugin.audienceRBAC.create` | `true` | Keep `true` unless you're providing a tighter binding via admission webhook; the chart's binding is audience-narrow but `system:nodes`-broad |
 | Pod security (bridge) | hardened by default (`runAsNonRoot`, `runAsUser: 65532`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drops `ALL` capabilities, `seccompProfile: RuntimeDefault`) | Keep the defaults; relax only if a sidecar genuinely requires it |
@@ -456,11 +492,14 @@ credential issued
 
 credential denied
   source=…  reason=invalid_token|no_matching_harboraccess|secret_owner_mismatch
+  category=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other   # invalid_token only
   (subject, pod, node, audiences once the token is valid) requested_image=…
 ```
 
-The pod and node come from the `kubernetes.io` claim of a bound token and
-are recorded for attribution only; no trust decision reads them.
+The pod and node come from the `kubernetes.io` claim of the token. The
+bridge requires the pod claim to be present (ADR-0028); which pod and node
+it names is recorded for attribution only, and no authorization decision
+reads it. The token itself is never logged.
 
 The credential endpoint accepts at most `bridge.rateLimit.perSource`
 requests per second (burst `bridge.rateLimit.burst`) from one source IP
@@ -493,14 +532,15 @@ IDs cannot make the bridge poll the apiserver once per request.
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 
 - `bridge_credential_issuances_total{result=ok|unauthorized|forbidden|unavailable|bad_request|server_error|rate_limited}`
-- `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|other}`
+- `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other}`
 - `bridge_harboraccess_lookup_failures_total`
 - `bridge_robot_secret_missing_total`
 - `bridge_credential_issuance_duration_seconds`
 
 A non-zero rate on `result=unauthorized` or
-`oidc_validation_failures_total{reason=wrong_issuer}` is worth a page;
-both indicate someone is trying tokens the bridge does not trust.
+`oidc_validation_failures_total{reason=wrong_issuer|excessive_lifetime|not_pod_bound}`
+is worth a page: kubelet never sends such tokens, so someone is trying
+tokens the bridge does not trust.
 
 ## Verifying release artifacts
 

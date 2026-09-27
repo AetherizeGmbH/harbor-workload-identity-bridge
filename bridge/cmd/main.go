@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
@@ -62,6 +63,10 @@ const (
 	defaultRateBurst   = 100
 
 	leaderElectionID = "bridge.harbor.aetherize.io"
+
+	// kubeletTokenLifetime is the lifetime of the tokens kubelet requests
+	// for the credential provider: the TokenRequest default (ADR-0028).
+	kubeletTokenLifetime = time.Hour
 )
 
 func main() {
@@ -90,6 +95,7 @@ func run() error {
 	for k, v := range cfg.Sanitized() {
 		setupLog.Info("config", "key", k, "value", v)
 	}
+	logWeakTokenValidation(setupLog, cfg)
 
 	// Step 2: build the scheme. clientgo gives us the core resources;
 	// harborv1alpha1 is our CRD. Also resolve the rest.Config for the
@@ -195,7 +201,9 @@ func run() error {
 	// rationale.
 	startupCtx := ctrl.SetupSignalHandler()
 	validatorCfg := dataplane.Config{
-		Issuer: cfg.OIDCIssuer.String(),
+		Issuer:                 cfg.OIDCIssuer.String(),
+		MaxTokenLifetime:       cfg.TokenMaxLifetime,
+		AllowNonPodBoundTokens: !cfg.RequirePodBoundToken,
 	}
 	if cfg.OIDCJWKSURL != nil {
 		validatorCfg.JWKSURL = cfg.OIDCJWKSURL.String()
@@ -268,6 +276,19 @@ func run() error {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
+}
+
+// logWeakTokenValidation warns about token-validation settings that either
+// weaken the bridge or refuse kubelet's own tokens (ADR-0028).
+func logWeakTokenValidation(log logr.Logger, cfg *controlplane.Config) {
+	if !cfg.RequirePodBoundToken {
+		log.Info("tokens not bound to a pod are accepted; this weakens the bridge and is meant for local development only",
+			"env", controlplane.EnvRequirePodBoundToken)
+	}
+	if cfg.TokenMaxLifetime < kubeletTokenLifetime {
+		log.Info("the maximum token lifetime is below the lifetime of kubelet's tokens; every kubelet request will be refused unless the token issuer caps lifetimes lower",
+			"env", controlplane.EnvTokenMaxLifetime, "max", cfg.TokenMaxLifetime.String(), "kubelet", kubeletTokenLifetime.String())
+	}
 }
 
 // rateLimitFromEnv reads the per-source request limit of the credential

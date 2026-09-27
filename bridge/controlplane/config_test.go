@@ -6,8 +6,10 @@ package controlplane
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // setEnv saves the current env, applies the supplied overrides, and returns
@@ -27,6 +29,7 @@ func clearAllEnv(t *testing.T) {
 	for _, k := range []string{
 		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
 		EnvForceLocalValidation, EnvLogLevel, EnvAudience, EnvHarborAccessSelector, EnvInstance,
+		EnvTokenMaxLifetime, EnvRequirePodBoundToken,
 	} {
 		t.Setenv(k, "")
 		// t.Setenv with empty string doesn't actually unset on every Go
@@ -89,6 +92,71 @@ func TestLoadFromEnv_AppliesDefaults(t *testing.T) {
 	}
 	if cfg.LogLevel != defaultLogLevel {
 		t.Errorf("LogLevel default expected %q; got %q", defaultLogLevel, cfg.LogLevel)
+	}
+	// ADR-0028: kubelet's tokens last exactly one hour and are pod-bound.
+	if cfg.TokenMaxLifetime != time.Hour {
+		t.Errorf("TokenMaxLifetime default expected 1h; got %s", cfg.TokenMaxLifetime)
+	}
+	if !cfg.RequirePodBoundToken {
+		t.Errorf("RequirePodBoundToken default expected true; got false")
+	}
+}
+
+func TestLoadFromEnv_TokenPolicy(t *testing.T) {
+	base := map[string]string{
+		EnvClusterName:    "prod",
+		EnvNamespace:      "harbor-bridge-system",
+		EnvOIDCIssuer:     "https://kubernetes.default.svc",
+		EnvHarborURL:      "https://harbor.example.com",
+		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		EnvAudience:       "harbor-bridge-prod",
+	}
+	tests := []struct {
+		name        string
+		maxLifetime string // "" = unset
+		requirePod  string // "" = unset
+		wantMax     time.Duration
+		wantPod     bool
+		mustHave    string // non-empty = expected error fragment
+	}{
+		{name: "defaults", wantMax: time.Hour, wantPod: true},
+		{name: "custom", maxLifetime: "90m", requirePod: "false", wantMax: 90 * time.Minute, wantPod: false},
+		{name: "explicit true", maxLifetime: "1h", requirePod: "true", wantMax: time.Hour, wantPod: true},
+		{name: "not a duration", maxLifetime: "forever", mustHave: EnvTokenMaxLifetime + ` "forever" must be a duration`},
+		{name: "bare number", maxLifetime: "3600", mustHave: EnvTokenMaxLifetime + ` "3600" must be a duration`},
+		{name: "zero", maxLifetime: "0s", mustHave: EnvTokenMaxLifetime + ` "0s" must be positive`},
+		{name: "negative", maxLifetime: "-1h", mustHave: EnvTokenMaxLifetime + ` "-1h" must be positive`},
+		{name: "not a boolean", requirePod: "maybe", mustHave: EnvRequirePodBoundToken + ` "maybe" must be a boolean`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearAllEnv(t)
+			setEnv(t, base)
+			if tt.maxLifetime != "" {
+				setEnv(t, map[string]string{EnvTokenMaxLifetime: tt.maxLifetime})
+			}
+			if tt.requirePod != "" {
+				setEnv(t, map[string]string{EnvRequirePodBoundToken: tt.requirePod})
+			}
+			cfg, err := LoadFromEnv()
+			if tt.mustHave != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.mustHave) {
+					t.Fatalf("err = %v, want it to contain %q", err, tt.mustHave)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.TokenMaxLifetime != tt.wantMax || cfg.RequirePodBoundToken != tt.wantPod {
+				t.Errorf("TokenMaxLifetime=%s RequirePodBoundToken=%v, want %s %v",
+					cfg.TokenMaxLifetime, cfg.RequirePodBoundToken, tt.wantMax, tt.wantPod)
+			}
+			m := cfg.Sanitized()
+			if m[EnvTokenMaxLifetime] != tt.wantMax.String() || m[EnvRequirePodBoundToken] != strconv.FormatBool(tt.wantPod) {
+				t.Errorf("Sanitized() does not report the token policy: %v", m)
+			}
+		})
 	}
 }
 
@@ -198,6 +266,8 @@ func TestLoadFromEnv_ReportsAllErrorsAtOnce(t *testing.T) {
 		EnvAudience:             "harbor-bridge-prod",
 		EnvForceLocalValidation: "perhaps",
 		EnvLogLevel:             "loud",
+		EnvTokenMaxLifetime:     "0",
+		EnvRequirePodBoundToken: "sometimes",
 	})
 
 	_, err := LoadFromEnv()
@@ -207,7 +277,7 @@ func TestLoadFromEnv_ReportsAllErrorsAtOnce(t *testing.T) {
 	msg := err.Error()
 	for _, fragment := range []string{
 		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
-		EnvForceLocalValidation, EnvLogLevel,
+		EnvForceLocalValidation, EnvLogLevel, EnvTokenMaxLifetime, EnvRequirePodBoundToken,
 	} {
 		if !strings.Contains(msg, fragment) {
 			t.Errorf("aggregated error missing reference to %s: %s", fragment, msg)

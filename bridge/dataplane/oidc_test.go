@@ -111,27 +111,49 @@ func (fi *fixtureIssuer) signTokenWithOtherKey(t *testing.T, claims jwt.MapClaim
 	return signed
 }
 
-// standardClaims returns SA-token-shaped claims with iss bound to the
-// fixture. Tests override fields they want to test against.
+// standardClaims returns claims shaped like the token kubelet requests
+// for the credential provider: one hour, bound to a pod (ADR-0028), iss
+// bound to the fixture. Tests override fields they want to test against.
 func (fi *fixtureIssuer) standardClaims() jwt.MapClaims {
 	now := time.Now()
 	return jwt.MapClaims{
-		"iss": fi.URL(),
-		"aud": []string{"harbor.example.com"},
-		"sub": "system:serviceaccount:flux-system:source-controller",
-		"iat": now.Unix(),
-		"exp": now.Add(time.Hour).Unix(),
+		"iss":           fi.URL(),
+		"aud":           []string{"harbor.example.com"},
+		"sub":           "system:serviceaccount:flux-system:source-controller",
+		"iat":           now.Unix(),
+		"nbf":           now.Unix(),
+		"exp":           now.Add(time.Hour).Unix(),
+		"kubernetes.io": podBinding(),
 	}
 }
 
-// newValidatorFor constructs a Validator pointed at the fixture. The
+// podBinding is the kubernetes.io claim of a token bound to a pod.
+func podBinding() map[string]any {
+	return map[string]any{
+		"namespace":      "flux-system",
+		"pod":            map[string]any{"name": "source-controller-7d9f", "uid": "3f2c0a1e"},
+		"node":           map[string]any{"name": "node-a", "uid": "9e1b"},
+		"serviceaccount": map[string]any{"name": "source-controller", "uid": "5a7d"},
+	}
+}
+
+// newValidatorFor constructs a Validator pointed at the fixture, with the
+// default token policy (one-hour cap, pod binding required). The
 // fixture's httptest.Server.Client() transport is used so plain-HTTP
 // JWKS discovery works in tests without disabling TLS verification.
 func newValidatorFor(t *testing.T, fi *fixtureIssuer) Validator {
 	t.Helper()
+	return newValidatorWith(t, fi, Config{MaxTokenLifetime: time.Hour})
+}
+
+// newValidatorWith is newValidatorFor with the caller's token policy.
+func newValidatorWith(t *testing.T, fi *fixtureIssuer, policy Config) Validator {
+	t.Helper()
 	v, err := NewValidator(context.Background(), Config{
-		Issuer:     fi.URL(),
-		HTTPClient: fi.server.Client(),
+		Issuer:                 fi.URL(),
+		HTTPClient:             fi.server.Client(),
+		MaxTokenLifetime:       policy.MaxTokenLifetime,
+		AllowNonPodBoundTokens: policy.AllowNonPodBoundTokens,
 	})
 	if err != nil {
 		t.Fatalf("construct validator: %v", err)
@@ -163,6 +185,9 @@ func TestValidator_ValidToken(t *testing.T) {
 	}
 	if claims.Expiry.IsZero() {
 		t.Errorf("Expiry not populated")
+	}
+	if got := claims.Expiry.Sub(claims.IssuedAt); got != time.Hour {
+		t.Errorf("Expiry - IssuedAt = %s, want 1h", got)
 	}
 }
 
@@ -264,11 +289,24 @@ func TestNewValidator_FailsOnUnreachableIssuer(t *testing.T) {
 	// Constructor must fail fast on a bad issuer URL so misconfiguration
 	// blocks the bridge from starting.
 	_, err := NewValidator(context.Background(), Config{
-		Issuer:     "http://127.0.0.1:1/nonexistent",
-		HTTPClient: &http.Client{Timeout: time.Second},
+		Issuer:           "http://127.0.0.1:1/nonexistent",
+		HTTPClient:       &http.Client{Timeout: time.Second},
+		MaxTokenLifetime: time.Hour,
 	})
 	if err == nil {
 		t.Fatal("expected NewValidator to fail on unreachable issuer")
+	}
+	if !strings.Contains(err.Error(), "discovery") {
+		t.Errorf("error should come from discovery: %v", err)
+	}
+}
+
+func TestNewValidator_RequiresPositiveMaxTokenLifetime(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Hour} {
+		_, err := NewValidator(context.Background(), Config{Issuer: "https://kubernetes.default.svc", MaxTokenLifetime: d})
+		if err == nil || !strings.Contains(err.Error(), "max token lifetime must be positive") {
+			t.Errorf("MaxTokenLifetime=%s: err = %v, want the positive-lifetime refusal", d, err)
+		}
 	}
 }
 
@@ -303,20 +341,22 @@ func TestNewValidator_JWKSURL_SkipsDiscoveryAndValidatesCustomIssuer(t *testing.
 	client := &http.Client{Transport: roundTripperFunc(disallowDiscovery)}
 
 	v, err := NewValidator(context.Background(), Config{
-		Issuer:     declaredIssuer,
-		JWKSURL:    fi.URL() + "/keys",
-		HTTPClient: client,
+		Issuer:           declaredIssuer,
+		JWKSURL:          fi.URL() + "/keys",
+		HTTPClient:       client,
+		MaxTokenLifetime: time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("NewValidator: %v", err)
 	}
 
 	tok := fi.signToken(t, jwt.MapClaims{
-		"iss": declaredIssuer, // matches Config.Issuer, NOT the fixture's URL
-		"sub": "system:serviceaccount:flux-system:source-controller",
-		"aud": "harbor-bridge",
-		"exp": time.Now().Add(time.Hour).Unix(),
-		"iat": time.Now().Unix(),
+		"iss":           declaredIssuer, // matches Config.Issuer, NOT the fixture's URL
+		"sub":           "system:serviceaccount:flux-system:source-controller",
+		"aud":           "harbor-bridge",
+		"exp":           time.Now().Add(time.Hour).Unix(),
+		"iat":           time.Now().Unix(),
+		"kubernetes.io": podBinding(),
 	})
 
 	claims, err := v.Validate(context.Background(), tok)
@@ -337,21 +377,28 @@ func TestNewValidator_JWKSURL_RejectsTokensWithWrongIssuer(t *testing.T) {
 	const declaredIssuer = "https://kubernetes.default.svc.cluster.local"
 
 	v, err := NewValidator(context.Background(), Config{
-		Issuer:  declaredIssuer,
-		JWKSURL: fi.URL() + "/keys",
+		Issuer:           declaredIssuer,
+		JWKSURL:          fi.URL() + "/keys",
+		MaxTokenLifetime: time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("NewValidator: %v", err)
 	}
 
 	tok := fi.signToken(t, jwt.MapClaims{
-		"iss": "https://somewhere-else.example.com", // does not match declaredIssuer
-		"sub": "system:serviceaccount:x:y",
-		"exp": time.Now().Add(time.Hour).Unix(),
+		"iss":           "https://somewhere-else.example.com", // does not match declaredIssuer
+		"sub":           "system:serviceaccount:x:y",
+		"exp":           time.Now().Add(time.Hour).Unix(),
+		"iat":           time.Now().Unix(),
+		"kubernetes.io": podBinding(),
 	})
 
-	if _, err := v.Validate(context.Background(), tok); err == nil {
+	_, err = v.Validate(context.Background(), tok)
+	if err == nil {
 		t.Fatal("expected Validate to reject token with mismatched issuer")
+	}
+	if got := classifyOIDCError(err); got != OIDCReasonWrongIssuer {
+		t.Errorf("category = %q, want %q (%v)", got, OIDCReasonWrongIssuer, err)
 	}
 }
 

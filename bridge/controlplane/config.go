@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/labels"
 
@@ -40,6 +41,8 @@ const (
 	EnvAudience             = "BRIDGE_AUDIENCE"
 	EnvHarborAccessSelector = "BRIDGE_HARBORACCESS_SELECTOR"
 	EnvInstance             = "BRIDGE_INSTANCE"
+	EnvTokenMaxLifetime     = "BRIDGE_TOKEN_MAX_LIFETIME"
+	EnvRequirePodBoundToken = "BRIDGE_REQUIRE_POD_BOUND_TOKEN"
 
 	// instanceMaxLen keeps the per-instance finalizer's name part
 	// ("robot-<instance>") within the 63-character limit.
@@ -52,6 +55,10 @@ const (
 
 	// defaultHarborRobotPrefix is Harbor's default robot_name_prefix.
 	defaultHarborRobotPrefix = "robot$"
+
+	// defaultTokenMaxLifetime admits kubelet's credential-provider tokens,
+	// which carry the TokenRequest default lifetime of one hour (ADR-0028).
+	defaultTokenMaxLifetime = time.Hour
 
 	adminUsernameKey = "username"
 	adminPasswordKey = "password"
@@ -165,6 +172,16 @@ type Config struct {
 	// Instance names this bridge among several on a cluster. It is
 	// required with a selector and forms the per-instance finalizer.
 	Instance string
+
+	// TokenMaxLifetime is the longest lifetime (exp - iat) of a
+	// ServiceAccount token the data plane accepts (ADR-0028). Defaults to
+	// defaultTokenMaxLifetime; must be positive.
+	TokenMaxLifetime time.Duration
+
+	// RequirePodBoundToken makes the data plane refuse tokens without the
+	// kubernetes.io pod claim (ADR-0028). Defaults to true. false weakens
+	// the bridge and exists for hand-minted tokens in local development.
+	RequirePodBoundToken bool
 }
 
 // Finalizer returns the finalizer this bridge sets on the HarborAccess
@@ -195,6 +212,8 @@ func LoadFromEnv() (*Config, error) {
 		LogLevel:             defaultLogLevel,
 		ForceLocalValidation: true,
 		HarborRobotPrefix:    defaultHarborRobotPrefix,
+		TokenMaxLifetime:     defaultTokenMaxLifetime,
+		RequirePodBoundToken: true,
 	}
 	var errs []error
 
@@ -273,6 +292,27 @@ func LoadFromEnv() (*Config, error) {
 		}
 	}
 
+	if raw := strings.TrimSpace(os.Getenv(EnvTokenMaxLifetime)); raw != "" {
+		v, err := time.ParseDuration(raw)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s %q must be a duration such as 1h", EnvTokenMaxLifetime, raw))
+		case v <= 0:
+			errs = append(errs, fmt.Errorf("%s %q must be positive", EnvTokenMaxLifetime, raw))
+		default:
+			cfg.TokenMaxLifetime = v
+		}
+	}
+
+	if raw := os.Getenv(EnvRequirePodBoundToken); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s %q must be a boolean", EnvRequirePodBoundToken, raw))
+		} else {
+			cfg.RequirePodBoundToken = v
+		}
+	}
+
 	if raw := strings.TrimSpace(os.Getenv(EnvLogLevel)); raw != "" {
 		if _, ok := validLogLevels[raw]; !ok {
 			errs = append(errs, fmt.Errorf("%s %q must be one of debug, info, warn, error", EnvLogLevel, raw))
@@ -344,6 +384,8 @@ func (c *Config) Sanitized() map[string]string {
 		EnvLogLevel:             c.LogLevel,
 		EnvAudience:             c.Audience,
 		EnvHarborAllowHTTP:      strconv.FormatBool(c.HarborAllowHTTP),
+		EnvTokenMaxLifetime:     c.TokenMaxLifetime.String(),
+		EnvRequirePodBoundToken: strconv.FormatBool(c.RequirePodBoundToken),
 	}
 	if c.HarborCAFile != "" {
 		out[EnvHarborCAFile] = c.HarborCAFile

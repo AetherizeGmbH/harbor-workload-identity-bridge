@@ -598,6 +598,12 @@ spec:
             # The only token audience the bridge serves (ADR-0026).
             - name: BRIDGE_AUDIENCE
               value: "harbor-bridge-prod-eu-west"
+            # Longest accepted token lifetime, and whether a token must be
+            # bound to a pod (ADR-0028).
+            - name: BRIDGE_TOKEN_MAX_LIFETIME
+              value: "1h"
+            - name: BRIDGE_REQUIRE_POD_BOUND_TOKEN
+              value: "true"
             - name: BRIDGE_RATE_LIMIT_PER_SOURCE
               value: "20"
             - name: BRIDGE_RATE_LIMIT_BURST

@@ -218,14 +218,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 1. Validate the SA token (signature, expiry, issuer).
+	// 1. Validate the SA token (signature, expiry, issuer, lifetime, pod
+	// binding; ADR-0028).
 	claims, err := h.Validator.Validate(ctx, rawToken)
 	if err != nil {
+		category := classifyOIDCError(err)
 		h.audit(logger).Info("credential denied", append(caller,
-			"reason", "invalid_token", "err", truncate(err.Error(), 200),
+			"reason", "invalid_token", "category", category, "err", truncate(err.Error(), 200),
 			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
-		h.recordOIDCFailure(err)
+		h.recordOIDCFailure(category)
 		h.recordResult(ResultUnauthorized)
 		return
 	}
@@ -315,11 +317,13 @@ func (h *Handler) recordResult(result string) {
 	h.Metrics.Issuances.WithLabelValues(result).Inc()
 }
 
-func (h *Handler) recordOIDCFailure(err error) {
+// recordOIDCFailure counts a Validate failure under its classifyOIDCError
+// category.
+func (h *Handler) recordOIDCFailure(category string) {
 	if h.Metrics == nil {
 		return
 	}
-	h.Metrics.OIDCValidationFailures.WithLabelValues(classifyOIDCError(err)).Inc()
+	h.Metrics.OIDCValidationFailures.WithLabelValues(category).Inc()
 }
 
 // findHarborAccess returns the HarborAccess CR whose serviceAccountRef

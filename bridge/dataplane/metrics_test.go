@@ -5,6 +5,7 @@ package dataplane
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,6 +109,10 @@ func TestMetrics_OIDCFailureClassification(t *testing.T) {
 		// wrong_issuer bucket could never fire in production.
 		{errors.New(`oidc: id token issued by a different provider, expected "https://a" got "https://b"`), OIDCReasonWrongIssuer, "wrong_issuer"},
 		{errors.New("oidc: malformed jwt"), OIDCReasonMalformed, "malformed"},
+		// ADR-0028: matched by sentinel, not by text; the message names
+		// an iat "issued" in the future, which must not read as an issuer.
+		{fmt.Errorf("%w: %w: issued in the future", ErrInvalidToken, ErrTokenLifetime), OIDCReasonExcessiveLifetime, "excessive_lifetime"},
+		{fmt.Errorf("%w: %w: no kubernetes.io pod name and uid", ErrInvalidToken, ErrTokenNotPodBound), OIDCReasonNotPodBound, "not_pod_bound"},
 		{errors.New("something else entirely"), OIDCReasonOther, "other"},
 	}
 	for _, c := range cases {

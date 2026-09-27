@@ -126,10 +126,12 @@ their respective backends.
 
 For every image pull, the kubelet runs the plugin, which calls the bridge
 with the pod's SA token. The bridge validates the token's signature,
-expiry, and issuer locally; finds the `HarborAccess` whose
-`serviceAccountRef` and `trustPolicy.audience` match the token; reads the
-robot's Basic Auth credentials from a Secret in the bridge's own
-namespace; and returns them.
+expiry, and issuer locally, and requires it to be bound to a pod and to
+live no longer than an hour (by default), as kubelet's tokens do
+([ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md)); finds
+the `HarborAccess` whose `serviceAccountRef` and `trustPolicy.audience`
+match the token; reads the robot's Basic Auth credentials from a Secret in
+the bridge's own namespace; and returns them.
 
 The kubelet then hands those credentials to containerd, which does the
 **standard Harbor handshake itself** — the same `401 →

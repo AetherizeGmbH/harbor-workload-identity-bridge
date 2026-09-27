@@ -1,6 +1,14 @@
 ## Chart value migrations
 
-### Unreleased: optional plugin namespace (ADR-0027)
+### Unreleased: token lifetime cap and pod binding (ADR-0028)
+
+| Change | What to do |
+| --- | --- |
+| The bridge refuses ServiceAccount tokens whose lifetime (`exp - iat`) exceeds `bridge.tokenValidation.maxLifetime` (`BRIDGE_TOKEN_MAX_LIFETIME`, default `1h`) or that carry no `iat` (or one more than five minutes in the future), with `401` and the audit category `excessive_lifetime` | Nothing for kubelet: its tokens last exactly one hour. Hand-minted tokens (local development, scripts calling `/v1/credentials`) need `--duration` of at most the maximum, e.g. `kubectl create token <sa> -n <ns> --audience=<aud> --duration=1h …`. Do not set the maximum below `1h` unless your token issuer issues shorter tokens: every kubelet request would be refused. |
+| The bridge refuses tokens without the `kubernetes.io` pod claim (`bridge.tokenValidation.requirePodBinding`, `BRIDGE_REQUIRE_POD_BOUND_TOKEN`, default `true`), with `401` and the audit category `not_pod_bound` | Nothing for kubelet: its tokens are bound to the pulling pod. Bind hand-minted tokens to a pod that runs as the ServiceAccount: add `--bound-object-kind=Pod --bound-object-name=<pod>` (HOW-TO-TEST.md, Phase 3). `false` accepts unbound tokens again but weakens the bridge; use it only for local development. |
+| `credential denied` audit lines with `reason=invalid_token` carry a new `category` field (`expired`, `bad_signature`, `wrong_issuer`, `malformed`, `excessive_lifetime`, `not_pod_bound`, `other`); `bridge_oidc_validation_failures_total` gains the `reason` values `excessive_lifetime` and `not_pod_bound` | Nothing. Alert on them like on `wrong_issuer`: kubelet never sends such tokens. |
+
+### 0.9.0: optional plugin namespace (ADR-0027)
 
 | Change | What to do |
 | --- | --- |
