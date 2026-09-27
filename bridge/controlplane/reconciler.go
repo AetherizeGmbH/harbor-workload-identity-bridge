@@ -488,14 +488,10 @@ func rotationNotBefore(ha *harborv1alpha1.HarborAccess, secret *corev1.Secret, n
 }
 
 // requeueAfter schedules the next pass: at the rotation instant (plus the
-// safety margin), but no later than ResyncInterval so out-of-band drift is
-// noticed. A per-object offset derived from the UID spreads the resyncs of
-// many HarborAccess objects instead of hitting Harbor in lockstep.
+// safety margin), but no later than resyncAfter so out-of-band drift is
+// noticed.
 func (r *Reconciler) requeueAfter(ha *harborv1alpha1.HarborAccess, notBefore, now time.Time) time.Duration {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(ha.UID))
-	jitter := time.Duration(h.Sum32()%uint32(ResyncInterval/10/time.Second)) * time.Second
-	next := ResyncInterval - jitter
+	next := resyncAfter(ha)
 	if untilRotation := notBefore.Add(RotationSafetyMargin).Sub(now); untilRotation < next {
 		next = untilRotation
 	}
@@ -503,6 +499,17 @@ func (r *Reconciler) requeueAfter(ha *harborv1alpha1.HarborAccess, notBefore, no
 		next = time.Second
 	}
 	return next
+}
+
+// resyncAfter is ResyncInterval less a per-object offset of up to a tenth
+// of it, derived from the UID. Every object is reconciled when the bridge
+// starts; the offset spreads their resyncs instead of hitting Harbor with
+// all of them in lockstep an interval later.
+func resyncAfter(ha *harborv1alpha1.HarborAccess) time.Duration {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(ha.UID))
+	jitter := time.Duration(h.Sum32()%uint32(ResyncInterval/10/time.Second)) * time.Second
+	return ResyncInterval - jitter
 }
 
 // deleteStaleRobots deletes every robot owned by this HarborAccess except
@@ -842,12 +849,13 @@ func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.Harbor
 // markNotReadyWithRequeue is markNotReady for conditions resolved outside
 // the CR: a robot disabled in Harbor, or a robot or Secret that belongs to
 // someone else (RobotConflict). No event on this CR announces that they
-// are gone, so the object is re-checked on the resync interval.
+// are gone, so the object is re-checked on the resync interval
+// (resyncAfter).
 func (r *Reconciler) markNotReadyWithRequeue(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
 	if _, err := r.markNotReady(ctx, ha, reason, message); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: ResyncInterval}, nil
+	return ctrl.Result{RequeueAfter: resyncAfter(ha)}, nil
 }
 
 // markTransientError writes Ready=False AND returns the cause as the

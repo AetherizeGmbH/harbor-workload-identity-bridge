@@ -167,3 +167,33 @@ func TestSecretToHarborAccess_MapsByNameToo(t *testing.T) {
 		}
 	}
 }
+
+// Objects re-checked because of a condition outside the CR are spread over
+// the last tenth of the resync interval by their UID, like Ready ones:
+// every object is reconciled when the bridge starts, and a fixed interval
+// would send all of their Harbor lookups at once an interval later.
+func TestReconcile_ResyncRequeueIsSpreadPerObject(t *testing.T) {
+	robotName := "bridge-prod-eu-west.flux-system.source-controller"
+	requeue := func(uid types.UID) time.Duration {
+		t.Helper()
+		mh := newMockHarbor()
+		mh.preexisting(robotName, RobotDescription(testCluster, "other-ns", "other-ha"))
+		ha := newHarborAccess()
+		ha.UID = uid
+		r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+		res, err := r.Reconcile(context.Background(), reqFor(ha))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.RequeueAfter
+	}
+	a, b := requeue("uid-a"), requeue("uid-b")
+	for _, got := range []time.Duration{a, b} {
+		if got < ResyncInterval*9/10 || got > ResyncInterval {
+			t.Errorf("RequeueAfter = %s, want within [%s, %s]", got, ResyncInterval*9/10, ResyncInterval)
+		}
+	}
+	if a == b {
+		t.Errorf("two objects requeue after the same %s; the resyncs are not spread", a)
+	}
+}
