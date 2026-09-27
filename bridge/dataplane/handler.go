@@ -33,7 +33,7 @@ const CredentialsPath = "/v1/credentials"
 // the endpoint is reachable on every node's NodePort (ADR-0008), the body
 // is decoded before the SA token is verified, and a caller need only send
 // a dummy "Authorization: Bearer x" header to reach the json decode. Without
-// this bound a single large body can OOM the bridge. See AUDIT.md F1.
+// this bound a single large body can OOM the bridge.
 const maxRequestBodyBytes = 64 << 10 // 64 KiB
 
 // cacheKeyTypeRegistry is the cacheKeyType we emit in every successful
@@ -221,7 +221,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil && r.ContentLength != 0 {
 		defer func() { _ = r.Body.Close() }()
 		// Bound the body before decoding: it is attacker-reachable and
-		// parsed before token validation (AUDIT.md F1).
+		// parsed before token validation.
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			// Body is optional but if present must parse — otherwise the
@@ -317,7 +317,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	creds, err := h.readRobotSecret(ctx, matched)
 	if err != nil {
 		if errors.Is(err, errSecretOwnerMismatch) {
-			// Secret-name collision (AUDIT.md F2): the Secret at the
+			// Secret-name collision (ADR-0018): the Secret at the
 			// expected name belongs to a different HarborAccess. Deny —
 			// never cross-wire one workload's credentials to another.
 			logger.Error(err, "robot Secret owner mismatch; refusing to issue credentials",
@@ -426,10 +426,10 @@ func (h *Handler) recordOIDCFailure(category string) {
 // The audience value that matched is also returned so the audit log
 // records the exact aud string the kubelet projected the token with.
 //
-// Selection is deterministic (AUDIT.md F7). In a correct configuration
-// exactly one CR matches a given (subject, issuer, audience). If two or
-// more match, that is an operator misconfiguration — two CRs claim the
-// same workload identity, typically with different permission sets.
+// Selection is deterministic. In a correct configuration exactly one CR
+// matches a given (subject, issuer, audience). If two or more match, that
+// is an operator misconfiguration — two CRs claim the same workload
+// identity, typically with different permission sets.
 // Returning whichever CR k8s.List happened to yield first would let the
 // effective permission set flip between bridge restarts and between the
 // two HA replicas (List order is not stable across informer caches), so
@@ -456,8 +456,8 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 	var matches, deletingMatches []match
 	for i := range list.Items {
 		ha := &list.Items[i]
-		// Defense-in-depth (AUDIT.md F13): a CR with an empty audience or
-		// issuer must never match. The CRD enforces MinLength=1 on both
+		// Defense-in-depth: a CR with an empty audience or issuer must
+		// never match. The CRD enforces MinLength=1 on both
 		// trustPolicy.audience and trustPolicy.issuer, but the data plane is
 		// the security boundary and must not rely solely on CRD validation
 		// (a CR applied with --validate=false, or a future API revision that
@@ -478,12 +478,12 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 		if harborAccessSubject(ha) != claims.Subject {
 			continue
 		}
-		// Defense-in-depth (AUDIT.md F5): the Validator already pins iss to
-		// the bridge's configured issuer, and the reconciler refuses to
-		// provision a robot for a CR whose trustPolicy.issuer disagrees with
-		// the cluster issuer. Re-checking here means a CR is never matched
-		// against a token from an issuer it did not declare, even if those
-		// upstream invariants regress.
+		// Defense-in-depth: the Validator already pins iss to the bridge's
+		// configured issuer, and the reconciler refuses to provision a robot
+		// for a CR whose trustPolicy.issuer disagrees with the cluster
+		// issuer. Re-checking here means a CR is never matched against a
+		// token from an issuer it did not declare, even if those upstream
+		// invariants regress.
 		if ha.Spec.TrustPolicy.Issuer != claims.Issuer {
 			continue
 		}
@@ -622,17 +622,16 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 		secret); err != nil {
 		return nil, err
 	}
-	// Read-path collision backstop (audit F2). If the Secret carries the
-	// bridge's ownership labels and they name a DIFFERENT HarborAccess than
-	// the one matched for this token, two CRs have collided on one Secret
-	// name. Refuse rather than hand one workload's SA the other workload's
-	// robot password.
 	// Serve only Secrets the control plane wrote (it stamps its labels on
 	// every write): a Secret someone else created at that name is never
 	// handed out as robot credentials.
 	if !robotsecret.IsManaged(secret) {
 		return nil, fmt.Errorf("%w: Secret %s/%s is not managed by the bridge", errSecretOwnerMismatch, h.Config.BridgeNamespace, name)
 	}
+	// Read-path collision backstop (ADR-0018). If the Secret's ownership
+	// labels name a DIFFERENT HarborAccess than the one matched for this
+	// token, two CRs have collided on one Secret name. Refuse rather than
+	// hand one workload's SA the other workload's robot password.
 	if robotsecret.StampedForOther(secret, ha.Namespace, ha.Name) {
 		return nil, fmt.Errorf("%w: Secret %s/%s is stamped for HarborAccess %s/%s, not %s/%s",
 			errSecretOwnerMismatch, h.Config.BridgeNamespace, name,
@@ -650,7 +649,7 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 // errSecretOwnerMismatch is returned by readRobotSecret when the robot Secret
 // found at the expected name is stamped as belonging to a different
 // HarborAccess than the one matched for this request. This is the read-path
-// backstop for the Secret-name collision class (audit F2). The Secret name
+// backstop for the Secret-name collision class (ADR-0018). The Secret name
 // is dot-joined ("robot-<haNs>.<haName>", ADR-0018) and therefore
 // injective, so this never fires in normal operation; it remains so that even
 // if two distinct CRs ever collapsed to the same Secret name (an invariant

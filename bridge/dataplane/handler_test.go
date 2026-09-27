@@ -326,9 +326,9 @@ func TestFindHarborAccess_MultipleMatches_DeterministicSelection(t *testing.T) {
 	// Two CRs claim the same (subject, issuer, audience) identity — an
 	// operator misconfiguration. findHarborAccess must resolve it the same
 	// way on every call: the namespace/name-sorted-first match, never
-	// whichever the informer cache happened to list first (AUDIT.md F7).
-	// A non-deterministic pick would let a workload intermittently receive
-	// a more- or less-privileged robot than intended.
+	// whichever the informer cache happened to list first. A
+	// non-deterministic pick would let a workload intermittently receive a
+	// more- or less-privileged robot than intended.
 	mk := func(name string, action harborv1alpha1.HarborAction) harborv1alpha1.HarborAccess {
 		return harborv1alpha1.HarborAccess{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: hTestBridgeNS},
@@ -419,9 +419,9 @@ func TestFindHarborAccess_ListsByIndexedSubjectWithoutDeepCopy(t *testing.T) {
 
 func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 	// The CRD enforces MinLength=1 on trustPolicy.{audience,issuer}, but the
-	// data plane must not depend on that (AUDIT.md F13). A CR that somehow
-	// carries an empty audience must NOT match a token whose aud claim is
-	// (or contains) the empty string, and likewise for issuer.
+	// data plane must not depend on that. A CR that somehow carries an
+	// empty audience must NOT match a token whose aud claim is (or
+	// contains) the empty string, and likewise for issuer.
 	base := func() *harborv1alpha1.HarborAccess {
 		return &harborv1alpha1.HarborAccess{
 			ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: hTestBridgeNS},
@@ -689,10 +689,10 @@ func TestHandler_EmptyBody_OK(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Security regression tests (see AUDIT.md)
+// Security regression tests
 // ----------------------------------------------------------------------------
 
-// AUDIT.md F1: the credential-request body is bounded by maxRequestBodyBytes
+// The credential-request body is bounded by maxRequestBodyBytes
 // and the decode happens before token validation, so an attacker who supplies
 // only a dummy Bearer header must not be able to make the bridge buffer an
 // arbitrarily large body. We assert the oversized body is rejected (400) and
@@ -715,7 +715,7 @@ func TestHandler_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
-// AUDIT.md F5: a CR whose trustPolicy.issuer disagrees with the validated
+// A CR whose trustPolicy.issuer disagrees with the validated
 // token's iss claim must not be matched, even when sub and aud line up.
 func TestHandler_IssuerMismatch_NoMatch(t *testing.T) {
 	fx := newHandlerFixture(t)
@@ -735,12 +735,6 @@ func TestHandler_IssuerMismatch_NoMatch(t *testing.T) {
 	}
 }
 
-// AUDIT.md F2: defense-in-depth read-path backstop. Since ADR-0018 the Secret
-// name "robot-<haNs>.<haName>" is dot-joined and injective, so in normal
-// operation two CRs never share a Secret name. This test forces the
-// owner-label mismatch directly to prove that, even if that invariant ever
-// regressed, the read path refuses to hand a token matched to CR A a Secret
-// stamped (via labels) for CR B — returning 403, never the other CR's creds.
 // TestHandler_SecretNameMatchesControlPlane: the handler must read the
 // Secret under exactly the name the control plane writes. Both use
 // robotsecret.Name now; this pins the literal so a change is deliberate.
@@ -804,6 +798,12 @@ func TestHandler_ResponseIsNotStorable(t *testing.T) {
 	}
 }
 
+// Defense-in-depth read-path backstop. Since ADR-0018 the Secret name
+// "robot-<haNs>.<haName>" is dot-joined and injective, so in normal
+// operation two CRs never share a Secret name. This test forces the
+// owner-label mismatch directly to prove that, even if that invariant ever
+// regressed, the read path refuses to hand a token matched to CR A a Secret
+// stamped (via labels) for CR B — returning 403, never the other CR's creds.
 func TestHandler_SecretOwnerMismatch_Forbidden(t *testing.T) {
 	fx := newHandlerFixture(t)
 	sec := &corev1.Secret{}

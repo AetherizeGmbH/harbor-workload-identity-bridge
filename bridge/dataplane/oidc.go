@@ -127,7 +127,9 @@ type Config struct {
 
 	// HTTPClient is used for OIDC discovery and JWKS fetching. Pass a
 	// client with a custom transport for httptest, mTLS, or audit
-	// instrumentation. nil means http.DefaultClient.
+	// instrumentation. nil means NewOIDCHTTPClient("", ""): bounded
+	// timeouts, TLS 1.2 minimum, no redirects followed, the system trust
+	// roots and no bridge token.
 	HTTPClient *http.Client
 
 	// MaxTokenLifetime is the longest lifetime (exp - iat) an accepted
