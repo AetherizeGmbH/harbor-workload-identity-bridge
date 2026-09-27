@@ -17,14 +17,14 @@ import (
 	"time"
 
 	httptransport "github.com/go-openapi/runtime/client"
-	v2client "github.com/goharbor/go-client/pkg/sdk/v2.0/client"
+	"github.com/go-openapi/strfmt"
 	sdkrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
 	"github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 )
 
 const (
-	// harborBasePath is the v2 API root Harbor exposes. The SDK requires
-	// this on the URL passed to v2client.New.
+	// harborBasePath is the v2 API root Harbor exposes; every SDK request
+	// path is relative to it.
 	harborBasePath = "/api/v2.0"
 
 	// pageSize is the page size the wrapper uses when walking the paginated
@@ -163,7 +163,7 @@ func WithCallTimeout(d time.Duration) Option {
 // goClient is the production Client implementation, backed by
 // github.com/goharbor/go-client.
 type goClient struct {
-	api         *v2client.HarborAPI
+	robots      sdkrobot.API
 	robotPrefix string
 	callTimeout time.Duration
 }
@@ -220,6 +220,14 @@ func (noLogger) Debugf(string, ...any) {}
 // transport is optional; pass non-nil to override the default (httptest
 // servers, custom TLS, mTLS, instrumented round-trippers, etc.). nil
 // selects defaultTransport.
+//
+// The client follows no redirects. Every request carries the Harbor admin
+// credentials, and net/http re-sends the Authorization header (and on
+// 307/308 the body) to a redirect target on the same host or a subdomain
+// of it whatever its scheme: an https Harbor behind a proxy that answers
+// with a redirect to http:// would put the admin credentials and robot
+// passwords on the wire in clear text, bypassing the https requirement.
+// A redirect fails the call with an error naming the target instead.
 func NewClient(harborURL *url.URL, username, password string, transport http.RoundTripper, opts ...Option) (Client, error) {
 	if harborURL == nil {
 		return nil, errors.New("harborURL is nil")
@@ -237,30 +245,38 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 	if transport == nil {
 		transport = defaultTransport()
 	}
-	cfg := v2client.Config{
-		URL:       &u,
-		Transport: transport,
-		AuthInfo:  httptransport.BasicAuth(username, password),
-	}
-	api := v2client.New(cfg)
+	// The runtime would otherwise build its own http.Client lazily, with
+	// net/http's default policy of following up to 10 redirects.
+	hc := &http.Client{Transport: transport, CheckRedirect: refuseRedirect}
+	rt := httptransport.NewWithClient(u.Host, u.Path, []string{u.Scheme}, hc)
 	// The go-openapi runtime turns on full request/response dumps when
 	// DEBUG or SWAGGER_DEBUG is set in the environment: every call's
 	// Authorization header (the Harbor admin credentials) and every
 	// create/refresh response (robot passwords) would go to stdout.
 	// Those variable names are generic enough to be set for unrelated
 	// reasons, so the dumps are switched off unconditionally.
-	rt, ok := api.Transport.(*httptransport.Runtime)
-	if !ok {
-		return nil, fmt.Errorf("harbor SDK transport is %T, want *client.Runtime (wire dumps could not be disabled)", api.Transport)
-	}
 	rt.SetDebug(false)
 	rt.SetLogger(noLogger{})
 
-	c := &goClient{api: api, robotPrefix: HarborRobotPrefix, callTimeout: DefaultCallTimeout}
+	c := &goClient{
+		robots:      sdkrobot.New(rt, strfmt.Default, httptransport.BasicAuth(username, password)),
+		robotPrefix: HarborRobotPrefix,
+		callTimeout: DefaultCallTimeout,
+	}
 	for _, o := range opts {
 		o(c)
 	}
 	return c, nil
+}
+
+// refuseRedirect is the Harbor client's http.Client.CheckRedirect: Harbor's
+// /api/v2.0 endpoints do not redirect, so a redirect means a proxy or a
+// harbor.url that points somewhere other than the API itself. net/http
+// closes the redirect response and returns this error from the call.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("refusing to follow a redirect to %s: the Harbor client follows no redirects "+
+		"(it would re-send the Harbor admin credentials); set the Harbor URL (BRIDGE_HARBOR_URL, chart harbor.url) "+
+		"to the https address Harbor's API answers on directly", req.URL.Redacted())
 }
 
 func (c *goClient) Create(ctx context.Context, name, description string, perms []ProjectPermission) (*Robot, error) {
@@ -277,7 +293,7 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 	ctx, cancel := c.call(ctx)
 	defer cancel()
 	params := sdkrobot.NewCreateRobotParamsWithContext(ctx).WithRobot(body)
-	resp, err := c.api.Robot.CreateRobot(ctx, params)
+	resp, err := c.robots.CreateRobot(ctx, params)
 	if err != nil {
 		return nil, wrapHarborOp(fmt.Sprintf("create robot %q", name), err)
 	}
@@ -305,7 +321,7 @@ func (c *goClient) Delete(ctx context.Context, id int64) error {
 	ctx, cancel := c.call(ctx)
 	defer cancel()
 	params := sdkrobot.NewDeleteRobotParamsWithContext(ctx).WithRobotID(id)
-	if _, err := c.api.Robot.DeleteRobot(ctx, params); err != nil {
+	if _, err := c.robots.DeleteRobot(ctx, params); err != nil {
 		if isNotFound(err) {
 			// Delete is idempotent at the bridge level.
 			return nil
@@ -350,7 +366,7 @@ func (c *goClient) listPage(ctx context.Context, page, size int64, q *string) (*
 		WithPage(&page).
 		WithPageSize(&size).
 		WithQ(q)
-	return c.api.Robot.ListRobot(ctx, params)
+	return c.robots.ListRobot(ctx, params)
 }
 
 // GetByName looks the robot up by its internal name. It asks Harbor for
@@ -394,7 +410,7 @@ func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) 
 	params := sdkrobot.NewRefreshSecParamsWithContext(ctx).
 		WithRobotID(id).
 		WithRobotSec(&models.RobotSec{})
-	resp, err := c.api.Robot.RefreshSec(ctx, params)
+	resp, err := c.robots.RefreshSec(ctx, params)
 	if err != nil {
 		return "", wrapHarborOp(fmt.Sprintf("refresh secret for robot %d", id), err)
 	}
@@ -427,7 +443,7 @@ func (c *goClient) Update(ctx context.Context, current *Robot, description strin
 	params := sdkrobot.NewUpdateRobotParamsWithContext(ctx).
 		WithRobotID(current.ID).
 		WithRobot(body)
-	if _, err := c.api.Robot.UpdateRobot(ctx, params); err != nil {
+	if _, err := c.robots.UpdateRobot(ctx, params); err != nil {
 		return wrapHarborOp(fmt.Sprintf("update robot %d", current.ID), err)
 	}
 	return nil

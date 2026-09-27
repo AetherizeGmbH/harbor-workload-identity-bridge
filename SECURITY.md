@@ -469,7 +469,7 @@ their own RBAC.
 | Lever | Default | Recommendation |
 | --- | --- | --- |
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
-| Harbor transport (`harbor.url`) | https required | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http |
+| Harbor transport (`harbor.url`) | https required, no redirects followed | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http. Point `harbor.url` at the address Harbor's API answers on directly: the bridge refuses redirects, which would re-send the admin credentials (to an http:// target in clear text) |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h, a Go duration (`30m`, `1h`; no days) | Use 1h or less unless you have a measured pull-rate problem |
 | `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
@@ -536,7 +536,11 @@ robot Secret that does not exist yet (`503`) and Kubernetes API errors
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never
 answers makes reconciles fail with an error and a `Ready=False`
-condition instead of blocking the controller.
+condition instead of blocking the controller. The Harbor client follows
+no redirects: net/http would re-send the admin credentials, and on
+307/308 the request body, to a redirect target on the same host even
+over plain http. A redirect fails the call with an error that names the
+target (`TestClient_RefusesRedirects`).
 
 OIDC discovery and JWKS fetches follow no redirects and are bounded
 (30s). The bridge's own ServiceAccount token, which the apiserver

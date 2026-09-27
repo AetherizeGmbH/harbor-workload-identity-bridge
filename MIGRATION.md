@@ -7,6 +7,12 @@
 | `spec.tokenTTL` must be a Go duration (units `h`, `m`, `s`, `ms`, `us`, `ns`, e.g. `30m`, `1h`, `1h30m`); forms such as `1d`, `3 hours` or `PT1H` are rejected | Older CRDs admitted those forms, and a single such object stopped the bridge from reconciling any HarborAccess and from serving any credential request. The bridge now reports such an object as `Ready=False`, `reason=InvalidSpec`, leaves its robot unchanged, refuses credential requests for it (`403`, audit `reason=invalid_harboraccess_spec`) and serves all others. List the values with `kubectl get harboraccess -A -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,TTL:.spec.tokenTTL` and rewrite every value that is not a Go duration, e.g. `1d` as `24h`. Helm does not upgrade CRDs from `crds/`: apply the new CRD with `kubectl apply -f charts/harbor-bridge/crds/`. |
 | A HarborAccess must have a `spec`; creating one without it, or removing it, is rejected | The bridge never served such objects. It now reports existing ones as `Ready=False`, `reason=InvalidSpec` ("spec is missing") instead of `IssuerMismatch`; add a spec or delete them (deleting also revokes a robot left from before the spec was removed). They stay deletable after the CRD update. |
 
+### Unreleased: Harbor client hardening
+
+| Change | What to do |
+| --- | --- |
+| The bridge no longer follows HTTP redirects from Harbor. Each call carried the Harbor admin credentials to the redirect target, even when the target was plain http | Nothing, unless reconciles fail with `refusing to follow a redirect to …`: then set `harbor.url` (`BRIDGE_HARBOR_URL`) to the https address Harbor's API answers on directly, e.g. the redirect target shown in the error. |
+
 ### Unreleased: token lifetime cap and pod binding (ADR-0028)
 
 | Change | What to do |
