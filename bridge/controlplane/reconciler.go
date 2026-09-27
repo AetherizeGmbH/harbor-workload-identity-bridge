@@ -146,6 +146,14 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	logger := log.FromContext(ctx)
 	cluster := r.Config.ClusterName
 
+	// The CRD requires spec; this guards objects stored before that rule
+	// existed, which would otherwise be reported as an issuer mismatch.
+	if ha.Spec.ServiceAccountRef == (harborv1alpha1.ServiceAccountRef{}) &&
+		ha.Spec.TrustPolicy == (harborv1alpha1.TrustPolicy{}) && len(ha.Spec.Permissions) == 0 {
+		return r.markNotReady(ctx, ha, ReasonInvalidSpec,
+			"spec is missing: a HarborAccess needs spec.serviceAccountRef, spec.trustPolicy and spec.permissions")
+	}
+
 	// 1. Issuer match — refuse early if the CR was applied to the wrong cluster.
 	if ha.Spec.TrustPolicy.Issuer != r.Config.OIDCIssuer.String() {
 		return r.markNotReady(ctx, ha, ReasonIssuerMismatch,

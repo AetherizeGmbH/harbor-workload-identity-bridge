@@ -173,6 +173,7 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ha,categories={harbor}
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters: it is stamped as a label value on the robot Secret"
+// +kubebuilder:validation:XValidation:rule="has(self.spec) || (oldSelf.hasValue() && !has(oldSelf.value().spec))",message="spec is required: serviceAccountRef, trustPolicy and permissions",fieldPath=".spec",reason="FieldValueRequired",optionalOldSelf=true
 // +kubebuilder:printcolumn:name="SA",type="string",JSONPath=".spec.serviceAccountRef.name"
 // +kubebuilder:printcolumn:name="SA-Namespace",type="string",JSONPath=".spec.serviceAccountRef.namespace",priority=1
 // +kubebuilder:printcolumn:name="Robot",type="string",JSONPath=".status.robot.name"
@@ -182,6 +183,13 @@ const (
 type HarborAccess struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// spec is required by the CEL rule above, not by +required (which
+	// dropping omitempty would also emit): the apiserver does not ratchet
+	// `required`, so a spec-less object stored before the rule existed
+	// could no longer be written, not even to release its finalizer. The
+	// rule rejects creating an object without spec and removing spec from
+	// one, but leaves such an old object writable.
 
 	Spec   HarborAccessSpec   `json:"spec,omitempty"`
 	Status HarborAccessStatus `json:"status,omitempty"`

@@ -60,8 +60,8 @@ func installCRD(t *testing.T, cfg *rest.Config, dir string, ready func() bool) {
 
 // legacyCRDDir writes the HarborAccess CRD as releases up to 0.10.0
 // shipped it, as far as these tests care: tokenTTL with `format: duration`
-// (the apiserver then accepts strfmt durations such as "1d"), no maxLength
-// and the bounds rule without the unchanged-value exemption.
+// (the apiserver then accepts strfmt durations such as "1d"), no maxLength,
+// the bounds rule without the unchanged-value exemption, and spec optional.
 func legacyCRDDir(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(crdDir(), crdFile))
@@ -82,6 +82,14 @@ func legacyCRDDir(t *testing.T) string {
 		"message": "tokenTTL must be between 5m and 24h",
 		"rule":    "duration(self) >= duration('5m') && duration(self) <= duration('24h')",
 	}}
+	var rootRules []any
+	for _, r := range root["x-kubernetes-validations"].([]any) {
+		if !strings.Contains(r.(map[string]any)["rule"].(string), "has(self.spec)") {
+			rootRules = append(rootRules, r)
+		}
+	}
+	root["x-kubernetes-validations"] = rootRules
+	delete(root, "required")
 	out, err := yaml.Marshal(crd)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +117,17 @@ func rawHarborAccess(t *testing.T, namespace, name, tokenTTL string) *unstructur
 	if err := unstructured.SetNestedField(u.Object, tokenTTL, "spec", "tokenTTL"); err != nil {
 		t.Fatal(err)
 	}
+	return u
+}
+
+// speclessHarborAccess is a HarborAccess with no spec at all, holding the
+// bridge's finalizer.
+func speclessHarborAccess(namespace, name string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(harborv1alpha1.GroupVersion.WithKind("HarborAccess"))
+	u.SetNamespace(namespace)
+	u.SetName(name)
+	u.SetFinalizers([]string{FinalizerName})
 	return u
 }
 
@@ -190,13 +209,44 @@ func TestEnvtest_CRDTokenTTLAdmitsOnlyGoDurations(t *testing.T) {
 	}
 }
 
-// A HarborAccess stored under the old CRD with tokenTTL "1d" stays in etcd
-// after the upgrade. It must not take the bridge down: the controller's
-// cache syncs, other HarborAccess objects reconcile, the cached LIST the
-// data plane uses succeeds, and the bad object is reported as InvalidSpec.
-// It stays writable (status, finalizer, a fix of tokenTTL), but cannot be
-// changed to another invalid value.
-func TestEnvtest_LegacyTokenTTLDoesNotStallTheBridge(t *testing.T) {
+// Without spec none of its required fields, patterns or defaults apply;
+// the apiserver must refuse such an object and the removal of spec.
+func TestEnvtest_CRDRequiresSpec(t *testing.T) {
+	cfg := setupEnvtest(t)
+	ctx := context.Background()
+	k8s, err := client.New(cfg, client.Options{Scheme: testScheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensureNamespaces(t, k8s, testNS)
+
+	if err := k8s.Create(ctx, speclessHarborAccess(testNS, "no-spec")); !apierrors.IsInvalid(err) {
+		t.Errorf("create without spec: err = %v, want an Invalid admission error", err)
+	}
+	nullSpec := speclessHarborAccess(testNS, "null-spec")
+	nullSpec.Object["spec"] = nil
+	if err := k8s.Create(ctx, nullSpec); !apierrors.IsInvalid(err) {
+		t.Errorf("create with spec: null: err = %v, want an Invalid admission error", err)
+	}
+
+	ha := rawHarborAccess(t, testNS, "with-spec", "1h")
+	if err := k8s.Create(ctx, ha); err != nil {
+		t.Fatalf("create with spec: %v", err)
+	}
+	removeSpec := client.RawPatch(types.MergePatchType, []byte(`{"spec":null}`))
+	if err := k8s.Patch(ctx, &harborv1alpha1.HarborAccess{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "with-spec"}}, removeSpec); !apierrors.IsInvalid(err) {
+		t.Errorf("remove spec: err = %v, want an Invalid admission error", err)
+	}
+}
+
+// HarborAccess objects stored under the old CRD with tokenTTL "1d", or
+// without spec, stay in etcd after the upgrade. They must not take the
+// bridge down: the controller's cache syncs, other HarborAccess objects
+// reconcile, the cached LIST the data plane uses succeeds, and the bad
+// objects are reported as InvalidSpec. They stay writable (status,
+// finalizer, a fix of tokenTTL), but "1d" cannot be changed to another
+// invalid value.
+func TestEnvtest_LegacyObjectsDoNotStallTheBridge(t *testing.T) {
 	cfg := setupEnvtest(t)
 	ctx := context.Background()
 	k8s, err := client.New(cfg, client.Options{Scheme: testScheme})
@@ -226,6 +276,10 @@ func TestEnvtest_LegacyTokenTTLDoesNotStallTheBridge(t *testing.T) {
 		if err := k8s.Create(ctx, u); err != nil {
 			t.Fatalf("create legacy object %s: %v", key, err)
 		}
+	}
+	nospec := client.ObjectKey{Namespace: "tenant-b", Name: "nospec"}
+	if err := k8s.Create(ctx, speclessHarborAccess(nospec.Namespace, nospec.Name)); err != nil {
+		t.Fatalf("create legacy object without spec: %v", err)
 	}
 	valid := newHarborAccess()
 	valid.Finalizers = nil
@@ -295,6 +349,7 @@ func TestEnvtest_LegacyTokenTTLDoesNotStallTheBridge(t *testing.T) {
 		client.ObjectKeyFromObject(valid): ReasonReconcileSucceeded,
 		typo:                              ReasonInvalidSpec,
 		fixme:                             ReasonInvalidSpec,
+		nospec:                            ReasonInvalidSpec,
 	})
 
 	// The data plane lists through the same cache on every request.
@@ -312,20 +367,24 @@ func TestEnvtest_LegacyTokenTTLDoesNotStallTheBridge(t *testing.T) {
 	}
 	waitReady(map[client.ObjectKey]string{fixme: ReasonReconcileSucceeded})
 
-	// Deleting the legacy object releases its finalizer: the finalizer
-	// patch must pass validation although tokenTTL stays "1d".
-	if err := k8s.Delete(ctx, &harborv1alpha1.HarborAccess{ObjectMeta: metav1.ObjectMeta{Namespace: typo.Namespace, Name: typo.Name}}); err != nil {
-		t.Fatal(err)
+	// Deleting a legacy object releases its finalizer: the finalizer patch
+	// must pass validation although tokenTTL stays "1d" or spec stays absent.
+	for _, key := range []client.ObjectKey{typo, nospec} {
+		if err := k8s.Delete(ctx, &harborv1alpha1.HarborAccess{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		err := k8s.Get(ctx, typo, &harborv1alpha1.HarborAccess{})
-		if apierrors.IsNotFound(err) {
-			break
+	for _, key := range []client.ObjectKey{typo, nospec} {
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			err := k8s.Get(ctx, key, &harborv1alpha1.HarborAccess{})
+			if apierrors.IsNotFound(err) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("legacy object %s not deleted: %v", key, err)
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("legacy object not deleted: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
