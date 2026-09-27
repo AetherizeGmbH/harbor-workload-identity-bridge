@@ -130,9 +130,9 @@ func run() error {
 
 		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
 
-		// Cache scoping — minimum-privilege RBAC. HarborAccess CRs are
-		// cluster-scoped (operators put them in any namespace), so the
-		// default cluster-wide watch is correct for those. Secrets, by
+		// Cache scoping — minimum-privilege RBAC. HarborAccess is
+		// namespaced, but its objects may live in any namespace, so the
+		// default cluster-wide watch is correct for them. Secrets, by
 		// contrast, are only read from BRIDGE_NAMESPACE (ADR-0011);
 		// without this ByObject override the cache would list/watch
 		// secrets cluster-wide and require cluster-scoped Secret RBAC.
