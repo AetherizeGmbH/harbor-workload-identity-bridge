@@ -1,3 +1,67 @@
+## [0.10.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.9.0...v0.10.0) (2026-09-27)
+
+### ⚠ BREAKING CHANGES
+
+* **dataplane:** the bridge refuses ServiceAccount tokens that live
+longer than bridge.tokenValidation.maxLifetime (1h) or are not bound to
+a pod. Kubelet's tokens are unaffected; bind hand-minted tokens with
+--bound-object-kind=Pod --bound-object-name=<pod> and --duration <= 1h.
+
+* docs: close threat-model item O3 with ADR-0028
+
+- Threat model: T1 and T2 name the lifetime cap and the pod binding as
+  mitigations; new accepted risk A5 keeps the residual (a stolen
+  kubelet token stays usable for at most its remaining hour after its
+  pod is gone, since only TokenReview checks the bound object); the
+  logged-events list names the new categories; O3 is marked closed.
+  The model requires a new approval for changes, so its status is
+  proposed until the maintainer approves this revision.
+- README: the O3 item leaves "Open decisions (TODO)", whose intro now
+  lists O2 and O5; phase 10 lists the token lifetime cap and ADR-0028.
+
+* docs: correct where denials are logged and the Harbor CA hint
+
+Found while documenting ADR-0028 in the same sections.
+
+- SECURITY.md said failures log at V(1). Denials are credential denied
+  lines on the fixed-info audit logger; a missing robot Secret (503) and
+  API errors (500) go to the regular log.
+- HOW-TO-TEST.md called BRIDGE_HARBOR_CA_FILE a backlog item; it shipped
+  in 0.8.0 (chart: harbor.caSecret).
+
+* refactor(bridge): build the validator config in one tested function
+
+BRIDGE_REQUIRE_POD_BOUND_TOKEN and dataplane.Config's
+AllowNonPodBoundTokens mean opposite things, and nothing tested the
+negation between them: bridge/cmd had no tests, the validator and the
+env parsing were tested only on their own, and the e2e sends only
+kubelet's tokens, which are pod-bound either way. Dropping the "!" left
+every test green while the default deployment accepted tokens bound to
+no pod.
+
+validatorConfig now maps the bridge config onto the validator's, and a
+table test follows each setting from the env var the chart renders to
+the validator field; the inverted mapping fails it. The startup warnings
+read the same validator config, so they report what is enforced.
+
+* docs: bound a redeemed token's reach by the password rotation
+
+SECURITY.md, ADR-0028 and threat-model item A5 said a stolen token stops
+working when it expires and that sustained abuse needs a new token every
+hour. One accepted token returns the robot's password, and Harbor
+accepts that password until the next rotation, which the bridge
+schedules PasswordRotationInterval (24h) plus RotationSafetyMargin (1m)
+after the previous one (bridge/controlplane/contract.go). The cap bounds
+how long a token can be redeemed, not how long its credentials work, and
+sustained abuse costs about one TokenRequest a day. The passages now say
+so and point to deleting the password Secret for an immediate rotation.
+
+* fix(chart): default bridge.tokenValidation for --reuse-values upgrades
+
+### Bug Fixes
+
+* **dataplane:** cap token lifetime and require pod-bound tokens ([#121](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/121)) ([d79a447](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/d79a44789156984c0fa00d1f01bcb46ebd8e3de6))
+
 ## [0.9.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.8.0...v0.9.0) (2026-09-24)
 
 ### Features
