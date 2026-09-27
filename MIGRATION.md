@@ -18,7 +18,20 @@
 | A HarborAccess whose `serviceAccountRef` namespace or name contains consecutive hyphens (`--`, e.g. a punycode `xn--…` namespace) reports `Ready=False`, `reason=InvalidSpec` once, instead of `HarborError` with retries that never end | Nothing changes for these workloads: Harbor refuses robot names with doubled separators, so they never got a robot. Use a ServiceAccount whose namespace and name have no `--`. |
 | `clusterName` (`BRIDGE_CLUSTER_NAME`) must not contain consecutive hyphens; the bridge refuses to start | Harbor refused every robot of such a cluster, so no HarborAccess could work. Choose a cluster name without `--`. |
 
-### Unreleased: token lifetime cap and pod binding (ADR-0028)
+### Unreleased: configurable plugin provider name (ADR-0029)
+
+No action is needed for existing installs: with the default
+`plugin.providerName` the chart renders the same manifests, every node
+file keeps its path, and the upgrade restarts no kubelet.
+
+| Change | What to do |
+| --- | --- |
+| New `plugin.providerName` (default `harbor-bridge-plugin`, a DNS label) names the kubelet provider entry and the plugin binary; a non-default name also names the install's CA, mTLS and state files | Nothing for a single install. To run a second bridge with its own chart-managed plugin, upgrade every existing release first, then install the new one with its own `plugin.providerName`, `service.nodePort`, `plugin.audience` and non-overlapping `plugin.matchImages`, and give every release a `bridge.harborAccessSelector` (README, "Several installs per cluster"). Changing the name of an existing install leaves its old entry and files on the nodes; remove them as described under "Uninstalling". |
+| Patch and none mode merge into the chart-owned provider config once it holds another provider, instead of overwriting it | Nothing. While only this install's entry is in the file, it is written as before. |
+| The installer takes a lock on each node (`/run/harbor-bridge-installer.lock`, and `<provider config>.lock` next to the provider config) and records a per-install hash in its state file | Nothing. The state file of the previous version is converted on the first pass without a kubelet restart. |
+| A second bridge installed by hand with `plugin.enabled=false` (the workaround so far) | Optional: switch it to the chart's DaemonSet with the same provider name. The installer adopts an existing bridge entry of that name. |
+
+### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 
 | Change | What to do |
 | --- | --- |

@@ -102,7 +102,13 @@ Several bridges on one cluster each serve only the HarborAccess objects
 their `bridge.harborAccessSelector` matches. A bridge revokes its robot
 for an object that stops matching and releases its own per-instance
 finalizer. Bridges that share a Harbor must use different `clusterName`
-values (the robot ownership prefix).
+values (the robot ownership prefix). On the nodes, each bridge's release
+has its own kubelet provider entry and plugin binary
+(`plugin.providerName`, [ADR-0029](docs/adr/0029-configurable-plugin-provider-name.md)).
+Keep their `plugin.matchImages` disjoint: kubelet runs every matching
+provider for a pull, so with overlapping patterns each bridge receives a
+token for its own audience and logs the requested image, also for pulls
+it does not serve.
 
 ### Long-lived and unbound tokens
 
@@ -364,7 +370,8 @@ container:
   shell; the unit name is validated against the systemd character set —
   but only when the effective credential-provider config content (or
   the kubelet flags) actually changed, tracked by a content hash in
-  `/var/lib/harbor-bridge/installer-state.json`. It then waits until the
+  `/var/lib/harbor-bridge/installer-state.json` (one state file per
+  install, ADR-0029). It then waits until the
   unit is stably active (and, in patch mode, until the running kubelet
   carries the flags) before it records success; otherwise the pod fails
   loudly. Running containers survive the restart (containerd owns them).
@@ -382,6 +389,17 @@ container:
   operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
   node's existing `CredentialProviderConfig`, preserving foreign
   provider entries and unknown fields.
+- edits only the provider entry named `plugin.providerName` when several
+  installs share a node ([ADR-0029](docs/adr/0029-configurable-plugin-provider-name.md)),
+  and does so under an exclusive `flock` (`/run/harbor-bridge-installer.lock`
+  for the whole pass, and a `.lock` file next to the provider config), so
+  concurrent installers neither lose each other's entries nor restart
+  kubelet at the same time. The lock files follow the same file rules as
+  above. The provider name is a chart value that becomes a file name in
+  kubelet's bin dir, where GKE keeps kubelet itself: the installer never
+  replaces a provider entry of that name that is not a bridge entry, and,
+  for a non-default name, never replaces a file of that name that is not
+  this plugin.
 
 This privilege model is what installing a credential provider on
 nodes requires — managed node images (EKS, GKE, AKS) pre-wire their
@@ -512,7 +530,7 @@ it.
 ```
 credential issued
   source=10.0.3.17                       # TCP peer (the node, via the NodePort)
-  client_cert=CN=harbor-bridge-plugin    # with mTLS
+  client_cert=CN=harbor-bridge-plugin    # with mTLS; the CN is <release>-plugin
   subject=system:serviceaccount:flux-system:source-controller
   pod=source-controller-7d9f  pod_uid=3f2c…  node=node-a   # bound-token claims
   audience=harbor.example.com

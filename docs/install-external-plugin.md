@@ -34,8 +34,18 @@ crane export ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:<versi
   | tar -x plugin/harbor-bridge-plugin
 ```
 
-Verify the image signature first (`cosign verify`, see SECURITY.md). The file
-must be named `harbor-bridge-plugin` and be executable by kubelet.
+Verify the image signature first (`cosign verify`, see SECURITY.md). Kubelet
+runs `<bin-dir>/<provider name>` for each entry, so the file must be named
+exactly like the provider entry's `name` in step 3 and be executable by
+kubelet. The name is `plugin.providerName`, `harbor-bridge-plugin` by default;
+set it in the chart values too, so the NOTES print the matching entry.
+
+A second bridge on the same cluster (ADR-0026) needs a copy of the binary
+under a name of its own, for example `harbor-bridge-eu`, and its own entry of
+that name next to the first one: one entry per bridge, with disjoint
+`matchImages` (ADR-0029). Where the nodes can run the chart's DaemonSet,
+`plugin.providerName` does this for you (README, "Several installs per
+cluster").
 
 ## 3. Give kubelet the provider entry
 
@@ -47,7 +57,7 @@ that contains this entry):
 apiVersion: kubelet.config.k8s.io/v1
 kind: CredentialProviderConfig
 providers:
-  - name: harbor-bridge-plugin
+  - name: harbor-bridge-plugin      # = plugin.providerName = the binary's file name
     apiVersion: credentialprovider.kubelet.k8s.io/v1
     matchImages:
       - harbor.example.com          # bare host: matchImages globs only the domain
@@ -94,7 +104,8 @@ Talos (1.6 and newer) configures the two kubelet flags itself from
 `machine.kubelet.credentialProviderConfig`, and expects provider binaries in
 `/usr/local/lib/kubelet/credentialproviders`, delivered by a system extension.
 
-1. Build a system extension that installs `harbor-bridge-plugin` into
+1. Build a system extension that installs the binary as `harbor-bridge-plugin`
+   (or your `plugin.providerName`) into
    `/usr/local/lib/kubelet/credentialproviders/` (see the Talos extensions
    repository for the layout; the ECR provider extension is the closest model).
    Include it in your installer image (Image Factory or `imager`).

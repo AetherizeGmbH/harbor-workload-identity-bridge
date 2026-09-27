@@ -296,6 +296,30 @@ the bridge, or remove the `harbor.aetherize.io/robot` finalizer by hand and
 delete the leftover `robot$bridge-<clusterName>.*` robots in Harbor. Helm
 keeps the CRD (`crds/`); delete it yourself when you are done.
 
+`helm uninstall` removes nothing on the nodes. The provider entry named
+`plugin.providerName` stays in kubelet's credential-provider config, and
+the plugin binary, the CA (and mTLS) files, the state file and the lock
+files stay on disk. Kubelet keeps running the plugin for its
+`matchImages`; with the bridge gone the plugin fails and adds no
+credentials, so those pulls go ahead with whatever other credentials
+apply (a later service on the same NodePort would also need a
+certificate from the pinned CA to receive a token). Renaming
+`plugin.providerName` leaves the old entry behind in the same way. To
+clean a node:
+
+1. Remove the entry from the config kubelet reads
+   (`--image-credential-provider-config`; in patch and none mode
+   `<plugin.hostConfigDir>/credential-provider-config.yaml`). Kubelet
+   refuses a config without providers: if it was the last entry, also
+   remove the two `--image-credential-provider-*` flags (patch mode:
+   from `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`).
+2. Restart kubelet (`systemctl restart kubelet`). Do this before you
+   delete the binary: kubelet does not start while an entry's binary is
+   missing.
+3. Delete `<bin-dir>/<providerName>`, the CA and mTLS files in
+   `plugin.hostConfigDir` and the state file in `plugin.install.stateDir`
+   (file names in [Several installs per cluster](#several-installs-per-cluster-adr-0029)).
+
 ### How the node install works — modes and upgrades (ADR-0021)
 
 The DaemonSet runs the `harbor-bridge-installer` binary on every node.
@@ -313,7 +337,8 @@ Kubelet reads the credential-provider config **once at boot** (no hot
 reload), but execs the plugin *binary* per pull. The installer therefore
 restarts kubelet exactly when the effective config content (or the
 kubelet flags) changed — tracked via a content hash in
-`/var/lib/harbor-bridge/installer-state.json` on each node:
+`/var/lib/harbor-bridge/installer-state.json` on each node (one state
+file per install, see below):
 
 - `helm upgrade` changing `matchImages`/`audience` **converges without
   operator action** (the DaemonSet re-rolls, the installer detects the
@@ -322,6 +347,63 @@ kubelet flags) changed — tracked via a content hash in
 - No-op re-rolls, plugin binary updates, and CA/mTLS rotation never
   restart kubelet (the plugin re-reads the CA on every exec; the
   DaemonSet's long-running container syncs rotated certs to the node).
+
+### Several installs per cluster (ADR-0029)
+
+A cluster can run several bridges, for example one per Harbor instance
+([ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)).
+Each is a Helm release with its own plugin DaemonSet. Kubelet has one
+credential-provider config and one bin dir, so the releases share them:
+on every node, each release's installer adds and updates only the
+provider entry named by its `plugin.providerName` and leaves every other
+entry alone: the other releases' and the cloud's. Values for a second
+release next to a first one that keeps the default provider name:
+
+```yaml
+clusterName: prod-eu-west-2          # distinct when both bridges use the same Harbor
+plugin:
+  providerName: harbor-bridge-eu     # kubelet entry and binary name; unique per release
+  audience: harbor-bridge-prod-eu-west-2
+  matchImages: ["harbor-eu.example.com"]   # must not overlap the other release's
+bridge:
+  harborAccessSelector:              # give every release a selector, and label
+    harbor.aetherize.io/bridge: harbor-eu  # each HarborAccess for its bridge
+service:
+  nodePort: 31444                    # the first release keeps 31443
+```
+
+- **Selectors on every release.** A bridge without
+  `bridge.harborAccessSelector` sees every HarborAccess and marks the
+  other bridge's objects `AudienceMismatch`. Label each HarborAccess for
+  its bridge and give each release a selector.
+- **Node files.** The default name keeps `harbor-bridge-plugin`,
+  `harbor-bridge-ca.crt` (`harbor-bridge-client.crt`/`.key` with mTLS)
+  and `installer-state.json`. Any other name uses `<name>` in the bin
+  dir, `<name>.ca.crt` (`<name>.client.crt`/`.key`) in
+  `plugin.hostConfigDir` and `<name>.installer-state.json` in
+  `plugin.install.stateDir`.
+- **Upgrade first.** Every release on the cluster must run a chart
+  version with ADR-0029 before you add the second: an older installer in
+  patch or none mode rewrites the shared config with only its own entry.
+- **Same directories.** In patch and none mode all releases must use the
+  same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. In auto mode a
+  later release merges into whatever config kubelet already runs.
+- **Disjoint `matchImages`.** Kubelet runs every provider whose
+  `matchImages` match an image, pools their credentials and tries them
+  in order until a pull succeeds (read in the kubelet source; see
+  ADR-0029). Overlapping patterns still pull, but every pull calls each
+  matching bridge, and a bridge without a HarborAccess for the pod
+  answers 403 and logs a denial each time.
+- **Concurrent rollouts are safe.** The installers serialise on
+  `/run/harbor-bridge-installer.lock` and on a `.lock` file next to the
+  provider config, and each restarts kubelet only for changes to its own
+  entry.
+- **The installer refuses names it does not own**: a provider entry of
+  that name that is not a bridge entry, or a file of that name in
+  kubelet's bin dir that is not this plugin (GKE keeps kubelet itself
+  there).
+- Removing one release, or renaming its provider, leaves its entry on
+  the nodes: see [Uninstalling](#uninstalling).
 
 ### Bootstrap ordering (chicken-and-egg)
 
@@ -446,17 +528,9 @@ In order.
 
 ### Open decisions (TODO)
 
-Open items from the 2026-09 security review (threat model items O2 and
-O5). None blocks a single-bridge install today.
+Open item from the 2026-09 security review (threat model item O2). It
+blocks no install today.
 
-- [ ] **Configurable plugin provider names (O5).** The plugin's provider
-  name and file names are fixed (`harbor-bridge-plugin`), so only one
-  chart-installed plugin can exist per node, and one plugin talks to one
-  bridge. *Limits now:* several bridges on one cluster (ADR-0026) work on
-  the bridge side, but every bridge after the first needs its plugin
-  installed by hand (`plugin.enabled=false`, a renamed copy of the binary
-  and its own kubelet provider entry). This is the only item that limits
-  what the chart can do.
 - [ ] **mTLS client identity (O2).** With mTLS on, the bridge accepts any
   client certificate its CA signed; with a shared ClusterIssuer, anyone who
   may create cert-manager Certificates can get one. Decide on a dedicated

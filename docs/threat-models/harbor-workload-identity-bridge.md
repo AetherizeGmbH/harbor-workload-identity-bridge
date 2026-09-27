@@ -17,8 +17,8 @@ model and hardening guide) with STRIDE per trust boundary, DREAD-rated
 residual risks and the security events the system logs. It follows the
 format of the DSOMM-based ai-security-rules and was approved by the
 maintainer on 2026-09-24. Changes to the threat model need a new
-approval; the closure of O3 (ADR-0028, 2026-09-27: T1, T2, A5) awaits
-it.
+approval; the closure of O3 (ADR-0028, 2026-09-27: T1, T2, A5) and the
+closure of O5 (ADR-0029, 2026-09-27: T17) await it.
 
 ## Scope and protection requirement
 
@@ -92,6 +92,7 @@ Abuse stories:
 | T14 | R | B1/B5 | Credential issuance or denial cannot be attributed | Audit logger fixed at info; source IP, client cert, pod, node, reason per decision (`handler.go`); Kubernetes audit log covers CR changes | Low (2.4) |
 | T15 | T | B7 | Malicious dependency or tool version reaches a signed release, or a re-pointed tag reaches the nodes | Actions SHA-pinned; Trivy image pinned by digest; Renovate waits 7 days and never automerges majors; images built from the tag without cache; Trivy isolated without rights; cosign signatures, SBOM and SLSA provenance on every image and the chart; images pinnable by digest (`*.image.digest`) | Medium (4.4), see O4 |
 | T16 | I | B3 | Robot Secrets readable by others in the bridge namespace, or a foreign Secret served as credentials | Secrets live only in the bridge namespace; the data plane serves only Secrets the bridge labelled, the reconciler never adopts a foreign one; RBAC trimmed to the verbs used; restrict namespace RBAC; enable encryption at rest (operator) | Medium (4.0), see A3 |
+| T17 | T/D | B6 | Several installs on one node: one installer drops or replaces another install's or the cloud's provider entry, overwrites a foreign binary (GKE keeps kubelet in the provider bin dir) through its provider name, or two installers race on the shared config and the kubelet restart | Per-install provider name and files; each installer replaces only a bridge entry of its own name and never a foreign file in the bin dir; flock node and config locks around every read-modify-write and restart ([ADR-0029](../adr/0029-configurable-plugin-provider-name.md), `installer/lock.go`, `installer/providerconfig.go`) | Low (2.2) |
 
 Security events the system must log (acceptance criteria):
 
@@ -159,5 +160,9 @@ Open items (not accepted; tracked):
   scanning and push protection, private vulnerability reporting, and the
   release App's ruleset bypass; the Renovate App lacks "Dependabot alerts:
   read".
-- **O5** Configurable plugin provider names, so several chart-managed
-  plugins can coexist on a node (ADR-0026).
+- ~~**O5** Configurable plugin provider names, so several chart-managed
+  plugins can coexist on a node (ADR-0026).~~ Closed by ADR-0029
+  (2026-09-27): implemented as `plugin.providerName`, mitigations in T17.
+  `helm uninstall` still leaves an install's provider entry and files on
+  the nodes, as it always did; removing them is manual (README,
+  "Uninstalling").

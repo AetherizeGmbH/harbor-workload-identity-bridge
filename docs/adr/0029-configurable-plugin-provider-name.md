@@ -17,7 +17,9 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   `<bin-dir>/<provider name>` for each entry. Several installs therefore
   share the config file, the bin dir, `/etc/default/kubelet` (patch mode)
   and the kubelet unit. Only the entry, the binary's name and the files the
-  entry points to can belong to one install.
+  entry points to can belong to one install. (Since Kubernetes 1.34 the
+  config flag may also name a directory whose `*.json`/`*.yaml`/`*.yml`
+  files kubelet reads together; see Alternatives.)
 - Patch and none mode wrote the chart-rendered config verbatim, which drops
   every other entry. Merge mode already replaced or appended by name.
 - The installers of two releases can run at the same time on one node (a
@@ -31,7 +33,10 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
 - Kubelet behaviour this rests on, read in the Kubernetes source (master,
   2026-09-27):
   - `pkg/credentialprovider/plugin/config.go` rejects a provider name that
-    contains `/` or a space, is `.` or `..`, or occurs twice.
+    contains `/` or a space, is `.` or `..`, or occurs twice, and a config
+    without any provider. Since v1.34.0 (commit `be6807e6a5`) the config
+    path may be a directory; a name that occurs in two of its files is
+    rejected too.
   - `pkg/credentialprovider/plugin/plugin.go` resolves each provider to
     `exec.LookPath(<bin-dir>/<name>)` at startup and fails when the binary
     is missing; `pkg/kubelet/kuberuntime/kuberuntime_manager.go` then exits
@@ -39,7 +44,9 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
     from starting.
   - `pkg/credentialprovider/plugin/plugins.go`
     (`externalCredentialProviderKeyring.Lookup`) runs every provider whose
-    `matchImages` match the image and pools their credentials;
+    `matchImages` match the image and pools their credentials in provider
+    order (`pkg/credentialprovider/keyring.go`, `BasicDockerKeyring` keeps
+    every credential of a registry key);
     `pkg/kubelet/kuberuntime/kuberuntime_image.go` tries them in turn until
     a pull succeeds. A provider that fails is logged and contributes
     nothing.
@@ -52,7 +59,9 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
    name, and free of dots, which the file names in (3) rely on. The
    installer reads it from `PROVIDER_NAME`, which the chart renders only
    for a non-default name, validates it the same way, and refuses a
-   rendered config that has no entry of that name.
+   rendered config that has no entry of that name. The chart quotes a
+   non-default name in the rendered entry: YAML 1.1 reads labels such as
+   `yes` or `123` as a boolean or a number.
 2. **The default name keeps every node path.** Binary
    `harbor-bridge-plugin`, `harbor-bridge-ca.crt`,
    `harbor-bridge-client.crt`/`.key`, `installer-state.json`. An existing
@@ -91,7 +100,7 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      lock, then config lock, so it cannot deadlock.
 
    Lock files are created and opened under the installer's file rules
-   (`os.Root`, Lstat, `O_NOFOLLOW`, `os.SameFile`; ADR-0021, audit H6). A
+   (`os.Root`, Lstat, `O_NOFOLLOW`, `os.SameFile`; `installer/files.go`). A
    flock dies with its process, so a crashed installer leaves no stale
    lock. A waiting installer gives up after ten minutes and fails its pod,
    which retries.
@@ -127,7 +136,8 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   plugin cannot reach the removed bridge (a new service on the same port
   would also need a certificate from the pinned CA) and contributes no
   credentials. Cleanup is manual: remove the entry before, or together
-  with, the binary, then restart kubelet. Renaming `plugin.providerName`
+  with, the binary, then restart kubelet; if it was the last entry, the
+  kubelet flags must go too. Renaming `plugin.providerName`
   leaves the old entry behind in the same way. There is no small, safe
   automatic cleanup: DaemonSet pods also stop on every re-roll and drain,
   where removing the entry would be wrong.
@@ -140,7 +150,16 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
 
 ## Alternatives considered
 
-- **One config file per install.** Kubelet reads exactly one.
+- **One config file per install in a config directory.** Kubelet 1.34+
+  reads every file of a directory named by the config flag, which would
+  make per-install files possible without editing a shared file. Moving
+  an existing install from its file to a directory changes the kubelet
+  flags (a restart on upgrade and new node paths), managed nodes point the
+  flag at the cloud's own file that merge mode must edit anyway, and the
+  installer would have to support both layouts. The installer still
+  expects a file and refuses a flag that names a directory with an error
+  that says so. Supporting it (a per-install file dropped into that
+  directory) is a possible follow-up.
 - **A subdirectory per install under `plugin.hostConfigDir`.** The sync
   container and any pod with a hostPath on that directory can write there;
   a symlink planted in place of the subdirectory would redirect the

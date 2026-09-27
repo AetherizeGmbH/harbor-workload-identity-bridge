@@ -93,6 +93,12 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 20 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
 | 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left |
 
+The harness installs one release. Several releases on one node (ADR-0029)
+are covered by the installer's unit tests (`installer/coexist_test.go`: two
+of our providers next to a foreign one in merge, patch and none mode, both
+locks, two installers at once) and by the chart's golden case
+`second-instance`, not by a kubelet-driven run.
+
 ## Pause-for-inspection mode
 
 `make e2e-pause` sets `TF_VAR_pause_after_pull=true`. That flips the
