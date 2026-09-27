@@ -31,12 +31,15 @@ BEGIN_LINE = (
 END_LINE = "<!-- END HARBOR-COMPAT -->"
 
 
+UNKNOWN = (-1,)
+
+
 def semver(v):
-    """Parse 'X.Y.Z' into a comparable tuple; unknown/garbage sorts lowest."""
+    """Parse 'X.Y.Z' into a comparable tuple; unknown/garbage is UNKNOWN and sorts lowest."""
     try:
         return tuple(int(x) for x in v.split(".")[:3])
     except (ValueError, AttributeError):
-        return (-1,)
+        return UNKNOWN
 
 
 def load_rows(results_glob):
@@ -50,7 +53,9 @@ def load_rows(results_glob):
 def render_table(rows):
     """Return (markdown table lines, floor, ceiling) for the result rows."""
     rows = sorted(rows, key=lambda r: semver(r["app"]), reverse=True)
-    passing = [semver(r["app"]) for r in rows if r["status"] == "pass"]
+    # A leg whose Harbor version is unknown (`helm show chart` failed) says
+    # nothing about the range, even when it passed.
+    passing = [semver(r["app"]) for r in rows if r["status"] == "pass" and semver(r["app"]) != UNKNOWN]
     floor = min(passing, default=None)
     ceiling = max(passing, default=None)
 
