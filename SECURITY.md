@@ -606,13 +606,14 @@ their own RBAC.
 - **Refused HarborAccess.** A HarborAccess reported as
   `AudienceMismatch`, `IssuerMismatch` or `InvalidSpec` gets no usable
   robot ([ADR-0030](docs/adr/0030-refused-harboraccess-suspends-its-robot.md)).
-  If it already had one, the bridge disables it in Harbor (description
+  The bridge deletes its Secret (even while Harbor is unreachable). If it
+  already had a robot, the bridge disables it in Harbor (description
   token `suspended=true`), or deletes it when its grants cannot be written
-  back (a pre-0.5.5 `*`), and deletes its Secret, so a password handed out
-  earlier stops working at once. Fixing the HarborAccess re-enables the
-  robot with a new password. A wrong `plugin.audience` therefore suspends
-  every robot until it is corrected. A robot an administrator disabled is
-  left disabled.
+  back (a pre-0.5.5 `*`), so a password handed out earlier stops working
+  at once. Fixing the HarborAccess gives the robot a new password while it
+  is still disabled, then re-enables it. A wrong `plugin.audience`
+  therefore suspends every robot until it is corrected. A robot an
+  administrator disabled is left disabled.
 - **Residual window.** The bridge stops issuing credentials for a
   HarborAccess the moment it is marked for deletion (`credential denied`,
   `reason=harboraccess_deleting`), even while the deletion is blocked.

@@ -298,9 +298,18 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	}
 
 	// 6b. Resume a robot the bridge suspended while this HarborAccess was
-	// refused (ADR-0030). The Secret goes first: a password from before
-	// the suspension must never work again, and a missing Secret forces
-	// the rotation below even if this pass stops after the update.
+	// refused (ADR-0030). A password from before the suspension must never
+	// work again, so the robot gets a new one while it is still disabled
+	// (Harbor rotates a disabled robot's secret and keeps it disabled), and
+	// only then is it re-enabled. Whatever step a pass fails at, the old
+	// password stays dead: until the enabling update succeeds the robot is
+	// disabled and carries the token, and the next pass resumes again. A
+	// Secret present at this point (restored, or its deletion during the
+	// suspension failed) holds a password that is dead after the rotation;
+	// it goes first, so that a pass that stops after the enabling update
+	// finds no Secret and rotates again instead of trusting it.
+	now := r.Clock.Now()
+	password, rotatedAt := "", (*time.Time)(nil)
 	resumed := false
 	if !created && robot.Disabled && RobotSuspended(robot.Description) {
 		if secret != nil {
@@ -309,6 +318,12 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 			}
 			secret = nil
 		}
+		logger.Info("rotating the password of a suspended Harbor robot before resuming it", "robot", robotName)
+		newSecret, err := r.Harbor.RefreshSecret(ctx, robot.ID)
+		if err != nil {
+			return r.markTransientError(ctx, ha, fmt.Errorf("rotate the password of a suspended robot: %w", err))
+		}
+		password, rotatedAt = newSecret, &now
 		enabled := *robot
 		enabled.Disabled = false
 		logger.Info("resuming Harbor robot suspended while the HarborAccess was refused", "robot", robotName)
@@ -324,7 +339,8 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	// applied (and retried) until it sticks, and drift made in the Harbor
 	// UI is reverted. The password is NOT rotated for a spec change —
 	// Harbor applies the new grants to the existing robot, and a rotation
-	// would invalidate every password kubelet still has cached.
+	// would invalidate every password kubelet still has cached. A resumed
+	// robot was converged by the update that re-enabled it.
 	if !created && !resumed && (!harbor.PermissionsMatch(robot, desiredPerms) ||
 		robot.Description != desiredDescription ||
 		robot.ExpiresAt != harborNeverExpires) {
@@ -334,15 +350,13 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		}
 	}
 
-	// 8. Password. A freshly created robot comes with one. Otherwise rotate
-	// when the schedule says so, or when the stored password cannot be
-	// valid for this robot (Secret missing/incomplete, or the robot was
-	// re-created under the same name).
-	now := r.Clock.Now()
-	password, rotatedAt := "", (*time.Time)(nil)
+	// 8. Password. A freshly created robot comes with one, a resumed one
+	// got one above. Otherwise rotate when the schedule says so, or when
+	// the stored password cannot be valid for this robot (Secret
+	// missing/incomplete, or the robot was re-created under the same name).
 	if created {
 		password, rotatedAt = robot.Secret, &now
-	} else if why := rotationReason(ha, secret, robot, now); why != "" {
+	} else if why := rotationReason(ha, secret, robot, now); !resumed && why != "" {
 		logger.Info("rotating Harbor robot password", "robot", robotName, "reason", why)
 		newSecret, err := r.Harbor.RefreshSecret(ctx, robot.ID)
 		if err != nil {
@@ -382,19 +396,20 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 // audience mismatch, invalid spec) and suspends what it already owns
 // (ADR-0030): a robot provisioned before the HarborAccess became refused
 // would otherwise keep its grants and a password that is never rotated
-// again. Refused objects are re-checked every ResyncInterval, so a
-// suspended robot an administrator re-enables is disabled again. A failed
+// again. Refused objects are re-checked every resyncAfter, so a suspended
+// robot an administrator re-enables is disabled again. A failed
 // suspension keeps the refusal reason and is retried with backoff.
 func (r *Reconciler) refuse(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
-	suspendErr := r.suspend(ctx, ha)
+	outcome, suspendErr := r.suspend(ctx, ha)
 	if suspendErr != nil {
 		message += fmt.Sprintf("; suspending its robot failed and is retried: %v", suspendErr)
+		outcome = "suspending the robot failed and is retried: " + suspendErr.Error()
 	}
 	meta.SetStatusCondition(&ha.Status.Conditions, metav1.Condition{
 		Type:               harborv1alpha1.ConditionRobotProvisioned,
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
-		Message:            "no usable robot while the HarborAccess is refused; a robot it had is disabled in Harbor (ADR-0030)",
+		Message:            "no usable robot while the HarborAccess is refused (ADR-0030): " + outcome,
 		ObservedGeneration: ha.Generation,
 	})
 	if err := r.setNotReady(ctx, ha, reason, message); err != nil {
@@ -403,57 +418,84 @@ func (r *Reconciler) refuse(ctx context.Context, ha *harborv1alpha1.HarborAccess
 	if suspendErr != nil {
 		return ctrl.Result{}, suspendErr
 	}
-	return ctrl.Result{RequeueAfter: ResyncInterval}, nil
+	return ctrl.Result{RequeueAfter: resyncAfter(ha)}, nil
 }
 
-// suspend disables the robot a refused HarborAccess owns and deletes its
-// robot Secret (ADR-0030). Only the robot its serviceAccountRef maps to
-// can be enabled and serving; robots of an earlier serviceAccountRef and
-// pre-ADR-0018 robots are the janitor's (it deletes them). A robot that
-// is already disabled stays as it is: suspended before, or disabled by an
-// administrator, whose decision the bridge never overrides.
-func (r *Reconciler) suspend(ctx context.Context, ha *harborv1alpha1.HarborAccess) error {
+// suspend deletes the robot Secret of a refused HarborAccess and disables
+// the robot it owns (ADR-0030). It returns what happened to the robot, for
+// the RobotProvisioned condition.
+//
+// The Secret goes first and whatever Harbor answers: deleting it needs only
+// the apiserver, its password is dead or about to be, and the data plane
+// still matches an InvalidSpec HarborAccess and would hand the Secret out.
+//
+// Only the robot its serviceAccountRef maps to can be enabled and serving;
+// robots of an earlier serviceAccountRef and pre-ADR-0018 robots are the
+// janitor's (it deletes them). A robot that is already disabled stays as it
+// is: suspended before, or disabled by an administrator, whose decision the
+// bridge never overrides.
+func (r *Reconciler) suspend(ctx context.Context, ha *harborv1alpha1.HarborAccess) (string, error) {
 	logger := log.FromContext(ctx)
 	cluster := r.Config.ClusterName
 	robotName, nameErr := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
-	if nameErr == nil && harbor.OwnsRobot(cluster, robotName) {
-		robot, err := r.Harbor.GetByName(ctx, robotName)
-		switch {
-		case errors.Is(err, harbor.ErrRobotNotFound):
-		case err != nil:
-			return fmt.Errorf("look up robot: %w", err)
-		case !robotOwnedBy(cluster, robot, ha.Namespace, ha.Name), robot.Disabled:
-		case canWriteBack(robot.Permissions):
-			disabled := *robot
-			disabled.Disabled = true
-			if err := r.Harbor.Update(ctx, &disabled, SuspendedRobotDescription(cluster, ha.Namespace, ha.Name), robot.Permissions); err != nil {
-				return fmt.Errorf("disable robot %q: %w", robot.WireName, err)
-			}
-			logger.Info("suspended Harbor robot of a refused HarborAccess", "robot", robot.WireName, "id", robot.ID)
-		default:
-			// Harbor's update replaces the grants with the ones sent, and
-			// the bridge never sends a project it refuses (such as a
-			// pre-0.5.5 "*"). A robot it cannot disable is revoked.
-			if err := r.Harbor.Delete(ctx, robot.ID); err != nil {
-				return fmt.Errorf("delete robot %q: %w", robot.WireName, err)
-			}
-			logger.Info("deleted Harbor robot of a refused HarborAccess: its grants cannot be written back to disable it",
-				"robot", robot.WireName, "id", robot.ID)
-		}
-	}
 
-	// The Secret goes whether or not a robot was found: its password is
-	// dead or about to be, and the data plane must have nothing to serve.
+	secretErr := r.deleteOwnRobotSecret(ctx, ha, robotName)
+
+	if nameErr != nil || !harbor.OwnsRobot(cluster, robotName) {
+		return "its ServiceAccount maps to no robot name of this bridge", secretErr
+	}
+	robot, err := r.Harbor.GetByName(ctx, robotName)
+	switch {
+	case errors.Is(err, harbor.ErrRobotNotFound):
+		return "it has no robot in Harbor", secretErr
+	case err != nil:
+		return "", errors.Join(secretErr, fmt.Errorf("look up robot: %w", err))
+	case !robotOwnedBy(cluster, robot, ha.Namespace, ha.Name):
+		return fmt.Sprintf("Harbor robot %q is not this HarborAccess's and is left alone", robot.WireName), secretErr
+	case robot.Disabled && RobotSuspended(robot.Description):
+		return fmt.Sprintf("Harbor robot %q is suspended (disabled) until the HarborAccess is accepted again", robot.WireName), secretErr
+	case robot.Disabled:
+		return fmt.Sprintf("Harbor robot %q was disabled in Harbor by an administrator and stays disabled", robot.WireName), secretErr
+	case canWriteBack(robot.Permissions):
+		disabled := *robot
+		disabled.Disabled = true
+		if err := r.Harbor.Update(ctx, &disabled, SuspendedRobotDescription(cluster, ha.Namespace, ha.Name), robot.Permissions); err != nil {
+			return "", errors.Join(secretErr, fmt.Errorf("disable robot %q: %w", robot.WireName, err))
+		}
+		logger.Info("suspended Harbor robot of a refused HarborAccess", "robot", robot.WireName, "id", robot.ID)
+		return fmt.Sprintf("Harbor robot %q is suspended (disabled) until the HarborAccess is accepted again", robot.WireName), secretErr
+	default:
+		// Harbor's update replaces the grants with the ones sent, and the
+		// bridge never sends a project it refuses (such as a pre-0.5.5
+		// "*"). A robot it cannot disable is revoked.
+		if err := r.Harbor.Delete(ctx, robot.ID); err != nil {
+			return "", errors.Join(secretErr, fmt.Errorf("delete robot %q: %w", robot.WireName, err))
+		}
+		logger.Info("deleted Harbor robot of a refused HarborAccess: its grants cannot be written back to disable it",
+			"robot", robot.WireName, "id", robot.ID)
+		return fmt.Sprintf("Harbor robot %q was deleted: its grants cannot be written back to disable it", robot.WireName), secretErr
+	}
+}
+
+// deleteOwnRobotSecret deletes ha's robot Secret if ha owns it
+// (secretDeleteConflict).
+func (r *Reconciler) deleteOwnRobotSecret(ctx context.Context, ha *harborv1alpha1.HarborAccess, robotName string) error {
 	secret, err := r.getRobotSecret(ctx, ha)
 	if err != nil {
 		return fmt.Errorf("read robot Secret: %w", err)
 	}
-	if secret != nil && r.secretConflict(ha, secret, robotName) == "" {
-		if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete robot Secret: %w", err)
-		}
-		logger.Info("deleted robot Secret of a refused HarborAccess", "secret", secret.Name)
+	if secret == nil {
+		return nil
 	}
+	if msg := r.secretDeleteConflict(ha, secret, robotName); msg != "" {
+		log.FromContext(ctx).Info("keeping a Secret at the robot Secret's name that does not belong to this HarborAccess",
+			"secret", secret.Name, "reason", msg)
+		return nil
+	}
+	if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete robot Secret: %w", err)
+	}
+	log.FromContext(ctx).Info("deleted robot Secret of a refused HarborAccess", "secret", secret.Name)
 	return nil
 }
 
@@ -757,6 +799,24 @@ func (r *Reconciler) secretConflict(ha *harborv1alpha1.HarborAccess, secret *cor
 				"Secret %q in %s is not managed by the bridge and does not hold this robot's credentials; refusing to adopt it. Rename or delete it",
 				robotsecret.Name(ha.Namespace, ha.Name), r.Config.Namespace)
 		}
+	}
+	return ""
+}
+
+// secretDeleteConflict returns why ha must not delete the Secret at its
+// robot-Secret name, or "" when it may. On top of secretConflict, a
+// managed Secret must be stamped for this cluster, the rule the janitor
+// deletes by (it lists only this cluster's Secrets): a bridge with another
+// clusterName that shares the namespace writes the same Secret names, and
+// deleting its Secret would make it rotate and rebuild it, only for this
+// bridge to delete it again on the event.
+func (r *Reconciler) secretDeleteConflict(ha *harborv1alpha1.HarborAccess, secret *corev1.Secret, robotName string) string {
+	if msg := r.secretConflict(ha, secret, robotName); msg != "" {
+		return msg
+	}
+	if secret != nil && robotsecret.IsManaged(secret) && secret.Labels[robotsecret.LabelCluster] != r.Config.ClusterName {
+		return fmt.Sprintf("robot-password Secret %q is stamped for cluster %q, not %q",
+			secret.Name, secret.Labels[robotsecret.LabelCluster], r.Config.ClusterName)
 	}
 	return ""
 }

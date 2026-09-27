@@ -14,7 +14,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
@@ -73,6 +75,16 @@ func secretGone(t *testing.T, r *Reconciler) bool {
 	return apierrors.IsNotFound(err)
 }
 
+// provisionedMessage returns the RobotProvisioned condition's message.
+func provisionedMessage(t *testing.T, r *Reconciler) string {
+	t.Helper()
+	c := meta.FindStatusCondition(getHA(t, r).Status.Conditions, harborv1alpha1.ConditionRobotProvisioned)
+	if c == nil {
+		t.Fatal("no RobotProvisioned condition")
+	}
+	return c.Message
+}
+
 func TestReconcile_RefusedHarborAccessSuspendsItsRobot(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
@@ -123,6 +135,9 @@ func TestReconcile_RefusedHarborAccessSuspendsItsRobot(t *testing.T) {
 			got := getHA(t, r)
 			assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, tc.reason)
 			assertCondition(t, got, harborv1alpha1.ConditionRobotProvisioned, metav1.ConditionFalse, tc.reason)
+			if msg := provisionedMessage(t, r); !strings.Contains(msg, "is suspended (disabled)") {
+				t.Errorf("RobotProvisioned message %q does not say the robot is suspended", msg)
+			}
 
 			// The janitor keeps the suspended robot of a live, selected
 			// HarborAccess: suspension is reversible.
@@ -174,10 +189,29 @@ func TestReconcile_ResumesSuspendedRobotWithANewPassword(t *testing.T) {
 	assertCondition(t, getHA(t, r), harborv1alpha1.ConditionReady, metav1.ConditionTrue, ReasonReconcileSucceeded)
 }
 
-// A Secret present when the robot is resumed (its deletion during the
-// suspension failed, or someone restored it) is not trusted: even when the
-// pass that re-enables the robot fails before rotating, the next pass
-// rotates, so a password from before the suspension never works again.
+// revivalWatch fails a test that re-enables a robot while Harbor still
+// holds the password it had before its suspension.
+type revivalWatch struct {
+	*mockHarbor
+	oldSecret string
+	revived   []int64
+}
+
+func (w *revivalWatch) Update(ctx context.Context, current *harbor.Robot, description string, perms []harbor.ProjectPermission) error {
+	w.mu.Lock()
+	stored, ok := w.robots[current.ID]
+	if ok && stored.Disabled && !current.Disabled && stored.Secret == w.oldSecret {
+		w.revived = append(w.revived, current.ID)
+	}
+	w.mu.Unlock()
+	return w.mockHarbor.Update(ctx, current, description, perms)
+}
+
+// Resuming never re-enables the robot with the password it had before the
+// suspension, whatever step a pass fails at: the password is rotated while
+// the robot is still disabled. A Secret present when the robot is resumed
+// (its deletion during the suspension failed, or someone restored it) is
+// not trusted either.
 func TestReconcile_ResumeNeverRevivesAPasswordFromBeforeTheSuspension(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()
@@ -194,22 +228,86 @@ func TestReconcile_ResumeNeverRevivesAPasswordFromBeforeTheSuspension(t *testing
 			}},
 		Data: map[string][]byte{"username": []byte(mockRobotPrefix + testRobotName), "password": []byte("leaked-before-suspension")},
 	}
-	r := newReconciler(t, mh, fixedClock{testT0}, ha, stale)
-	mh.errOnRefresh = errors.New("harbor went away")
-	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err == nil {
-		t.Fatal("setup: the resume pass was expected to fail at the rotation")
-	}
-	if mh.robots[id].Disabled {
-		t.Fatal("setup: the robot was not re-enabled before the rotation failed")
+	watch := &revivalWatch{mockHarbor: mh, oldSecret: "leaked-before-suspension"}
+	r := newReconciler(t, watch, fixedClock{testT0}, ha, stale)
+
+	stillSuspended := func(step string) {
+		t.Helper()
+		if robot := mh.robots[id]; !robot.Disabled || !RobotSuspended(robot.Description) {
+			t.Errorf("%s: robot disabled=%v description=%q; a failed resume must leave it suspended", step, robot.Disabled, robot.Description)
+		}
 	}
 
-	mh.errOnRefresh = nil
+	// The rotation fails: the robot stays suspended.
+	mh.errOnRefresh = errors.New("harbor went away")
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err == nil {
+		t.Fatal("the resume pass was expected to fail at the rotation")
+	}
+	stillSuspended("rotation failed")
+	if !secretGone(t, r) {
+		t.Error("the Secret holding the pre-suspension password survived the resume")
+	}
+
+	// The rotation succeeds, the enabling update fails: still suspended,
+	// and the next pass resumes again.
+	mh.errOnRefresh, mh.errOnUpdate = nil, errors.New("harbor went away")
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err == nil {
+		t.Fatal("the resume pass was expected to fail at the enabling update")
+	}
+	stillSuspended("enabling update failed")
+
+	mh.errOnUpdate = nil
 	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
 		t.Fatal(err)
+	}
+	if mh.robots[id].Disabled {
+		t.Fatal("robot not resumed")
+	}
+	if len(watch.revived) != 0 {
+		t.Errorf("robot %v re-enabled while Harbor still accepted the password from before the suspension", watch.revived)
 	}
 	got := secretPassword(t, r)
 	if got == "leaked-before-suspension" || got != mh.harborPassword(id) {
 		t.Errorf("stored password %q, Harbor accepts %q: the pre-suspension password came back", got, mh.harborPassword(id))
+	}
+}
+
+// A pass that re-enabled the robot and failed to store the new password
+// leaves no Secret, so the next pass rotates again instead of trusting a
+// Secret from before the suspension.
+func TestReconcile_ResumeThatFailsToStoreThePasswordRotatesAgain(t *testing.T) {
+	mh := newMockHarbor()
+	r, id := provisioned(t, mh)
+	editHA(t, r, func(ha *harborv1alpha1.HarborAccess) { ha.Spec.TrustPolicy.Audience = "other" })
+	if _, err := r.Reconcile(context.Background(), reqFor(newHarborAccess())); err != nil {
+		t.Fatal(err)
+	}
+	editHA(t, r, func(ha *harborv1alpha1.HarborAccess) { ha.Spec.TrustPolicy.Audience = r.Config.Audience })
+
+	fail := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok && fail {
+				return errors.New("apiserver went away")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	if _, err := r.Reconcile(context.Background(), reqFor(newHarborAccess())); err == nil {
+		t.Fatal("the resume pass was expected to fail at the Secret write")
+	}
+	if mh.robots[id].Disabled {
+		t.Fatal("setup: the robot was expected to be re-enabled before the Secret write failed")
+	}
+	fail = false
+	if _, err := r.Reconcile(context.Background(), reqFor(newHarborAccess())); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.refreshCalls) != 2 {
+		t.Errorf("refresh calls %v, want two: the password of the failed pass was never stored", mh.refreshCalls)
+	}
+	if got := secretPassword(t, r); got != mh.harborPassword(id) {
+		t.Errorf("stored password %q, Harbor accepts %q", got, mh.harborPassword(id))
 	}
 }
 
@@ -238,6 +336,9 @@ func TestReconcile_RefusedHarborAccessWithLegacyWildcardRobotRevokesIt(t *testin
 		t.Error("the every-project robot's Secret survived")
 	}
 	assertCondition(t, getHA(t, r), harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
+	if msg := provisionedMessage(t, r); !strings.Contains(msg, "was deleted") {
+		t.Errorf("RobotProvisioned message %q does not say the robot was deleted", msg)
+	}
 }
 
 // An administrator's disable is not the bridge's to undo (ADR-0023): a
@@ -253,6 +354,9 @@ func TestReconcile_RefusedHarborAccessLeavesAnAdministratorsDisableAlone(t *test
 	}
 	if len(mh.updateCalls) != 0 || RobotSuspended(mh.robots[id].Description) {
 		t.Fatalf("administrator-disabled robot marked as suspended: updates %+v", mh.updateCalls)
+	}
+	if msg := provisionedMessage(t, r); !strings.Contains(msg, "by an administrator") {
+		t.Errorf("RobotProvisioned message %q does not say an administrator disabled the robot", msg)
 	}
 
 	editHA(t, r, func(ha *harborv1alpha1.HarborAccess) { ha.Spec.TrustPolicy.Audience = r.Config.Audience })
@@ -337,5 +441,89 @@ func TestReconcile_RefusedHarborAccessWithoutARobotWritesNothing(t *testing.T) {
 	}
 	if n := len(mh.createCalls) + len(mh.updateCalls) + len(mh.deleteCalls) + len(mh.refreshCalls); n != 0 {
 		t.Errorf("%d Harbor writes for a HarborAccess that never had a robot", n)
+	}
+	if msg := provisionedMessage(t, r); !strings.Contains(msg, "has no robot") {
+		t.Errorf("RobotProvisioned message %q does not say there is no robot", msg)
+	}
+}
+
+// The robot Secret goes even when Harbor cannot be asked about the robot:
+// deleting it needs only the apiserver, and the data plane still matches
+// an InvalidSpec HarborAccess (such as one granting "*") and would keep
+// handing the password out for as long as Harbor's API fails, for example
+// with broken bridge admin credentials while robot logins still work.
+func TestReconcile_RefusedHarborAccessDeletesItsSecretWhenHarborFails(t *testing.T) {
+	mh := newMockHarbor()
+	r, id := provisioned(t, mh)
+	editHA(t, r, func(ha *harborv1alpha1.HarborAccess) {
+		ha.Spec.Permissions = append(ha.Spec.Permissions, harborv1alpha1.ProjectPermission{Project: "*", Action: harborv1alpha1.ActionPullPush})
+	})
+	mh.errOnGetByName = map[string]error{testRobotName: errors.New("harbor 401")}
+	if _, err := r.Reconcile(context.Background(), reqFor(newHarborAccess())); err == nil {
+		t.Fatal("a failed suspension must be retried with backoff")
+	}
+	if !secretGone(t, r) {
+		t.Error("robot Secret survived a failed Harbor lookup; the data plane could keep serving it")
+	}
+	if mh.robots[id].Disabled {
+		t.Fatal("setup: the robot cannot have been disabled without a lookup")
+	}
+	if msg := provisionedMessage(t, r); !strings.Contains(msg, "suspending the robot failed") || strings.Contains(msg, "is suspended") {
+		t.Errorf("RobotProvisioned message %q must say the suspension failed, not that the robot is suspended", msg)
+	}
+}
+
+// Two bridges with different clusterName values that share a namespace
+// write the same robot-Secret names. The bridge that refuses a HarborAccess
+// (it names the other bridge's audience) must leave the other bridge's
+// Secret alone: deleting it would make that bridge rotate and rebuild it,
+// and the rebuilt Secret's event would bring the deletion back, one Harbor
+// rotation per round.
+func TestReconcile_RefusedHarborAccessLeavesAnotherClustersSecretAlone(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.TrustPolicy.Audience = "audience-b"
+	mhA, mhB := newMockHarbor(), newMockHarbor()
+	bridgeA := newReconciler(t, mhA, fixedClock{testT0}, ha)
+	bridgeA.Config.ClusterName, bridgeA.Config.Audience = "cluster-a", "audience-a"
+	cfgB := *bridgeA.Config
+	cfgB.ClusterName, cfgB.Audience = "cluster-b", "audience-b"
+	bridgeB := &Reconciler{Client: bridgeA.Client, Scheme: bridgeA.Scheme, Harbor: mhB, Config: &cfgB, Clock: bridgeA.Clock}
+
+	if _, err := bridgeB.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+	for round := range 3 {
+		if _, err := bridgeA.Reconcile(context.Background(), reqFor(ha)); err != nil {
+			t.Fatalf("round %d, bridge A: %v", round, err)
+		}
+		if secretGone(t, bridgeA) {
+			t.Fatalf("round %d: the refusing bridge deleted the Secret the other bridge serves", round)
+		}
+		if _, err := bridgeB.Reconcile(context.Background(), reqFor(ha)); err != nil {
+			t.Fatalf("round %d, bridge B: %v", round, err)
+		}
+	}
+	if len(mhB.refreshCalls) != 0 {
+		t.Errorf("bridge B rotated %v: its Secret was taken from it", mhB.refreshCalls)
+	}
+}
+
+// Refused objects are re-checked on the per-object resync (resyncAfter),
+// not all at once an interval after the bridge started.
+func TestReconcile_RefusedHarborAccessResyncIsSpreadPerObject(t *testing.T) {
+	requeue := func(uid types.UID) time.Duration {
+		t.Helper()
+		ha := newHarborAccess()
+		ha.UID = uid
+		ha.Spec.TrustPolicy.Audience = "other"
+		r := newReconciler(t, newMockHarbor(), fixedClock{testT0}, ha)
+		res, err := r.Reconcile(context.Background(), reqFor(ha))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.RequeueAfter
+	}
+	if a, b := requeue("uid-a"), requeue("uid-b"); a == b || a < ResyncInterval*9/10 || b < ResyncInterval*9/10 {
+		t.Errorf("RequeueAfter %s and %s: want two different values within the last tenth of %s", a, b, ResyncInterval)
 	}
 }
