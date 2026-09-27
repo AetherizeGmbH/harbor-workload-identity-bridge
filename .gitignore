@@ -22,7 +22,7 @@ test/e2e/modules/**/.terraform.lock.hcl
 test/e2e/**/.gen/
 test/e2e/**/terraform.tfstate*
 test/e2e/**/errored_test.tfstate
-test/e2e/**/.tofu-sleep
+test/e2e/**/.tofu-sleep*
 test/e2e/**/.diag/
 test/e2e/diag-last/
 
@@ -32,7 +32,7 @@ test/e2e-gke/**/.terraform/
 test/e2e-gke/**/.gen/
 test/e2e-gke/**/terraform.tfstate*
 test/e2e-gke/**/errored_test.tfstate
-test/e2e-gke/**/.tofu-sleep
+test/e2e-gke/**/.tofu-sleep*
 test/e2e-gke/**/.diag/
 
 # Node tooling (semantic-release / commitlint). package-lock.json is

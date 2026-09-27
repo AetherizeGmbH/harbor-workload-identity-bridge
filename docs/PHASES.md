@@ -365,7 +365,7 @@ Originally-planned section (kept for archaeology):
 8. `harbor_access` — the `HarborAccess` CRs + test SAs: baseline, two collision-prone SAs (ADR-0018), a tenant-namespace CR, and a multi-project `pull,push` CR; waits on `Ready=True` (bridge controller's umbrella condition).
 9. `pull_pod` / `_alpha` / `_beta` / `_gamma` / `_multi` — pods pull their project via the credential provider; together they cover multi-tenancy, collision-resistance, cluster-wide CR matching, and a multi-project robot.
 10. `robot_push_test` — Job using the multi-project robot's credentials to push a tag to one project and pull another; verifies the `pull,push` action end-to-end.
-11. `file_sleep` — no-op unless `TF_VAR_pause_after_pull=true`, in which case it blocks (AFTER all assertions) on `rm test/e2e/.tofu-sleep`.
+11. `file_sleep` — no-op unless `TF_VAR_pause_after_pull=true`, in which case it blocks (AFTER all assertions) until you `rm test/e2e/.tofu-sleep-*` (a fresh suffix per run).
 
 Topology + flow diagram in [docs/img/local-dev-topology-tofu.svg](img/local-dev-topology-tofu.svg).
 
@@ -445,7 +445,7 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 
 | Topic | Resolution path |
 | --- | --- |
-| Does containerd's auth flow accept our Basic Auth credentials end-to-end? | **Resolved 2026-06-05.** The `pull_pod` stage of [test/e2e/tests/01-bridge.tftest.hcl](../test/e2e/tests/01-bridge.tftest.hcl) runs the full chain — kubelet → plugin → bridge → robot creds → containerd → Harbor — under real kubelet on `kindest/node:v1.35.0`. Pass = green. |
+| Does containerd's auth flow accept our Basic Auth credentials end-to-end? | **Resolved 2026-06-05.** The `pull_pod` stage of [test/e2e/tests/02-bridge.tftest.hcl](../test/e2e/tests/02-bridge.tftest.hcl) runs the full chain — kubelet → plugin → bridge → robot creds → containerd → Harbor — under real kubelet on `kindest/node:v1.35.0`. Pass = green. |
 | Should the data plane gate on CR `Ready=True` before returning credentials? | Phase 6 polish. Trade-off: stronger guarantee vs more code in the hot path. |
 | Should `forceLocalValidation: false` ever default `true`? | Reassess when Harbor #17520 lands. Air-gapped clusters keep `true` indefinitely. |
 | Should the chart split metrics onto a separate port? | Phase 5 design call. Currently planned: same port, same TLS. |

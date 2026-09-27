@@ -65,9 +65,9 @@
   <text x="40" y="376" class="note">No kubectl proxy.</text>
   <text x="40" y="392" class="note">Tofu test does apply, build, seed,</text>
   <text x="40" y="408" class="note">and the assertion in one run.</text>
-  <text x="40" y="430" class="note">`make e2e-pause` halts before the</text>
-  <text x="40" y="446" class="note">load-bearing pull; a sleep file at</text>
-  <text x="40" y="462" class="note">test/e2e/.tofu-sleep gates it.</text>
+  <text x="40" y="430" class="note">`make e2e-pause` halts after the</text>
+  <text x="40" y="446" class="note">assertions; a sleep file at</text>
+  <text x="40" y="462" class="note">test/e2e/.tofu-sleep-* gates it.</text>
   <text x="40" y="478" class="note">Delete the file to resume.</text>
 
   <text x="40" y="510" class="note">~5 min cluster → chart → pass.</text>

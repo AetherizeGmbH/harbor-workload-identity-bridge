@@ -244,7 +244,7 @@ Run:
 
 ```bash
 make e2e-gke          # full run, auto-destroy (~25-35 min, dominated by cluster create)
-make e2e-gke-pause    # pause after the assertions; rm test/e2e-gke/.tofu-sleep to continue
+make e2e-gke-pause    # pause after the assertions; rm test/e2e-gke/.tofu-sleep-* to continue
 ```
 
 Differences from the kind harness (details in
