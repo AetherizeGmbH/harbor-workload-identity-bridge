@@ -727,7 +727,8 @@ func TestRunSync_RejectsNonPositiveInterval(t *testing.T) {
 
 // TestRun_MergeRefusesAConfigDirectory: kubelet 1.34+ accepts a directory
 // for --image-credential-provider-config. The installer does not merge
-// into one; it says so before it writes anything.
+// into one; it says so before it writes anything next to it, not even a
+// lock file.
 func TestRun_MergeRefusesAConfigDirectory(t *testing.T) {
 	env := newTestEnv(t, modeMerge, nil)
 	env.cfg.MergeBinDir = "/cloud/bin"

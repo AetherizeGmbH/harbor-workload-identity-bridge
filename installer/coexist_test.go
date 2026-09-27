@@ -400,7 +400,8 @@ func TestRun_RefusesToTakeOverAForeignProvider(t *testing.T) {
 	if env.restarts != 0 {
 		t.Fatal("kubelet restarted after a refusal")
 	}
-	// A refused pass writes nothing, not even the CA.
+	// A refused pass writes no file of the install, not even the CA (only
+	// lock files).
 	assertAbsent(t, env, configDir+"/ecr-credential-provider.ca.crt", "/cloud/bin/ecr-credential-provider.entry")
 }
 
@@ -427,7 +428,8 @@ func TestRun_RefusesToOverwriteAForeignBinary(t *testing.T) {
 	if got := env.hostFile(t, "/etc/srv/kubernetes/cri_auth_config.yaml"); got != gkeConfig {
 		t.Fatal("the cloud config was changed")
 	}
-	// A refused pass writes nothing, not even the CA or the record.
+	// A refused pass writes no file of the install, not even the CA or the
+	// record (only lock files).
 	assertAbsent(t, env, configDir+"/kubelet.ca.crt", "/home/kubernetes/bin/kubelet.entry")
 
 	// A bridge entry of that name in the config does not make the file
@@ -1032,7 +1034,8 @@ func TestSiblingEntry(t *testing.T) {
 // config from one bin dir. A patch-mode install with other directories
 // than an install already on the node would take the other install's
 // entry out of kubelet's view, or, with only the bin dir different, leave
-// kubelet without its binary. It refuses before it writes anything.
+// kubelet without its binary. It refuses before it writes any file of the
+// install.
 func TestRun_PatchDoesNotMoveKubeletAwayFromAnotherInstall(t *testing.T) {
 	for _, tc := range []struct {
 		name              string

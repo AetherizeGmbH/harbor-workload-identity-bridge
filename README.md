@@ -329,8 +329,12 @@ clean a node:
    binary, executable, in kubelet's bin dir.
 4. Once the last install is gone from the node, also delete the backups
    of the shared files (`<provider config>.bak`; in patch mode
-   `/etc/default/kubelet.bak`) and the lock files
-   (`/run/harbor-bridge-installer.lock`, `<provider config>.lock`).
+   `/etc/default/kubelet.bak`) and the lock files:
+   `/run/harbor-bridge-installer.lock` and a `<config>.lock` next to
+   every provider config an installer edited or checked, also in a pass
+   it refused: next to the cloud's config in merge mode, and in patch
+   mode next to the chart-owned config and next to any config kubelet
+   read before patch mode moved it.
 
 ### How the node install works — modes and upgrades (ADR-0021)
 
@@ -449,7 +453,24 @@ service:
   same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
   refuses to point kubelet at other directories while the config kubelet
   reads holds another release's entry. In auto mode a later release
-  merges into whatever config kubelet already runs.
+  merges into whatever config kubelet already runs, and its binary goes
+  into kubelet's bin dir. When that config is another release's
+  chart-owned config, it treats it as the chart's (see "The chart-owned
+  config stays the chart's" below). Otherwise keep kubelet's config out
+  of every `plugin.hostConfigDir`: the installer refuses a kubelet config
+  inside its own `plugin.hostConfigDir` that is not the chart-owned one,
+  and a `plugin.install.configFile` inside it.
+- **Shared CA and mTLS files.** Each release keeps its CA file and its
+  mTLS client certificate and key in `plugin.hostConfigDir`, and every
+  release's sync container mounts that directory read-write as root. Where
+  releases share it (always in patch and none mode), a compromised sync
+  container of one release can read the other releases' mTLS client keys
+  and replace their pinned CA until their own sync container restores it
+  (every 60 s). That breaks the other release's pulls, and, together with
+  a position on the path to its bridge's endpoint, lets the attacker
+  impersonate that bridge; the token check still applies. In auto or
+  merge mode a `plugin.hostConfigDir` per release avoids this
+  (SECURITY.md).
 - **Disjoint `matchImages`.** Kubelet runs every provider whose
   `matchImages` match an image, pools their credentials and tries them
   in order until a pull succeeds (read in the kubelet source; see
@@ -465,15 +486,22 @@ service:
   to its own entry plus the other releases' entries, and drops anything
   else, as the single install always did. It keeps another release's
   entry only when that release's binary and its record, holding exactly
-  that entry, are in `plugin.hostBinaryDir`, which the sync containers
-  cannot write. Keep `plugin.hostBinaryDir` for this chart's plugins
-  only; the chart refuses a `plugin.hostBinaryDir` or
-  `plugin.install.stateDir` in reach of `plugin.hostConfigDir`.
+  that entry, are in kubelet's bin dir (`plugin.hostBinaryDir`), which
+  the sync containers cannot write. A merge pass into such a config (its
+  own, or one another release's record names) does the same. Keep
+  `plugin.hostBinaryDir` for this chart's plugins only; the chart
+  refuses a `plugin.hostBinaryDir` or `plugin.install.stateDir` in reach
+  of `plugin.hostConfigDir`.
 - **The installer refuses names it does not own**: in a cloud's config
   (merge mode), a provider entry of that name that is not a bridge
   entry; for a non-default name, a file of that name in kubelet's bin
   dir that is not this plugin (GKE keeps kubelet itself there) and has
-  no record of this install next to it. A refused pass writes nothing.
+  no record of this install next to it. In a cloud's config it also
+  refuses to write or restart kubelet onto a config kubelet would exit
+  on: an entry whose binary is missing from kubelet's bin dir or not
+  executable, a repeated name, or a name kubelet refuses. A refused pass
+  changes no config, binary, record, CA, mTLS or state file; only lock
+  files (see [Uninstalling](#uninstalling)) may be new.
 - Removing one release, or renaming its provider, leaves its entry on
   the nodes: see [Uninstalling](#uninstalling).
 
@@ -576,7 +604,7 @@ contract, not individually run.
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
 | 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), GKE e2e harness, ADRs 0021, 0022 and 0024 | ✅ Code + kind e2e complete; first `make e2e-gke` run against a real project still outstanding |
 | 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, ADRs 0023 and 0025 | ✅ Code + kind e2e (lifecycle stages) complete |
-| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, token lifetime cap and pod binding, signed releases with provenance, gosec and fuzzing, ADRs 0026–0028, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
+| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, token lifetime cap and pod binding, several chart-managed installs per cluster (configurable plugin provider name), signed releases with provenance, gosec and fuzzing, ADRs 0026–0029, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
 
 ### Next
 

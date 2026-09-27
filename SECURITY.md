@@ -396,36 +396,70 @@ container:
   concurrent installers neither lose each other's entries nor restart
   kubelet at the same time. The lock files follow the same file rules as
   above.
-- writes a record `<bin dir>/<providerName>.entry` (mode `0600`, not
-  executable) next to the plugin binary before it writes its entry: the
-  canonical bytes of that entry. The bin dir is out of reach of the sync
-  containers (no sync container mounts it, and the chart and the
-  installer refuse a `plugin.hostBinaryDir` in reach of
-  `plugin.hostConfigDir`, and a state dir inside it). Keep
-  `plugin.hostBinaryDir` for this chart's plugins only.
-- in `patch` and `none` mode keeps the chart-owned config
-  (`<plugin.hostConfigDir>/credential-provider-config.yaml`) the chart's.
-  The sync container of every release can write that directory, and
-  kubelet runs every entry of the file after its next restart. Each pass
-  rewrites the file to this install's entry plus the other installs'
-  entries, and keeps another install's entry only when its executable
-  binary is in `plugin.hostBinaryDir` and its record there holds exactly
-  that entry. A planted entry, or another install's entry changed in the
+- keeps a record `<bin dir>/<providerName>.entry` (mode `0600`, not
+  executable) next to the plugin binary: the canonical bytes of its
+  entry, and the chart-owned config it writes into, if any. A pass adds
+  its new entry to the record before it writes the binary and the entry,
+  and drops the old one from the record only after the config holds the
+  new one. The bin dir is out of reach of the sync containers (no sync
+  container mounts it, and the chart and the installer refuse a
+  `plugin.hostBinaryDir` in reach of `plugin.hostConfigDir`, and a state
+  dir inside it). Keep `plugin.hostBinaryDir` for this chart's plugins
+  only.
+- keeps the chart-owned config
+  (`<plugin.hostConfigDir>/credential-provider-config.yaml`) the chart's:
+  in `patch` and `none` mode, and in `merge` mode when kubelet's config
+  is a chart-owned config (this install's own, or one a record in
+  kubelet's bin dir names; for example a release in `auto` mode whose
+  directories differ from those of the `patch`-mode release that wired
+  kubelet). The sync container of every release that uses that
+  directory, and any pod with a hostPath on it, can write there, and
+  kubelet runs every entry of the file after its next restart. Each pass rewrites the file to this install's entry plus the
+  other installs' entries, and keeps another install's entry only when
+  its executable binary is in kubelet's bin dir (`plugin.hostBinaryDir`
+  in `patch` and `none` mode) and its record there holds exactly that
+  entry. A planted entry, or another install's entry changed in the
   file, is dropped before the installer restarts kubelet, as the whole
-  file was replaced before ADR-0029. Residual: a writer of
+  file was replaced before ADR-0029. Any other kubelet config inside
+  `plugin.hostConfigDir` is refused in `merge` mode, and so is
+  `plugin.install.configFile` inside it. Residual: a writer of
   `plugin.hostConfigDir` can remove another install's entry (or change
-  it so that the next pass drops it) until that install's next pass,
-  and kubelet reads the file as it is when kubelet itself starts, before
-  any installer runs (a node reboot). In `patch` mode the installer also
-  refuses to point kubelet at its own directories while the config
-  kubelet reads holds another install's entry.
+  it so that the next pass drops it) until that install's next pass;
+  after a pass of another install died between its record and its
+  config, it can switch that install's entry between the old and the
+  new one until that install's next pass; and kubelet reads the file as
+  it is when kubelet itself starts, before any installer runs (a node
+  reboot). In `patch` mode the installer also refuses to point kubelet at
+  its own directories while the config kubelet reads holds another
+  install's entry.
+- in `merge` mode into a cloud's config, keeps every other entry, but
+  refuses to write the config, or restart kubelet onto it, when kubelet
+  would exit at startup: an entry whose binary is missing from kubelet's
+  bin dir or not executable, a name that occurs twice, or a name kubelet
+  refuses.
+- puts each release's CA file (which its plugin reads on every exec)
+  and mTLS client certificate and key into `plugin.hostConfigDir`, which
+  all releases share in `patch` and `none` mode, and in every mode with
+  the default value. Every release's sync container mounts that
+  directory read-write as root. Residual: a compromised sync container
+  of one release, or any pod with a hostPath on the directory, can read
+  the other releases' mTLS client keys and replace their pinned CA; each
+  release's sync container restores its own CA only once per sync
+  interval (60 s). A replaced CA breaks that release's pulls, or, with a
+  position on the path to that bridge's endpoint, lets the writer
+  impersonate the bridge; a client key only passes the mTLS check, which
+  never replaces the token (O2). Give each release its own
+  `plugin.hostConfigDir` in `auto` or `merge` mode where that matters.
 - treats the provider name, a chart value, as a file name in kubelet's
   bin dir, where GKE keeps kubelet itself: in a cloud's config (`merge`
   mode) it never replaces a provider entry of that name that is not a
   bridge entry, and, for a non-default name, it never replaces a file of
   that name that is not this plugin: only its own record next to the
   file, or the file already holding this plugin's bytes, makes it this
-  install's. A pass that refuses writes nothing on the node.
+  install's. A pass that refuses changes no config, binary, record, CA,
+  mTLS or state file; only the lock files it took, and their
+  directories, may be new (next to the cloud's config in `merge` mode,
+  next to kubelet's current config in `patch` mode).
 
 This privilege model is what installing a credential provider on
 nodes requires — managed node images (EKS, GKE, AKS) pre-wire their
@@ -456,8 +490,10 @@ Operator choices:
   mode: root (it refreshes the on-host CA/mTLS files when
   cert-manager rotates them) but never privileged, no capabilities,
   `seccompProfile: RuntimeDefault`, read-only root filesystem, and a
-  single hostPath mount: `plugin.hostConfigDir`. It never sees the host
-  root, never uses nsenter, never touches kubelet.
+  single hostPath mount: `plugin.hostConfigDir`, which also holds the CA
+  and mTLS files of every other release that uses the same directory
+  (see above). It never sees the host root, never uses nsenter, never
+  touches kubelet.
 - The DaemonSet pods get no ServiceAccount token (they never call the
   Kubernetes API).
 - `plugin.enabled: false` removes the DaemonSet entirely, for nodes

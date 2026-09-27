@@ -271,7 +271,10 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   reads (a file, or the files of a directory) holds a bridge entry of
   another name; a single install that changed its own directories still
   moves. In auto mode a later install merges into whatever config kubelet
-  already runs.
+  already runs; when that is another release's chart-owned config, it
+  keeps only the entries the records vouch for (decision 4). Its binary
+  and record then go into the other release's `plugin.hostBinaryDir`,
+  kubelet's bin dir.
 - `plugin.matchImages` of different installs should not overlap. They still
   work when they do, but every matching plugin runs for each pull: a bridge
   without a HarborAccess for the pod answers 403, its plugin returns no
@@ -317,10 +320,42 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   that install's installer wrote. And kubelet reads the
   file as it is at its own start, before any installer runs: a node
   reboot makes whatever the file holds then live until the next pass, as
-  before this ADR. An install in auto mode that merges into another
-  install's chart-owned file (other directories) keeps whatever that file
-  holds, like any merge.
-- Every node gets two empty lock files, also with a single install.
+  before this ADR. Merge mode keeps the entries of a kubelet config that
+  no record in kubelet's bin dir names as chart-owned; that holds for the
+  chart-owned config of an installer before this ADR (which "Upgrade
+  first" rules out next to another install) and for a none-mode config
+  when kubelet runs binaries from another directory than that install's
+  `plugin.hostBinaryDir`. There it refuses only a config kubelet would
+  exit on. A kubelet config in another release's `plugin.hostConfigDir`
+  that is not that release's chart-owned config is not recognised
+  either: keep kubelet's config out of every `plugin.hostConfigDir`.
+- Releases that use the same `plugin.hostConfigDir` (all of them in
+  patch and none mode, and in every mode with the default value) share
+  every release's CA file there, which its plugin reads on every exec,
+  and mTLS client certificate and key (`0600`, owned by root). Every
+  release's sync container mounts that directory read-write and runs as
+  root, which needs no capability to read or replace root-owned files.
+  A compromised sync container of one release, or any pod with a hostPath
+  on the directory, can therefore read the other releases' mTLS client
+  keys and replace their pinned CA; each release's sync container
+  restores its own CA only at its next tick (60 s), so a writer that
+  keeps replacing it holds it most of the time. A replaced CA makes that
+  release's plugin fail its TLS handshake (a denial of service), or,
+  together with a position on the path to that bridge's endpoint
+  (`127.0.0.1` on the host network by default), lets the writer
+  impersonate the bridge. A client key lets it pass that bridge's mTLS
+  check, which is defence in depth only (every request still needs a
+  valid token; O2). With one release per node a sync container reached
+  only its own files. A directory per release for the CA and mTLS files,
+  mounted only by that release's sync container, would close this and is
+  a possible follow-up.
+- Lock files stay on every node, also with a single install: in none mode
+  the config lock next to the chart-owned config; in auto, merge and
+  patch mode the node lock and the lock next to the config the pass
+  edits; in patch mode also the lock next to kubelet's current config
+  whenever that is another config (the first move away from a cloud's
+  config, or from an earlier `plugin.hostConfigDir`). A refused pass can
+  leave these lock files, and their directories, behind (decision 4).
 
 ## Alternatives considered
 
