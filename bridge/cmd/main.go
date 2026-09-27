@@ -25,11 +25,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
-	corev1 "k8s.io/api/core/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -135,25 +132,10 @@ func run() error {
 
 		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
 
-		// Cache scoping — minimum-privilege RBAC. HarborAccess is
-		// namespaced, but its objects may live in any namespace, so the
-		// default cluster-wide watch is correct for them. Secrets, by
-		// contrast, are only read from BRIDGE_NAMESPACE (ADR-0011);
-		// without this ByObject override the cache would list/watch
-		// secrets cluster-wide and require cluster-scoped Secret RBAC.
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}: {
-					Namespaces: map[string]cache.Config{
-						cfg.Namespace: {},
-					},
-				},
-				// ADR-0026: with a selector the reconciler and the data
-				// plane only ever see the HarborAccess objects this bridge
-				// serves. nil keeps every object.
-				&harborv1alpha1.HarborAccess{}: {Label: cfg.HarborAccessSelector},
-			},
-		},
+		// Minimum-privilege RBAC: Secrets from BRIDGE_NAMESPACE only
+		// (ADR-0011), HarborAccess cluster-wide, limited by the selector
+		// (ADR-0026).
+		Cache: cfg.CacheOptions(),
 	}
 	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
 	if err != nil {
@@ -261,13 +243,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
-	if err := mgr.Add(server); err != nil {
-		return fmt.Errorf("add server: %w", err)
-	}
-	// Ready means "can serve credentials": the listener is bound (it
-	// binds only after the informer caches synced).
-	if err := mgr.AddReadyzCheck("dataplane", server.ReadyCheck); err != nil {
-		return fmt.Errorf("add readyz: %w", err)
+	// Ready means "can serve credentials": the listener is bound, and it
+	// binds only after the HarborAccess and Secret caches the handler
+	// reads have synced. A replica whose caches do not sync within
+	// CacheSyncTimeout exits with an error.
+	if err := controlplane.AddAfterCacheSync(mgr, "dataplane", server, controlplane.CacheSyncTimeout); err != nil {
+		return err
 	}
 
 	// Step 9: start the manager. Blocks until SIGTERM/SIGINT.
