@@ -134,6 +134,12 @@ func (j *Janitor) sweepRobots(ctx context.Context) (map[types.NamespacedName]boo
 		// pre-ADR-0018. A bridge MUST NOT touch any robot outside it.
 		legacy := harbor.OwnsLegacyRobot(cluster, robot.Name)
 		if !harbor.OwnsRobot(cluster, robot.Name) && !legacy {
+			if haNS, haName, err := misnamedRobot(cluster, robot); err != nil {
+				// Ours by description, not by name: never touched, and its
+				// owner keeps its finalizer (releaseUnselected).
+				logger.Error(err, "skipping robot the bridge cannot recognise by name", "robot", robot.WireName)
+				pending[types.NamespacedName{Namespace: haNS, Name: haName}] = true
+			}
 			continue
 		}
 

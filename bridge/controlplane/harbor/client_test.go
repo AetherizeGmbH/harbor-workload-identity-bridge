@@ -430,6 +430,7 @@ func TestClient_RobotPrefixMismatchFailsClosed(t *testing.T) {
 		{"robot$", "robot_"}, // bridge configured with a prefix Harbor does not use
 		{"robot$", "robot"},  // one prefix is a prefix of the other
 		{"robot", "robot$"},
+		{"robotx$", "robot"}, // the rest of Harbor's prefix is no valid name start
 	} {
 		t.Run(tc.harbor+"/"+tc.bridge, func(t *testing.T) {
 			fake := newFakeHarbor(t)
@@ -466,23 +467,43 @@ func TestClient_RobotPrefixMismatchFailsClosed(t *testing.T) {
 	}
 }
 
-// When Harbor's prefix is the configured one plus more characters that a
-// robot name may start with, the listing cannot tell (configured "robot",
-// Harbor "robotx$" lists "robotx$bridge-…" as "x$bridge-…"). The exact
-// name query can: its hit must be exactly <configured prefix><name>.
+// When Harbor's prefix is the configured one plus characters a robot name
+// may contain, the listing cannot tell (configured "robot$", Harbor
+// "robot$ci-" lists "robot$ci-bridge-…" as "ci-bridge-…", a valid name).
+// The exact name query can: Harbor finds the robot under its stored name,
+// but not under the name the configured prefix leaves.
 func TestClient_GetByName_DetectsPrefixMismatchTheListingCannot(t *testing.T) {
 	fake := newFakeHarbor(t)
-	fake.prefix = "robotx$"
+	fake.prefix = "robot$ci-"
 	srv := fake.server()
 	defer srv.Close()
-	u, _ := url.Parse(srv.URL)
-	c, err := NewClient(u, "", "", srv.Client().Transport, WithRobotPrefix("robot"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := newClientFor(t, srv, "", "")
 	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod.ns.sa", Editable: true}
 	if _, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotPrefixMismatch) {
 		t.Fatalf("GetByName: err = %v, want ErrRobotPrefixMismatch", err)
+	}
+	// The blind spot the control plane covers with the robot description
+	// (misnamedRobot in controlplane/contract.go): the listing succeeds
+	// with a name OwnsRobot does not claim.
+	robots, err := c.List(context.Background())
+	if err != nil || len(robots) != 1 || robots[0].Name != "ci-bridge-prod.ns.sa" {
+		t.Fatalf("List = %+v, %v; want the one robot as ci-bridge-prod.ns.sa", robots, err)
+	}
+}
+
+// A Harbor that ignores the name filter returns every robot. One whose
+// name merely ends with the looked-up name (another cluster's robot) is no
+// evidence of a prefix mismatch: the lookup must fall back to the full
+// scan and report NotFound so the reconciler creates the robot.
+func TestClient_GetByName_SuffixHitUnderIgnoredFilterIsNoMismatch(t *testing.T) {
+	fake := newFakeHarbor(t)
+	fake.ignoreQuery = true
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-eu-bridge-prod.ns.sa", Editable: true}
+	if r, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotNotFound) {
+		t.Fatalf("GetByName = %+v, %v; want ErrRobotNotFound", r, err)
 	}
 }
 

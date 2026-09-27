@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -132,7 +133,9 @@ var ErrRobotAlreadyExists = errors.New("robot already exists")
 // is configured with another robot_name_prefix. The bridge would then
 // fail to recognise its own robots, which silently breaks lookups (a
 // create/409 loop), revocation on HarborAccess deletion, and the janitor,
-// so every read path fails closed with this error instead.
+// so every read path that can see the mismatch fails closed with this
+// error instead (see fromHarborRobot for the one shape a listing cannot
+// see; the control plane wraps this error for it too).
 var ErrRobotPrefixMismatch = errors.New("robot name prefix does not match Harbor's robot_name_prefix")
 
 // Client is the small surface the reconciler and janitor need against
@@ -164,7 +167,9 @@ const DefaultRobotPrefix = "robot$"
 // DefaultRobotPrefix). Harbor stores robot names without it and prepends
 // it on every read path and in the create response; the client strips it
 // again so callers only see internal names (ADR-0023). A prefix that does
-// not match Harbor's makes the client return ErrRobotPrefixMismatch.
+// not match Harbor's makes the client return ErrRobotPrefixMismatch
+// wherever it can tell. An empty prefix selects nothing special: Harbor's
+// prefix is then taken to be empty.
 func WithRobotPrefix(prefix string) Option {
 	return func(c *goClient) { c.robotPrefix = prefix }
 }
@@ -420,18 +425,8 @@ func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
 	if r := matchName(robots, name); r != nil {
 		return r, nil
 	}
-	// The filter matched the stored name exactly, so Harbor reports that
-	// robot as <its prefix><name>. A hit of that shape that the configured
-	// prefix does not strip to name means the two prefixes differ in a way
-	// list() cannot see: Harbor's is the configured one plus characters a
-	// robot name may start with (configured "robot", Harbor "robotx$").
-	// Without this check the lookup would report NotFound and drive a
-	// create/409 loop.
-	for i := range robots {
-		if wire := robots[i].WireName; strings.HasSuffix(wire, name) && wire != c.robotPrefix+name {
-			return nil, fmt.Errorf("look up robot %q: %w: Harbor reports it as %q, the configured prefix %q expects %q; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
-				name, ErrRobotPrefixMismatch, wire, c.robotPrefix, c.robotPrefix+name)
-		}
+	if err := c.checkSuffixHit(ctx, name, robots); err != nil {
+		return nil, err
 	}
 	robots, err = c.List(ctx)
 	if err != nil {
@@ -441,6 +436,43 @@ func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
 		return r, nil
 	}
 	return nil, ErrRobotNotFound
+}
+
+// checkSuffixHit looks at the robots the filtered lookup of name
+// returned without an exact match. A Harbor that honours q=name=<name>
+// returns only the robot stored as name, reported as <its prefix><name>:
+// a hit of that shape that the configured prefix does not strip to name
+// means the prefixes differ in a way list() cannot see (Harbor's is the
+// configured one plus characters a robot name may contain: configured
+// "robot$", Harbor "robot$ci-"). Without this check the lookup would
+// report NotFound and drive a create/409 loop.
+//
+// A Harbor that ignores the filter returns every robot, and one that
+// merely ends with name ("bridge-eu-bridge-prod.ns.sa" for
+// "bridge-prod.ns.sa") proves nothing. The hit is therefore looked up
+// again under the name the configured prefix leaves: a Harbor that
+// honours the filter finds it there only if that is its stored name (the
+// prefixes match, the first answer was no exact match after all), and one
+// that ignores the filter returns it again. Either way the first answer
+// told nothing about name, and GetByName falls back to the full scan.
+func (c *goClient) checkSuffixHit(ctx context.Context, name string, robots []Robot) error {
+	for i := range robots {
+		r := &robots[i]
+		if r.WireName == c.robotPrefix+name || !strings.HasSuffix(r.WireName, name) {
+			continue
+		}
+		q := "name=" + r.Name
+		again, err := c.list(ctx, &q)
+		if err != nil {
+			return err
+		}
+		if slices.ContainsFunc(again, func(o Robot) bool { return o.ID == r.ID }) {
+			return nil
+		}
+		return fmt.Errorf("look up robot %q: %w: Harbor stores it as %q and reports it as %q, the configured prefix %q expects %q; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+			name, ErrRobotPrefixMismatch, name, r.WireName, c.robotPrefix, c.robotPrefix+name)
+	}
+	return nil
 }
 
 func matchName(robots []Robot, name string) *Robot {
@@ -599,16 +631,22 @@ func toHarborPermissions(perms []ProjectPermission) []*models.RobotPermission {
 // robot_name_prefix to the name of every editable (v2) robot and returns
 // legacy (v1, non-editable) robots raw (goharbor/harbor
 // src/controller/robot/controller.go populate), so the prefix is stripped
-// only when present. Harbor also refuses to create a robot whose name does
-// not start with a lower-case letter or digit (validateName in
-// src/server/v2.0/handler/robot.go, since robot accounts v2 in 2.2). An
-// editable robot that lacks the configured prefix, or that does not start
-// with such a character once it is stripped (configured "robot", Harbor
-// "robot$"), proves that Harbor uses another prefix: ErrRobotPrefixMismatch.
+// only when present. Harbor also refuses to create a robot whose name
+// fails robotNameRegex (validateName in src/server/v2.0/handler/robot.go,
+// the same regex since robot accounts v2 in 2.2), so every editable
+// robot's stored name matches it. An editable robot that lacks the
+// configured prefix, or whose remainder fails the regex once it is
+// stripped (configured "robot", Harbor "robot$" or "robotx$"), proves
+// that Harbor uses another prefix: ErrRobotPrefixMismatch. What this
+// cannot see is a Harbor prefix that is the configured one plus
+// characters a robot name may contain (configured "robot$", Harbor
+// "robot$ci-"): GetByName and Create catch that for the names they
+// handle, and the control plane refuses to act on a robot whose
+// description it wrote but whose name it does not recognise.
 func (c *goClient) fromHarborRobot(r *models.Robot) (Robot, error) {
 	if r.Editable {
 		rest, ok := strings.CutPrefix(r.Name, c.robotPrefix)
-		if !ok || rest == "" || !isLowerAlnum(rest[0]) {
+		if !ok || !robotNameRegex.MatchString(rest) {
 			return Robot{}, fmt.Errorf("%w: Harbor reports robot %q (id %d), which the configured prefix %q does not account for; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
 				ErrRobotPrefixMismatch, r.Name, r.ID, c.robotPrefix)
 		}
@@ -644,10 +682,6 @@ func (c *goClient) fromHarborRobot(r *models.Robot) (Robot, error) {
 	}
 	out.Permissions = normalizePermissions(perms)
 	return out, nil
-}
-
-func isLowerAlnum(b byte) bool {
-	return ('a' <= b && b <= 'z') || ('0' <= b && b <= '9')
 }
 
 // harborStatusErr is the interface every generated go-client error response

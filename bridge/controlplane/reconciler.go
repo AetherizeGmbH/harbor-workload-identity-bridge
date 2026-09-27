@@ -460,6 +460,9 @@ func (r *Reconciler) deleteStaleRobots(ctx context.Context, ha *harborv1alpha1.H
 	}
 	for i := range robots {
 		robot := &robots[i]
+		if ns, name, err := misnamedRobot(r.Config.ClusterName, robot); err != nil && ns == ha.Namespace && name == ha.Name {
+			return err
+		}
 		if robot.ID == keepID || !robotOwnedBy(r.Config.ClusterName, robot, ha.Namespace, ha.Name) {
 			continue
 		}
@@ -501,6 +504,11 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 	}
 	for i := range robots {
 		robot := &robots[i]
+		if ns, name, err := misnamedRobot(r.Config.ClusterName, robot); err != nil && ns == ha.Namespace && name == ha.Name {
+			// Ours by description, not by name: it can be neither
+			// deleted nor left behind.
+			return r.blockDeletion(ctx, ha, err)
+		}
 		if !robotOwnedBy(r.Config.ClusterName, robot, ha.Namespace, ha.Name) {
 			continue
 		}

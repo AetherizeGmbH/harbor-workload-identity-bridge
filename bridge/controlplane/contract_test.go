@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
@@ -89,6 +90,41 @@ func TestRobotOwnedBy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := robotOwnedBy("prod", &tc.robot, "ns", "ha"); got != tc.want {
 				t.Errorf("robotOwnedBy = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// misnamedRobot flags exactly the robots the bridge's description claims
+// for this cluster whose name the ownership prefixes do not cover: the
+// shape every robot takes when the configured robot prefix is Harbor's
+// minus characters a robot name may contain ("robot$" vs "robot$ci-").
+func TestMisnamedRobot(t *testing.T) {
+	desc := RobotDescription("prod", "ns", "ha")
+	cases := []struct {
+		name  string
+		robot harbor.Robot
+		want  bool
+	}{
+		{"current name", harbor.Robot{Name: "bridge-prod.sa-ns.sa", Description: desc}, false},
+		{"legacy dash name", harbor.Robot{Name: "bridge-prod-sa-ns-sa", Description: desc}, false},
+		{"other cluster tag", harbor.Robot{Name: "ci-bridge-prod-eu.ns.sa", Description: RobotDescription("prod-eu", "ns", "ha")}, false},
+		{"untagged", harbor.Robot{Name: "ci-robot", Description: "hand-made"}, false},
+		{"tag without HarborAccess", harbor.Robot{Name: "ci-robot", Description: robotDescriptionTag + " cluster=prod"}, false},
+		{"unstripped rest of Harbor's prefix", harbor.Robot{Name: "ci-bridge-prod.sa-ns.sa", Description: desc}, true},
+		{"foreign name", harbor.Robot{Name: "ci-robot", Description: desc}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ns, name, err := misnamedRobot("prod", &tc.robot)
+			if got := err != nil; got != tc.want {
+				t.Fatalf("misnamedRobot err = %v, want error %v", err, tc.want)
+			}
+			if !tc.want {
+				return
+			}
+			if !errors.Is(err, harbor.ErrRobotPrefixMismatch) || ns != "ns" || name != "ha" {
+				t.Errorf("misnamedRobot = %q, %q, %v; want ns, ha and ErrRobotPrefixMismatch", ns, name, err)
 			}
 		})
 	}

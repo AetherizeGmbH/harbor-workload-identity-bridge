@@ -103,6 +103,36 @@ func ParseRobotDescription(description string) (haNamespace, haName string, ok b
 	return "", "", false
 }
 
+// misnamedRobot returns the HarborAccess a robot's description assigns it
+// to and an error wrapping harbor.ErrRobotPrefixMismatch when the robot
+// carries the description the bridge of cluster writes (tag, exactly this
+// cluster, a HarborAccess) but a name outside the cluster's ownership
+// prefixes (OwnsRobot, OwnsLegacyRobot). ok is false for every other
+// robot.
+//
+// The bridge must not touch such a robot: the name gates every write
+// (ADR-0009). It must not take it for absent either. The usual cause is a
+// configured robot prefix that is Harbor's robot_name_prefix minus
+// characters a robot name may contain (configured "robot$", Harbor
+// "robot$ci-"): the Harbor client then lists every robot as
+// "ci-bridge-…" without noticing (see fromHarborRobot), and a deletion
+// that skipped the robot would release the HarborAccess while the robot
+// keeps a valid password.
+func misnamedRobot(cluster string, robot *harbor.Robot) (haNamespace, haName string, err error) {
+	if harbor.OwnsRobot(cluster, robot.Name) || harbor.OwnsLegacyRobot(cluster, robot.Name) ||
+		!RobotBelongsToCluster(robot.Description, cluster) {
+		return "", "", nil
+	}
+	ns, name, ok := ParseRobotDescription(robot.Description)
+	if !ok {
+		return "", "", nil
+	}
+	return ns, name, fmt.Errorf("%w: robot %q (id %d) carries this bridge's description for HarborAccess %s/%s, "+
+		"but its name is outside the ownership prefix %q, so the bridge does not touch it; most likely "+
+		"BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) is shorter than Harbor's robot_name_prefix: set it to Harbor's",
+		harbor.ErrRobotPrefixMismatch, robot.WireName, robot.ID, ns, name, harbor.ClusterPrefix(cluster))
+}
+
 // robotOwnedBy reports whether robot is a robot the bridge of cluster
 // created for the HarborAccess haNamespace/haName. All three layers must
 // hold (ADR-0009 + ADR-0023):

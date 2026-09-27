@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -1406,4 +1407,60 @@ func TestReconcile_RefusesForeignUnmanagedSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCondition(t, status, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRobotConflict)
+}
+
+// A robot whose description the bridge wrote for this HarborAccess, but
+// whose name the ownership prefix does not cover, is what every robot
+// looks like when the configured robot prefix is Harbor's minus
+// characters a robot name may contain ("robot$" vs "robot$ci-"): the
+// Harbor client cannot tell. Deletion must neither delete it (the name
+// gates every write) nor skip it and release the finalizer while the robot
+// keeps a valid password.
+func TestReconcile_Delete_BlocksOnRobotItCannotRecogniseByName(t *testing.T) {
+	ha := newHarborAccess()
+	now := metav1.NewTime(time.Now())
+	ha.DeletionTimestamp = &now
+	mh := newMockHarbor()
+	id := mh.preexisting("ci-bridge-prod-eu-west.flux-system.source-controller", RobotDescription(testCluster, testHANamespace, testHAName))
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: testNS, Name: robotsecret.Name(testHANamespace, testHAName),
+		Labels: robotsecret.Labels(testCluster, testHANamespace, testHAName)}}
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha, secret)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); !errors.Is(err, harbor.ErrRobotPrefixMismatch) {
+		t.Fatalf("Reconcile err = %v, want ErrRobotPrefixMismatch so the deletion is retried", err)
+	}
+	if len(mh.deleteCalls) != 0 {
+		t.Errorf("deleted robots %v outside the ownership prefix", mh.deleteCalls)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatalf("HarborAccess released although robot %d survives: %v", id, err)
+	}
+	if !containsFinalizer(got, FinalizerName) {
+		t.Error("finalizer released although the robot survives")
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonDeletionBlocked)
+	if c := meta.FindStatusCondition(got.Status.Conditions, harborv1alpha1.ConditionReady); c == nil || !strings.Contains(c.Message, "harbor.robotNamePrefix") {
+		t.Errorf("condition does not point at the robot prefix: %+v", c)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(secret), &corev1.Secret{}); err != nil {
+		t.Errorf("robot Secret deleted before the robot was revoked: %v", err)
+	}
+}
+
+// The same robot must stop the stale-robot cleanup of a live HarborAccess
+// instead of being skipped as someone else's.
+func TestReconcile_StaleCleanup_StopsOnRobotItCannotRecogniseByName(t *testing.T) {
+	ha := newHarborAccess()
+	mh := newMockHarbor()
+	mh.preexisting("ci-bridge-prod-eu-west.flux-system.old-sa", RobotDescription(testCluster, testHANamespace, testHAName))
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); !errors.Is(err, harbor.ErrRobotPrefixMismatch) {
+		t.Fatalf("Reconcile err = %v, want ErrRobotPrefixMismatch", err)
+	}
+	if len(mh.deleteCalls) != 0 {
+		t.Errorf("deleted robots %v outside the ownership prefix", mh.deleteCalls)
+	}
 }
