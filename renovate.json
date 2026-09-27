@@ -103,6 +103,11 @@
       "matchManagers": ["gomod"],
       "matchDepTypes": ["golang"],
       "enabled": false
+    },
+    {
+      "description": "controller-gen stamps its version into the CRDs (controller-gen.kubebuilder.io/version). A bump fails `make verify-generated` until someone runs `make generate manifests` and commits the result, so it never automerges.",
+      "matchPackageNames": ["sigs.k8s.io/controller-tools"],
+      "automerge": false
     }
   ],
   "gomod": {
@@ -132,6 +137,14 @@
       "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n\\s*version:\\s*(?<currentValue>\\S+)"
+      ]
+    },
+    {
+      "description": "Tool versions in the Makefile (`NAME_VERSION ?= vX.Y.Z`). Annotate the assignment with a `# renovate:` comment on the line directly above it.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n[A-Z0-9_]+\\s*\\?=\\s*(?<currentValue>\\S+)"
       ]
     }
   ],

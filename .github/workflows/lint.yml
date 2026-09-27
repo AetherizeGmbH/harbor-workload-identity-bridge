@@ -78,8 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Exact versions and hashes for yamllint and its dependencies live
+      # in hack/requirements-yamllint.txt (Renovate bumps them).
       - run: |
-          pip install --user yamllint
+          pip install --user --require-hashes --no-deps -r hack/requirements-yamllint.txt
           # No --strict: warnings (e.g. one shell command that runs
           # over our 200-char soft limit in e2e.yml) shouldn't fail
           # CI. key-duplicates remains an `error` rule and so still fails.

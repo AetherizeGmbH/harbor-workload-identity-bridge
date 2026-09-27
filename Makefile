@@ -1,16 +1,46 @@
 # Copyright 2026 The Aetherize Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
-# Matches the controller-gen.kubebuilder.io/version stamped in the CRDs.
-CONTROLLER_GEN_VERSION ?= v0.21.0
 PROJECT_DIR := $(shell pwd)
+LOCALBIN ?= $(PROJECT_DIR)/bin
+
+# Tool versions. Renovate bumps each one through the `# renovate:` comment
+# directly above it (Makefile custom manager in renovate.json). A tool's
+# file name carries its version, so a bump installs the new version
+# instead of reusing a stale binary.
+
+# Matches the controller-gen.kubebuilder.io/version stamped in the CRDs.
+# renovate: datasource=go depName=sigs.k8s.io/controller-tools
+CONTROLLER_GEN_VERSION ?= v0.21.0
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
+
+# renovate: datasource=go depName=golang.org/x/vuln
+GOVULNCHECK_VERSION ?= v1.8.0
+GOVULNCHECK ?= $(LOCALBIN)/govulncheck-$(GOVULNCHECK_VERSION)
+
+# renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
+SETUP_ENVTEST_VERSION ?= v0.25.1
+SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
+
+# go-install-tool installs package $(2) at version $(3) as file $(1). `go
+# install pkg@version` checks the module against the Go checksum database.
+define go-install-tool
+@set -e; mkdir -p $(LOCALBIN); tmp=$$(mktemp -d); \
+	GOBIN=$$tmp go install $(2)@$(3); \
+	mv "$$tmp/$$(basename $(2))" $(1); rm -rf "$$tmp"
+endef
 
 .PHONY: all
 all: generate manifests vet build build-plugin build-installer
 
 $(CONTROLLER_GEN):
-	go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+	$(call go-install-tool,$@,sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_GEN_VERSION))
+
+$(GOVULNCHECK):
+	$(call go-install-tool,$@,golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
+
+$(SETUP_ENVTEST):
+	$(call go-install-tool,$@,sigs.k8s.io/controller-runtime/tools/setup-envtest,$(SETUP_ENVTEST_VERSION))
 
 .PHONY: generate
 generate: $(CONTROLLER_GEN) ## Generate deepcopy methods for API types
@@ -32,6 +62,10 @@ fmt: ## Run gofmt
 .PHONY: vet
 vet: ## Run go vet
 	go vet ./...
+
+.PHONY: govulncheck
+govulncheck: $(GOVULNCHECK) ## Report known vulnerabilities reachable from our code (Go's official scanner)
+	$(GOVULNCHECK) ./...
 
 .PHONY: build
 build: ## Build the bridge binary into bin/bridge
@@ -57,10 +91,6 @@ test: ## Run unit tests (envtest tests skip cleanly when KUBEBUILDER_ASSETS is u
 	go test ./...
 
 ENVTEST_K8S_VERSION ?= 1.34.x
-SETUP_ENVTEST ?= $(shell go env GOPATH)/bin/setup-envtest
-
-$(SETUP_ENVTEST):
-	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21
 
 .PHONY: envtest-setup
 envtest-setup: $(SETUP_ENVTEST) ## Fetch kube-apiserver + etcd binaries for envtest

@@ -104,5 +104,5 @@ jobs:
       # Go's official vuln scanner. Unlike Trivy it does call-graph
       # reachability (only fails on vulns we actually call) and covers the
       # stdlib — complements, doesn't duplicate, the Trivy fs scan.
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - run: govulncheck ./...
+      # The Makefile pins the version (Renovate bumps it).
+      - run: make govulncheck
