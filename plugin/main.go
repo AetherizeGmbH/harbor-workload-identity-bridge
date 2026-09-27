@@ -17,8 +17,12 @@
 //   - other 5xx    → exits non-zero
 //   - network err  → exits non-zero
 //
-// Non-zero exits write the cause to stderr; kubelet surfaces stderr in
-// node events when the credential provider fails.
+// Non-zero exits write the cause to stderr. Kubelet appends it to the
+// error it logs, which names the image ("Failed getting credential from
+// external registry credential provider" on 1.34; "Failed to provide
+// credentials for image", with the pod and ServiceAccount, from 1.35), and
+// goes on without this plugin's credentials; it creates no Event. After
+// exit 0 kubelet reads no stderr at all.
 package main
 
 import (
@@ -39,9 +43,10 @@ import (
 const credentialsPath = "/v1/credentials"
 
 // Wire types — duplicated from k8s.io/kubelet/pkg/apis/credentialprovider/v1
-// per ADR-0015. Keeps the plugin off the k8s.io/kubelet module's version
-// curve and avoids the cacheKeyType="ServiceAccount" enum mismatch in
-// older upstream Go enums.
+// per ADR-0015. Keeps k8s.io/api and apimachinery out of a binary that
+// kubelet executes on every node, and keeps the plugin off the
+// k8s.io/kubelet module's version curve. (ADR-0015's enum-mismatch reason
+// was wrong; see ADR-0016.)
 const (
 	credentialProviderAPIVersion = "credentialprovider.kubelet.k8s.io/v1"
 	requestKind                  = "CredentialProviderRequest"
@@ -183,9 +188,9 @@ func writeRefusedResponse(w io.Writer, image string) error {
 		CacheDuration: time.Duration(0).String(),
 		Auth:          map[string]authConfig{},
 	}
-	// image is unused in the body but recorded on stderr for kubelet's
-	// event stream so an operator can map "no creds for X" to the image
-	// that triggered it.
+	// Kubelet discards stderr when the plugin exits 0, so this line shows
+	// only when the plugin is run by hand. The bridge's audit log records
+	// every refusal with its reason.
 	fmt.Fprintf(os.Stderr, "harbor-bridge-plugin: bridge refused credentials for %s; returning empty auth (no cache)\n", image)
 	return json.NewEncoder(w).Encode(out)
 }

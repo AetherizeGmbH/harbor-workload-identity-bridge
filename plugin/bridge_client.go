@@ -215,8 +215,9 @@ func loadCAPEM(s string) ([]byte, error) {
 	return os.ReadFile(s)
 }
 
-// bodySnippet trims a bridge error body so we surface the cause in
-// kubelet's event stream without dumping a multi-line HTML page on stderr.
+// bodySnippet trims a bridge error body so the cause reaches kubelet's log
+// (kubelet appends a failing plugin's stderr to the error it logs) without
+// a multi-line HTML page.
 func bodySnippet(body []byte) string {
 	s := strings.TrimSpace(string(body))
 	if len(s) > maxBodySnippetLen {

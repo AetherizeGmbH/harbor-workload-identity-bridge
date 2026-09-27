@@ -209,7 +209,7 @@ The pull errors you may hit and what they mean:
 
 | Error | Cause |
 |---|---|
-| `no basic auth credentials` | Kubelet returned no creds for the image. Either matchImages didn't match, or the credential provider hit an error. Check kubelet logs for `plugin.go:416 "Failed to provide credentials"`. |
+| `no basic auth credentials` | Kubelet returned no creds for the image. Either matchImages didn't match, the credential provider hit an error, or the bridge refused the pod's ServiceAccount. Check the kubelet log (the `journalctl` command above): kubelet 1.35+ logs `Failed to provide credentials for image`, 1.34 `Failed getting credential from external registry credential provider`, and both name the image and end in the plugin's stderr. A refusal (401/403) leaves no kubelet line, so look for `credential denied` and its `reason` in the bridge's audit log (`kubectl -n harbor-bridge-system logs -l app.kubernetes.io/component=bridge --prefix`; every replica serves requests). |
 | `x509: certificate signed by unknown authority` | `containerd_trust` didn't install the Harbor cert on this node, or containerd didn't reload. `docker exec NODE cat /etc/containerd/certs.d/harbor.e2e:30843/ca.crt`. |
 | `audience "X" not found in pod spec volume, system:node:N is not authorized` | Chart's audience RBAC isn't applied. Check `kubectl get clusterrole \| grep audience-token-request`. |
 | `credential provider plugin did not return a valid cacheKeyType` | Bridge returning an enum value kubelet doesn't accept. Three valid values: `Image`, `Registry`, `Global`. |
