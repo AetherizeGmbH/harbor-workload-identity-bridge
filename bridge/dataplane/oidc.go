@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -118,7 +120,9 @@ type Config struct {
 	// the expected iss claim of incoming tokens; only the *transport*
 	// is overridden. Use this when the bridge runs outside the cluster
 	// (local dev via `kubectl proxy`) or behind a network topology
-	// where the cluster-internal URLs do not resolve.
+	// where the cluster-internal URLs do not resolve. Every URL the keys
+	// come through (JWKSURL, or Issuer and the discovered jwks_uri) must
+	// be https, or http to a loopback host.
 	JWKSURL string
 
 	// HTTPClient is used for OIDC discovery and JWKS fetching. Pass a
@@ -180,6 +184,9 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		if err != nil {
 			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
 		}
+		if err := requireTLSUnlessLoopback(u); err != nil {
+			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
+		}
 		allowIfAPIServer(u)
 		// No discovery document names the issuer's algorithms, so accept
 		// every one the key set verifies: an apiserver with an ECDSA
@@ -188,6 +195,11 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		// confusion; HS* and none are not in the list.
 		algs = algNames(jwtSigningAlgs)
 	} else {
+		// Discovery names the JWKS: whoever can rewrite the document can
+		// substitute the keys.
+		if err := requireTLSUnlessLoopback(issuerURL); err != nil {
+			return nil, fmt.Errorf("oidc: issuer %q (discovery): %w", cfg.Issuer, err)
+		}
 		provider, err := oidc.NewProvider(oidc.ClientContext(ctx, httpClient), cfg.Issuer)
 		if err != nil {
 			return nil, fmt.Errorf("oidc: discovery for issuer %q: %w", cfg.Issuer, err)
@@ -202,6 +214,9 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		u, err := url.Parse(meta.JWKSURI)
 		if err != nil || meta.JWKSURI == "" {
 			return nil, fmt.Errorf("oidc: discovery for issuer %q names no usable jwks_uri (%q)", cfg.Issuer, meta.JWKSURI)
+		}
+		if err := requireTLSUnlessLoopback(u); err != nil {
+			return nil, fmt.Errorf("oidc: discovery for issuer %q names jwks_uri %q: %w", cfg.Issuer, meta.JWKSURI, err)
 		}
 		jwksURL = meta.JWKSURI
 		// The apiserver's discovery names its JWKS endpoint by its own
@@ -226,6 +241,26 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		maxLifetime:            cfg.MaxTokenLifetime,
 		allowNonPodBoundTokens: cfg.AllowNonPodBoundTokens,
 	}, nil
+}
+
+// requireTLSUnlessLoopback refuses a URL the signing keys would be
+// fetched over without TLS. The keys decide every credential: anyone on
+// the path of a plain-http fetch could substitute their own and forge a
+// token for any ServiceAccount. Plain http stays allowed to a loopback
+// host, for local development through `kubectl proxy` (make run-local).
+func requireTLSUnlessLoopback(u *url.URL) error {
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+		return errors.New("plain http is allowed only to a loopback host (127.0.0.1, ::1, localhost); use https")
+	default:
+		return fmt.Errorf("scheme %q is not https", u.Scheme)
+	}
 }
 
 func algNames(algs []jose.SignatureAlgorithm) []string {
