@@ -292,11 +292,15 @@ plugin:
   # Name of this install's kubelet credential-provider entry and of the
   # plugin binary on the nodes (kubelet runs <bin dir>/<name>). Change it
   # only to run several installs of this chart on one cluster, one per
-  # bridge (ADR-0029): every install needs its own name, and every other
-  # entry in kubelet's config stays untouched. A DNS label: lower-case
-  # letters, digits and "-", at most 63 characters, as a string (quote a
-  # name YAML would read as a number or boolean, e.g. "123"; with --set,
-  # use --set-string). A name other than the default also names the
+  # bridge (ADR-0029): every install needs its own name. Other installs'
+  # entries stay, and so do the cloud's entries in merge mode; but the
+  # chart-owned config (patch/none mode, and merge mode when kubelet
+  # reads it) keeps only the entries of this chart's installs that their
+  # records vouch for and drops everything else (README, "The chart-owned
+  # config stays the chart's"). A DNS label: lower-case letters, digits
+  # and "-", at most 63 characters, as a string (quote a name YAML would
+  # read as a number or boolean, e.g. "123"; with --set, use
+  # --set-string). A name other than the default also names the
   # install's other node files: <hostConfigDir>/<name>.ca.crt (and
   # .client.crt/.client.key with mTLS) and
   # <install.stateDir>/<name>.installer-state.json. Renaming an
