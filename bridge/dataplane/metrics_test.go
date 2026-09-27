@@ -201,28 +201,44 @@ func TestMetrics_NoMetrics_HandlerStillWorks(t *testing.T) {
 	}
 }
 
-func TestPromHandler_ServesExpositionFormat(t *testing.T) {
+// Every series exists as zero before the first request, so rate() on a
+// never-incremented series needs no special case in dashboards.
+func TestNewMetrics_SeriesExistBeforeTheFirstRequest(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	_ = NewMetrics(reg)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	PromHandler(reg).ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
 	}
-	body := w.Body.String()
-	// Time-series exist as zero before any request because NewMetrics
-	// touches every label value.
-	for _, want := range []string{
+	labels := map[string]map[string]bool{}
+	for _, mf := range mfs {
+		labels[mf.GetName()] = map[string]bool{}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				labels[mf.GetName()][lp.GetValue()] = true
+			}
+		}
+	}
+	for _, name := range []string{
 		"bridge_credential_issuances_total",
 		"bridge_oidc_validation_failures_total",
 		"bridge_harboraccess_lookup_failures_total",
 		"bridge_robot_secret_missing_total",
-		"bridge_credential_issuance_duration_seconds_bucket",
+		"bridge_credential_issuance_duration_seconds",
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("/metrics output missing %q", want)
+		if _, ok := labels[name]; !ok {
+			t.Errorf("series %s missing", name)
+		}
+	}
+	for name, values := range map[string][]string{
+		"bridge_credential_issuances_total": {ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited},
+		"bridge_oidc_validation_failures_total": {OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed,
+			OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonKeysUnavailable, OIDCReasonOther},
+	} {
+		for _, v := range values {
+			if !labels[name][v] {
+				t.Errorf("%s{%s} missing", name, v)
+			}
 		}
 	}
 }

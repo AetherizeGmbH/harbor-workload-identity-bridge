@@ -5,11 +5,9 @@ package dataplane
 
 import (
 	"errors"
-	"net/http"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Label values for bridge_credential_issuances_total{result}. One increment
@@ -58,9 +56,10 @@ type Metrics struct {
 }
 
 // NewMetrics constructs the metric collectors and registers them on reg.
-// Pass controller-runtime's metrics.Registry from main.go to combine these
-// with the reconciler's built-in metrics on a single /metrics endpoint.
-// Pass prometheus.NewRegistry() in tests for isolation.
+// Pass controller-runtime's metrics.Registry from main.go: the manager's
+// metrics server serves it with the reconciler's metrics, on its own port
+// and never on the credential listener (ADR-0025). Pass
+// prometheus.NewRegistry() in tests for isolation.
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		Issuances: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -102,15 +101,6 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.OIDCValidationFailures.WithLabelValues(r)
 	}
 	return m
-}
-
-// PromHandler returns an http.Handler that serves the Prometheus exposition
-// format for gatherer g. Pass controller-runtime's metrics.Registry to
-// expose both data-plane and reconciler metrics under one /metrics path.
-func PromHandler(g prometheus.Gatherer) http.Handler {
-	return promhttp.HandlerFor(g, promhttp.HandlerOpts{
-		ErrorHandling: promhttp.ContinueOnError,
-	})
 }
 
 // classifyOIDCError buckets a Validate error into one of the OIDCReason*
