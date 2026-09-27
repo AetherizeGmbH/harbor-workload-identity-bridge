@@ -77,7 +77,7 @@ Evolution rule: additive only. Never reorder or remove existing tokens. The `man
 - `HarborError` — transient Harbor failure; reconciler returns the error so controller-runtime retries with backoff.
 - `EnforcedByBridge` — TrustPolicyApplied reason; status of bridge enforcement until #17520 lands.
 
-The `markNotReady` vs `markTransientError` distinction is load-bearing for retry semantics — see [Phase 2 follow-up commit 2a73e08](https://github.com/...).
+The split between `refuse` / `markNotReadyWithRequeue` (resolved by a change to the CR, the bridge or something outside the CR; re-checked on the resync interval, no error) and `markTransientError` (returns the error, so controller-runtime retries with backoff) is load-bearing for retry semantics.
 
 ### Data plane HTTP API
 

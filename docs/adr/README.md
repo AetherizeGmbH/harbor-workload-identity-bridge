@@ -10,7 +10,7 @@
 | 0006 | [OIDC validation strategy and audience binding](0006-oidc-validation-and-audience.md)  | Accepted |
 | 0007 | [Cache invalidation when HarborAccess CRs change](0007-cache-invalidation-on-cr-change.md) | Superseded by 0013 |
 | 0008 | [Plugin-to-bridge transport: NodePort](0008-plugin-to-bridge-transport-nodeport.md)    | Accepted |
-| 0009 | [Multi-cluster topology](0009-multi-cluster-topology.md)                               | Accepted (naming scheme + hyphen-prefix caveat superseded by 0018) |
+| 0009 | [Multi-cluster topology](0009-multi-cluster-topology.md)                               | Accepted (naming scheme + hyphen-prefix caveat superseded by 0018; §6 "stops without touching Harbor" superseded by 0030) |
 | 0010 | [ServiceAccountRef as the canonical workload identity in HarborAccess](0010-service-account-ref-as-identity.md) | Accepted |
 | 0011 | [Robot password storage as per-CR Kubernetes Secret in the bridge namespace](0011-robot-password-secret-storage.md) | Accepted |
 | 0012 | [Robot description as the cross-component reconciler↔janitor contract](0012-robot-description-as-component-contract.md) | Accepted |
@@ -24,10 +24,10 @@
 | 0020 | [Harbor compatibility is tested, not asserted](0020-harbor-compatibility-matrix.md) | Accepted |
 | 0021 | [Node installer: Go binary with auto/merge/patch/none modes](0021-node-installer-modes.md) | Accepted |
 | 0022 | [GKE e2e harness for merge-mode installation](0022-gke-e2e-harness.md) | Accepted (never run yet) |
-| 0023 | [Level-triggered robot lifecycle, rotation-safe credential caching, and complete revocation](0023-level-triggered-robot-lifecycle.md) | Accepted (amends 0003, 0012, 0013, 0014) |
+| 0023 | [Level-triggered robot lifecycle, rotation-safe credential caching, and complete revocation](0023-level-triggered-robot-lifecycle.md) | Accepted (amends 0003, 0012, 0013, 0014; a disabled robot marked as suspended is the bridge's to resume, amended by 0030) |
 | 0024 | [The chart can leave the plugin to the platform; supported node platforms](0024-plugin-optional-and-platform-support.md) | Accepted (extends 0021) |
 | 0025 | [Data plane serves on every replica; metrics leave the credential listener](0025-data-plane-serving.md) | Accepted (amends 0002, 0008) |
-| 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023) |
+| 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023; "no robot" for a refused object that had one amended by 0030) |
 | 0027 | [The plugin DaemonSet can run in its own namespace](0027-optional-plugin-namespace.md) | Accepted (extends 0021, 0024) |
 | 0028 | [Token lifetime cap and pod binding](0028-token-lifetime-cap-and-pod-binding.md) | Accepted (extends 0006, 0010) |
 | 0029 | [Configurable plugin provider name](0029-configurable-plugin-provider-name.md) | Accepted (refines 0021, 0026) |
