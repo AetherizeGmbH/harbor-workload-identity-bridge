@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -184,13 +185,22 @@ func (j *Janitor) sweepRobots(ctx context.Context) (map[types.NamespacedName]boo
 			del(robot, "pre-ADR-0018 robot superseded by the dot-named robot", owner)
 		default:
 			want, err := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
-			if err != nil || want == robot.Name {
+			switch {
+			case errors.Is(err, harbor.ErrInvalidRobotName):
+				// The owner's serviceAccountRef maps to no name Harbor
+				// accepts (the reconciler reports InvalidSpec), so none of
+				// its robots is current: this one belongs to a previous
+				// identity.
+				del(robot, "owning HarborAccess's serviceAccountRef maps to no robot name Harbor accepts", owner)
+			case err != nil || want == robot.Name:
 				continue
+			default:
+				// The owner's serviceAccountRef now maps to a different
+				// robot: this one belongs to the previous identity.
+				// Normally the reconciler already revoked it; this covers a
+				// failed cleanup.
+				del(robot, "owning HarborAccess now uses robot "+want, owner)
 			}
-			// The owner's serviceAccountRef now maps to a different robot:
-			// this one belongs to the previous identity. Normally the
-			// reconciler already revoked it; this covers a failed cleanup.
-			del(robot, "owning HarborAccess now uses robot "+want, owner)
 		}
 	}
 	return pending, nil

@@ -187,6 +187,26 @@ func TestJanitor_RevokesRobotOfPreviousServiceAccount(t *testing.T) {
 	}
 }
 
+// When the owner's serviceAccountRef changes to one Harbor cannot name
+// (a "--" in it), RobotName fails and the reconciler stops at InvalidSpec
+// before its stale-robot cleanup. The robot of the previous identity must
+// still be revoked, as it was when RobotName returned the refused name.
+func TestJanitor_RevokesRobotWhenOwnerMapsToNoValidName(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.ServiceAccountRef.Name = "build--runner"
+	mh := newMockHarbor()
+	staleID := mh.preexisting("bridge-prod-eu-west.flux-system.source-controller",
+		RobotDescription(testCluster, ha.Namespace, ha.Name))
+	j := newJanitor(t, mh, ha)
+
+	if err := j.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mh.robots[staleID]; ok {
+		t.Error("robot of the previous serviceAccountRef survived an edit to an identity Harbor cannot name")
+	}
+}
+
 // TestJanitor_RevokesLegacyDashNamedRobots covers upgrades from 0.2.x,
 // whose dash-named robots the dot-prefix ownership check never matched:
 // they leaked with valid passwords. Recognised via the legacy prefix plus

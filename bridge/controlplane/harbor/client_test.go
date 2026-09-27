@@ -120,6 +120,11 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "name required")
 			return
 		}
+		// Harbor's validateName (src/server/v2.0/handler/robot.go).
+		if !robotNameRegex.MatchString(body.Name) {
+			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "robot name is not in lower case or contains illegal characters")
+			return
+		}
 		id := f.mu.nextID
 		f.mu.nextID++
 		for _, existing := range f.mu.robots {
@@ -581,6 +586,23 @@ func TestClient_Create_409IsAlreadyExists(t *testing.T) {
 	_, err := c.Create(context.Background(), "bridge-a.b.c", "", perms)
 	if !errors.Is(err, ErrRobotAlreadyExists) {
 		t.Fatalf("second Create: got %v, want ErrRobotAlreadyExists", err)
+	}
+}
+
+// Harbor answers a robot name with doubled separators with 400, on every
+// retry. RobotName refuses such identities, so the reconciler reports a
+// permanent InvalidSpec instead of retrying a create Harbor never accepts.
+func TestClient_Create_HarborRefusesNamesRobotNameRejects(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	if _, err := RobotName("prod", "team--a", "sa"); !errors.Is(err, ErrInvalidRobotName) {
+		t.Fatalf("RobotName: err = %v, want ErrInvalidRobotName", err)
+	}
+	_, err := c.Create(context.Background(), "bridge-prod.team--a.sa", "", []ProjectPermission{{Project: "p", Action: "pull"}})
+	if err == nil || errors.Is(err, ErrRobotAlreadyExists) || !strings.Contains(err.Error(), "illegal characters") {
+		t.Fatalf("Create with a doubled separator: err = %v, want Harbor's 400", err)
 	}
 }
 

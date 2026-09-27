@@ -223,6 +223,10 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q exceeds %d-char DNS-label limit", EnvClusterName, cfg.ClusterName, clusterNameMaxLen))
 	case !clusterNameRegex.MatchString(cfg.ClusterName):
 		errs = append(errs, fmt.Errorf("%s %q must match %s", EnvClusterName, cfg.ClusterName, clusterNamePattern))
+	case strings.Contains(cfg.ClusterName, "--"):
+		// The cluster name is part of every robot name, and Harbor refuses
+		// robot names with doubled separators: no robot could be created.
+		errs = append(errs, fmt.Errorf("%s %q must not contain consecutive hyphens: Harbor refuses robot names with them, so the bridge could not create any robot", EnvClusterName, cfg.ClusterName))
 	}
 
 	cfg.Namespace = strings.TrimSpace(os.Getenv(EnvNamespace))

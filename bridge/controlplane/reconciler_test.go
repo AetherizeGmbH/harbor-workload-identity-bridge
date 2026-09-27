@@ -873,6 +873,27 @@ func TestReconcile_RejectsOverlongName(t *testing.T) {
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
 }
 
+// A ServiceAccount whose namespace or name contains "--" is a valid DNS
+// label but maps to a robot name Harbor refuses with 400 on every retry.
+// That is a permanent spec problem: InvalidSpec, and no create call.
+func TestReconcile_IdentityHarborCannotNameIsInvalidSpec(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.ServiceAccountRef.Namespace = "team--a"
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatalf("Reconcile returned %v; a permanent spec error must not be retried", err)
+	}
+	if len(mh.createCalls) != 0 {
+		t.Errorf("robot creation attempted for a name Harbor refuses: %+v", mh.createCalls)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
+}
+
 // TestReconcile_RotatesOnlyAfterThePromisedInstant pins the rotation
 // schedule to the Secret's rotation-not-before promise (ADR-0023): the data
 // plane never lets kubelet cache past that instant, so rotating earlier

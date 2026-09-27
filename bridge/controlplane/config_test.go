@@ -193,6 +193,15 @@ func TestLoadFromEnv_ValidationErrors(t *testing.T) {
 			mustHave: "must match",
 		},
 		{
+			// Harbor refuses robot names with doubled separators, and
+			// the cluster name is part of every robot name.
+			name: "cluster name with consecutive hyphens",
+			env: map[string]string{
+				EnvClusterName: "prod--eu",
+			},
+			mustHave: "consecutive hyphens",
+		},
+		{
 			name: "issuer with no scheme",
 			env: map[string]string{
 				EnvClusterName: "prod",
