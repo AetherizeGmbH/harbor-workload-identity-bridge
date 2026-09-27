@@ -153,15 +153,11 @@ jobs:
         run: echo "ref=$(cat out/image)@$(cat out/digest)" >> "$GITHUB_OUTPUT"
       # CycloneDX is the predicate format cosign attests against. For a
       # multi-arch index Trivy resolves a single platform (linux/amd64).
+      # Same digest-pinned image as trivy.yml; Renovate bumps both.
       - name: Generate SBOM with Trivy
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: docker://aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
         with:
-          # renovate: datasource=github-releases depName=aquasecurity/trivy
-          version: v0.74.0
-          scan-type: image
-          image-ref: ${{ steps.ref.outputs.ref }}
-          format: cyclonedx
-          output: out/sbom.cdx.json
+          args: image --format cyclonedx --output out/sbom.cdx.json ${{ steps.ref.outputs.ref }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sbom-${{ matrix.component }}

@@ -89,7 +89,7 @@ Abuse stories:
 | T12 | I | B4 | Harbor admin credential or robot passwords in logs or on the wire | SDK wire dumps disabled regardless of `DEBUG` (`harbor/client.go`); https to Harbor required, plain http only by explicit opt-in, private CA via `harbor.caSecret`; audit lines never carry secrets (tested) | Low (1.6) |
 | T13 | D | B4 | Hung Harbor blocks all reconciles and revocations | 30s per call, header/TLS timeouts, page cap (`harbor/client.go`); `DeletionBlocked` on error | Low (2.6) |
 | T14 | R | B1/B5 | Credential issuance or denial cannot be attributed | Audit logger fixed at info; source IP, client cert, pod, node, reason per decision (`handler.go`); Kubernetes audit log covers CR changes | Low (2.4) |
-| T15 | T | B7 | Malicious dependency or tool version reaches a signed release, or a re-pointed tag reaches the nodes | Actions SHA-pinned; Trivy pinned; Renovate waits 7 days and never automerges majors; images built from the tag without cache; Trivy isolated without rights; cosign signatures, SBOM and SLSA provenance on every image and the chart; images pinnable by digest (`*.image.digest`) | Medium (4.4), see O4 |
+| T15 | T | B7 | Malicious dependency or tool version reaches a signed release, or a re-pointed tag reaches the nodes | Actions SHA-pinned; Trivy image pinned by digest; Renovate waits 7 days and never automerges majors; images built from the tag without cache; Trivy isolated without rights; cosign signatures, SBOM and SLSA provenance on every image and the chart; images pinnable by digest (`*.image.digest`) | Medium (4.4), see O4 |
 | T16 | I | B3 | Robot Secrets readable by others in the bridge namespace, or a foreign Secret served as credentials | Secrets live only in the bridge namespace; the data plane serves only Secrets the bridge labelled, the reconciler never adopts a foreign one; RBAC trimmed to the verbs used; restrict namespace RBAC; enable encryption at rest (operator) | Medium (4.0), see A3 |
 
 Security events the system must log (acceptance criteria):
@@ -141,6 +141,6 @@ Open items (not accepted; tracked):
 - **O4** Repository settings: required review and CODEOWNERS, secret
   scanning and push protection, private vulnerability reporting, and the
   release App's ruleset bypass; the Renovate App lacks "Dependabot alerts:
-  read"; Renovate cannot look up `aquasecurity/*` (IP allow list).
+  read".
 - **O5** Configurable plugin provider names, so several chart-managed
   plugins can coexist on a node (ADR-0026).
