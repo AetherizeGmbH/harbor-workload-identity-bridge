@@ -1454,6 +1454,41 @@ func TestRun_OwnBinaryUpgradeAfterTheEntryVanished(t *testing.T) {
 	})
 }
 
+// TestRun_RecordComesBeforeTheBinary: installPluginBinary writes the record
+// before the binary. A pass that fails between the two must leave nothing a
+// later pass takes for another program's file: had the binary come first, a
+// non-default install whose pass died after it would refuse every later
+// pass with a new plugin image (no record, other bytes), and only deleting
+// the file by hand would get it out.
+func TestRun_RecordComesBeforeTheBinary(t *testing.T) {
+	for _, mode := range []string{modePatch, modeNone} {
+		t.Run(mode, func(t *testing.T) {
+			env := withName(t, newTestEnv(t, mode, []string{"/usr/bin/kubelet"}), euName)
+			record := env.cfg.hostPath(binDir + "/" + filesFor(euName).Record)
+			// Something in the way of the record makes its write fail.
+			if err := os.MkdirAll(record, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(env.cfg); err == nil {
+				t.Fatal("the pass succeeded although its record could not be written")
+			}
+			if err := os.Remove(record); err != nil {
+				t.Fatal(err)
+			}
+			// The next pass brings a new plugin image.
+			if err := os.WriteFile(env.cfg.SourcePlugin, []byte("ELF-fake-plugin-v2"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(env.cfg); err != nil {
+				t.Fatalf("the pass after an interrupted one was refused: %v", err)
+			}
+			if got := env.hostFile(t, binDir+"/"+euName); got != "ELF-fake-plugin-v2" {
+				t.Fatalf("binary = %q", got)
+			}
+		})
+	}
+}
+
 // TestRun_RecordHoldsTheEntry: every pass records the entry it writes, next
 // to the binary, readable by root only and not executable.
 func TestRun_RecordHoldsTheEntry(t *testing.T) {
