@@ -79,7 +79,7 @@ var ErrInvalidRobotName = errors.New("identity maps to a robot name Harbor does 
 // of the SHA-256 of the full natural name are appended after a '.'. Such a
 // name, "bridge-<cluster>.<ns>.<sa prefix>.<digest>", has three dots after
 // "bridge-", a natural name exactly two, so the two sets are disjoint as
-// long as:
+// long as (ADR-0031):
 //
 //   - the SA name is dot-free (the CRD pattern). An SA name with a dot
 //     would give a natural name the shape of a truncated one, and because
