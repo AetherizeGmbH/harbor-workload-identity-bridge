@@ -292,9 +292,13 @@ Delete your `HarborAccess` objects **before** `helm uninstall`. Each one
 carries a finalizer that revokes its Harbor robot, and only a running
 bridge can release it — after the bridge is gone, deleting those objects
 (or their namespaces) waits forever. If that already happened, reinstall
-the bridge, or remove the `harbor.aetherize.io/robot` finalizer by hand and
-delete the leftover `robot$bridge-<clusterName>.*` robots in Harbor. Helm
-keeps the CRD (`crds/`); delete it yourself when you are done.
+the bridge, or remove its finalizer by hand and delete the leftover
+`robot$bridge-<clusterName>.*` robots in Harbor. The finalizer is
+`harbor.aetherize.io/robot`, or, for a bridge with
+`bridge.harborAccessSelector`, `harbor.aetherize.io/robot-<instance>`
+(`bridge.instance`, default the release name; ADR-0026); the chart's
+NOTES print the right one. Helm keeps the CRD (`crds/`); delete it
+yourself when you are done.
 
 `helm uninstall` removes nothing on the nodes. The provider entry named
 `plugin.providerName` stays in kubelet's credential-provider config, and

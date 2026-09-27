@@ -125,6 +125,19 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- default .Release.Name .Values.bridge.instance -}}
 {{- end -}}
 
+{{/*
+finalizer is the finalizer the bridge sets on the HarborAccess objects it
+manages: a per-instance one with a selector (ADR-0026,
+bridge/controlplane/config.go Finalizer).
+*/}}
+{{- define "harbor-bridge.finalizer" -}}
+{{- if .Values.bridge.harborAccessSelector -}}
+harbor.aetherize.io/robot-{{ include "harbor-bridge.instance" . }}
+{{- else -}}
+harbor.aetherize.io/robot
+{{- end -}}
+{{- end -}}
+
 {{- define "harbor-bridge.validateRequiredValues" -}}
 {{- if not .Values.clusterName -}}
 {{- fail "clusterName is REQUIRED. Set --set clusterName=<dns-label> or values.yaml. Must be unique across clusters sharing one Harbor (ADR-0009)." -}}

@@ -109,7 +109,7 @@ NEXT STEPS
      Each carries a finalizer that revokes its Harbor robot; without the
      bridge running, those deletions (and the deletion of their namespaces)
      wait forever. If that already happened, reinstall the bridge — or remove
-     the "harbor.aetherize.io/robot" finalizer by hand and delete the leftover
+     the "{{ include "harbor-bridge.finalizer" . }}" finalizer by hand and delete the leftover
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
 {{- if .Values.plugin.enabled }}
      `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
