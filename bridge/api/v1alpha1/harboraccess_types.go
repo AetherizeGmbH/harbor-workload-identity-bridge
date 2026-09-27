@@ -98,12 +98,13 @@ type HarborAccessSpec struct {
 	// the bridge returns for this HarborAccess (the credential provider's
 	// cacheDuration). The bridge shortens it further so no cache outlives
 	// the next scheduled password rotation (ADR-0023). Min 5m, max 24h.
-	// Defaults to 1h.
+	// Defaults to 1h. A Go duration: units h, m, s, ms, us or ns, e.g.
+	// 30m, 1h or 1h30m. Days ("1d") and ISO 8601 ("PT1H") are rejected.
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:default="1h"
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m') && duration(self) <= duration('24h')",message="tokenTTL must be between 5m and 24h"
-	TokenTTL metav1.Duration `json:"tokenTTL,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="(oldSelf.hasValue() && self == oldSelf.value()) || (duration(self) >= duration('5m') && duration(self) <= duration('24h'))",message="tokenTTL must be a Go duration between 5m and 24h such as 30m, 1h or 1h30m (units h, m, s, ms, us, ns; days are not supported)",optionalOldSelf=true
+	TokenTTL Duration `json:"tokenTTL,omitempty"`
 }
 
 // RobotRef references the Harbor robot account managed for this HarborAccess.

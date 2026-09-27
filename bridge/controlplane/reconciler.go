@@ -179,6 +179,12 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 		}
 	}
 
+	// The CRD admits only Go durations; this guards values such as "1d"
+	// admitted before that rule existed, which decode to a zero TTL.
+	if err := ha.Spec.TokenTTL.Err(); err != nil {
+		return r.markNotReady(ctx, ha, ReasonInvalidSpec, "spec.tokenTTL: "+err.Error())
+	}
+
 	// 3. Compute desired robot identity.
 	robotName, err := harbor.RobotName(cluster, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
 	if err != nil {
