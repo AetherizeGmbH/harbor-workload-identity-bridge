@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -216,13 +217,14 @@ func (j *Janitor) deleteRobot(ctx context.Context, robot *harbor.Robot, why, own
 	return true
 }
 
-// releaseUnselected removes this bridge's per-instance finalizer from
-// HarborAccess objects it no longer selects (ADR-0026), once sweepRobots
-// has revoked their robots. Without a selector every object is selected
-// and there is nothing to release.
+// releaseUnselected removes this bridge's finalizers from HarborAccess
+// objects it no longer selects (ADR-0026), once sweepRobots has revoked
+// their robots: the per-instance finalizer, and the shared one when the
+// object was served by this bridge (see servedHere), which covers objects
+// that stopped matching when this bridge gained its selector. Without a
+// selector every object is selected and there is nothing to release.
 func (j *Janitor) releaseUnselected(ctx context.Context, pending map[types.NamespacedName]bool) {
-	finalizer := j.Config.Finalizer()
-	if finalizer == FinalizerName {
+	if j.Config.Finalizer() == FinalizerName {
 		return
 	}
 	logger := log.FromContext(ctx).WithName("janitor")
@@ -234,17 +236,37 @@ func (j *Janitor) releaseUnselected(ctx context.Context, pending map[types.Names
 	for i := range list.Items {
 		ha := &list.Items[i]
 		key := types.NamespacedName{Namespace: ha.Namespace, Name: ha.Name}
-		if j.Config.Selects(ha) || !controllerutil.ContainsFinalizer(ha, finalizer) || pending[key] {
+		if j.Config.Selects(ha) || pending[key] {
+			continue
+		}
+		var release []string
+		for _, f := range j.Config.ReleasedFinalizers() {
+			if controllerutil.ContainsFinalizer(ha, f) && (f != FinalizerName || j.servedHere(ha)) {
+				release = append(release, f)
+			}
+		}
+		if len(release) == 0 {
 			continue
 		}
 		patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
-		controllerutil.RemoveFinalizer(ha, finalizer)
+		for _, f := range release {
+			controllerutil.RemoveFinalizer(ha, f)
+		}
 		if err := j.Client.Patch(ctx, ha, patch); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "failed to release HarborAccess no longer selected", "harboraccess", key.String())
 			continue
 		}
-		logger.Info("released HarborAccess no longer selected by this bridge", "harboraccess", key.String(), "finalizer", finalizer)
+		logger.Info("released HarborAccess no longer selected by this bridge", "harboraccess", key.String(), "finalizers", release)
 	}
+}
+
+// servedHere reports whether the robot recorded in ha's status is one of
+// this cluster's: this bridge served ha last, so a shared finalizer on it
+// is this bridge's, set before it had a selector (ADR-0026 point 3). A
+// bridge that served ha since records its own robot there instead.
+func (j *Janitor) servedHere(ha *harborv1alpha1.HarborAccess) bool {
+	return ha.Status.Robot != nil &&
+		harbor.OwnsRobot(j.Config.ClusterName, strings.TrimPrefix(ha.Status.Robot.Name, j.Config.HarborRobotPrefix))
 }
 
 // sweepSecrets deletes robot Secrets of this cluster whose HarborAccess no

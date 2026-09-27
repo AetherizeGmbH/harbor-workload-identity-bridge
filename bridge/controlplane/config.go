@@ -193,6 +193,25 @@ func (c *Config) Finalizer() string {
 	return FinalizerName + "-" + c.Instance
 }
 
+// ReleasedFinalizers returns the finalizers this bridge removes once it
+// has revoked a HarborAccess's robots: its own (Finalizer), and the one
+// the same installation set in its other mode, so that adding or removing
+// the selector does not leave a finalizer nobody removes. With a selector
+// that is the shared finalizer, which only this bridge's pre-selector
+// installation can have set (ADR-0026 point 3). Without one it is the
+// per-instance finalizer of a selector since removed, which the bridge
+// can name only while BRIDGE_INSTANCE still names the instance.
+func (c *Config) ReleasedFinalizers() []string {
+	switch {
+	case c.selective():
+		return []string{c.Finalizer(), FinalizerName}
+	case c.Instance != "":
+		return []string{FinalizerName, FinalizerName + "-" + c.Instance}
+	default:
+		return []string{FinalizerName}
+	}
+}
+
 // Selects reports whether this bridge manages ha.
 func (c *Config) Selects(ha *harborv1alpha1.HarborAccess) bool {
 	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(ha.Labels))

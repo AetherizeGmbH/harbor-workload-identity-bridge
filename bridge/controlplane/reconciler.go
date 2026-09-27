@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -193,20 +195,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !ha.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, ha)
 	}
-
-	finalizer := r.Config.Finalizer()
-	if !controllerutil.ContainsFinalizer(ha, finalizer) {
-		// Optimistic-lock merge patch: a JSON merge patch replaces the
-		// whole finalizers list, so without the resourceVersion guard a
-		// finalizer another controller added concurrently could be lost.
-		patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
-		controllerutil.AddFinalizer(ha, finalizer)
-		if err := r.Patch(ctx, ha, patch); err != nil {
-			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
-		}
-	}
-
 	return r.reconcileNormal(ctx, ha)
+}
+
+// ensureFinalizer adds this bridge's finalizer. reconcileNormal calls it
+// right before the robot can be created, so a robot never exists without
+// the finalizer that revokes it, and a HarborAccess the bridge refuses
+// never depends on this bridge (and its Harbor) to be deleted. That
+// matters with several bridges whose selectors overlap (ADR-0026): each
+// serves only the objects that name its audience.
+func (r *Reconciler) ensureFinalizer(ctx context.Context, ha *harborv1alpha1.HarborAccess) error {
+	finalizer := r.Config.Finalizer()
+	if controllerutil.ContainsFinalizer(ha, finalizer) {
+		return nil
+	}
+	// Optimistic-lock merge patch: a JSON merge patch replaces the whole
+	// finalizers list, so without the resourceVersion guard a finalizer
+	// another controller added concurrently could be lost.
+	patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	controllerutil.AddFinalizer(ha, finalizer)
+	if err := r.Patch(ctx, ha, patch); err != nil {
+		return fmt.Errorf("add finalizer: %w", err)
+	}
+	return nil
 }
 
 func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.HarborAccess) (ctrl.Result, error) {
@@ -286,6 +297,10 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	}
 	if msg := r.secretConflict(ha, secret, robotName); msg != "" {
 		return r.markNotReadyWithRequeue(ctx, ha, ReasonRobotConflict, msg)
+	}
+
+	if err := r.ensureFinalizer(ctx, ha); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	desiredDescription := RobotDescription(cluster, ha.Namespace, ha.Name)
@@ -696,19 +711,13 @@ func (r *Reconciler) deleteStaleRobots(ctx context.Context, ha *harborv1alpha1.H
 func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.HarborAccess) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// With a selector the bridge owns its per-instance finalizer, and also
-	// the shared one, which only this bridge's pre-selector installation
-	// can have set (a CR can be deleted before the instance finalizer was
-	// added).
-	finalizers := []string{r.Config.Finalizer()}
-	if r.Config.Finalizer() != FinalizerName {
-		finalizers = append(finalizers, FinalizerName)
+	var held []string
+	for _, f := range r.Config.ReleasedFinalizers() {
+		if controllerutil.ContainsFinalizer(ha, f) {
+			held = append(held, f)
+		}
 	}
-	held := false
-	for _, f := range finalizers {
-		held = held || controllerutil.ContainsFinalizer(ha, f)
-	}
-	if !held {
+	if len(held) == 0 {
 		return ctrl.Result{}, nil
 	}
 
@@ -718,38 +727,44 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 	// revocation; a robot that survives it keeps a valid password.
 	robots, err := r.Harbor.List(ctx)
 	if err != nil {
-		return r.blockDeletion(ctx, ha, fmt.Errorf("list robots: %w", err))
+		return r.blockDeletion(ctx, ha, held, fmt.Errorf("list robots: %w", err))
 	}
 	for i := range robots {
 		robot := &robots[i]
 		if ns, name, err := misnamedRobot(r.Config.ClusterName, robot); err != nil && ns == ha.Namespace && name == ha.Name {
 			// Ours by description, not by name: it can be neither
 			// deleted nor left behind.
-			return r.blockDeletion(ctx, ha, err)
+			return r.blockDeletion(ctx, ha, held, err)
 		}
 		if !robotOwnedBy(r.Config.ClusterName, robot, ha.Namespace, ha.Name) {
 			continue
 		}
 		if err := r.Harbor.Delete(ctx, robot.ID); err != nil {
-			return r.blockDeletion(ctx, ha, fmt.Errorf("delete robot %q: %w", robot.WireName, err))
+			return r.blockDeletion(ctx, ha, held, fmt.Errorf("delete robot %q: %w", robot.WireName, err))
 		}
 		logger.Info("deleted Harbor robot", "robot", robot.WireName, "id", robot.ID)
 	}
 
-	// Delete the password Secret, unless it is stamped for a different
-	// HarborAccess (collision backstop — never delete another CR's Secret).
+	// Delete the password Secret if it belongs to this HarborAccess, by the
+	// rule reconcileNormal writes by (secretConflict): never another CR's
+	// Secret (collision backstop), never one the bridge refused to adopt.
+	// A Secret left behind is never served (the data plane serves only
+	// Secrets stamped for the HarborAccess it matched).
 	secret, err := r.getRobotSecret(ctx, ha)
 	if err != nil {
-		return r.blockDeletion(ctx, ha, fmt.Errorf("read robot Secret: %w", err))
+		return r.blockDeletion(ctx, ha, held, fmt.Errorf("read robot Secret: %w", err))
 	}
-	if secret != nil && !robotsecret.StampedForOther(secret, ha.Namespace, ha.Name) {
+	robotName, _ := harbor.RobotName(r.Config.ClusterName, ha.Spec.ServiceAccountRef.Namespace, ha.Spec.ServiceAccountRef.Name)
+	if msg := r.secretConflict(ha, secret, robotName); secret != nil && msg == "" {
 		if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil && !apierrors.IsNotFound(err) {
-			return r.blockDeletion(ctx, ha, fmt.Errorf("delete robot Secret: %w", err))
+			return r.blockDeletion(ctx, ha, held, fmt.Errorf("delete robot Secret: %w", err))
 		}
+	} else if secret != nil {
+		logger.Info("keeping a Secret at the robot Secret's name that does not belong to this HarborAccess", "secret", secret.Name, "reason", msg)
 	}
 
 	patch := client.MergeFromWithOptions(ha.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	for _, f := range finalizers {
+	for _, f := range held {
 		controllerutil.RemoveFinalizer(ha, f)
 	}
 	if err := r.Patch(ctx, ha, patch); err != nil {
@@ -761,11 +776,21 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, ha *harborv1alpha1.Har
 // blockDeletion records why the finalizer cannot be released yet and
 // returns cause so controller-runtime retries with backoff. The status
 // write is best-effort: the object is being deleted, and surfacing the
-// Harbor error matters more than the write succeeding.
-func (r *Reconciler) blockDeletion(ctx context.Context, ha *harborv1alpha1.HarborAccess, cause error) (ctrl.Result, error) {
+// Harbor error matters more than the write succeeding. held lists this
+// bridge's finalizers on ha: all of them must be removed by hand to force
+// the deletion.
+func (r *Reconciler) blockDeletion(ctx context.Context, ha *harborv1alpha1.HarborAccess, held []string, cause error) (ctrl.Result, error) {
+	quoted := make([]string, len(held))
+	for i, f := range held {
+		quoted[i] = strconv.Quote(f)
+	}
+	what := "the " + strings.Join(quoted, " and ") + " finalizer"
+	if len(held) > 1 {
+		what += "s"
+	}
 	msg := fmt.Sprintf("cannot revoke the Harbor robot yet, deletion is waiting: %v. "+
-		"If Harbor is gone for good, remove the %q finalizer by hand; the janitor deletes the orphaned robot once Harbor is reachable",
-		cause, r.Config.Finalizer())
+		"If Harbor is gone for good, remove %s by hand; the janitor deletes the orphaned robot once Harbor is reachable",
+		cause, what)
 	if err := r.setNotReady(ctx, ha, ReasonDeletionBlocked, msg); err != nil {
 		log.FromContext(ctx).V(1).Info("could not record deletion-blocked status", "err", err.Error())
 	}
