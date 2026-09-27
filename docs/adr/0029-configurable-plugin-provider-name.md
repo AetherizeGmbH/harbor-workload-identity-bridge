@@ -170,7 +170,17 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      directory, inside it or contains it, and a `plugin.install.stateDir`
      that is that directory or inside it (per path segment); merge mode
      refuses a discovered kubelet bin dir in that relation.
-     `plugin.hostBinaryDir` must hold only this chart's plugins.
+     `plugin.hostBinaryDir` must hold only this chart's plugins. Those
+     checks see one release's values only. A release with its own
+     `plugin.hostConfigDir` needs one that is disjoint from every other
+     release's directories (the same, inside or containing): inside
+     another release's `plugin.hostConfigDir`, that release's sync
+     container reads its CA and mTLS key and can replace the directory
+     with a symlink. The installer therefore opens `plugin.hostConfigDir`
+     one component at a time (`os.Root`, Lstat, `os.SameFile`) and refuses
+     a symlink in its path; kubelet still follows one when it mounts the
+     hostPath into a pod (a `none`-mode install container, every sync
+     container), which the installer cannot see.
    - For a non-default name, an existing `<bin-dir>/<name>` is replaced
      only when this install's record is next to it or the file already has
      exactly the bytes the installer would write. A bridge entry of that

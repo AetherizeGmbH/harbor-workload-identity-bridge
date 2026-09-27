@@ -471,7 +471,18 @@ service:
   a position on the path to its bridge's endpoint, lets the attacker
   impersonate that bridge; the token check still applies. In auto or
   merge mode a `plugin.hostConfigDir` per release avoids this
-  (SECURITY.md).
+  (SECURITY.md). Per-release directories must be disjoint: never the
+  same as, inside, or containing another release's
+  `plugin.hostConfigDir`, `plugin.hostBinaryDir`, `plugin.install.binDir`
+  or `plugin.install.stateDir`, or kubelet's credential-provider bin dir.
+  `/etc/kubernetes/credential-provider-config/eu` under the default
+  directory, for example, is in reach of the default release's sync
+  container, which can read the CA and mTLS key there and replace the
+  directory with a symlink. The installer refuses a symlink in its own
+  `plugin.hostConfigDir`'s path, but kubelet follows one when it mounts
+  the directory into a `none`-mode install container and every sync
+  container, and the chart and the installer compare only one release's
+  own directories.
 - **Disjoint `matchImages`.** Kubelet runs every provider whose
   `matchImages` match an image, pools their credentials and tries them
   in order until a pull succeeds (read in the kubelet source; see

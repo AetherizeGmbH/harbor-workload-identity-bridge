@@ -56,7 +56,18 @@ const lockPollInterval = 200 * time.Millisecond
 // created when missing) and returns the function that releases it. It
 // polls instead of blocking so that it can time out with a clear error.
 func lockFile(path string, timeout time.Duration) (unlock func(), err error) {
-	f, err := openLockFile(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	defer func() { _ = root.Close() }()
+	return lockFileIn(root, filepath.Base(path), timeout)
+}
+
+// lockFileIn is lockFile for the lock file name in the directory root.
+func lockFileIn(root *os.Root, name string, timeout time.Duration) (unlock func(), err error) {
+	path := filepath.Join(root.Name(), name)
+	f, err := openLockFile(root, name)
 	if err != nil {
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
@@ -111,31 +122,27 @@ func (c *config) chartOwnedPathIn(configPath string) string {
 }
 
 // lockConfig takes the config lock at lockPath (a node path). Its
-// directory is created when missing, as writeFileAtomic creates the
-// directory of the config it writes: an installer must be able to lock a
-// config before it exists.
+// directory is created when missing, as the config's writer creates it: an
+// installer must be able to lock a config before it exists. A lock in
+// plugin.hostConfigDir is taken through openConfigDir.
 func lockConfig(cfg *config, lockPath string) (unlock func(), err error) {
-	if err := mkdirNodeDir(filepath.Dir(cfg.hostPath(lockPath))); err != nil {
+	root, err := cfg.openDirOf(lockPath, true)
+	if err != nil {
 		return nil, fmt.Errorf("lock %s: %w", lockPath, err)
 	}
-	return lockFile(cfg.hostPath(lockPath), cfg.lockTimeout)
+	defer func() { _ = root.Close() }()
+	return lockFileIn(root, filepath.Base(lockPath), cfg.lockTimeout)
 }
 
-// openLockFile creates the lock file when it is missing and opens it under
-// the same rules as every other host file (files.go): relative to its
-// directory, and only if the last component is a regular file, never a
-// symlink, FIFO or device. A lock file is never replaced or removed.
-// flock needs no write access, so the file is opened read-only. The
-// directory must exist: /run on every systemd node, and the directory of
-// the config file otherwise, which the caller has already created or
+// openLockFile creates the lock file name in root when it is missing and
+// opens it under the same rules as every other host file (files.go):
+// relative to its directory, and only if the last component is a regular
+// file, never a symlink, FIFO or device. A lock file is never replaced or
+// removed. flock needs no write access, so the file is opened read-only.
+// The directory must exist: /run on every systemd node, and the directory
+// of the config file otherwise, which the caller has already created or
 // discovered.
-func openLockFile(path string) (*os.File, error) {
-	dir, name := filepath.Dir(path), filepath.Base(path)
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
+func openLockFile(root *os.Root, name string) (*os.File, error) {
 	// O_CREATE|O_EXCL never follows a symlink and fails on any existing
 	// name, which openRegular then checks.
 	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)

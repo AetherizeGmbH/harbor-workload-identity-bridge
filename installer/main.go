@@ -236,6 +236,30 @@ func (c *config) hostPath(nodePath string) string {
 	return filepath.Join(c.HostRoot, filepath.Clean("/"+nodePath))
 }
 
+// openConfigDir opens plugin.hostConfigDir, creating it when missing, and
+// refuses a symlink in its path (openNodeDir): the sync container of every
+// release writes it, and a release's plugin.hostConfigDir can sit inside
+// another's.
+func (c *config) openConfigDir() (*os.Root, error) {
+	return openNodeDir(c.HostRoot, c.HostConfigDir)
+}
+
+// openDirOf opens the directory of the node path p: plugin.hostConfigDir
+// through openConfigDir, any other directory as it is, created when missing
+// if create is set (mkdirNodeDir).
+func (c *config) openDirOf(p string, create bool) (*os.Root, error) {
+	dir := filepath.Dir(p)
+	if dir == c.HostConfigDir {
+		return c.openConfigDir()
+	}
+	if create {
+		if err := mkdirNodeDir(c.hostPath(dir)); err != nil {
+			return nil, err
+		}
+	}
+	return os.OpenRoot(c.hostPath(dir))
+}
+
 // files returns this install's own node file names.
 func (c *config) files() nodeFiles {
 	return filesFor(c.ProviderName)

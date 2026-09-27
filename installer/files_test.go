@@ -225,3 +225,64 @@ func TestReadHostFile_RefusesSymlink(t *testing.T) {
 		t.Fatalf("missing file: err = %v, want fs.ErrNotExist", err)
 	}
 }
+
+// TestOpenNodeDir_CreatesAndRefusesSymlinks: openNodeDir creates a missing
+// directory path and refuses a symlink, or anything but a directory, in
+// any of its components below the host root.
+func TestOpenNodeDir_CreatesAndRefusesSymlinks(t *testing.T) {
+	host := t.TempDir()
+	root, err := openNodeDir(host, "/etc/kubernetes/hb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeFileIn(root, "f", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = root.Close()
+	if got, err := os.ReadFile(filepath.Join(host, "etc/kubernetes/hb/f")); err != nil || string(got) != "x" {
+		t.Fatalf("got %q (err %v)", got, err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(host, "etc/elsewhere"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T)
+		dir     string
+		want    string
+	}{
+		{"last component", func(t *testing.T) {
+			// Relative, so that it stays inside the directory os.Root is
+			// opened on, which os.Root would follow.
+			if err := os.Symlink("../elsewhere", filepath.Join(host, "etc/kubernetes/eu")); err != nil {
+				t.Fatal(err)
+			}
+		}, "/etc/kubernetes/eu", "refusing to follow symlink eu"},
+		{"inner component", func(t *testing.T) {
+			if err := os.Symlink("elsewhere", filepath.Join(host, "etc/link")); err != nil {
+				t.Fatal(err)
+			}
+		}, "/etc/link/x", "refusing to follow symlink link"},
+		{"a file", func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(host, "etc/file"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "/etc/file/x", "is not a directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.prepare(t)
+			root, err := openNodeDir(host, tc.dir)
+			if err == nil {
+				_ = root.Close()
+				t.Fatal("opened")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
+	}
+	if entries, err := os.ReadDir(filepath.Join(host, "etc/elsewhere")); err != nil || len(entries) != 0 {
+		t.Fatalf("the symlink target holds %v (err %v)", entries, err)
+	}
+}

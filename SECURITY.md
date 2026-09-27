@@ -384,7 +384,18 @@ container:
   planted symlink turned the next install into a root write, or a copy
   of any host file into a readable backup, anywhere on the node. In
   merge mode this also means the node's existing credential-provider
-  config must be a regular file.
+  config must be a regular file. It opens `plugin.hostConfigDir` itself
+  one path component at a time and refuses a symlink in any of them: a
+  release whose `plugin.hostConfigDir` sits inside another release's is
+  in reach of that release's sync container, which could otherwise
+  replace the inner directory with a symlink and send the installer's
+  root writes (CA, mTLS key, config, backups, lock files) into a
+  directory of its choice. The check cannot look through a pod's own
+  mounts: kubelet resolves the hostPath of `plugin.hostConfigDir` when it
+  starts the pod, so in `none` mode, and for every release's sync
+  container, a symlink planted before the pod starts is followed. Keep
+  every release's `plugin.hostConfigDir` disjoint from every other
+  release's directories (the bullet on the CA and mTLS files below).
 - in `patch` mode parse-merges `/etc/default/kubelet`, preserving
   operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
   node's existing `CredentialProviderConfig`, preserving foreign
@@ -452,6 +463,16 @@ container:
   impersonate the bridge; a client key only passes the mTLS check, which
   never replaces the token (O2). Give each release its own
   `plugin.hostConfigDir` in `auto` or `merge` mode where that matters.
+  Such per-release directories must be disjoint: never the same as,
+  inside, or containing another release's `plugin.hostConfigDir`,
+  `plugin.hostBinaryDir`, `plugin.install.binDir` or
+  `plugin.install.stateDir`, or kubelet's credential-provider bin dir.
+  A directory inside another release's `plugin.hostConfigDir` (such as
+  `/etc/kubernetes/credential-provider-config/eu` under the default) is
+  in reach of that release's sync container, which reads the CA and mTLS
+  key there and can replace the directory with a symlink that kubelet
+  follows when it mounts it into this release's pods. The chart and the
+  installer compare only one release's own directories.
 - treats the provider name, a chart value, as a file name in kubelet's
   bin dir, where GKE keeps kubelet itself: in a cloud's config (`merge`
   mode) it never replaces a provider entry of that name that is not a

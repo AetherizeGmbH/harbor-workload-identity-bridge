@@ -317,7 +317,14 @@ plugin:
   # the chart and the installer refuse that (ADR-0029). hostBinaryDir
   # must hold only this chart's plugins: each install keeps its binary
   # and a record of its entry (<providerName>.entry) there, and trusts
-  # another install's entry only through them.
+  # another install's entry only through them. A release with its own
+  # hostConfigDir (auto/merge mode) needs one disjoint from every other
+  # release's directories: not the same as, inside, or containing another
+  # release's hostConfigDir, hostBinaryDir, install.binDir or
+  # install.stateDir; the chart compares only this release's own
+  # (README, "Shared CA and mTLS files"). hostConfigDir must never be
+  # kubelet's credential-provider config directory (kubelet 1.34+): kubelet
+  # loads every config file there, which every sync container could plant.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 

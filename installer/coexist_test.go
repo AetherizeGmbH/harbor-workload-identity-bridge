@@ -2210,3 +2210,40 @@ func TestRun_MergeKeepsAHandInstalledBridgeInACloudConfig(t *testing.T) {
 		t.Fatalf("record = %s, want %s: a cloud's config is not chart-owned", got, want)
 	}
 }
+
+// TestRun_RefusesASymlinkInHostConfigDir: a release whose own
+// plugin.hostConfigDir is inside another release's (a per-release
+// directory under the default one) is in reach of that release's sync
+// container, which can replace the inner directory with a symlink. The
+// installer must refuse to follow it, and write nothing into the directory
+// it points at: not the config, the CA, the mTLS files or a lock file.
+func TestRun_RefusesASymlinkInHostConfigDir(t *testing.T) {
+	for _, mode := range []string{modeNone, modePatch} {
+		t.Run(mode, func(t *testing.T) {
+			env := withName(t, newTestEnv(t, mode, []string{"/usr/bin/kubelet"}), euName)
+			env.cfg.MTLSEnabled = true
+			env.cfg.HostConfigDir = configDir + "/eu"
+			for _, dir := range []string{configDir, "/etc/elsewhere"} {
+				if err := os.MkdirAll(env.cfg.hostPath(dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink("../../elsewhere", env.cfg.hostPath(configDir+"/eu")); err != nil {
+				t.Fatal(err)
+			}
+			err := run(env.cfg)
+			if err == nil || !strings.Contains(err.Error(), "refusing to follow symlink eu") {
+				t.Fatalf("got %v, want a refusal", err)
+			}
+			if err := syncAuxFiles(env.cfg); err == nil || !strings.Contains(err.Error(), "refusing to follow symlink eu") {
+				t.Fatalf("sync: got %v, want a refusal", err)
+			}
+			if entries, err := os.ReadDir(env.cfg.hostPath("/etc/elsewhere")); err != nil || len(entries) != 0 {
+				t.Fatalf("the installer wrote into the symlink's target: %v (err %v)", entries, err)
+			}
+			if env.restarts != 0 {
+				t.Fatal("kubelet restarted")
+			}
+		})
+	}
+}

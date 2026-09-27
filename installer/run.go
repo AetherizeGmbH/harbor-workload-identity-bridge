@@ -137,12 +137,17 @@ func run(cfg *config) error {
 // leaves kubelet alone — the operator owns the flags.
 func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 	configPath := cfg.ownConfigPath()
-	unlock, err := lockConfig(cfg, configPath+lockSuffix)
+	dir, err := cfg.openConfigDir()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	unlock, err := lockFileIn(dir, configFileName+lockSuffix, cfg.lockTimeout)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	desired, err := ownConfig(cfg, rendered, entry)
+	desired, err := ownConfig(cfg, dir, rendered, entry)
 	if err != nil {
 		return err
 	}
@@ -153,7 +158,7 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 	if err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
-	changed, err := writeFileAtomic(cfg.hostPath(configPath), desired, 0o644)
+	changed, err := writeFileIn(dir, configFileName, desired, 0o644)
 	if err != nil {
 		return err
 	}
@@ -170,10 +175,15 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 // (lockPatchConfigs).
 func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	configPath := cfg.ownConfigPath()
+	dir, err := cfg.openConfigDir()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
 
 	// Compute everything that can be refused BEFORE touching the host,
 	// so a refusal never leaves a half-install behind.
-	desiredConfig, err := ownConfig(cfg, rendered, entry)
+	desiredConfig, err := ownConfig(cfg, dir, rendered, entry)
 	if err != nil {
 		return err
 	}
@@ -193,7 +203,7 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	if err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
-	configChanged, err := writeFileAtomic(cfg.hostPath(configPath), desiredConfig, 0o644)
+	configChanged, err := writeFileIn(dir, configFileName, desiredConfig, 0o644)
 	if err != nil {
 		return err
 	}
@@ -389,11 +399,12 @@ func configDocs(path string) ([][]byte, error) {
 }
 
 // ownConfig reads the chart-owned provider config of patch and none mode
-// and returns the content it must have after this install
-// (chartOwnedConfig). The caller holds the config lock.
-func ownConfig(cfg *config, rendered []byte, entry map[string]any) ([]byte, error) {
+// from dir, plugin.hostConfigDir (openConfigDir), and returns the content it
+// must have after this install (chartOwnedConfig). The caller holds the
+// config lock.
+func ownConfig(cfg *config, dir *os.Root, rendered []byte, entry map[string]any) ([]byte, error) {
 	path := cfg.ownConfigPath()
-	existing, err := readHostFile(cfg.hostPath(path))
+	existing, err := readFileIn(dir, configFileName)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return rendered, nil
@@ -485,7 +496,13 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	if withinDir(wiring.ConfigFile, cfg.HostConfigDir) && wiring.ConfigFile != own {
 		return fmt.Errorf("kubelet's credential-provider config %s is inside plugin.hostConfigDir %s, which every release's sync container can write, and is not the chart-owned config there (%s); keep kubelet's config out of plugin.hostConfigDir, or choose another plugin.hostConfigDir", wiring.ConfigFile, cfg.HostConfigDir, own)
 	}
-	unlock, err := lockFile(cfg.hostPath(wiring.ConfigFile+lockSuffix), cfg.lockTimeout)
+	dir, err := cfg.openDirOf(wiring.ConfigFile, false)
+	if err != nil {
+		return fmt.Errorf("open the directory of node credential-provider config %s: %w", wiring.ConfigFile, err)
+	}
+	defer func() { _ = dir.Close() }()
+	name := filepath.Base(wiring.ConfigFile)
+	unlock, err := lockFileIn(dir, name+lockSuffix, cfg.lockTimeout)
 	if err != nil {
 		return err
 	}
@@ -493,7 +510,7 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 
 	// Read, validate, and merge first: an unknown schema or a missing file
 	// is refused before anything is written (no half-install).
-	existing, err := readHostFile(cfg.hostPath(wiring.ConfigFile))
+	existing, err := readFileIn(dir, name)
 	if err != nil {
 		// Kubelet refuses to start when the flag points at a missing
 		// file, so on a live node this indicates a wrong override.
@@ -531,7 +548,7 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	if err := installFiles(cfg, wiring.BinDir, entryJSON, claim); err != nil {
 		return err
 	}
-	written, err := writeFileAtomic(cfg.hostPath(wiring.ConfigFile), merged, 0o644)
+	written, err := writeFileIn(dir, name, merged, 0o644)
 	if err != nil {
 		return err
 	}
@@ -728,8 +745,13 @@ func checkBinaryOwnership(cfg *config, binDir string) error {
 // HostConfigDir. Shared by the install pass and the --sync loop.
 func syncAuxFiles(cfg *config) error {
 	files := cfg.files()
+	dir, err := cfg.openConfigDir()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
 	caDst := filepath.Join(cfg.HostConfigDir, files.CA)
-	changed, err := copyFile(cfg.SourceCA, cfg.hostPath(caDst), 0o644)
+	changed, err := copyFileIn(cfg.SourceCA, dir, files.CA, 0o644)
 	if err != nil {
 		return err
 	}
@@ -740,7 +762,7 @@ func syncAuxFiles(cfg *config) error {
 		return nil
 	}
 	certDst := filepath.Join(cfg.HostConfigDir, files.ClientCert)
-	changed, err = copyFile(cfg.SourceClientCert, cfg.hostPath(certDst), 0o644)
+	changed, err = copyFileIn(cfg.SourceClientCert, dir, files.ClientCert, 0o644)
 	if err != nil {
 		return err
 	}
@@ -748,7 +770,7 @@ func syncAuxFiles(cfg *config) error {
 		logf("installed mTLS client cert → %s", certDst)
 	}
 	keyDst := filepath.Join(cfg.HostConfigDir, files.ClientKey)
-	changed, err = copyFile(cfg.SourceClientKey, cfg.hostPath(keyDst), 0o600)
+	changed, err = copyFileIn(cfg.SourceClientKey, dir, files.ClientKey, 0o600)
 	if err != nil {
 		return err
 	}
