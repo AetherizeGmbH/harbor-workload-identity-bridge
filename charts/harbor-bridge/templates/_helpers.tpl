@@ -178,7 +178,11 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
-{{- $providerName := toString .Values.plugin.providerName -}}
+{{- $rawProviderName := .Values.plugin.providerName -}}
+{{- if not (or (kindIs "invalid" $rawProviderName) (kindIs "string" $rawProviderName)) -}}
+{{- fail (printf "plugin.providerName must be a string, but it was read as the %s %v: values files and --set read unquoted values such as 123, 1e3, yes or on as numbers or booleans. Quote the name in the values file (providerName: \"123\") or pass it with --set-string (ADR-0029)." (kindOf $rawProviderName) $rawProviderName) -}}
+{{- end -}}
+{{- $providerName := include "harbor-bridge.plugin.providerName" . -}}
 {{- if or (gt (len $providerName) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $providerName)) -}}
 {{- fail (printf "plugin.providerName=%q must be a DNS label (lower-case letters, digits and -, at most 63 characters): it names the kubelet credential-provider entry and the plugin binary on every node. Keep the default harbor-bridge-plugin unless you run several installs per cluster; then give each its own name, e.g. harbor-bridge-eu (ADR-0029)." $providerName) -}}
 {{- end -}}
@@ -318,25 +322,41 @@ split is "true" when the plugin runs in a namespace of its own.
 {{- end -}}
 
 {{/*
-Plugin provider name (ADR-0029). legacyNames is "true" for the default
-name, whose node files keep the names they had before provider names
-became configurable.
+providerName is plugin.providerName (ADR-0029), the one place templates
+read it from. A missing key renders the default: `helm upgrade
+--reuse-values` renders this chart with the previous chart's values,
+which predate the key, and a null value unsets it. validateRequiredValues
+rejects every value that is not a string, because a number or boolean
+would not render back as the name the operator wrote.
+*/}}
+{{- define "harbor-bridge.plugin.providerName" -}}
+{{- if kindIs "invalid" .Values.plugin.providerName -}}
+harbor-bridge-plugin
+{{- else -}}
+{{- .Values.plugin.providerName -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+legacyNames is "true" for the default provider name, whose node files
+keep the names they had before provider names became configurable.
 */}}
 {{- define "harbor-bridge.plugin.legacyNames" -}}
-{{- if eq (toString .Values.plugin.providerName) "harbor-bridge-plugin" -}}true{{- end -}}
+{{- if eq (include "harbor-bridge.plugin.providerName" .) "harbor-bridge-plugin" -}}true{{- end -}}
 {{- end -}}
 
 {{/*
 providerNameYAML is the provider name as a YAML scalar. The default stays
 bare, as it always rendered (one changed byte in the rendered config would
 restart kubelet on upgrade); any other name is quoted, because YAML 1.1
-reads DNS labels such as "yes", "on" or "123" as booleans or numbers.
+reads DNS labels such as "yes", "on" or "123" as booleans or numbers when
+the installer parses the rendered config.
 */}}
 {{- define "harbor-bridge.plugin.providerNameYAML" -}}
 {{- if include "harbor-bridge.plugin.legacyNames" . -}}
 harbor-bridge-plugin
 {{- else -}}
-{{- .Values.plugin.providerName | quote -}}
+{{- include "harbor-bridge.plugin.providerName" . | quote -}}
 {{- end -}}
 {{- end -}}
 
@@ -353,7 +373,7 @@ two installs never share a file. The installer derives the same names
 {{- if include "harbor-bridge.plugin.legacyNames" $ctx -}}
 {{- printf "%s/harbor-bridge-%s" $ctx.Values.plugin.hostConfigDir $suffix -}}
 {{- else -}}
-{{- printf "%s/%s.%s" $ctx.Values.plugin.hostConfigDir $ctx.Values.plugin.providerName $suffix -}}
+{{- printf "%s/%s.%s" $ctx.Values.plugin.hostConfigDir (include "harbor-bridge.plugin.providerName" $ctx) $suffix -}}
 {{- end -}}
 {{- end -}}
 

@@ -49,6 +49,7 @@ cases=(
   "plugin.providerName over 63 characters|--set|plugin.providerName=$(printf 'a%.0s' {1..64})|must be a DNS label (lower-case letters, digits and -, at most 63 characters): it names the kubelet"
   "plugin.providerName empty|--set|plugin.providerName=|plugin.providerName=\"\" must be a DNS label"
   "plugin.providerName checked with plugin.enabled=false|--set|plugin.enabled=false,plugin.providerName=a_b|plugin.providerName=\"a_b\" must be a DNS label"
+  "plugin.providerName read as a number|--set|plugin.providerName=123|plugin.providerName must be a string, but it was read as the int64 123"
 )
 
 failed=0
@@ -103,6 +104,42 @@ if out=$(render -f "${TMP}/values-no-matchimages.yaml" --set plugin.enabled=fals
   fi
 else
   echo "FAIL  plugin.enabled=false without matchImages must render"
+  echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# An unquoted yes in a values file is YAML's boolean true, not the name
+# "yes": refused, never rendered as the provider name "true" (ADR-0029).
+printf 'plugin:\n  providerName: yes\n' > "${TMP}/values-provider-yes.yaml"
+out=$(render -f "${COMPLETE}" -f "${TMP}/values-provider-yes.yaml" 2>&1 || true)
+if echo "${out}" | grep -qF "plugin.providerName must be a string, but it was read as the bool true"; then
+  echo "PASS  plugin.providerName: yes (unquoted) in a values file"
+else
+  echo "FAIL  plugin.providerName: yes (unquoted) in a values file"
+  echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# The same name as a string renders it in the entry and in every node path.
+if out=$(render -f "${COMPLETE}" --set-string plugin.providerName=123 2>&1) \
+   && echo "${out}" | grep -qF -- '- name: "123"' \
+   && echo "${out}" | grep -qF '/etc/kubernetes/credential-provider-config/123.ca.crt"' \
+   && ! echo "${out}" | grep -qF '%!'; then
+  echo "PASS  plugin.providerName=123 via --set-string renders the name everywhere"
+else
+  echo "FAIL  plugin.providerName=123 via --set-string renders the name everywhere"
+  echo "      got: ${out}" | grep -E 'name: "123"|ca.crt|%!|Error' | head -3
+  failed=$((failed+1))
+fi
+
+# A missing plugin.providerName renders exactly the default. `helm upgrade
+# --reuse-values` from a chart before ADR-0029 renders with that chart's
+# values, which lack the key; a null value removes the key the same way.
+if out=$(render -f "${COMPLETE}" --set plugin.providerName=null 2>&1) \
+   && [ "${out}" = "$(render -f "${COMPLETE}")" ]; then
+  echo "PASS  missing plugin.providerName (--reuse-values) renders the default"
+else
+  echo "FAIL  missing plugin.providerName (--reuse-values) renders the default"
   echo "      got: ${out}" | head -3
   failed=$((failed+1))
 fi

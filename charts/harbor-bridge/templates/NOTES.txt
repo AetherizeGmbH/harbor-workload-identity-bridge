@@ -16,7 +16,7 @@
 {{- if .Values.plugin.enabled }}
   Plugin image : {{ include "harbor-bridge.plugin.image" . }} (install mode: {{ .Values.plugin.install.mode }})
 {{- if not (include "harbor-bridge.plugin.legacyNames" .) }}
-  Provider     : {{ .Values.plugin.providerName }} (one of several installs per cluster, ADR-0029)
+  Provider     : {{ include "harbor-bridge.plugin.providerName" . }} (one of several installs per cluster, ADR-0029)
 {{- end }}
 {{- else }}
   Plugin       : NOT deployed by this chart (plugin.enabled=false)
@@ -74,7 +74,7 @@ NEXT STEPS
      needs the plugin binary and this provider entry in the credential-provider
      config it reads (--image-credential-provider-config). The binary is in the
      plugin image at /plugin/harbor-bridge-plugin; install it in kubelet's
-     --image-credential-provider-bin-dir as {{ .Values.plugin.providerName }}
+     --image-credential-provider-bin-dir as {{ include "harbor-bridge.plugin.providerName" . }}
      (kubelet runs the binary named like the entry):
 
        {{ include "harbor-bridge.plugin.image" . }}
@@ -112,7 +112,7 @@ NEXT STEPS
      the "harbor.aetherize.io/robot" finalizer by hand and delete the leftover
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
 {{- if .Values.plugin.enabled }}
-     `helm uninstall` leaves the kubelet provider entry {{ .Values.plugin.providerName }}
+     `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
      and its files on the nodes; README "Uninstalling" shows how to remove them.
 {{- end }}
 

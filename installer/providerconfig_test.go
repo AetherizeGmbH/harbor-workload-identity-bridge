@@ -522,11 +522,12 @@ func mustEntry(t *testing.T, rendered, name string) map[string]any {
 	return entry
 }
 
-// TestProviderName_YAMLAmbiguousNamesStayStrings: the chart quotes every
-// non-default provider name because YAML 1.1 reads DNS labels such as
-// "yes" or "123" as a boolean or a number. The quoted name must be found
-// in the rendered config and stay a string through a merge; unquoted it
-// would not be found at all.
+// TestProviderName_YAMLAmbiguousNamesStayStrings: the chart accepts
+// plugin.providerName only as a string and quotes every non-default name
+// in the rendered config, because YAML 1.1 reads DNS labels such as "yes"
+// or "123" as a boolean or a number. The quoted name must be found in the
+// rendered config and stay a string through a merge; unquoted it would
+// not be found at all.
 func TestProviderName_YAMLAmbiguousNamesStayStrings(t *testing.T) {
 	for _, name := range []string{"yes", "on", "123", "1e3"} {
 		quoted := strings.Replace(renderedConfig, "name: harbor-bridge-plugin", `name: "`+name+`"`, 1)

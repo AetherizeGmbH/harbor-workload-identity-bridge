@@ -212,7 +212,7 @@ same addressing works without a host-root mount.
 {{- /* Rendered only for a non-default name, so the pod template of an
        existing install stays as it was (ADR-0029). */}}
 - name: PROVIDER_NAME
-  value: {{ .Values.plugin.providerName | quote }}
+  value: {{ include "harbor-bridge.plugin.providerName" . | quote }}
 {{- end }}
 - name: NODE_IP
   valueFrom:
