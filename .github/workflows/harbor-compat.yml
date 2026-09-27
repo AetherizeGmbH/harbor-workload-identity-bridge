@@ -12,8 +12,11 @@ on:
     inputs:
       charts:
         description: >-
-          JSON array of Harbor *chart* versions to test (overrides the default
-          matrix). Use this to probe the floor downward, e.g. ["1.11.4","1.12.6"].
+          JSON array of Harbor *chart* versions to probe instead of the default
+          matrix, e.g. ["1.11.4","1.12.6"] to probe below the floor. A probe run
+          reports its results in the run summary only: it never touches the
+          README table or its PR. To move the published range, edit the default
+          list (ADR-0020). Leave empty for the regular run.
         required: false
         default: ""
 
@@ -122,10 +125,14 @@ jobs:
           echo "::error::Harbor chart $CHART e2e failed (status $STATUS)"
           exit 1
 
+  # A probe run (custom chart list) must not reach the README: the table
+  # would hold only the probe rows, with floor and ceiling computed from
+  # them, and the PR would overwrite a pending weekly refresh on the shared
+  # branch. On schedule `inputs.charts` is null, which compares equal to ''.
   aggregate:
     name: update README table
     needs: matrix
-    if: always()
+    if: always() && inputs.charts == ''
     runs-on: ubuntu-latest
     # The PR is opened with the App token; GITHUB_TOKEN only reads.
     permissions:
@@ -168,3 +175,26 @@ jobs:
           delete-branch: true
           labels: dependencies
           add-paths: README.md
+
+  probe-report:
+    name: report probe results
+    needs: matrix
+    if: always() && inputs.charts != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: compat-artifacts
+          pattern: compat-result-*
+      - name: Render probe results into the run summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Harbor compat probe (README table unchanged)"
+            echo
+            python3 hack/render-compat-table.py --summary \
+              'compat-artifacts/compat-result-*/result.json'
+          } >> "$GITHUB_STEP_SUMMARY"
