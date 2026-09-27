@@ -50,6 +50,12 @@ cases=(
   "plugin.providerName empty|--set|plugin.providerName=|plugin.providerName=\"\" must be a DNS label"
   "plugin.providerName checked with plugin.enabled=false|--set|plugin.enabled=false,plugin.providerName=a_b|plugin.providerName=\"a_b\" must be a DNS label"
   "plugin.providerName read as a number|--set|plugin.providerName=123|plugin.providerName must be a string, but it was read as the int64 123"
+  "plugin.hostBinaryDir equal to plugin.hostConfigDir|--set|plugin.hostBinaryDir=/etc/kubernetes/credential-provider-config|plugin.hostBinaryDir=\"/etc/kubernetes/credential-provider-config\" and plugin.hostConfigDir=\"/etc/kubernetes/credential-provider-config\" must not be the same directory or inside one another"
+  "plugin.hostBinaryDir inside plugin.hostConfigDir|--set|plugin.hostBinaryDir=/etc/kubernetes/credential-provider-config/bin|must not be the same directory or inside one another"
+  "plugin.hostConfigDir inside plugin.hostBinaryDir|--set|plugin.hostConfigDir=/etc/kubernetes/credential-provider/config|must not be the same directory or inside one another"
+  "plugin.install.binDir inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/kubernetes/credential-provider-config/bin,plugin.install.configFile=/etc/cp.yaml|plugin.install.binDir=\"/etc/kubernetes/credential-provider-config/bin\" and plugin.hostConfigDir"
+  "plugin.install.stateDir equal to plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config|plugin.install.stateDir=\"/etc/kubernetes/credential-provider-config\" must not be plugin.hostConfigDir"
+  "plugin.install.stateDir inside plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config/state|must not be plugin.hostConfigDir"
 )
 
 failed=0
@@ -141,6 +147,17 @@ if out=$(render -f "${COMPLETE}" --set plugin.providerName=null 2>&1) \
 else
   echo "FAIL  missing plugin.providerName (--reuse-values) renders the default"
   echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# The overlap check compares per path segment: the defaults
+# /etc/kubernetes/credential-provider and
+# /etc/kubernetes/credential-provider-config share a string prefix but no
+# directory, and the state dir may be a parent of plugin.hostConfigDir.
+if render -f "${COMPLETE}" --set plugin.install.stateDir=/etc/kubernetes > /dev/null 2>&1; then
+  echo "PASS  plugin directories compared per path segment"
+else
+  echo "FAIL  plugin directories compared per path segment"
   failed=$((failed+1))
 fi
 

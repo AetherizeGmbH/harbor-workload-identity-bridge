@@ -99,6 +99,11 @@ func run(cfg *config) error {
 		}
 	}
 
+	if mode == modeMerge && dirsOverlap(wiring.BinDir, cfg.HostConfigDir) {
+		// The binaries and records in the bin dir must be out of reach
+		// of the writers of plugin.hostConfigDir (loadConfig).
+		return fmt.Errorf("kubelet's credential-provider bin dir %s and plugin.hostConfigDir %s must not be the same directory or inside one another: every release's sync container can write plugin.hostConfigDir; choose another plugin.hostConfigDir", wiring.BinDir, cfg.HostConfigDir)
+	}
 	if mode == modePatch {
 		// Held until the pass ends: no installer may add an entry to the
 		// config kubelet reads now between checkRewire and the rewire.

@@ -233,6 +233,20 @@ harbor.aetherize.io/robot
 {{- fail (printf "%s=%q must be an absolute, clean node path (letters, digits and . _ - / only)." $k (toString $v)) -}}
 {{- end -}}
 {{- end -}}
+{{- /* plugin.hostConfigDir is writable by the sync container of every
+       release. The installer trusts the plugin binaries and entry records
+       in the bin dir, and its state file decides about kubelet restarts, so
+       neither may be in reach of it (ADR-0029). Compared per path segment:
+       /a/b-c is not inside /a/b. The installer checks the same (loadConfig). */}}
+{{- $configDir := .Values.plugin.hostConfigDir -}}
+{{- range $k, $v := dict "plugin.hostBinaryDir" .Values.plugin.hostBinaryDir "plugin.install.binDir" $install.binDir -}}
+{{- if and $v $configDir (or (eq $v $configDir) (hasPrefix (printf "%s/" $v) $configDir) (hasPrefix (printf "%s/" $configDir) $v)) -}}
+{{- fail (printf "%s=%q and plugin.hostConfigDir=%q must not be the same directory or inside one another: the sync container of every release can write plugin.hostConfigDir, and the installer trusts what is in the plugin bin dir (ADR-0029)." $k (toString $v) $configDir) -}}
+{{- end -}}
+{{- end -}}
+{{- if and $install.stateDir $configDir (or (eq $install.stateDir $configDir) (hasPrefix (printf "%s/" $configDir) (toString $install.stateDir))) -}}
+{{- fail (printf "plugin.install.stateDir=%q must not be plugin.hostConfigDir=%q or inside it: the sync container of every release can write plugin.hostConfigDir, and the state file decides about kubelet restarts (ADR-0029)." (toString $install.stateDir) $configDir) -}}
+{{- end -}}
 {{- if not .Values.plugin.allowSelfMatchImages -}}
 {{- $pluginHost := include "harbor-bridge.registryHost" .Values.plugin.image.repository -}}
 {{- $bridgeHost := include "harbor-bridge.registryHost" .Values.bridge.image.repository -}}

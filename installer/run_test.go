@@ -417,6 +417,35 @@ func TestLoadConfig_Validation(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	// plugin.hostConfigDir is writable by every release's sync container:
+	// no bin dir or state dir in reach of it.
+	for name, extra := range map[string]map[string]string{
+		"bin dir equals config dir":        {"HOST_BIN_DIR": "/c"},
+		"bin dir inside config dir":        {"HOST_BIN_DIR": "/c/bin"},
+		"config dir inside bin dir":        {"HOST_BIN_DIR": "/c", "HOST_CONFIG_DIR": "/c/config"},
+		"merge bin dir inside config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/c/bin", "INSTALL_MERGE_CONFIG_FILE": "/x.yaml"},
+		"merge bin dir equals config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/c", "INSTALL_MERGE_CONFIG_FILE": "/x.yaml"},
+		"state dir equals config dir":      {"STATE_DIR": "/c"},
+		"state dir inside config dir":      {"STATE_DIR": "/c/state"},
+		"default state dir in config dir":  {"HOST_CONFIG_DIR": "/var/lib"},
+		"config dir inside bin dir (deep)": {"HOST_BIN_DIR": "/opt", "HOST_CONFIG_DIR": "/opt/a/b"},
+	} {
+		if _, err := loadConfig(env(withBase(extra))); err == nil || !strings.Contains(err.Error(), "must not be") {
+			t.Errorf("%s: got %v, want an overlap refusal", name, err)
+		}
+	}
+	// Per path segment: a shared string prefix is no overlap, and the
+	// state dir may be a parent of the config dir.
+	for name, extra := range map[string]map[string]string{
+		"chart defaults":             {"HOST_BIN_DIR": "/etc/kubernetes/credential-provider", "HOST_CONFIG_DIR": "/etc/kubernetes/credential-provider-config"},
+		"config dir name extends":    {"HOST_BIN_DIR": "/c", "HOST_CONFIG_DIR": "/cc"},
+		"state dir above config dir": {"STATE_DIR": "/var/lib", "HOST_CONFIG_DIR": "/var/lib/hb"},
+		"state dir name extends":     {"STATE_DIR": "/c-state"},
+	} {
+		if _, err := loadConfig(env(withBase(extra))); err != nil {
+			t.Errorf("%s: refused: %v", name, err)
+		}
+	}
 	if c, err := loadConfig(env(base)); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
 	} else if c.ProviderName != defaultProviderName {

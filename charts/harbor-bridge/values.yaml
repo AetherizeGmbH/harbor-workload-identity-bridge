@@ -301,7 +301,10 @@ plugin:
   # instead go into the paths discovered from kubelet's own flags, so
   # hostBinaryDir is unused there. Several installs on one cluster share
   # the config file in hostConfigDir (kubelet reads one): in patch/none
-  # mode they must use the same two directories.
+  # mode they must use the same two directories. The sync container of
+  # every release can write hostConfigDir, so hostBinaryDir (and
+  # install.binDir) must not be hostConfigDir, inside it, or contain it;
+  # the chart and the installer refuse that (ADR-0029).
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 
@@ -347,7 +350,9 @@ plugin:
     # Systemd unit the installer restarts.
     kubeletUnit: kubelet
     # Node directory holding the installer's idempotency state file
-    # (installer-state.json, or <providerName>.installer-state.json).
+    # (installer-state.json, or <providerName>.installer-state.json). Not
+    # hostConfigDir or a directory inside it (the chart refuses that): the
+    # state file decides about kubelet restarts.
     stateDir: /var/lib/harbor-bridge
 
   # URL the on-node plugin uses to reach the bridge. Empty renders the

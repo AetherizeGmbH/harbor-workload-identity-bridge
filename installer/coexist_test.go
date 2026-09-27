@@ -1194,3 +1194,26 @@ func TestRun_ConcurrentNoneAndPatchInstallsBothLand(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_MergeRefusesABinDirInReachOfHostConfigDir: kubelet's discovered
+// bin dir must be out of reach of plugin.hostConfigDir's writers, like
+// HOST_BIN_DIR (loadConfig).
+func TestRun_MergeRefusesABinDirInReachOfHostConfigDir(t *testing.T) {
+	env := newTestEnv(t, modeAuto, []string{
+		"/usr/bin/kubelet",
+		"--image-credential-provider-bin-dir=" + configDir + "/bin",
+		"--image-credential-provider-config=/cloud/config.yaml",
+	})
+	writeHostFile(t, env, "/cloud/config.yaml", gkeConfig)
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "must not be the same directory or inside one another") {
+		t.Fatalf("got %v, want a refusal", err)
+	}
+	if got := env.hostFile(t, "/cloud/config.yaml"); got != gkeConfig {
+		t.Fatal("the cloud config was changed")
+	}
+	assertAbsent(t, env, configDir+"/bin/"+defaultProviderName, configDir+"/harbor-bridge-ca.crt")
+	if env.restarts != 0 {
+		t.Fatal("kubelet restarted after a refusal")
+	}
+}

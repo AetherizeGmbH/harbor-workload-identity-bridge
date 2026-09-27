@@ -41,6 +41,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -173,6 +174,19 @@ func loadConfig(getenv func(string) string) (*config, error) {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 	}
+	// plugin.hostConfigDir is writable by the sync container of every
+	// release (and any pod with a hostPath on it). The bin dir holds the
+	// binaries kubelet runs, which the installer also takes as proof of
+	// another install's entry (siblingEntry), and the state file decides
+	// about kubelet restarts: neither may be where those writers reach.
+	for name, dir := range map[string]string{"HOST_BIN_DIR": c.HostBinDir, "INSTALL_MERGE_BIN_DIR": c.MergeBinDir} {
+		if dir != "" && dirsOverlap(dir, c.HostConfigDir) {
+			return nil, fmt.Errorf("%s %q and HOST_CONFIG_DIR %q must not be the same directory or inside one another: every release's sync container can write HOST_CONFIG_DIR", name, dir, c.HostConfigDir)
+		}
+	}
+	if withinDir(c.StateDir, c.HostConfigDir) {
+		return nil, fmt.Errorf("STATE_DIR %q must not be HOST_CONFIG_DIR %q or inside it: every release's sync container can write HOST_CONFIG_DIR", c.StateDir, c.HostConfigDir)
+	}
 	if err := validUnitName(c.KubeletUnit); err != nil {
 		return nil, fmt.Errorf("KUBELET_UNIT: %w", err)
 	}
@@ -196,6 +210,19 @@ func validNodePath(p string) error {
 		return fmt.Errorf("path %q must be absolute, clean, and use only letters, digits and . _ - /", p)
 	}
 	return nil
+}
+
+// withinDir reports whether the node path p is dir or inside it. Both are
+// clean absolute paths (validNodePath); the comparison is per path
+// segment, so /a/b-c is not inside /a/b.
+func withinDir(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, dir+"/")
+}
+
+// dirsOverlap reports whether one of the node directories a and b is the
+// other or inside it.
+func dirsOverlap(a, b string) bool {
+	return withinDir(a, b) || withinDir(b, a)
 }
 
 // hostPath maps a node path to the path the container reads/writes it

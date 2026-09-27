@@ -102,6 +102,12 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      no other install's entry is in the file, it is the rendered config
      byte for byte, as before. A chart-owned file that cannot be parsed is
      replaced, as before.
+   - What the installer trusts must be out of reach of the writers of
+     `plugin.hostConfigDir`: the chart and the installer refuse a
+     `plugin.hostBinaryDir` or `plugin.install.binDir` that is that
+     directory, inside it or contains it, and a `plugin.install.stateDir`
+     that is that directory or inside it (per path segment); merge mode
+     refuses a discovered kubelet bin dir in that relation.
    - For a non-default name, an existing `<bin-dir>/<name>` is replaced
      only when the config already holds a bridge entry of that name or the
      file already has exactly the bytes the installer would write. GKE keeps
