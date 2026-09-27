@@ -241,5 +241,13 @@ func (k *cachedKeySet) fetch(ctx context.Context) ([]jose.JSONWebKey, error) {
 	if err := json.Unmarshal(body, &set); err != nil {
 		return nil, fmt.Errorf("decode JWKS: %w", err)
 	}
-	return set.Keys, nil
+	// Any JSON object decodes: a URL that names the discovery document or
+	// another JSON endpoint yields no keys, and replacing the last good
+	// keys with none would fail every token.
+	for i := range set.Keys {
+		if set.Keys[i].IsPublic() {
+			return set.Keys, nil
+		}
+	}
+	return nil, fmt.Errorf("JWKS contains no public key (%d keys)", len(set.Keys))
 }

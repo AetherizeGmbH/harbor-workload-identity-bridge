@@ -691,9 +691,9 @@ most every 30s (counted from the end of the previous fetch), so forged
 tokens with unknown key IDs cannot make the bridge poll the apiserver
 once per request. A token signed by a key the bridge already holds never
 waits for a fetch: keys older than 10 minutes are refreshed in the
-background, and while the apiserver is slow or unreachable the last
-keys fetched stay in use, including a key the issuer has since rotated
-out.
+background, and while the apiserver is slow or unreachable, or answers
+with no public key, the last keys fetched stay in use, including a key
+the issuer has since rotated out.
 
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 

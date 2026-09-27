@@ -318,6 +318,9 @@ func TestCachedKeySet_KeepsTheLastGoodKeysWhenARefreshFails(t *testing.T) {
 		{"error status", serveStatus(http.StatusInternalServerError)},
 		{"not a JWKS", serveBody([]byte("<html>"))},
 		{"oversized", serveBody(bytes.Repeat([]byte(" "), maxJWKSSize+1))},
+		{"no keys", serveBody([]byte(`{"keys":[]}`))},
+		{"the discovery document", serveBody([]byte(`{"issuer":"https://kubernetes.default.svc","jwks_uri":"https://kubernetes.default.svc/openid/v1/jwks"}`))},
+		{"only a symmetric key", serveBody([]byte(`{"keys":[{"kty":"oct","kid":"test-key-1","k":"c2VjcmV0"}]}`))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fi, srv, ks, clock := keySetFixture(t, 3*time.Second)
