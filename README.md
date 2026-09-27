@@ -420,7 +420,7 @@ contract, not individually run.
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
 | 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), GKE e2e harness, ADRs 0021, 0022 and 0024 | ✅ Code + kind e2e complete; first `make e2e-gke` run against a real project still outstanding |
 | 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, ADRs 0023 and 0025 | ✅ Code + kind e2e (lifecycle stages) complete |
-| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, signed releases with provenance, gosec and fuzzing, ADRs 0026–0027, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
+| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, token lifetime cap and pod binding, signed releases with provenance, gosec and fuzzing, ADRs 0026–0028, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
 
 ### Next
 
@@ -444,8 +444,8 @@ In order.
 
 ### Open decisions (TODO)
 
-Open items from the 2026-09 security review (threat model items O2, O3
-and O5). None blocks a single-bridge install today.
+Open items from the 2026-09 security review (threat model items O2 and
+O5). None blocks a single-bridge install today.
 
 - [ ] **Configurable plugin provider names (O5).** The plugin's provider
   name and file names are fixed (`harbor-bridge-plugin`), so only one
@@ -462,14 +462,6 @@ and O5). None blocks a single-bridge install today.
   default. *Limits now:* nothing functional; mTLS is optional defense in
   depth, and every request still needs a valid, audience-bound
   ServiceAccount token.
-- [ ] **Token lifetime cap and pod binding (O3).** The bridge accepts any
-  valid token of the right audience until it expires, including
-  long-lived ones from `kubectl create token --duration=…` (which needs
-  the right to create tokens for that ServiceAccount) and tokens not bound
-  to a pod. Decide on a maximum lifetime and whether to require the pod
-  claim. *Limits now:* nothing functional; kubelet's own tokens are short
-  and pod-bound, so this only narrows what a stolen or hand-minted token
-  can do.
 
 ## Support and services
 
