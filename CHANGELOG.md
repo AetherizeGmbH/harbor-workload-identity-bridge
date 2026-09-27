@@ -1,3 +1,10 @@
+## [0.10.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.10.0...v0.10.1) (2026-09-27)
+
+### Bug Fixes
+
+* **api:** admit only Go durations as tokenTTL and require spec ([#129](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/129)) ([19066ef](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/19066efd14c0a49e5f8bdbc5f2a756ce6fbaea13))
+* **plugin:** pin the bridge wire keys, test the TLS server name, correct the docs ([#128](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/128)) ([7b00f8c](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/7b00f8cd523750b7fbc26e49226fc8f2caee8ca4))
+
 ## [0.10.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.9.0...v0.10.0) (2026-09-27)
 
 ### ⚠ BREAKING CHANGES
