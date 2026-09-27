@@ -270,7 +270,12 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   refuses to move kubelet to its own directories while the config kubelet
   reads (a file, or the files of a directory) holds a bridge entry of
   another name; a single install that changed its own directories still
-  moves. In auto mode a later install merges into whatever config kubelet
+  moves. When that config is in reach of the writers of a
+  `plugin.hostConfigDir` (inside this install's, or a chart-owned config a
+  record in kubelet's bin dir names), only the entries the records there
+  vouch for count, as in decision 4: a planted entry neither keeps kubelet
+  on that config nor keeps this install off its own. In a cloud's or
+  hand-edited config every bridge entry counts. In auto mode a later install merges into whatever config kubelet
   already runs; when that is another release's chart-owned config, it
   keeps only the entries the records vouch for (decision 4). Its binary
   and record then go into the other release's `plugin.hostBinaryDir`,

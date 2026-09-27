@@ -236,10 +236,10 @@ func kubeletStartProblems(doc []byte, own string, hasBinary func(name string) bo
 }
 
 // otherBridgeProviders returns the names of the harbor-bridge entries in
-// the CredentialProviderConfig in doc that are not named name: the
-// entries of other installs (ADR-0029). A document it cannot read holds
-// none.
-func otherBridgeProviders(doc []byte, name string) []string {
+// the CredentialProviderConfig in doc that are not named name and that
+// counts accepts (every one when counts is nil): the entries of other
+// installs (ADR-0029). A document it cannot read holds none.
+func otherBridgeProviders(doc []byte, name string, counts func(entry map[string]any) bool) []string {
 	cfg := map[string]any{}
 	if err := yaml.Unmarshal(doc, &cfg); err != nil {
 		return nil
@@ -250,7 +250,7 @@ func otherBridgeProviders(doc []byte, name string) []string {
 	}
 	var names []string
 	for _, p := range providers {
-		if pm, ok := p.(map[string]any); ok && pm["name"] != name && isBridgeProvider(pm) {
+		if pm, ok := p.(map[string]any); ok && pm["name"] != name && isBridgeProvider(pm) && (counts == nil || counts(pm)) {
 			names = append(names, fmt.Sprint(pm["name"]))
 		}
 	}

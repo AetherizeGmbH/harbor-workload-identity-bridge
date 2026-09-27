@@ -452,7 +452,8 @@ service:
 - **Same directories.** In patch and none mode all releases must use the
   same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
   refuses to point kubelet at other directories while the config kubelet
-  reads holds another release's entry. In auto mode a later release
+  reads holds another release's entry (in a chart-owned config, only an
+  entry that release's record in kubelet's bin dir vouches for). In auto mode a later release
   merges into whatever config kubelet already runs, and its binary goes
   into kubelet's bin dir. When that config is another release's
   chart-owned config, it treats it as the chart's (see "The chart-owned

@@ -90,12 +90,24 @@ func lockFile(path string, timeout time.Duration) (unlock func(), err error) {
 // to a file. For a directory of config files, which kubelet reads since
 // Kubernetes 1.34, it is the lock a none-mode install whose
 // plugin.hostConfigDir is that directory takes before it writes its
-// chart-owned config there.
+// chart-owned config there (chartOwnedPathIn). That layout is unsupported
+// (every writer of plugin.hostConfigDir could add config files that kubelet
+// loads), but an installer must not race one that uses it.
 func (c *config) configLockPath(configPath string) string {
+	return c.chartOwnedPathIn(configPath) + lockSuffix
+}
+
+// chartOwnedPathIn returns the node path of the chart-owned config a
+// patch- or none-mode install keeps at kubelet's config path configPath:
+// configPath itself for a file, and
+// <directory>/credential-provider-config.yaml for a directory of config
+// files, where a none-mode install whose plugin.hostConfigDir is that
+// directory writes it.
+func (c *config) chartOwnedPathIn(configPath string) string {
 	if fi, err := os.Lstat(c.hostPath(configPath)); err == nil && fi.IsDir() {
-		return filepath.Join(configPath, configFileName) + lockSuffix
+		return filepath.Join(configPath, configFileName)
 	}
-	return configPath + lockSuffix
+	return configPath
 }
 
 // lockConfig takes the config lock at lockPath (a node path). Its

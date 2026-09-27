@@ -272,22 +272,27 @@ func lockPatchConfigs(cfg *config, current kubeletWiring) (func(), error) {
 // moving the config drops that install's entry, and moving only the bin
 // dir leaves kubelet without that install's binary, so that kubelet does
 // not start. A single install that changed its own directories still
-// moves. The caller holds the node lock and the config locks of current
-// and of this install's own config (lockPatchConfigs) until the pass ends,
-// so no installer adds an entry to either between this read and the
-// rewire.
+// moves. What counts as another install's entry depends on who can write
+// current (rewireCounts). The caller holds the node lock and the config
+// locks of current and of this install's own config (lockPatchConfigs)
+// until the pass ends, so no installer adds an entry to either between
+// this read and the rewire.
 func checkRewire(cfg *config, current kubeletWiring) error {
 	want := kubeletWiring{BinDir: cfg.HostBinDir, ConfigFile: cfg.ownConfigPath()}
 	if !current.wired() || current == want {
 		return nil
 	}
 	docs, err := configDocs(cfg.hostPath(current.ConfigFile))
+	var counts func(map[string]any) bool
+	if err == nil {
+		counts, err = cfg.rewireCounts(current)
+	}
 	if err != nil {
 		return fmt.Errorf("mode patch: cannot tell whether kubelet's credential-provider config %s holds other installs' entries, so it stays wired to it: %w", current.ConfigFile, err)
 	}
 	var others []string
 	for _, doc := range docs {
-		for _, name := range otherBridgeProviders(doc, cfg.ProviderName) {
+		for _, name := range otherBridgeProviders(doc, cfg.ProviderName, counts) {
 			others = append(others, strconv.Quote(name))
 		}
 	}
@@ -296,6 +301,29 @@ func checkRewire(cfg *config, current kubeletWiring) error {
 	}
 	return fmt.Errorf("mode patch: kubelet runs with bin-dir=%q config=%q, which holds the provider entries %s of other harbor-bridge installs; moving kubelet to this install's bin-dir=%q config=%q would break them. Give every install the same plugin.hostBinaryDir and plugin.hostConfigDir, or use plugin.install.mode=auto",
 		current.BinDir, current.ConfigFile, strings.Join(others, ", "), want.BinDir, want.ConfigFile)
+}
+
+// rewireCounts returns what checkRewire takes for another install's entry
+// in kubelet's current config (current). A config that writers of a
+// plugin.hostConfigDir reach holds whatever they planted there: a file or
+// directory inside this install's plugin.hostConfigDir, or a chart-owned
+// config that a record in kubelet's bin dir names (claimsChartOwned; for a
+// directory of config files, the chart-owned config of a none-mode install
+// whose plugin.hostConfigDir it is). There only the entries another
+// installer wrote count (siblingIn): a planted entry must neither keep
+// kubelet on that config, where it runs at every kubelet start, nor keep
+// this install from moving kubelet to its own config, where this installer
+// drops it. Any other config (a cloud's, or one edited by hand) is not the
+// chart's, and every bridge entry in it counts (nil).
+func (c *config) rewireCounts(current kubeletWiring) (func(map[string]any) bool, error) {
+	if withinDir(current.ConfigFile, c.HostConfigDir) {
+		return c.siblingIn(current.BinDir), nil
+	}
+	claimed, err := c.claimsChartOwned(current.BinDir, c.chartOwnedPathIn(current.ConfigFile))
+	if err != nil || !claimed {
+		return nil, err
+	}
+	return c.siblingIn(current.BinDir), nil
 }
 
 // configDocs returns the credential-provider config documents kubelet reads
@@ -451,7 +479,7 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	// installer only edits a file; say so instead of failing on the read
 	// below (and before a lock file lands next to the directory).
 	if fi, err := os.Lstat(cfg.hostPath(wiring.ConfigFile)); err == nil && fi.IsDir() {
-		return fmt.Errorf("kubelet's credential-provider config %s is a directory, which the installer does not merge into; use plugin.install.mode=none and put the entry into a file of that directory yourself, or plugin.enabled=false", wiring.ConfigFile)
+		return fmt.Errorf("kubelet's credential-provider config %s is a directory, which the installer does not merge into; point kubelet's --image-credential-provider-config at a file, or put this install's entry into a file of that directory by other means and set plugin.enabled=false. Never make that directory plugin.hostConfigDir: every release's sync container can write plugin.hostConfigDir, and kubelet loads every config file of the directory at every start", wiring.ConfigFile)
 	}
 	own := cfg.ownConfigPath()
 	if withinDir(wiring.ConfigFile, cfg.HostConfigDir) && wiring.ConfigFile != own {

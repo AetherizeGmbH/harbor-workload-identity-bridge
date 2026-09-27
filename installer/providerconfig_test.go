@@ -371,17 +371,20 @@ func TestOtherBridgeProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := otherBridgeProviders(doc, defaultProviderName); len(got) != 0 {
+	if got := otherBridgeProviders(doc, defaultProviderName, nil); len(got) != 0 {
 		t.Fatalf("otherBridgeProviders = %v; the GKE provider is not a bridge entry", got)
 	}
 	doc, _, err = mergeProvider(doc, mustEntry(t, renderedConfigFor("harbor-bridge-eu"), "harbor-bridge-eu"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := otherBridgeProviders(doc, defaultProviderName); !reflect.DeepEqual(got, []string{"harbor-bridge-eu"}) {
+	if got := otherBridgeProviders(doc, defaultProviderName, nil); !reflect.DeepEqual(got, []string{"harbor-bridge-eu"}) {
 		t.Fatalf("otherBridgeProviders = %v", got)
 	}
-	if got := otherBridgeProviders([]byte("{nope"), defaultProviderName); got != nil {
+	if got := otherBridgeProviders(doc, defaultProviderName, func(map[string]any) bool { return false }); got != nil {
+		t.Fatalf("otherBridgeProviders = %v; counts accepts none", got)
+	}
+	if got := otherBridgeProviders([]byte("{nope"), defaultProviderName, nil); got != nil {
 		t.Fatalf("an unreadable config holds %v", got)
 	}
 }

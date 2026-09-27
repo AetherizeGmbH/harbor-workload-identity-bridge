@@ -431,7 +431,9 @@ container:
   it is when kubelet itself starts, before any installer runs (a node
   reboot). In `patch` mode the installer also refuses to point kubelet at
   its own directories while the config kubelet reads holds another
-  install's entry.
+  install's entry; in a config in reach of a `plugin.hostConfigDir`, only
+  an entry a record in kubelet's bin dir vouches for counts, so a planted
+  entry cannot keep kubelet on that config.
 - in `merge` mode into a cloud's config, keeps every other entry, but
   refuses to write the config, or restart kubelet onto it, when kubelet
   would exit at startup: an entry whose binary is missing from kubelet's

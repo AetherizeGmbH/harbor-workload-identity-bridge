@@ -1133,10 +1133,108 @@ func TestRun_PatchReadsAConfigDirectoryBeforeMovingKubelet(t *testing.T) {
 	}
 }
 
+// TestRun_PatchMovesKubeletAwayFromPlantedEntries: when kubelet's current
+// config is in reach of the writers of a plugin.hostConfigDir, only the
+// entries an installer recorded keep patch mode from moving kubelet. A
+// planted entry must not: it would keep kubelet on a config where it runs
+// at every kubelet start, and keep this install from its own config, where
+// the installer drops it. A cloud's or hand-edited config stays the
+// conservative case: every bridge entry in it counts.
+func TestRun_PatchMovesKubeletAwayFromPlantedEntries(t *testing.T) {
+	// plant puts an entry for the program name into the file nodePath and
+	// an executable of that name into bin, without a record: a leftover
+	// binary (writeFileAtomic leaves the previous plugin as <name>.bak),
+	// or anything else kubelet can run.
+	plant := func(t *testing.T, env *testEnv, bin, nodePath, name string) {
+		t.Helper()
+		writeHostFile(t, env, nodePath, "apiVersion: kubelet.config.k8s.io/v1\nkind: CredentialProviderConfig\nproviders:\n"+plantedAs(name))
+		writeHostFile(t, env, bin+"/"+name, "ELF-fake-plugin")
+		if err := os.Chmod(env.cfg.hostPath(bin+"/"+name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	own := kubeletWiring{BinDir: binDir, ConfigFile: configDir + "/" + configFileName}
+	for _, tc := range []struct {
+		name string
+		// current is kubelet's wiring before the pass; prepare plants the
+		// entries.
+		current kubeletWiring
+		prepare func(t *testing.T, env *testEnv)
+	}{
+		{"plugin.hostConfigDir as kubelet's config directory",
+			kubeletWiring{BinDir: binDir, ConfigFile: configDir},
+			func(t *testing.T, env *testEnv) {
+				plant(t, env, binDir, configDir+"/evil.yaml", defaultProviderName+".bak")
+				plant(t, env, binDir, configDir+"/other.yml", "evil")
+			}},
+		{"this install's own config, other bin dir",
+			kubeletWiring{BinDir: "/opt/cp-bin", ConfigFile: own.ConfigFile},
+			func(t *testing.T, env *testEnv) {
+				plant(t, env, "/opt/cp-bin", own.ConfigFile, "evil")
+			}},
+		{"another release's chart-owned config",
+			kubeletWiring{BinDir: "/opt/cp-bin", ConfigFile: "/etc/kubernetes/hb-eu/" + configFileName},
+			func(t *testing.T, env *testEnv) {
+				// The other release's entry is gone (a writer removed it);
+				// its record in kubelet's bin dir still names the file.
+				writeHostFile(t, env, "/opt/cp-bin/"+filesFor(euName).Record,
+					recordOf(t, "/etc/kubernetes/hb-eu/"+configFileName, mustEntry(t, renderedConfigFor(euName), euName)))
+				plant(t, env, "/opt/cp-bin", "/etc/kubernetes/hb-eu/"+configFileName, "evil")
+			}},
+		{"another release's plugin.hostConfigDir as kubelet's config directory",
+			kubeletWiring{BinDir: "/opt/cp-bin", ConfigFile: "/etc/kubernetes/hb-eu"},
+			func(t *testing.T, env *testEnv) {
+				// A none-mode release keeps its chart-owned config in
+				// that directory; its record names that file.
+				writeHostFile(t, env, "/opt/cp-bin/"+filesFor(euName).Record,
+					recordOf(t, "/etc/kubernetes/hb-eu/"+configFileName, mustEntry(t, renderedConfigFor(euName), euName)))
+				plant(t, env, "/opt/cp-bin", "/etc/kubernetes/hb-eu/evil.yaml", "evil")
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t, modePatch, []string{
+				"/usr/bin/kubelet",
+				"--image-credential-provider-bin-dir=" + tc.current.BinDir,
+				"--image-credential-provider-config=" + tc.current.ConfigFile,
+			})
+			tc.prepare(t, env)
+			if err := run(env.cfg); err != nil {
+				t.Fatalf("a planted entry kept kubelet on its config: %v", err)
+			}
+			if got, err := discoverKubelet(env.cfg.ProcRoot); err != nil || got != own {
+				t.Fatalf("kubelet wiring = %+v (err %v), want %+v", got, err, own)
+			}
+			if got := env.hostFile(t, own.ConfigFile); got != renderedConfig {
+				t.Fatalf("this install's config holds more than its entry:\n%s", got)
+			}
+			if env.restarts != 1 {
+				t.Fatalf("restarts = %d, want 1", env.restarts)
+			}
+		})
+	}
+
+	// The same planted entry in a cloud's config, which no record names and
+	// which is outside plugin.hostConfigDir, still counts.
+	env := newTestEnv(t, modePatch, []string{
+		"/usr/bin/kubelet",
+		"--image-credential-provider-bin-dir=/opt/cp-bin",
+		"--image-credential-provider-config=/opt/cp/config.yaml",
+	})
+	plant(t, env, "/opt/cp-bin", "/opt/cp/config.yaml", "evil")
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), `holds the provider entries "evil"`) {
+		t.Fatalf("got %v, want a refusal", err)
+	}
+	if env.restarts != 0 {
+		t.Fatal("kubelet restarted after a refusal")
+	}
+}
+
 // TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt: a none-mode
 // install takes only the config lock of the config it writes, and kubelet
 // may read exactly that config (a file, or since Kubernetes 1.34 the
-// directory it writes into). Patch mode with other directories must wait
+// directory it writes into, a layout the docs rule out but patch mode must
+// not race either). Patch mode with other directories must wait
 // for that lock before it reads the config (checkRewire), or it moves
 // kubelet away from an entry the none-mode install adds meanwhile. That
 // holds too when kubelet reads this install's own config (or the directory
@@ -1179,8 +1277,14 @@ func TestRun_PatchLocksKubeletsCurrentConfigBeforeCheckingIt(t *testing.T) {
 			default:
 			}
 
-			// It writes its binary and its entry, then releases the lock.
+			// It writes its record, its binary and its entry, as its
+			// installer does, then releases the lock.
+			writeHostFile(t, b, "/opt/cp-bin/"+filesFor(euName).Record,
+				recordOf(t, noneConfig, mustEntry(t, renderedConfigFor(euName), euName)))
 			writeHostFile(t, b, "/opt/cp-bin/"+euName, "ELF-fake-plugin")
+			if err := os.Chmod(b.cfg.hostPath("/opt/cp-bin/"+euName), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			writeHostFile(t, b, noneConfig, renderedConfigFor(euName))
 			unlock()
 			select {
