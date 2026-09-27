@@ -10,6 +10,8 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -350,6 +352,68 @@ func TestCachedKeySet_KeepsTheLastGoodKeysWhenARefreshFails(t *testing.T) {
 			}
 			if _, err := ks.VerifySignature(context.Background(), valid); err != nil {
 				t.Fatalf("after the failed unknown-key refresh: %v", err)
+			}
+		})
+	}
+}
+
+// failingTransport passes requests on until fail is called, then fails
+// each one with that error before it is sent, like a TLS handshake or a
+// proxy failure.
+type failingTransport struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (f *failingTransport) fail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+func (f *failingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	err := f.err
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// A token that names a key the bridge holds but is signed by another key
+// is a bad signature, whatever the refresh it starts returns. Failures
+// are categorised by their text, and the refresh error used to be part of
+// it: while the JWKS fetch failed with an expired TLS certificate, a
+// forged token counted as expired.
+func TestCachedKeySet_HeldKeyWithAWrongSignatureStaysABadSignature(t *testing.T) {
+	for _, tc := range []struct{ name, fetchErr string }{
+		{"expired TLS certificate", "tls: failed to verify certificate: x509: certificate has expired or is not yet valid"},
+		{"malformed response", "net/http: HTTP/1.x transport connection broken: malformed HTTP response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fi, srv, ks, clock := keySetFixture(t, 3*time.Second)
+			tr := &failingTransport{}
+			ks.client.Transport = tr
+			if _, err := ks.VerifySignature(context.Background(), fi.signToken(t, fi.standardClaims())); err != nil {
+				t.Fatal(err)
+			}
+			tr.fail(errors.New(tc.fetchErr))
+			clock.advance(jwksMinRefresh)
+			forged := forgedToken(t, fi, fi.kid)
+			for _, attempt := range []string{"the refresh fails", "rate-limited after the failure"} {
+				_, err := ks.VerifySignature(context.Background(), forged)
+				if err == nil {
+					t.Fatalf("%s: forged token verified", attempt)
+				}
+				// As go-oidc and Validate wrap it.
+				wrapped := fmt.Errorf("%w: failed to verify signature: %w", ErrInvalidToken, err)
+				if c := classifyOIDCError(wrapped); c != OIDCReasonBadSignature {
+					t.Fatalf("%s: category = %q for %q, want %q", attempt, c, err, OIDCReasonBadSignature)
+				}
+			}
+			if n := srv.hits.Load(); n != 1 {
+				t.Fatalf("%d JWKS requests reached the server, want 1: the refresh must fail in the transport", n)
 			}
 		})
 	}

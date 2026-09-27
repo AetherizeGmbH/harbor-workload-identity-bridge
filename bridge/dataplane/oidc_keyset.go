@@ -95,7 +95,8 @@ func (k *cachedKeySet) VerifySignature(ctx context.Context, raw string) ([]byte,
 	}
 	keyID := jws.Signatures[0].Header.KeyID
 
-	if payload, ok := verifyWith(jws, k.cachedKeys(), keyID); ok {
+	cached := k.cachedKeys()
+	if payload, ok := verifyWith(jws, cached, keyID); ok {
 		return payload, nil
 	}
 	// Unknown key: fetch again, unless the last fetch ended too recently.
@@ -103,10 +104,29 @@ func (k *cachedKeySet) VerifySignature(ctx context.Context, raw string) ([]byte,
 	if payload, ok := verifyWith(jws, keys, keyID); ok {
 		return payload, nil
 	}
-	if refreshErr != nil {
+	// A key the bridge holds that does not verify the signature is a bad
+	// signature whatever the refresh did. Its error must not carry the
+	// refresh error: failures are categorised by their text, and a JWKS
+	// fetch error such as an expired TLS certificate would relabel a
+	// forged token as expired.
+	if refreshErr != nil && !holdsKey(cached, keyID) && !holdsKey(keys, keyID) {
 		return nil, fmt.Errorf("failed to verify token signature: %w", refreshErr)
 	}
 	return nil, errors.New("failed to verify token signature")
+}
+
+// holdsKey reports whether keys include one with the ID keyID. A token
+// without a key ID names no key.
+func holdsKey(keys []jose.JSONWebKey, keyID string) bool {
+	if keyID == "" {
+		return false
+	}
+	for i := range keys {
+		if keys[i].KeyID == keyID {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyWith(jws *jose.JSONWebSignature, keys []jose.JSONWebKey, keyID string) ([]byte, bool) {
