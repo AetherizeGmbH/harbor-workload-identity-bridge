@@ -1,0 +1,18 @@
+{
+  "name": "harbor-workload-identity-bridge-ci-tooling",
+  "private": true,
+  "description": "CI tooling only (semantic-release, commitlint). Nothing here ships. Exact versions; package-lock.json pins the rest and CI installs with npm ci.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@semantic-release/changelog": "7.0.0",
+    "@semantic-release/exec": "7.1.0",
+    "@semantic-release/git": "11.0.1",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "semantic-release": "25.0.9"
+  }
+}

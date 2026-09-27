@@ -21,13 +21,15 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with: { node-version: 22 }
-      - run: npm install --no-save @commitlint/cli @commitlint/config-conventional
+      # Exact versions from package-lock.json; --no-install makes npx fail
+      # instead of downloading anything that is not in node_modules.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Lint commit messages
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+        run: npx --no-install commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
       - name: Lint PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: echo "$PR_TITLE" | npx commitlint
+        run: echo "$PR_TITLE" | npx --no-install commitlint

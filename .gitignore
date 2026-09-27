@@ -31,7 +31,7 @@ test/e2e-gke/**/errored_test.tfstate
 test/e2e-gke/**/.tofu-sleep
 test/e2e-gke/**/.diag/
 
-# Node tooling (semantic-release / commitlint)
+# Node tooling (semantic-release / commitlint). package-lock.json is
+# committed: CI installs exactly it with `npm ci`.
 node_modules/
-package-lock.json
 npm-debug.log
