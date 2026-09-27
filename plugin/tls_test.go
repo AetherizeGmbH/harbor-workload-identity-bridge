@@ -93,7 +93,7 @@ func startBridge(t *testing.T, ca *pki, clientCA *pki) string {
 		t.Fatal(err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "Registry"})
+		_ = json.NewEncoder(w).Encode(bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: secs(60), CacheKeyType: "Registry"})
 	}))
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
 	if clientCA != nil {

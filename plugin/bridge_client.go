@@ -45,11 +45,16 @@ const (
 
 // bridgeResponse mirrors bridge/dataplane.Response. Duplicated rather than
 // imported per ADR-0015; see that ADR for the binary-size and
-// transitive-dep rationale.
+// transitive-dep rationale. The JSON keys are pinned on both sides by
+// bridge/dataplane/testdata/credentials-response.golden.json.
 type bridgeResponse struct {
-	Username      string `json:"username"`
-	Password      string `json:"password"`
-	ExpiresInSecs int    `json:"expires_in"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// ExpiresInSecs is a pointer so that a missing expires_in is told
+	// apart from 0, which the bridge sends once a rotation promise has
+	// passed. Read as 0, a missing key would silently turn off kubelet's
+	// credential cache.
+	ExpiresInSecs *int   `json:"expires_in"`
 	CacheKeyType  string `json:"cache_key_type"`
 }
 
@@ -157,6 +162,9 @@ func (c *bridgeClient) fetch(image, token string) (*bridgeResponse, error) {
 		}
 		if out.CacheKeyType == "" {
 			return nil, errors.New("bridge returned 200 with empty cache_key_type")
+		}
+		if out.ExpiresInSecs == nil {
+			return nil, errors.New("bridge returned 200 without expires_in")
 		}
 		return &out, nil
 	case http.StatusUnauthorized, http.StatusForbidden:

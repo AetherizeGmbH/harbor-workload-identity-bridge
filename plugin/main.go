@@ -152,7 +152,10 @@ func writeOKResponse(w io.Writer, r *bridgeResponse, image string) error {
 	if !cacheKeyTypes[r.CacheKeyType] {
 		return fmt.Errorf("bridge returned cache key type %q; want Image, Registry or Global", r.CacheKeyType)
 	}
-	secs := r.ExpiresInSecs
+	if r.ExpiresInSecs == nil {
+		return errors.New("bridge response has no expires_in")
+	}
+	secs := *r.ExpiresInSecs
 	if secs < 0 {
 		secs = 0
 	}

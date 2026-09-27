@@ -20,10 +20,11 @@ func TestWriteOKResponse_ClampsAndValidates(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"normal", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: 3600, CacheKeyType: "Registry"}, "1h0m0s", false},
-		{"negative", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: -5, CacheKeyType: "Registry"}, "0s", false},
-		{"beyond 24h", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: 1 << 40, CacheKeyType: "Image"}, "24h0m0s", false},
-		{"unknown cache key type", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: 60, CacheKeyType: "ServiceAccount"}, "", true},
+		{"normal", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: secs(3600), CacheKeyType: "Registry"}, "1h0m0s", false},
+		{"negative", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: secs(-5), CacheKeyType: "Registry"}, "0s", false},
+		{"beyond 24h", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: secs(1 << 40), CacheKeyType: "Image"}, "24h0m0s", false},
+		{"unknown cache key type", bridgeResponse{Username: "u", Password: "p", ExpiresInSecs: secs(60), CacheKeyType: "ServiceAccount"}, "", true},
+		{"no expires_in", bridgeResponse{Username: "u", Password: "p", CacheKeyType: "Registry"}, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
