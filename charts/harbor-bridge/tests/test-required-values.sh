@@ -123,6 +123,16 @@ else
   failed=$((failed+1))
 fi
 
+# `helm upgrade --reuse-values` from a release that predates
+# bridge.tokenValidation keeps the old values, which lack the key. A null
+# --set removes it the same way; the render must equal the default one.
+if [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set bridge.tokenValidation=null 2>&1)" ]; then
+  echo "PASS  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
+else
+  echo "FAIL  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
+  failed=$((failed+1))
+fi
+
 if [ "${failed}" -gt 0 ]; then
   echo
   echo "${failed} required-value test(s) failed"
