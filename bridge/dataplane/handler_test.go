@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -742,5 +744,71 @@ func TestHandler_UnmanagedSecret_NotServed(t *testing.T) {
 	h.ServeHTTP(w, bearerReq(t, "img"))
 	if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), hTestRobotPass) {
 		t.Fatalf("status %d body %q, want 403 without credentials", w.Code, w.Body.String())
+	}
+}
+
+// ADR-0028 end to end through the real validator: a long-lived or unbound
+// token is a 401, audited as invalid_token with its category and counted
+// under that category; kubelet's one-hour pod-bound token is served. The
+// token itself never reaches the audit line.
+func TestHandler_TokenPolicyDenialsAreAuditedByCategory(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		mutate   func(jwt.MapClaims)
+		status   int
+		category string
+	}{
+		{"kubelet token", func(jwt.MapClaims) {}, http.StatusOK, ""},
+		{"one-year token", func(c jwt.MapClaims) { c["exp"] = now.Add(8760 * time.Hour).Unix() }, http.StatusUnauthorized, OIDCReasonExcessiveLifetime},
+		{"no iat", func(c jwt.MapClaims) { delete(c, "iat"); delete(c, "nbf") }, http.StatusUnauthorized, OIDCReasonExcessiveLifetime},
+		{"not bound to a pod", func(c jwt.MapClaims) { delete(c, "kubernetes.io") }, http.StatusUnauthorized, OIDCReasonNotPodBound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fi := newFixtureIssuer(t)
+			ha := newTestHA()
+			ha.Spec.TrustPolicy.Issuer = fi.URL()
+			reg := prometheus.NewRegistry()
+			var audit captured
+			h := &Handler{
+				K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(ha, newTestRobotSecret()).Build(),
+				Validator: newValidatorFor(t, fi),
+				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
+				Metrics:   NewMetrics(reg),
+				Audit:     audit.logger(),
+			}
+
+			claims := fi.standardClaims()
+			claims["aud"] = hTestAudience
+			claims["sub"] = hTestSubject
+			tc.mutate(claims)
+			token := fi.signToken(t, claims)
+			r := bearerReq(t, "img")
+			r.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+
+			if w.Code != tc.status {
+				t.Fatalf("status %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+			out := audit.joined()
+			if strings.Contains(out, token) {
+				t.Fatal("audit line contains the token")
+			}
+			if tc.category == "" {
+				if !strings.Contains(out, `"pod_uid"="3f2c0a1e"`) {
+					t.Errorf("issuance not attributed to the bound pod:\n%s", out)
+				}
+				return
+			}
+			for _, want := range []string{`"credential denied"`, `"reason"="invalid_token"`, `"category"="` + tc.category + `"`} {
+				if !strings.Contains(out, want) {
+					t.Errorf("denial line lacks %s:\n%s", want, out)
+				}
+			}
+			if got := counter(t, reg, "bridge_oidc_validation_failures_total", map[string]string{"reason": tc.category}); got != 1 {
+				t.Errorf("oidc_failures{reason=%s} = %v, want 1", tc.category, got)
+			}
+		})
 	}
 }

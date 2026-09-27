@@ -39,6 +39,10 @@ cases=(
   "plugin.namespace without a CA bundle source|--set|plugin.namespace=harbor-bridge-plugin|needs the bridge CA through trust-manager"
   "plugin.namespace with a namespaced mTLS issuer|--set|plugin.namespace=harbor-bridge-plugin,plugin.caBundle.source.secret.name=ca,bridge.mTLS.enabled=true,bridge.mTLS.clientIssuerRef.name=x,bridge.mTLS.clientIssuerRef.kind=Issuer|must be ClusterIssuer when plugin.namespace is set"
   "bridge.instance with a selector|--set|bridge.harborAccessSelector.a=b,bridge.instance=Bad_Name|must be a DNS label of at most 50 characters"
+  "bridge.tokenValidation.maxLifetime not a duration|--set|bridge.tokenValidation.maxLifetime=3600|must be a positive Go duration"
+  "bridge.tokenValidation.maxLifetime zero|--set|bridge.tokenValidation.maxLifetime=0s|must be a positive Go duration"
+  "bridge.tokenValidation.maxLifetime negative|--set|bridge.tokenValidation.maxLifetime=-1h|must be a positive Go duration"
+  "bridge.tokenValidation.requirePodBinding not a boolean|--set-string|bridge.tokenValidation.requirePodBinding=yes|must be true or false"
 )
 
 failed=0
@@ -104,6 +108,28 @@ if render -f "${COMPLETE}" --set 'plugin.matchImages={ghcr.io}' \
   echo "PASS  allowSelfMatchImages bypasses the chicken-and-egg guard"
 else
   echo "FAIL  allowSelfMatchImages bypasses the chicken-and-egg guard"
+  failed=$((failed+1))
+fi
+
+# ADR-0028: the token policy reaches the bridge's environment.
+if out=$(render -f "${COMPLETE}" --set bridge.tokenValidation.maxLifetime=90m \
+     --set bridge.tokenValidation.requirePodBinding=false 2>&1) \
+   && echo "${out}" | grep -A1 'name: BRIDGE_TOKEN_MAX_LIFETIME' | grep -q 'value: "90m"' \
+   && echo "${out}" | grep -A1 'name: BRIDGE_REQUIRE_POD_BOUND_TOKEN' | grep -q 'value: "false"'; then
+  echo "PASS  bridge.tokenValidation renders into the bridge env"
+else
+  echo "FAIL  bridge.tokenValidation renders into the bridge env"
+  echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# `helm upgrade --reuse-values` from a release that predates
+# bridge.tokenValidation keeps the old values, which lack the key. A null
+# --set removes it the same way; the render must equal the default one.
+if [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set bridge.tokenValidation=null 2>&1)" ]; then
+  echo "PASS  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
+else
+  echo "FAIL  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
   failed=$((failed+1))
 fi
 

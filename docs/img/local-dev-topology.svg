@@ -95,10 +95,10 @@
   <text x="790" y="416" text-anchor="middle" class="sub">stored in harbor-bridge-system ns</text>
 
   <rect class="box" x="640" y="500" width="300" height="90" rx="6"/>
-  <text x="790" y="526" text-anchor="middle" class="lbl">test ServiceAccount</text>
-  <text x="790" y="544" text-anchor="middle" class="sub">test-pull/image-puller</text>
-  <text x="790" y="560" text-anchor="middle" class="sub">`kubectl create token --audience=...`</text>
-  <text x="790" y="576" text-anchor="middle" class="sub">mints audience-scoped SA tokens here</text>
+  <text x="790" y="526" text-anchor="middle" class="lbl">test ServiceAccount + pod</text>
+  <text x="790" y="544" text-anchor="middle" class="sub">test-pull/image-puller, pod token-holder</text>
+  <text x="790" y="560" text-anchor="middle" class="sub">`kubectl create token --bound-object-kind=Pod`</text>
+  <text x="790" y="576" text-anchor="middle" class="sub">mints pod-bound, audience-scoped SA tokens</text>
 
   <!-- HARBOR ZONE -->
   <rect class="harborZ" x="1000" y="100" width="240" height="640" rx="10"/>
@@ -143,15 +143,16 @@
 
   <!-- 4: bridge -> harbor (admin) -->
   <path class="arrow-harb" d="M 540 470 C 740 540, 980 360, 1020 270" marker-end="url(#head-harb)"/>
-  <rect class="stepBoxR" x="734" y="540" width="160" height="20" rx="4"/>
-  <text x="742" y="554" class="stepR">4</text>
-  <text x="754" y="554" class="sub">robot CRUD (admin Basic Auth)</text>
+  <rect class="stepBoxR" x="710" y="452" width="160" height="20" rx="4"/>
+  <text x="718" y="466" class="stepR">4</text>
+  <text x="730" y="466" class="sub">robot CRUD (admin Basic Auth)</text>
 
   <!-- 5: terminal -> apiserver (kubectl create token) -->
   <path class="arrow-kind" d="M 220 195 C 380 80, 580 120, 640 200" marker-end="url(#head-kind)"/>
-  <rect class="stepBoxK" x="320" y="78" width="240" height="20" rx="4"/>
-  <text x="328" y="92" class="stepM">5</text>
-  <text x="340" y="92" class="sub">kubectl create token --audience=harbor-bridge</text>
+  <rect class="stepBoxK" x="250" y="78" width="360" height="34" rx="4"/>
+  <text x="258" y="92" class="stepM">5</text>
+  <text x="270" y="92" class="sub">kubectl create token --audience=harbor-bridge</text>
+  <text x="270" y="106" class="sub">--bound-object-kind=Pod --bound-object-name=token-holder</text>
 
   <!-- 6: terminal -> bridge -->
   <path class="arrow-emph" d="M 130 240 L 130 340" marker-end="url(#head-blue)"/>

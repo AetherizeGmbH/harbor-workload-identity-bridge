@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -233,7 +234,7 @@ func TestNewValidator_SendsTokenOnlyToInClusterAPIServer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			v, err := NewValidator(context.Background(), Config{Issuer: srv.URL, HTTPClient: client})
+			v, err := NewValidator(context.Background(), Config{Issuer: srv.URL, HTTPClient: client, MaxTokenLifetime: time.Hour})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -267,5 +268,157 @@ func TestValidator_ExposesPodAndNodeForAudit(t *testing.T) {
 	}
 	if got.Pod != "puller-7d9" || got.PodUID != "3f2c" || got.Node != "node-a" {
 		t.Fatalf("pod/node attribution = %q %q %q", got.Pod, got.PodUID, got.Node)
+	}
+}
+
+// ADR-0028: the validator caps the token lifetime (exp - iat) and requires
+// the kubernetes.io pod claim; kubelet's own tokens (one hour, pod-bound)
+// pass with the defaults.
+func TestValidator_TokenLifetimeAndPodBinding(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		policy   Config
+		mutate   func(jwt.MapClaims)
+		want     error // nil = accepted
+		category string
+	}{
+		{
+			name:   "kubelet token: lifetime exactly the maximum",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(jwt.MapClaims) {},
+		},
+		{
+			name:   "maximum plus one second",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) { c["exp"] = now.Add(time.Hour + time.Second).Unix() },
+			want:   ErrTokenLifetime, category: OIDCReasonExcessiveLifetime,
+		},
+		{
+			name:   "one-year token from kubectl create token --duration=8760h",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) { c["exp"] = now.Add(8760 * time.Hour).Unix() },
+			want:   ErrTokenLifetime, category: OIDCReasonExcessiveLifetime,
+		},
+		{
+			name:   "configured maximum below the token's lifetime",
+			policy: Config{MaxTokenLifetime: 30 * time.Minute},
+			mutate: func(jwt.MapClaims) {},
+			want:   ErrTokenLifetime, category: OIDCReasonExcessiveLifetime,
+		},
+		{
+			name:   "configured maximum above the token's lifetime",
+			policy: Config{MaxTokenLifetime: 24 * time.Hour},
+			mutate: func(c jwt.MapClaims) { c["exp"] = now.Add(24 * time.Hour).Unix() },
+		},
+		{
+			name:   "missing iat",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) { delete(c, "iat"); delete(c, "nbf") },
+			want:   ErrTokenLifetime, category: OIDCReasonExcessiveLifetime,
+		},
+		{
+			name:   "iat beyond the clock-skew allowance in the future",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) {
+				delete(c, "nbf")
+				c["iat"] = now.Add(time.Hour).Unix()
+				c["exp"] = now.Add(2 * time.Hour).Unix()
+			},
+			want: ErrTokenLifetime, category: OIDCReasonExcessiveLifetime,
+		},
+		{
+			name:   "missing pod claim, binding required",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) { delete(c, "kubernetes.io") },
+			want:   ErrTokenNotPodBound, category: OIDCReasonNotPodBound,
+		},
+		{
+			name:   "token bound to a Secret, binding required",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) {
+				c["kubernetes.io"] = map[string]any{
+					"namespace": "flux-system",
+					"secret":    map[string]any{"name": "s", "uid": "1"},
+				}
+			},
+			want: ErrTokenNotPodBound, category: OIDCReasonNotPodBound,
+		},
+		{
+			name:   "pod claim without uid, binding required",
+			policy: Config{MaxTokenLifetime: time.Hour},
+			mutate: func(c jwt.MapClaims) {
+				c["kubernetes.io"] = map[string]any{"pod": map[string]any{"name": "p"}}
+			},
+			want: ErrTokenNotPodBound, category: OIDCReasonNotPodBound,
+		},
+		{
+			name:   "missing pod claim, binding not required",
+			policy: Config{MaxTokenLifetime: time.Hour, AllowNonPodBoundTokens: true},
+			mutate: func(c jwt.MapClaims) { delete(c, "kubernetes.io") },
+		},
+		{
+			name:   "binding not required still caps the lifetime",
+			policy: Config{MaxTokenLifetime: time.Hour, AllowNonPodBoundTokens: true},
+			mutate: func(c jwt.MapClaims) {
+				delete(c, "kubernetes.io")
+				c["exp"] = now.Add(8760 * time.Hour).Unix()
+			},
+			want: ErrTokenLifetime, category: OIDCReasonExcessiveLifetime,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fi := newFixtureIssuer(t)
+			v := newValidatorWith(t, fi, tc.policy)
+			claims := fi.standardClaims()
+			claims["iat"], claims["nbf"], claims["exp"] = now.Unix(), now.Unix(), now.Add(time.Hour).Unix()
+			tc.mutate(claims)
+			got, err := v.Validate(context.Background(), fi.signToken(t, claims))
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("rejected: %v", err)
+				}
+				if got.Subject == "" {
+					t.Fatal("accepted without claims")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !errors.Is(err, ErrInvalidToken) || !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want ErrInvalidToken wrapping %v", err, tc.want)
+			}
+			if c := classifyOIDCError(err); c != tc.category {
+				t.Errorf("category = %q, want %q", c, tc.category)
+			}
+		})
+	}
+}
+
+func TestCheckLifetime_Boundaries(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		iat, exp time.Time
+		ok       bool
+	}{
+		{"exactly the maximum", now, now.Add(time.Hour), true},
+		{"one second over", now, now.Add(time.Hour + time.Second), false},
+		{"shorter", now.Add(-50 * time.Minute), now.Add(10 * time.Minute), true},
+		{"no iat", time.Time{}, now.Add(time.Minute), false},
+		{"iat 1970", time.Unix(0, 0), now.Add(time.Minute), false},
+		{"iat at the skew allowance", now.Add(maxIssuedAtSkew), now.Add(maxIssuedAtSkew + time.Hour), true},
+		{"iat past the skew allowance", now.Add(maxIssuedAtSkew + time.Second), now.Add(maxIssuedAtSkew + time.Second + time.Minute), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkLifetime(tc.iat, tc.exp, now, time.Hour)
+			if tc.ok != (err == nil) {
+				t.Fatalf("err = %v, want ok=%v", err, tc.ok)
+			}
+			if err != nil && !errors.Is(err, ErrTokenLifetime) {
+				t.Fatalf("err = %v, want ErrTokenLifetime", err)
+			}
+		})
 	}
 }

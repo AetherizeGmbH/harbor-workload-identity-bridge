@@ -128,6 +128,20 @@ bridge:
   # policies (goharbor/harbor#17520). Keep true today.
   forceLocalValidation: true
 
+  # Which ServiceAccount tokens the credential endpoint accepts (ADR-0028).
+  tokenValidation:
+    # Longest lifetime (exp - iat) of an accepted token, a Go duration.
+    # Kubelet's credential-provider tokens last exactly 1h (the
+    # TokenRequest default). A shorter value refuses them and every pull
+    # through the bridge fails, unless your token issuer caps lifetimes
+    # lower; a longer one only admits longer-lived hand-minted tokens.
+    maxLifetime: 1h
+    # Refuse tokens without the kubernetes.io pod claim; every kubelet
+    # token is bound to the pod that pulls. false WEAKENS the bridge: it
+    # also accepts tokens bound to no pod (e.g. `kubectl create token`
+    # without --bound-object-kind=Pod). Only for local development.
+    requirePodBinding: true
+
   logLevel: info  # debug | info | warn | error
 
   # Several bridges on one cluster (e.g. one per Harbor instance): each

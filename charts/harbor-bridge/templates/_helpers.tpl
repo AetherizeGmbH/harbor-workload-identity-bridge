@@ -167,6 +167,14 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- fail "bridge.mTLS.clientIssuerRef.kind must be ClusterIssuer when plugin.namespace is set: the plugin's client certificate is issued in the plugin namespace. ADR-0027." -}}
 {{- end -}}
 {{- end -}}
+{{- $maxLifetime := include "harbor-bridge.tokenMaxLifetime" . -}}
+{{- if or (not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" $maxLifetime)) (not (regexMatch "[1-9]" $maxLifetime)) -}}
+{{- fail (printf "bridge.tokenValidation.maxLifetime=%q must be a positive Go duration such as 1h (ADR-0028)." $maxLifetime) -}}
+{{- end -}}
+{{- $requirePodBinding := dig "requirePodBinding" true (.Values.bridge.tokenValidation | default dict) -}}
+{{- if not (kindIs "bool" $requirePodBinding) -}}
+{{- fail (printf "bridge.tokenValidation.requirePodBinding=%q must be true or false (ADR-0028)." (toString $requirePodBinding)) -}}
+{{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
@@ -316,4 +324,17 @@ installer substitutes a literal $(NODE_IP) with the node's IP).
 {{- else -}}
 https://127.0.0.1:{{ .Values.service.nodePort }}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Token validation settings (ADR-0028), defaulted here because `helm upgrade
+--reuse-values` from a chart without bridge.tokenValidation keeps the old
+values and never sees the new defaults in values.yaml.
+*/}}
+{{- define "harbor-bridge.tokenMaxLifetime" -}}
+{{- dig "maxLifetime" "1h" (.Values.bridge.tokenValidation | default dict) | toString -}}
+{{- end -}}
+
+{{- define "harbor-bridge.requirePodBinding" -}}
+{{- dig "requirePodBinding" true (.Values.bridge.tokenValidation | default dict) | toString -}}
 {{- end -}}

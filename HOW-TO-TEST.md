@@ -407,9 +407,19 @@ real Kubernetes.
 
 ## Phase 3 — Hit the data plane with curl
 
+The bridge accepts only tokens that are bound to a pod and live at most
+`BRIDGE_TOKEN_MAX_LIFETIME` (default `1h`), like the ones kubelet sends
+([ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md)). Run a
+pod as the ServiceAccount to bind the token to; the apiserver refuses to
+bind a token to a pod that runs as another ServiceAccount.
+
 ```bash
+kubectl run token-holder -n test-pull --image=registry.k8s.io/pause:3.10 \
+  --overrides='{"spec":{"serviceAccountName":"image-puller"}}'
+
 TOKEN=$(kubectl create token image-puller -n test-pull \
-  --audience=harbor-bridge --duration=1h)
+  --audience=harbor-bridge --duration=1h \
+  --bound-object-kind=Pod --bound-object-name=token-holder)
 
 curl -sv -k \
   -H "Authorization: Bearer $TOKEN" \
@@ -464,9 +474,10 @@ make build-plugin
 # Confirm the plugin is dependency-clean per ADR-0015.
 go list -deps ./plugin/... | grep -cE '^(k8s\.io|sigs\.k8s\.io)'  # 0
 
-# Same SA token, same image, through the plugin.
+# Same SA, same image, through the plugin (token bound to the Phase 3 pod).
 TOKEN=$(kubectl create token image-puller -n test-pull \
-  --audience=harbor-bridge --duration=10m)
+  --audience=harbor-bridge --duration=10m \
+  --bound-object-kind=Pod --bound-object-name=token-holder)
 
 PLUGIN_RESP=$(jq -n --arg tok "$TOKEN" --arg img "your-harbor/your-project/whatever:tag" \
   '{apiVersion:"credentialprovider.kubelet.k8s.io/v1",
@@ -508,9 +519,10 @@ the bridge used to emit the kubelet-invalid `"ServiceAccount"`.
 | `dial tcp: lookup kubernetes.default.svc.cluster.local: no such host` at bridge startup | `BRIDGE_OIDC_JWKS_URL` not set | Start `make proxy` and set `BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks`. |
 | Reconciler logs `create robot: NOT_FOUND: project "X" not found` and the CR is `Ready=False` | Harbor project from `spec.permissions[].project` doesn't exist | Create the project in Harbor; the next reconcile recovers. |
 | Bridge returns `401 invalid token` from `/v1/credentials` | SA token's `iss` claim ≠ `BRIDGE_OIDC_ISSUER` | Re-print the issuer with `kubectl get --raw /.well-known/openid-configuration` and align both env var + `trustPolicy.issuer`. |
+| `401 invalid token`, audit line `category=not_pod_bound` or `category=excessive_lifetime` | Token minted without `--bound-object-kind=Pod`, or with a `--duration` above `BRIDGE_TOKEN_MAX_LIFETIME` | Mint it as in Phase 3. `BRIDGE_REQUIRE_POD_BOUND_TOKEN=false` accepts unbound tokens, but weakens the bridge; keep it to local development. |
 | `/v1/credentials` returns `403 no matching HarborAccess` | SA subject mismatch OR audience mismatch | Compare `kubectl get sa image-puller -n test-pull` subject to CR's `serviceAccountRef`. Compare token's `--audience` to `trustPolicy.audience`. |
 | `/v1/credentials` returns `503 credentials not yet available` | Robot Secret hasn't materialised | `kubectl get harboraccess -n harbor-bridge-system test-access -o yaml` until `Ready=True`. |
-| Reconciler logs `tls: failed to verify certificate` against Harbor | Harbor's cert signed by a CA your system trust store doesn't know | Trust Harbor's CA at the OS level, or use a Harbor with a publicly-trusted cert. `BRIDGE_HARBOR_CA_FILE` is on the backlog. |
+| Reconciler logs `tls: failed to verify certificate` against Harbor | Harbor's cert signed by a CA your system trust store doesn't know | Set `BRIDGE_HARBOR_CA_FILE` to Harbor's CA bundle (PEM); it then is the only trust root for Harbor (chart: `harbor.caSecret`). |
 | `crane pull` 401 from Harbor | Wrong creds, or robot's password rotated between Phase 3 and 4 | Re-run Phase 3, use the fresh password. |
 | `kubectl proxy` exits with `error: error upgrading connection` | Background job got SIGHUP or kubeconfig context changed | Restart `make proxy` and re-fetch JWKS to confirm health. |
 

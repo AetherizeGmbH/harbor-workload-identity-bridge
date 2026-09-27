@@ -122,4 +122,12 @@ issued by {{ .Values.bridge.mTLS.clientIssuerRef.name }}. Verify cert-manager is
   kubectl -n {{ .Release.Namespace }} get certificate
 {{- end }}
 
+{{- if eq (include "harbor-bridge.requirePodBinding" .) "false" }}
+
+WARNING: bridge.tokenValidation.requirePodBinding=false weakens the bridge. It
+also accepts ServiceAccount tokens bound to no pod, such as those from
+`kubectl create token` without --bound-object-kind=Pod (ADR-0028). Use it only
+for local development.
+{{- end }}
+
 Docs: https://github.com/AetherizeGmbH/harbor-workload-identity-bridge

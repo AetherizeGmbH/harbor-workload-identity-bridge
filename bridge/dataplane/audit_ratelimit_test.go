@@ -136,7 +136,7 @@ func TestHandler_DenialsAreAudited(t *testing.T) {
 		t.Fatalf("status %d", w.Code)
 	}
 	out := audit.joined()
-	for _, want := range []string{`"credential denied"`, `"reason"="invalid_token"`, `"source"="10.9.9.9"`} {
+	for _, want := range []string{`"credential denied"`, `"reason"="invalid_token"`, `"category"="expired"`, `"source"="10.9.9.9"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("denial line lacks %s:\n%s", want, out)
 		}

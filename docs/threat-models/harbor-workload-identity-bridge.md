@@ -1,8 +1,8 @@
 # Threat model: Harbor Workload Identity Bridge
 
-Status: approved
-Approved-by: Karsten Siemer
-Approved-at: 2026-09-24
+Status: proposed
+Approved-by:
+Approved-at:
 
 Applies-to:
 - `bridge/**`
@@ -17,7 +17,8 @@ model and hardening guide) with STRIDE per trust boundary, DREAD-rated
 residual risks and the security events the system logs. It follows the
 format of the DSOMM-based ai-security-rules and was approved by the
 maintainer on 2026-09-24. Changes to the threat model need a new
-approval.
+approval; the closure of O3 (ADR-0028, 2026-09-27: T1, T2, A5) awaits
+it.
 
 ## Scope and protection requirement
 
@@ -75,8 +76,8 @@ Abuse stories:
 
 | # | STRIDE | Boundary | Threat | Mitigation (where) | Residual DREAD (estimate) |
 | --- | --- | --- | --- | --- | --- |
-| T1 | S | B1 | Forged or foreign-audience token redeemed for credentials | OIDC signature, issuer, expiry (go-oidc, `bridge/dataplane/oidc.go`); exactly one served audience, CR must name it ([ADR-0026](../adr/0026-audience-pinning-and-harboraccess-selector.md)); subject must match `serviceAccountRef` | Low (2.4) |
-| T2 | S | B1 | Pod-creator mounts a bridge-audience token and fetches its own SA's password (abuse story 2) | Same credential the workload already gets through kubelet; limited to that SA's grants; mTLS (optional) and a NetworkPolicy restrict who can reach the endpoint | Medium (4.8), see A2 |
+| T1 | S | B1 | Forged, foreign-audience, long-lived or unbound token redeemed for credentials | OIDC signature, issuer, expiry (go-oidc, `bridge/dataplane/oidc.go`); lifetime `exp - iat` at most `bridge.tokenValidation.maxLifetime` (1h, what kubelet's tokens have), `iat` required, and the `kubernetes.io` pod claim required, so a `kubectl create token --duration=8760h` token or one bound to no pod is refused ([ADR-0028](../adr/0028-token-lifetime-cap-and-pod-binding.md), `oidc.go`); exactly one served audience, CR must name it ([ADR-0026](../adr/0026-audience-pinning-and-harboraccess-selector.md)); subject must match `serviceAccountRef` | Low (2.4), see A5 |
+| T2 | S | B1 | Pod-creator mounts a bridge-audience token and fetches its own SA's password (abuse story 2) | Same credential the workload already gets through kubelet; limited to that SA's grants; the token must be pod-bound and live at most 1h, so a projected token with a longer `expirationSeconds` is refused ([ADR-0028](../adr/0028-token-lifetime-cap-and-pod-binding.md)); mTLS (optional) and a NetworkPolicy restrict who can reach the endpoint | Medium (4.8), see A2 and A5 |
 | T3 | T | B1 | Man in the middle between plugin and bridge, or a redirect that carries the pod token away | TLS 1.2+, plugin pins the bridge CA, `127.0.0.1` NodePort by default, verifies against the Service name for `$(NODE_IP)` endpoints; no redirects followed (`plugin/bridge_client.go`); optional mTLS | Low (2.0) |
 | T4 | D | B1 | Flood of requests or forged tokens | Per-source token bucket, 429 before parsing (`ratelimit.go`); JWKS refetch at most every 30s (`oidc_keyset.go`); 64 KiB body, 32 KiB headers, server timeouts; PDB with two replicas | Medium (4.2) |
 | T5 | I | B2 | Bridge SA token leaks to a non-apiserver host or redirect target | Token only over https to the in-cluster apiserver and its discovery-named `jwks_uri`; redirects not followed (`oidc_client.go`) | Low (1.8) |
@@ -96,8 +97,9 @@ Security events the system must log (acceptance criteria):
 
 - every credential issuance and denial, with reason, source and pod/node
   attribution (`audit` logger, `credential issued` / `credential denied`);
-- token validation failures by category (metric
-  `bridge_oidc_validation_failures_total`);
+- token validation failures by category, including `excessive_lifetime`
+  and `not_pod_bound` (metric `bridge_oidc_validation_failures_total`,
+  and the `category` of the `credential denied` audit line);
 - rate-limited requests (`bridge_credential_issuances_total{result="rate_limited"}`);
 - robot creation, update, rotation and deletion, with the owning CR
   (controller log);
@@ -129,6 +131,19 @@ operator's admission control (SECURITY.md recommends one).
   cached credentials fail at Harbor immediately; a rotated one fails pulls
   until the cache entry expires. Justification: kubelet has no
   invalidation API.
+- **A5 — A stolen pod-bound token outlives its pod at the bridge.** The
+  bridge validates tokens locally, so a stolen kubelet token stays
+  redeemable for its remaining lifetime, at most
+  `bridge.tokenValidation.maxLifetime` (1h), after its pod or its
+  ServiceAccount is deleted. The robot password it redeems works at
+  Harbor until the next rotation, which the bridge schedules 24h and 1m
+  after the previous one (`bridge/controlplane/contract.go`), unless the
+  password Secret is deleted first. Whoever may create tokens for a
+  ServiceAccount can mint a pod-bound one for an existing pod of it; one
+  token per rotation, about one TokenRequest a day, keeps them supplied.
+  Justification: only the apiserver's TokenReview checks the bound
+  object, at the cost of an apiserver round trip per pull
+  ([ADR-0028](../adr/0028-token-lifetime-cap-and-pod-binding.md)).
 
 Open items (not accepted; tracked):
 
@@ -137,7 +152,9 @@ Open items (not accepted; tracked):
   risk. Decide whether a future major release makes the split the default.
 - **O2** mTLS client identity: dedicated client CA and identity pinning;
   mTLS is off by default.
-- **O3** Token lifetime cap and pod binding for credential requests.
+- ~~**O3** Token lifetime cap and pod binding for credential requests.~~
+  Closed by ADR-0028 (2026-09-27): mitigations in T1 and T2, residual
+  risk A5.
 - **O4** Repository settings: required review and CODEOWNERS, secret
   scanning and push protection, private vulnerability reporting, and the
   release App's ruleset bypass; the Renovate App lacks "Dependabot alerts:
