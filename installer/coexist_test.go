@@ -451,8 +451,8 @@ func TestRun_LegacyStateIsConvertedWithoutRestart(t *testing.T) {
 				t.Fatalf("a matching legacy state restarted kubelet (restarts = %d)", env.restarts)
 			}
 			st, err := loadState(env.statePath())
-			if err != nil || st == nil || st.HashScheme != hashSchemeEntry {
-				t.Fatalf("state not converted: %+v (err %v)", st, err)
+			if err != nil || st == nil || st.EntryHash == "" || st.AppliedHash != tc.legacy(t, env).AppliedHash {
+				t.Fatalf("state not converted (entry hash added, whole-file hash kept): %+v (err %v)", st, err)
 			}
 
 			// A legacy state for other content still restarts.
@@ -468,6 +468,205 @@ func TestRun_LegacyStateIsConvertedWithoutRestart(t *testing.T) {
 				t.Fatalf("a stale legacy state did not restart kubelet (restarts = %d)", env.restarts)
 			}
 		})
+	}
+}
+
+// preADR0029State is the state record exactly as installers before
+// ADR-0029 (0.10.0 and older, installer/state.go) read and write it. Their
+// JSON decoding ignores fields they do not know, such as entryHash.
+type preADR0029State struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Mode          string `json:"mode"`
+	BinDir        string `json:"binDir"`
+	ConfigFile    string `json:"configFile"`
+	AppliedHash   string `json:"appliedHash"`
+}
+
+// preADR0029Hash is the hash an installer before ADR-0029 computes for a
+// pass of env's install on the node as it is now: contentHash(rendered,
+// desiredEnv) in patch mode, contentHash(merged) in merge mode (0.10.0,
+// installer/run.go runPatch and runMerge).
+func preADR0029Hash(t *testing.T, env *testEnv, mode, cloudConfig string) string {
+	t.Helper()
+	rendered, err := os.ReadFile(env.cfg.SourceConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch mode {
+	case modePatch:
+		desiredEnv, err := mergeExtraArgs([]byte(env.hostFile(t, defaultKubeletPath)), binDir, configDir+"/"+configFileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return contentHash(rendered, desiredEnv)
+	case modeMerge:
+		merged, _, err := mergeProvider([]byte(env.hostFile(t, cloudConfig)), renderedEntry(t, env))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return contentHash(merged)
+	}
+	t.Fatalf("mode %q", mode)
+	return ""
+}
+
+// preADR0029Matches is the comparison an installer before ADR-0029 makes
+// before it decides not to restart kubelet (state.matches in 0.10.0).
+func preADR0029Matches(t *testing.T, env *testEnv, mode, binDir, configFile, hash string) bool {
+	t.Helper()
+	raw, err := os.ReadFile(env.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st preADR0029State
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st.SchemaVersion == 1 && st.Mode == mode && st.BinDir == binDir && st.ConfigFile == configFile && st.AppliedHash == hash
+}
+
+// stateCompatCases are a single default-name install in patch and in merge
+// mode, with the paths an installer before ADR-0029 records.
+var stateCompatCases = []struct {
+	mode, binDir, configFile string
+	env                      func(t *testing.T) *testEnv
+}{
+	{
+		mode: modePatch, binDir: binDir, configFile: configDir + "/" + configFileName,
+		env: func(t *testing.T) *testEnv { return newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"}) },
+	},
+	{
+		mode: modeMerge, binDir: "/cloud/bin", configFile: "/cloud/config.yaml",
+		env: func(t *testing.T) *testEnv {
+			e := newTestEnv(t, modeMerge, nil)
+			e.cfg.MergeBinDir, e.cfg.MergeConfigFile = "/cloud/bin", "/cloud/config.yaml"
+			writeHostFile(t, e, "/cloud/config.yaml", gkeConfig)
+			return e
+		},
+	},
+}
+
+// TestRun_ForwardUpgradeFromPreADR0029StateDoesNotRestart: the first pass
+// of this installer on a node that 0.10.0 installed finds the state file
+// as 0.10.0 wrote it and does not restart kubelet.
+func TestRun_ForwardUpgradeFromPreADR0029StateDoesNotRestart(t *testing.T) {
+	for _, tc := range stateCompatCases {
+		t.Run(tc.mode, func(t *testing.T) {
+			env := tc.env(t)
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			// Replace the record with the one 0.10.0 writes for the same
+			// files: its fields only, its hash.
+			old := preADR0029State{SchemaVersion: 1, Mode: tc.mode, BinDir: tc.binDir, ConfigFile: tc.configFile,
+				AppliedHash: preADR0029Hash(t, env, tc.mode, tc.configFile)}
+			raw, err := json.MarshalIndent(old, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(env.statePath(), append(raw, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			if env.restarts != 1 {
+				t.Fatalf("the upgrade restarted kubelet (restarts = %d)", env.restarts)
+			}
+			st, err := loadState(env.statePath())
+			if err != nil || st == nil || st.EntryHash == "" || st.AppliedHash != old.AppliedHash {
+				t.Fatalf("state = %+v (err %v), want the entry hash added and appliedHash kept", st, err)
+			}
+		})
+	}
+}
+
+// TestRun_RollbackFindsItsOwnStateHash: an installer before ADR-0029 that
+// runs after this one (a rollback of the chart or the plugin image) reads
+// the state file this installer wrote. For a single, unchanged install its
+// comparison must match, or the rollback restarts kubelet on every node.
+func TestRun_RollbackFindsItsOwnStateHash(t *testing.T) {
+	for _, tc := range stateCompatCases {
+		t.Run(tc.mode, func(t *testing.T) {
+			env := tc.env(t)
+			// First install, then a no-op re-roll, then a helm upgrade
+			// that changes the entry: every record this installer
+			// writes must be readable by the old comparison.
+			for i, pass := range []func(){
+				func() {},
+				func() {},
+				func() {
+					upgraded := strings.Replace(renderedConfig, `"harbor.example.com"`, `"harbor-alt.example.com"`, 1)
+					if err := os.WriteFile(env.cfg.SourceConfig, []byte(upgraded), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				},
+			} {
+				pass()
+				if err := run(env.cfg); err != nil {
+					t.Fatal(err)
+				}
+				if !preADR0029Matches(t, env, tc.mode, tc.binDir, tc.configFile, preADR0029Hash(t, env, tc.mode, tc.configFile)) {
+					raw, _ := os.ReadFile(env.statePath())
+					t.Fatalf("pass %d: an installer before ADR-0029 would not find its own hash in\n%s", i, raw)
+				}
+			}
+		})
+	}
+}
+
+// TestRun_EntryHashDrivesRestartsWithSeveralInstalls: another install's
+// entry changes the shared file, and with it the whole-file hash, but only
+// a change of an install's own entry makes it restart kubelet. appliedHash
+// keeps the whole-file hash of this install's last restart.
+func TestRun_EntryHashDrivesRestartsWithSeveralInstalls(t *testing.T) {
+	a := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	b := newSiblingEnv(t, a, modePatch, euName)
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	aFirst, err := loadState(a.statePath())
+	if err != nil || aFirst == nil {
+		t.Fatalf("state: %+v (err %v)", aFirst, err)
+	}
+	if err := run(b.cfg); err != nil {
+		t.Fatal(err)
+	}
+	fileNow := contentHash([]byte(a.hostFile(t, configDir+"/"+configFileName)), []byte(a.hostFile(t, defaultKubeletPath)))
+	if fileNow == aFirst.AppliedHash {
+		t.Fatal("precondition: the second entry must change the whole-file hash")
+	}
+	bState, err := loadState(b.statePath())
+	if err != nil || bState == nil || bState.AppliedHash != fileNow {
+		t.Fatalf("the second install's appliedHash must be the file it restarted kubelet for: %+v (err %v)", bState, err)
+	}
+
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if a.restarts != 1 {
+		t.Fatalf("another install's entry made this install restart kubelet (restarts = %d)", a.restarts)
+	}
+	if st, _ := loadState(a.statePath()); st == nil || *st != *aFirst {
+		t.Fatalf("a pass without a restart rewrote the state: %+v, want %+v", st, aFirst)
+	}
+
+	upgraded := strings.Replace(renderedConfig, `"harbor.example.com"`, `"harbor-alt.example.com"`, 1)
+	if err := os.WriteFile(a.cfg.SourceConfig, []byte(upgraded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(a.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if a.restarts != 2 {
+		t.Fatalf("a change of this install's entry must restart kubelet (restarts = %d)", a.restarts)
+	}
+	if err := run(b.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if b.restarts != 1 {
+		t.Fatalf("the first install's entry change made the second install restart kubelet (restarts = %d)", b.restarts)
 	}
 }
 

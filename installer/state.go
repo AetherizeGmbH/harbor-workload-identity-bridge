@@ -29,36 +29,39 @@ type state struct {
 	Mode          string `json:"mode"`
 	BinDir        string `json:"binDir"`
 	ConfigFile    string `json:"configFile"`
-	// AppliedHash covers the restart-relevant content, as named by
-	// HashScheme.
+	// AppliedHash covers the whole effective credential-provider config
+	// file plus, in patch mode, the /etc/default/kubelet bytes, as of the
+	// last kubelet restart this installer verified or converted. It keeps
+	// the meaning it had before ADR-0029, when it was the only hash: an
+	// older installer (a rollback) compares exactly this field with its own
+	// whole-file hash, so for a single, unchanged install it finds its own
+	// record and does not restart kubelet.
 	AppliedHash string `json:"appliedHash"`
-	// HashScheme says what AppliedHash covers. Empty: the whole effective
-	// credential-provider config file plus, in patch mode, the
-	// /etc/default/kubelet bytes (installers before ADR-0029).
-	// hashSchemeEntry: only this install's provider entry plus, in patch
-	// mode, the /etc/default/kubelet bytes. Other installs' entries in the
-	// shared file are their own installers' concern, so a change there
-	// does not make this installer restart kubelet again.
-	HashScheme string `json:"hashScheme,omitempty"`
+	// EntryHash covers only this install's provider entry plus, in patch
+	// mode, the /etc/default/kubelet bytes (ADR-0029). It decides about
+	// restarts: other installs' entries in the shared file are their own
+	// installers' concern, so a change there does not make this installer
+	// restart kubelet again. Empty in a record written before ADR-0029, or
+	// by an older installer after a rollback (it drops fields it does not
+	// know).
+	EntryHash string `json:"entryHash,omitempty"`
 }
 
 const stateSchemaVersion = 1
 
-const hashSchemeEntry = "entry"
-
 // target is what one install pass wants kubelet to run with.
 type target struct {
 	mode, binDir, configFile string
-	// hash is the hashSchemeEntry hash of the desired content.
-	hash string
-	// legacyHash is what an installer before ADR-0029 recorded for the
-	// same content: the hash over the whole resulting file.
-	legacyHash string
+	// entryHash is the EntryHash of the desired content.
+	entryHash string
+	// fileHash is the AppliedHash of the desired content: the hash over
+	// the whole resulting file, as installers before ADR-0029 compute it.
+	fileHash string
 }
 
 // state returns the record of a successful restart for t.
 func (t target) state() *state {
-	return &state{Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, AppliedHash: t.hash, HashScheme: hashSchemeEntry}
+	return &state{Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, AppliedHash: t.fileHash, EntryHash: t.entryHash}
 }
 
 func loadState(path string) (*state, error) {
@@ -96,25 +99,26 @@ func saveState(path string, s *state) error {
 }
 
 // matches reports whether the recorded state covers t (same mode, same
-// paths, same restart-relevant content).
+// paths, same entry content).
 func (s *state) matches(t target) bool {
 	return s != nil &&
 		s.Mode == t.mode &&
 		s.BinDir == t.binDir &&
 		s.ConfigFile == t.configFile &&
-		s.HashScheme == hashSchemeEntry &&
-		s.AppliedHash == t.hash
+		s.EntryHash != "" &&
+		s.EntryHash == t.entryHash
 }
 
-// matchesLegacy reports whether a state file written before ADR-0029
-// recorded a restart for exactly the files as they are now.
+// matchesLegacy reports whether a record without an entry hash (written
+// before ADR-0029, or by an older installer after a rollback) records a
+// restart for exactly the files as they are now.
 func (s *state) matchesLegacy(t target) bool {
 	return s != nil &&
 		s.Mode == t.mode &&
 		s.BinDir == t.binDir &&
 		s.ConfigFile == t.configFile &&
-		s.HashScheme == "" &&
-		s.AppliedHash == t.legacyHash
+		s.EntryHash == "" &&
+		s.AppliedHash == t.fileHash
 }
 
 // contentHash hashes the restart-relevant byte slices in order.

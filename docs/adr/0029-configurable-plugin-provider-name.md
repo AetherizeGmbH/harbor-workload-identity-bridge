@@ -123,12 +123,19 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
    flock dies with its process, so a crashed installer leaves no stale
    lock. A waiting installer gives up after ten minutes and fails its pod,
    which retries.
-6. **Restart responsibility is per install.** The state hash covers this
-   install's entry, and in patch mode `/etc/default/kubelet`, not the whole
-   shared file. A kubelet restart is still due whenever the pass changed a
-   file. A state file written before this ADR records a whole-file hash;
-   when that hash matches the file as it is now, the installer converts
-   the record without restarting kubelet.
+6. **Restart responsibility is per install.** The state file gets a new
+   field `entryHash`, which covers this install's entry, and in patch mode
+   `/etc/default/kubelet`, not the whole shared file; the installer
+   compares it to decide about a restart. A kubelet restart is still due
+   whenever the pass changed a file. `appliedHash` keeps its meaning from
+   before this ADR, the hash of the whole effective file (and, in patch
+   mode, `/etc/default/kubelet`) at this install's last verified restart,
+   because older installers compare exactly that field: a rollback of a
+   single, unchanged install to an older chart or plugin image finds its
+   own hash and does not restart kubelet. A record without `entryHash`
+   (written before this ADR, or by an older installer after a rollback)
+   is compared by `appliedHash`; when that matches the file as it is now,
+   the installer adds `entryHash` without restarting kubelet.
 7. **Identities do not follow the name.** The mTLS client certificate keeps
    its CN `<fullname>-plugin` (the release name unless `fullnameOverride`
    is set), which already differs per release; the bridge only logs it

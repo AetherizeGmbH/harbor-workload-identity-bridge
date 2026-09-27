@@ -444,7 +444,7 @@ func TestLoadConfig_Validation(t *testing.T) {
 
 func TestStateRoundtripAndCorruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "installer-state.json")
-	want := target{mode: modePatch, binDir: "/b", configFile: "/c", hash: "h", legacyHash: "l"}
+	want := target{mode: modePatch, binDir: "/b", configFile: "/c", entryHash: "e", fileHash: "f"}
 	if err := saveState(path, want.state()); err != nil {
 		t.Fatal(err)
 	}
@@ -455,18 +455,31 @@ func TestStateRoundtripAndCorruption(t *testing.T) {
 	if !got.matches(want) {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
+	if got.AppliedHash != "f" || got.EntryHash != "e" {
+		t.Fatalf("appliedHash must stay the whole-file hash and entryHash the entry hash: %+v", got)
+	}
 	if got.matchesLegacy(want) {
-		t.Fatal("a per-install record must not match as legacy")
+		t.Fatal("a record with an entry hash must not match as legacy")
 	}
 	otherMode := want
 	otherMode.mode = modeMerge
 	if got.matches(otherMode) {
 		t.Fatal("matches must be mode-sensitive")
 	}
+	otherEntry := want
+	otherEntry.entryHash = "e2"
+	if got.matches(otherEntry) {
+		t.Fatal("matches must compare the entry hash")
+	}
+	otherFile := want
+	otherFile.fileHash = "f2"
+	if !got.matches(otherFile) {
+		t.Fatal("another install's change to the shared file must not count")
+	}
 
-	// A record without hashScheme is from an installer before ADR-0029:
-	// it matches only the legacy (whole-file) hash.
-	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "l"}
+	// A record without entryHash is from an installer before ADR-0029 (or
+	// an older one after a rollback): it matches only the whole-file hash.
+	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f"}
 	if err := saveState(path, legacy); err != nil {
 		t.Fatal(err)
 	}

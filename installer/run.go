@@ -207,8 +207,8 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	}
 	t := target{
 		mode: modePatch, binDir: cfg.HostBinDir, configFile: configPath,
-		hash:       contentHash(entryJSON, desiredEnv),
-		legacyHash: contentHash(desiredConfig, desiredEnv),
+		entryHash: contentHash(entryJSON, desiredEnv),
+		fileHash:  contentHash(desiredConfig, desiredEnv),
 	}
 	return finishWithRestart(cfg, t, configChanged || envChanged, verify)
 }
@@ -400,8 +400,8 @@ func runMerge(cfg *config, entry map[string]any, wiring kubeletWiring) error {
 
 	t := target{
 		mode: modeMerge, binDir: wiring.BinDir, configFile: wiring.ConfigFile,
-		hash:       contentHash(entryJSON),
-		legacyHash: contentHash(merged),
+		entryHash: contentHash(entryJSON),
+		fileHash:  contentHash(merged),
 	}
 	return finishWithRestart(cfg, t, mergeChanged || written, nil)
 }
@@ -426,12 +426,13 @@ func finishWithRestart(cfg *config, t target, changedNow bool, verify func() err
 		}
 		if st.matchesLegacy(t) {
 			// An installer before ADR-0029 restarted kubelet for exactly
-			// the files as they are now: record that under the
-			// per-install hash instead of restarting again.
+			// the files as they are now: add the entry hash to that
+			// record instead of restarting again. AppliedHash stays what
+			// it was, which is t.fileHash.
 			if err := saveState(statePath, t.state()); err != nil {
 				return err
 			}
-			logf("kubelet wiring is current; converted the state file to the per-install hash, not restarting")
+			logf("kubelet wiring is current; added the entry hash to the state file, not restarting")
 			return nil
 		}
 	}
