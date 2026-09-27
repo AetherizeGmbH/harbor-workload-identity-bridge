@@ -308,12 +308,20 @@ func TestNewValidator_FailsWhenTheSigningKeysCannotBeFetched(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer failing.Close()
+	// Any JSON answer used to pass: a JWKS URL naming the discovery
+	// document or /version started, and then every token was a bad
+	// signature.
+	fi := newFixtureIssuer(t)
+	version := httptest.NewServer(serveBody([]byte(`{"major":"1","minor":"33"}`)))
+	defer version.Close()
 	for _, tc := range []struct {
 		name string
 		cfg  Config
 	}{
 		{"unreachable JWKS URL", Config{Issuer: "https://kubernetes.default.svc", JWKSURL: "http://127.0.0.1:1/keys"}},
 		{"JWKS URL refuses the bridge", Config{Issuer: "https://kubernetes.default.svc", JWKSURL: failing.URL + "/openid/v1/jwks"}},
+		{"JWKS URL names the discovery document", Config{Issuer: fi.URL(), JWKSURL: fi.URL() + "/.well-known/openid-configuration"}},
+		{"JWKS URL names another JSON endpoint", Config{Issuer: "https://kubernetes.default.svc", JWKSURL: version.URL + "/version"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.cfg.MaxTokenLifetime = time.Hour
@@ -347,9 +355,10 @@ func TestValidator_UnavailableSigningKeysAreNotInvalidTokens(t *testing.T) {
 	fi := newFixtureIssuer(t)
 	srv := newJWKSServer(t, serveBody(jwksBody(t, fi.key, fi.kid)))
 	clock := newFakeClock()
+	tr := &failingTransport{}
 	v, err := NewValidator(context.Background(), Config{
 		Issuer: fi.URL(), JWKSURL: srv.URL, MaxTokenLifetime: time.Hour,
-		HTTPClient: &http.Client{Timeout: time.Second},
+		HTTPClient: &http.Client{Timeout: time.Second, Transport: tr},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -393,6 +402,24 @@ func TestValidator_UnavailableSigningKeysAreNotInvalidTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+
+	// The categories are matched on the error text, and these fetch
+	// errors name "expired" and "malformed". A forged token for a held key
+	// used to carry them and count as expired or malformed.
+	for _, fetchErr := range []struct{ name, text string }{
+		{"expired TLS certificate", "tls: failed to verify certificate: x509: certificate has expired or is not yet valid"},
+		{"malformed response", "net/http: HTTP/1.x transport connection broken: malformed HTTP response"},
+	} {
+		tr.fail(errors.New(fetchErr.text))
+		clock.advance(jwksMinRefresh + time.Second)
+		t.Run("known key, wrong signature, refresh failed: "+fetchErr.name, func(t *testing.T) {
+			invalid(t, fi.signTokenWithOtherKey(t, fi.standardClaims()))
+		})
+		t.Run("unknown key, rate-limited after the failure: "+fetchErr.name, func(t *testing.T) {
+			unavailable(t, context.Background(), rotated)
+		})
+	}
+	tr.fail(nil)
 
 	srv.set(srv.hang)
 	clock.advance(jwksMinRefresh + time.Second)
