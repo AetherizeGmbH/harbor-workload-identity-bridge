@@ -253,8 +253,12 @@ func TestEnvtest_LegacyTokenTTLDoesNotStallTheBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	mgrCtx, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- mgr.Start(mgrCtx) }()
+	// done is closed, not sent on, so that both waitReady and the cleanup
+	// can wait for the manager: a single value read by waitReady would
+	// leave the cleanup blocked forever and hang the test binary.
+	done := make(chan struct{})
+	var mgrErr error
+	go func() { mgrErr = mgr.Start(mgrCtx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
 	// waitReady waits until every key's Ready condition has the wanted
@@ -264,8 +268,8 @@ func TestEnvtest_LegacyTokenTTLDoesNotStallTheBridge(t *testing.T) {
 		deadline := time.Now().Add(30 * time.Second)
 		for {
 			select {
-			case err := <-done:
-				t.Fatalf("manager exited: %v", err)
+			case <-done:
+				t.Fatalf("manager exited: %v", mgrErr)
 			default:
 			}
 			var pending []string
