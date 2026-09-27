@@ -199,15 +199,33 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
 
 - Several releases, each with its own bridge and its own chart-managed
   DaemonSet, coexist on a node. Per release they need a distinct
-  `plugin.providerName`, release name, `service.nodePort`,
+  `plugin.providerName`, release name, namespace, `service.nodePort`,
   `plugin.audience` and `bridge.harborAccessSelector` (and `clusterName`
-  when they share a Harbor, ADR-0026). The release name (or
-  `fullnameOverride`) names the cluster-scoped audience ClusterRole and
-  ClusterRoleBinding (without the namespace), the mTLS CN and the default
-  `bridge.instance`; two releases of the same name collide even in
-  different namespaces. In patch and none mode they must use the same
-  `plugin.hostBinaryDir` and `plugin.hostConfigDir`, because kubelet reads
-  one config from one bin dir: patch mode reads kubelet's wiring first and
+  when they share a Harbor, ADR-0026), and, with `plugin.namespace`, a
+  plugin namespace of their own or a shared one created outside Helm
+  (`plugin.createNamespace=false` on every release; otherwise one release
+  owns the Namespace object, and uninstalling it deletes the others'
+  DaemonSets). The fullname (the release name, or `fullnameOverride`)
+  names the cluster-scoped audience ClusterRole and ClusterRoleBinding
+  (without the namespace), the trust-manager Bundle and the mTLS CN; two
+  releases of the same fullname collide even in different namespaces.
+  `bridge.instance`, which names the finalizer, defaults to the release
+  name only, not to `fullnameOverride`: when `fullnameOverride` is what
+  tells two releases apart, `bridge.instance` must be set explicitly.
+- A namespace per release is required, not only advised: the bridge's
+  leader-election Lease has a fixed name (`bridge.harbor.aetherize.io`,
+  `bridge/cmd/main.go`) in the release namespace, so two bridges in one
+  namespace elect one leader between them and the other's control plane
+  does not run; and the janitor lists the robot Secrets of its
+  `clusterName` in its namespace and deletes those whose HarborAccess its
+  selector does not match (`bridge/controlplane/janitor.go`
+  `sweepSecrets`), so two bridges with the same `clusterName` in one
+  namespace delete each other's Secrets. A possible follow-up makes both
+  per instance (a Lease name and a Secret label derived from
+  `bridge.instance`), which would allow several releases per namespace.
+- In patch and none mode all releases must use the same
+  `plugin.hostBinaryDir` and `plugin.hostConfigDir`, because kubelet
+  reads one config from one bin dir: patch mode reads kubelet's wiring first and
   refuses to move kubelet to its own directories while the config kubelet
   reads (a file, or the files of a directory) holds a bridge entry of
   another name; a single install that changed its own directories still
@@ -232,9 +250,17 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   leaves the old entry behind in the same way. There is no small, safe
   automatic cleanup: DaemonSet pods also stop on every re-roll and drain,
   where removing the entry would be wrong.
-- Every install on a node must run an installer with this ADR before a
-  second install is added. An older installer in patch or none mode
-  rewrites the shared config with its own entry alone.
+- A second install may be added only once every existing install runs an
+  installer with this ADR on every node: each release's plugin image, not
+  only its chart, must be such a version, and
+  `kubectl rollout status daemonset/<fullname>-plugin` (in its plugin
+  namespace) must have finished. An older installer with the default
+  name in patch or none mode rewrites the shared config with its own
+  entry alone, takes no lock and writes no record (so the other installs
+  drop its entry). For the same reason no install may be rolled back to
+  a chart or plugin image before this ADR while another install is on the
+  nodes. A single install can roll back without a kubelet restart
+  (decision 6).
 - Two installs with the same `plugin.providerName` still overwrite each
   other; the installer cannot tell them apart from an upgrade.
 - A writer of `plugin.hostConfigDir` can no longer get a changed or

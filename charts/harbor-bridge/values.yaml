@@ -155,7 +155,9 @@ bridge:
 
   # Names this bridge among several (its HarborAccess finalizer is
   # harbor.aetherize.io/robot-<instance>). Used only with a selector.
-  # Empty = the release name. DNS label, at most 50 characters.
+  # Empty = the release name, never fullnameOverride: set it whenever
+  # fullnameOverride is what tells two releases apart. DNS label, at most
+  # 50 characters.
   instance: ""
   # Requests per second (and burst) the credential endpoint accepts from
   # one source IP before it answers 429. Kubelet calls through its node's

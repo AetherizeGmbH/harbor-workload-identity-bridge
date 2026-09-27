@@ -364,14 +364,14 @@ file per install, see below):
 
 A cluster can run several bridges, for example one per Harbor instance
 ([ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)).
-Each is a Helm release with a release name of its own and its own
-plugin DaemonSet. Kubelet has one credential-provider config and one bin
-dir, so the releases share them: on every node, each release's installer
-adds and updates only the provider entry named by its
-`plugin.providerName` and leaves every other entry alone: the other
-releases' and the cloud's. Values for a second
-release (`helm install harbor-bridge-eu …`) next to a first one that
-keeps the default provider name:
+Each is a Helm release with a release name and a namespace of its own
+and its own plugin DaemonSet. Kubelet has one credential-provider config
+and one bin dir, so the releases share them: on every node, each
+release's installer adds and updates only the provider entry named by
+its `plugin.providerName` and leaves every other entry alone: the other
+releases' and the cloud's. Values for a second release
+(`helm install harbor-bridge-eu … --namespace harbor-bridge-eu --create-namespace`)
+next to a first one that keeps the default provider name:
 
 ```yaml
 clusterName: prod-eu-west-2          # distinct when both bridges use the same Harbor
@@ -386,11 +386,30 @@ service:
   nodePort: 31444                    # the first release keeps 31443
 ```
 
-- **A release name per release.** The release name (or
-  `fullnameOverride`) names the chart's cluster-scoped RBAC for the
-  kubelet audience, the plugin's mTLS client CN and, by default,
-  `bridge.instance`, the bridge's finalizer. Two releases with the same
-  name, even in different namespaces, collide.
+- **A release name per release.** The release name names the chart's
+  cluster-scoped objects (the RBAC for the kubelet audience and, with
+  `plugin.namespace`, the trust-manager Bundle), the plugin's mTLS client
+  CN and, by default, `bridge.instance`, which names the bridge's
+  finalizer. Two releases with the same name, even in different
+  namespaces, collide. `fullnameOverride` replaces the release name in
+  the object names and the CN, but `bridge.instance` follows only the
+  release name: whenever `fullnameOverride` is what tells two releases
+  apart, set `bridge.instance` explicitly too.
+- **A namespace per release.** Install each release into a namespace of
+  its own. The bridge's leader-election Lease has a fixed name
+  (`bridge.harbor.aetherize.io`) in the release namespace, so two bridges
+  there elect one leader between them and the other bridge's control
+  plane does not run (leader election is on with the default two
+  replicas). Each bridge's janitor also lists the robot Secrets of its
+  `clusterName` in its namespace and deletes those whose HarborAccess its
+  selector does not match: two bridges with the same `clusterName` (on
+  different Harbors) in one namespace delete each other's Secrets.
+- **A plugin namespace per release, or one created outside Helm.** With
+  `plugin.namespace`, give each release its own, or create a shared one
+  yourself and set `plugin.createNamespace=false` on every release.
+  Otherwise the first release owns the Namespace object, installing the
+  next one fails on it, and uninstalling the first deletes it together
+  with the other releases' plugin DaemonSets.
 - **Selectors on every release.** A bridge without
   `bridge.harborAccessSelector` sees every HarborAccess and marks the
   other bridge's objects `AudienceMismatch`. Label each HarborAccess for
@@ -416,7 +435,16 @@ service:
   touches the node: the install container fails with
   `read rendered credential-provider config: open /config/credential-provider-config.yaml: no such file or directory`,
   the pods stay in `Init:CrashLoopBackOff`, and nothing changes on the
-  node until the release gets a plugin image with ADR-0029.
+  node until the release gets a plugin image with ADR-0029. Add the
+  second release only once every existing release's plugin DaemonSet
+  runs such an image on every node, that is, once
+  `kubectl -n <plugin namespace> rollout status daemonset/<fullname>-plugin`
+  has finished for each (`<fullname>` is the release name or
+  `fullnameOverride`). From then on, never roll a release back to a chart
+  or plugin image before ADR-0029 while another release's plugin is on
+  the nodes. (A single install can roll back: the installer keeps its
+  state file readable for older installers, so an unchanged config does
+  not restart kubelet.)
 - **Same directories.** In patch and none mode all releases must use the
   same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
   refuses to point kubelet at other directories while the config kubelet
