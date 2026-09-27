@@ -16,10 +16,11 @@ on:
         required: true
         type: string
 
+# Read-only default. Every job below grants itself exactly the rights it
+# needs (build, attest) or none (sbom); a job added without its own block
+# must not inherit the signing identity or push rights.
 permissions:
   contents: read
-  packages: write
-  id-token: write
 
 concurrency:
   # Group by tag so independent versions don't queue against each other.
