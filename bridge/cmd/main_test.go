@@ -175,3 +175,52 @@ func TestCredentialMux_ServesOnlyTheCredentialEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestLeaderElectionFromEnv: a value that is not a boolean must fail
+// startup. It used to mean "off", so `--set bridge.leaderElection=on` or a
+// quoted "True" ran every replica as a leader: two reconcilers and two
+// janitors (ADR-0025 keeps both leader-only).
+func TestLeaderElectionFromEnv(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{raw: "", want: false},
+		{raw: "true", want: true},
+		{raw: "false", want: false},
+		{raw: "True", want: true},
+		{raw: "TRUE", want: true},
+		{raw: "1", want: true},
+		{raw: "0", want: false},
+		{raw: " true\n", want: true},
+		{raw: "yes", want: true},
+		{raw: "no", want: false},
+		{raw: "on", wantErr: true},
+		{raw: "off", wantErr: true},
+		{raw: "enabled", wantErr: true},
+		{raw: "Yes", wantErr: true},
+		{raw: "tru", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			t.Setenv(envEnableLeaderElec, tt.raw)
+			got, err := leaderElectionFromEnv()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("leaderElectionFromEnv() = %v, want an error", got)
+				}
+				if !strings.Contains(err.Error(), envEnableLeaderElec) {
+					t.Errorf("error %q does not name %s", err, envEnableLeaderElec)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("leaderElectionFromEnv(): %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("leaderElectionFromEnv() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

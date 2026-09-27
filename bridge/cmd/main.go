@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -115,6 +116,10 @@ func run() error {
 	}
 
 	// Step 3: build the controller-runtime Manager.
+	leaderElection, err := leaderElectionFromEnv()
+	if err != nil {
+		return err
+	}
 	mgrOpts := ctrl.Options{
 		Scheme: clientgoscheme.Scheme,
 		// /metrics is served by the manager's metrics server on its own
@@ -124,7 +129,7 @@ func run() error {
 		// metrics register into the same controller-runtime registry.
 		Metrics: metricsserver.Options{BindAddress: envOrDefault(envMetricsAddr, defaultMetricsAddr)},
 
-		LeaderElection:          envBool(envEnableLeaderElec, false),
+		LeaderElection:          leaderElection,
 		LeaderElectionID:        leaderElectionID,
 		LeaderElectionNamespace: cfg.Namespace,
 
@@ -371,18 +376,26 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-// envBool returns the env var parsed as bool. Falls back to def when
-// unset or unparseable; the controlplane config layer fail-fast-validates
-// the bools it owns, but the leader-election flag is benign enough that
-// "default off" is the right unparseable behaviour.
-func envBool(key string, def bool) bool {
-	v := os.Getenv(key)
-	switch v {
-	case "true", "1", "yes":
-		return true
-	case "false", "0", "no", "":
-		return false
-	default:
-		return def
+// leaderElectionFromEnv reads BRIDGE_ENABLE_LEADER_ELECTION. Unset or
+// empty means off (one replica). A value that is not a boolean fails
+// startup instead of meaning "off": with several replicas, election
+// silently off runs the reconciler and the janitor on every replica, which
+// ADR-0025 keeps leader-only; two reconcilers race on robot creation and
+// password rotation and can leave a Secret holding a password Harbor
+// already replaced. "yes" and "no" stay accepted, as before.
+func leaderElectionFromEnv() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(envEnableLeaderElec))
+	switch raw {
+	case "":
+		return false, nil
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
 	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s %q must be true or false", envEnableLeaderElec, raw)
+	}
+	return v, nil
 }

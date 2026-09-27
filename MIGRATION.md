@@ -59,6 +59,7 @@ default.
 | Change | What to do |
 | --- | --- |
 | The credential port (`8443`, exposed by the NodePort) no longer answers `GET /healthz`; it serves only `POST /v1/credentials` | Nothing for the chart: its probes use the health port (`8081`). Point any health check of your own at `/healthz` or `/readyz` on the health port. |
+| `BRIDGE_ENABLE_LEADER_ELECTION` (`bridge.leaderElection`) must be a boolean. Other values, such as `on` (what `--set bridge.leaderElection=on` renders), used to switch leader election off without a warning, so with several replicas every replica reconciled; they now stop the bridge at startup. `True` and `TRUE` now mean on | Leave `bridge.leaderElection` unset (on when `bridge.replicas > 1`) or set it to `true` or `false`. |
 
 ### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 
