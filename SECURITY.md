@@ -655,7 +655,9 @@ credential denied
 credential unavailable                   # valid token, nothing issued: 503 or 500
   source=…  subject=…  pod=…  node=…
   reason=secret_missing|secret_for_previous_identity|secret_unreadable|harboraccess_lookup_failed|robot_name_unknown
-  (harboraccess once matched, err for a 500) requested_image=…
+  (harboraccess once matched, err for a 500)
+  robot=…  expected_robot=…              # secret_for_previous_identity only
+  requested_image=…
 
 credential unavailable                   # token not judged: signing keys unavailable, 503
   source=…  reason=signing_keys_unavailable  err=…  requested_image=…
@@ -682,8 +684,11 @@ Denials (token rejected, no matching CR, CR being deleted, Secret owner
 mismatch) are the `credential denied` lines above, on the same
 fixed-info audit logger. A request with a valid token that gets no
 credentials for another reason is a `credential unavailable` line: the
-robot Secret does not exist yet (`503`, the plugin retries), or it is
-incomplete or the Kubernetes API failed (`500`, also on the regular log
+robot Secret does not exist yet, or it still holds the robot of the
+previous `serviceAccountRef` (`503`, the plugin retries; the latter also
+on every pull while `harbor.robotNamePrefix` does not match Harbor's
+`robot_name_prefix`), or it is incomplete, the robot name cannot be
+derived, or the Kubernetes API failed (`500`, also on the regular log
 with the full error). So is a token the bridge could not judge because
 it could not fetch the signing keys (`503`, see below). Requests refused
 before the token is checked (rate limit, missing bearer, bad body) are
