@@ -27,5 +27,4 @@ ignore: |
   charts/harbor-bridge/tests/golden/
   charts/harbor-bridge/templates/
   charts/harbor-bridge/crds/
-  test/e2e/diag-last/
   test/e2e/modules/kind-cluster/.gen/
