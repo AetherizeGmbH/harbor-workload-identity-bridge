@@ -150,8 +150,10 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
      every release and by any pod with a hostPath on it, and kubelet runs
      every entry of the file after its next restart, which the installer
      triggers itself. Installers before this ADR replaced the file with the
-     rendered config on every pass, which removed anything planted there.
-     Each pass now writes the rendered config plus the entries of the other
+     rendered config on every pass, which removed anything planted there
+     from what they wrote (not from what kubelet reads when a writer swaps
+     the file back before a kubelet start; Consequences). Each pass now
+     writes the rendered config plus the entries of the other
      installs, in place: bridge entries with a valid provider name whose
      binary is an executable regular file in `plugin.hostBinaryDir` and
      whose record there holds exactly the entry's canonical bytes (another
@@ -322,28 +324,62 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   (decision 6).
 - Two installs with the same `plugin.providerName` still overwrite each
   other; the installer cannot tell them apart from an upgrade.
-- A writer of `plugin.hostConfigDir` can no longer get a changed or
-  planted entry kept: the next pass of any install drops it and, in patch
-  mode, restarts kubelet onto the file without it. It can still remove
-  another install's entry from the chart-owned config (delete it, change
-  it so that the next pass drops it, or make the file unparsable), which
-  lasts until that install's next pass, usually its next pod start: a
-  denial of service against that install's pulls. After a pass of another
-  install died between its record and its config, until that install's
-  next pass, the writer can also switch that install's entry between the
-  one in the file and the one the pass meant to write: both are entries
-  that install's installer wrote. And kubelet reads the
-  file as it is at its own start, before any installer runs: a node
-  reboot makes whatever the file holds then live until the next pass, as
-  before this ADR. Merge mode keeps the entries of a kubelet config that
-  no record in kubelet's bin dir names as chart-owned; that holds for the
-  chart-owned config of an installer before this ADR (which "Upgrade
-  first" rules out next to another install) and for a none-mode config
-  when kubelet runs binaries from another directory than that install's
-  `plugin.hostBinaryDir`. There it refuses only a config kubelet would
-  exit on. A kubelet config in another release's `plugin.hostConfigDir`
-  that is not that release's chart-owned config is not recognised
-  either: keep kubelet's config out of every `plugin.hostConfigDir`.
+- No installer writes back, or keeps, a changed or planted entry in a
+  chart-owned config: the next pass of any install drops it and, in patch
+  mode, restarts kubelet. That does not keep such an entry from running.
+  Kubelet reads the file whenever it starts, and nothing reads it again
+  after the installer's write (the verification checks kubelet's flags,
+  not the file). A writer of `plugin.hostConfigDir` that swaps its own
+  version of the file in between an installer's write and the kubelet
+  restart that installer triggers seconds later (every sync container
+  runs as root, owns the directory's files and can watch it with
+  inotify), or before any other kubelet start (a node reboot, a restart
+  by anything else), has kubelet run a changed or planted entry until
+  the next kubelet start that reads a clean file, and the installer
+  records success. The entry can carry another release's `matchImages`
+  and audience and point at the writer's own endpoint, which then
+  receives that release's pods' tokens and can present them to that
+  release's bridge, or ask for any other audience the node may request
+  tokens for (the chart grants every release's `plugin.audience` to the
+  `system:nodes` group, `audience-rbac.yaml`).
+  Before this ADR only a release's own sync container could do this, to
+  its own pulls; with a shared `plugin.hostConfigDir` every release's
+  sync container can do it to every release's pulls. The records do not
+  change that; they keep the installers from writing or keeping such an
+  entry themselves. Taking the chart-owned config out of the sync
+  containers' reach would close it, and the reboot case: for example a
+  directory per release for the CA and mTLS files, mounted only by that
+  release's sync container, while only installers mount the directory of
+  the config. That moves the CA file every entry names, so every install
+  restarts kubelet once on upgrade; it is an open decision.
+- A writer of `plugin.hostConfigDir` can also remove another install's
+  entry from the chart-owned config (delete it, change it so that the
+  next pass drops it, or make the file unparsable), which lasts until
+  that install's next pass, usually its next pod start: a denial of
+  service against that install's pulls. After a pass of another install
+  died between its record and its config, until that install's next
+  pass, the writer can also switch that install's entry between the one
+  in the file and the one the pass meant to write: both are entries that
+  install's installer wrote. Merge mode keeps the entries of a kubelet
+  config that no record in kubelet's bin dir names as chart-owned; that
+  holds for the chart-owned config of an installer before this ADR
+  (which "Upgrade first" rules out next to another install) and for a
+  none-mode config when kubelet runs binaries from another directory
+  than that install's `plugin.hostBinaryDir`. There it refuses only a
+  config kubelet would exit on. A kubelet config in another release's
+  `plugin.hostConfigDir` that is not that release's chart-owned config is
+  not recognised either: keep kubelet's config out of every
+  `plugin.hostConfigDir`.
+- `plugin.hostConfigDir` must never be kubelet's credential-provider
+  config directory (Kubernetes 1.34+). Kubelet loads every `*.json`,
+  `*.yaml` and `*.yml` file of that directory at every start, a writer
+  of `plugin.hostConfigDir` can add one, and no pass removes it: a none
+  mode pass rewrites only its own file and cannot see kubelet's flags.
+  Patch mode moves kubelet from such a directory to its own file, where
+  the installer drops what it does not recognise; a planted entry does
+  not hold it back (the bullet on patch and none mode above). Merge mode
+  refuses a config directory. The docs send directory users to
+  `plugin.enabled=false` with the entry placed by other means.
 - Releases that use the same `plugin.hostConfigDir` (all of them in
   patch and none mode, and in every mode with the default value) share
   every release's CA file there, which its plugin reads on every exec,
@@ -383,7 +419,9 @@ Accepted, 2026-09-27. Refines ADR-0021 (node installer) and ADR-0026
   installer would have to support both layouts. The installer still
   expects a file and refuses a flag that names a directory with an error
   that says so. Supporting it (a per-install file dropped into that
-  directory) is a possible follow-up.
+  directory) is a possible follow-up; that directory must then be out of
+  reach of every sync container, since kubelet loads any config file
+  planted there.
 - **A subdirectory per install under `plugin.hostConfigDir`.** The sync
   container and any pod with a hostPath on that directory can write there;
   a symlink planted in place of the subdirectory would redirect the

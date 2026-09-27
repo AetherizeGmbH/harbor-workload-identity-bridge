@@ -425,26 +425,42 @@ container:
   directories differ from those of the `patch`-mode release that wired
   kubelet). The sync container of every release that uses that
   directory, and any pod with a hostPath on it, can write there, and
-  kubelet runs every entry of the file after its next restart. Each pass rewrites the file to this install's entry plus the
-  other installs' entries, and keeps another install's entry only when
-  its executable binary is in kubelet's bin dir (`plugin.hostBinaryDir`
-  in `patch` and `none` mode) and its record there holds exactly that
-  entry. A planted entry, or another install's entry changed in the
-  file, is dropped before the installer restarts kubelet, as the whole
-  file was replaced before ADR-0029. Any other kubelet config inside
-  `plugin.hostConfigDir` is refused in `merge` mode, and so is
-  `plugin.install.configFile` inside it. Residual: a writer of
-  `plugin.hostConfigDir` can remove another install's entry (or change
-  it so that the next pass drops it) until that install's next pass;
-  after a pass of another install died between its record and its
-  config, it can switch that install's entry between the old and the
-  new one until that install's next pass; and kubelet reads the file as
-  it is when kubelet itself starts, before any installer runs (a node
-  reboot). In `patch` mode the installer also refuses to point kubelet at
-  its own directories while the config kubelet reads holds another
-  install's entry; in a config in reach of a `plugin.hostConfigDir`, only
-  an entry a record in kubelet's bin dir vouches for counts, so a planted
-  entry cannot keep kubelet on that config.
+  kubelet runs every entry of the file after its next restart. Each pass
+  rewrites the file to this install's entry plus the other installs'
+  entries, and keeps another install's entry only when its executable
+  binary is in kubelet's bin dir (`plugin.hostBinaryDir` in `patch` and
+  `none` mode) and its record there holds exactly that entry. A planted
+  entry, or another install's entry changed in the file, is not written
+  back by any installer, as the whole file was replaced before ADR-0029.
+  Any other kubelet config inside `plugin.hostConfigDir` is refused in
+  `merge` mode, and so is `plugin.install.configFile` inside it.
+  Residual: kubelet reads the file whenever it starts, and nothing reads
+  it again after the installer's write. A writer of
+  `plugin.hostConfigDir` that swaps its own version in between an
+  installer's write and the kubelet restart that installer triggers
+  seconds later (it can watch the directory with inotify), or before any
+  other kubelet start (a node reboot), has kubelet run a changed or
+  planted entry until the next kubelet start that reads a clean file;
+  the installer reports success. Such an entry can carry another
+  release's `matchImages` and audience and point at the writer's own
+  endpoint, which then receives that release's pods' tokens, or ask for
+  any other audience the node may request tokens for. With one release
+  per node only that release's own sync container could do this, to its
+  own pulls; with a shared `plugin.hostConfigDir` every release's sync
+  container can do it to every release's pulls. A writer can also remove
+  another install's entry (or change it so that the next pass drops it)
+  until that install's next pass; and after a pass of another install
+  died between its record and its config, it can switch that install's
+  entry between the old and the new one until that install's next pass.
+  `plugin.hostConfigDir` must never be kubelet's credential-provider
+  config directory (kubelet 1.34+): kubelet loads every config file of
+  that directory at every start, and no pass removes a file a writer of
+  the directory adds. In `patch` mode the installer also refuses to
+  point kubelet at its own directories while the config kubelet reads
+  holds another install's entry; in a config in reach of a
+  `plugin.hostConfigDir`, only an entry a record in kubelet's bin dir
+  vouches for counts, so a planted entry cannot keep kubelet on that
+  config.
 - in `merge` mode into a cloud's config, keeps every other entry, but
   refuses to write the config, or restart kubelet onto it, when kubelet
   would exit at startup: an entry whose binary is missing from kubelet's

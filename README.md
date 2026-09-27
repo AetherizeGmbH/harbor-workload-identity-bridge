@@ -460,7 +460,10 @@ service:
   config stays the chart's" below). Otherwise keep kubelet's config out
   of every `plugin.hostConfigDir`: the installer refuses a kubelet config
   inside its own `plugin.hostConfigDir` that is not the chart-owned one,
-  and a `plugin.install.configFile` inside it.
+  and a `plugin.install.configFile` inside it. Never make
+  `plugin.hostConfigDir` kubelet's config directory (Kubernetes 1.34+):
+  kubelet loads every config file of it, which every sync container can
+  add and no pass removes.
 - **Shared CA and mTLS files.** Each release keeps its CA file and its
   mTLS client certificate and key in `plugin.hostConfigDir`, and every
   release's sync container mounts that directory read-write as root. Where
@@ -500,7 +503,12 @@ service:
   entry only when that release's binary and its record, holding exactly
   that entry, are in kubelet's bin dir (`plugin.hostBinaryDir`), which
   the sync containers cannot write. A merge pass into such a config (its
-  own, or one another release's record names) does the same. Keep
+  own, or one another release's record names) does the same. That keeps
+  every installer from writing or keeping a planted or changed entry,
+  not kubelet from reading one: kubelet reads the file whenever it
+  starts, so a sync container that swaps its own version in before a
+  kubelet start, including the restart an installer triggers right after
+  its write, gets its entries run (SECURITY.md; open decision O6). Keep
   `plugin.hostBinaryDir` for this chart's plugins only; the chart
   refuses a `plugin.hostBinaryDir` or `plugin.install.stateDir` in reach
   of `plugin.hostConfigDir`.
@@ -640,8 +648,8 @@ In order.
 
 ### Open decisions (TODO)
 
-Open item from the 2026-09 security review (threat model item O2). It
-blocks no install today.
+Open items from the 2026-09 security review and ADR-0029 (threat model
+items O2 and O6). Neither blocks a single install today.
 
 - [ ] **mTLS client identity (O2).** With mTLS on, the bridge accepts any
   client certificate its CA signed; with a shared ClusterIssuer, anyone who
@@ -650,6 +658,18 @@ blocks no install today.
   default. *Limits now:* nothing functional; mTLS is optional defense in
   depth, and every request still needs a valid, audience-bound
   ServiceAccount token.
+- [ ] **Chart-owned config out of the sync containers' reach (O6).** Every
+  release's sync container can write `plugin.hostConfigDir`, where kubelet's
+  chart-owned config (patch and none mode) and every release's CA and mTLS
+  files live. It can swap its own config in between an installer's write
+  and the kubelet restart that installer triggers, or before a reboot,
+  and kubelet then runs its entries (SECURITY.md). Decide on a directory
+  per release for the CA and mTLS files that only that release's sync
+  container mounts. *Limits now:* with one release per node, only that
+  release's own sync container can do this, to its own pulls; with
+  several releases sharing `plugin.hostConfigDir`, any release's sync
+  container can redirect another release's pods' tokens and read its
+  mTLS key.
 
 ## Support and services
 
