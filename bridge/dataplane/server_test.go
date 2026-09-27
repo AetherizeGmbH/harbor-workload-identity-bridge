@@ -483,3 +483,74 @@ func TestServer_BoundsHeadersAndErrorLog(t *testing.T) {
 		t.Error("no rate-limited ErrorLog: TLS handshake errors would be unbounded")
 	}
 }
+
+// TestServer_KeepsServingForShutdownDelay: after SIGTERM, kube-proxy on
+// every node still routes new NodePort connections to the terminating pod
+// for a while. The listener must accept them for ShutdownDelay instead of
+// refusing them at once, and stay ready meanwhile (the EndpointSlice marks
+// the pod terminating anyway; see drain).
+func TestServer_KeepsServingForShutdownDelay(t *testing.T) {
+	cert, key := writeSelfSignedCert(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	const delay = 2 * time.Second
+	srv, err := NewServer(ServerConfig{
+		ListenAddr:      "127.0.0.1:0",
+		CertFile:        cert,
+		KeyFile:         key,
+		Handler:         mux,
+		ShutdownTimeout: 2 * time.Second,
+		ShutdownDelay:   delay,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- srv.Start(ctx) }()
+	addr := waitForBind(t, srv, 2*time.Second)
+
+	cancel()
+	cancelled := time.Now()
+	time.Sleep(100 * time.Millisecond)
+
+	// A new connection, as every plugin invocation opens one.
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Timeout:   time.Second,
+	}
+	resp, err := client.Get("https://" + addr + "/ping")
+	if err != nil {
+		t.Fatalf("request during the shutdown delay: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status during the shutdown delay = %d", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Error("response during the shutdown delay kept the connection alive; it should ask the client to reconnect")
+	}
+	if err := srv.ReadyCheck(nil); err != nil {
+		t.Errorf("not ready during the shutdown delay: %v", err)
+	}
+
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if waited := time.Since(cancelled); waited < delay {
+			t.Fatalf("Start returned %s after cancel, before the %s delay", waited, delay)
+		}
+	case <-time.After(delay + 3*time.Second):
+		t.Fatal("Start did not return after the delay and the shutdown")
+	}
+	if conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+		_ = conn.Close()
+		t.Fatal("listener still accepts connections after the shutdown")
+	}
+}

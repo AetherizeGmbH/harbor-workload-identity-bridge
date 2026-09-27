@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	"golang.org/x/time/rate"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,6 +56,14 @@ type ServerConfig struct {
 	// Defaults to 10 seconds.
 	ShutdownTimeout time.Duration
 
+	// ShutdownDelay is how long the listener keeps accepting connections
+	// after ctx cancels, before the graceful shutdown starts. Kubernetes
+	// sends SIGTERM while kube-proxy on every node is still removing the
+	// terminating pod from the Service; until it has, new NodePort
+	// connections still reach this pod, and a closed listener refuses
+	// them, which fails the image pull. Zero shuts down at once.
+	ShutdownDelay time.Duration
+
 	// ReloadInterval is how often the serving key pair and the client CA
 	// bundle are re-read from disk (in addition to file-change events), so
 	// cert-manager rotations take effect without a restart. Defaults to
@@ -63,8 +72,9 @@ type ServerConfig struct {
 }
 
 // Server is a manager.Runnable HTTPS server. The manager calls Start with
-// a context tied to SIGTERM; Start blocks until the context cancels, then
-// performs a graceful Shutdown bounded by ShutdownTimeout.
+// a context tied to SIGTERM; Start blocks until the context cancels, keeps
+// serving for ShutdownDelay, then performs a graceful Shutdown bounded by
+// ShutdownTimeout.
 type Server struct {
 	cfg  ServerConfig
 	srv  *http.Server
@@ -204,9 +214,10 @@ func (s *Server) Addr() string {
 	return s.cfg.ListenAddr
 }
 
-// Start implements manager.Runnable. Blocks until ctx is cancelled, then
-// performs a graceful Shutdown bounded by cfg.ShutdownTimeout. Returning
-// from Start signals manager that this runnable is done.
+// Start implements manager.Runnable. Blocks until ctx is cancelled, keeps
+// serving for cfg.ShutdownDelay, then performs a graceful Shutdown bounded
+// by cfg.ShutdownTimeout. Returning from Start signals manager that this
+// runnable is done.
 func (s *Server) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("dataplane-server")
 
@@ -247,6 +258,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		if stopped, err := s.drain(logger, errCh); stopped {
+			return err
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 		defer cancel()
 		logger.Info("shutting down data-plane server", "timeout", s.cfg.ShutdownTimeout)
@@ -265,6 +279,32 @@ func (s *Server) Start(ctx context.Context) error {
 		// TLS handshake setup failure, etc.). Return so the manager
 		// can shut everything down.
 		return err
+	}
+}
+
+// drain keeps the listener serving for cfg.ShutdownDelay after ctx was
+// cancelled. Keep-alives are switched off first, so every connection closes
+// after its current response and its client reconnects through the Service
+// to another replica, rather than reusing a connection Shutdown later
+// closes. Readiness deliberately stays true: the EndpointSlice marks a
+// terminating pod not ready whatever its probe says, and a failing probe
+// would also clear its "serving" condition, which kube-proxy uses to keep
+// routing to terminating pods when no ready one is left (one replica
+// mid-rollout). stopped reports that the listener died during the delay;
+// err is then its error.
+func (s *Server) drain(logger logr.Logger, serveErr <-chan error) (stopped bool, err error) {
+	if s.cfg.ShutdownDelay <= 0 {
+		return false, nil
+	}
+	s.srv.SetKeepAlivesEnabled(false)
+	logger.Info("serving on until the Service stops routing to this pod", "delay", s.cfg.ShutdownDelay)
+	t := time.NewTimer(s.cfg.ShutdownDelay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return false, nil
+	case err := <-serveErr:
+		return true, err
 	}
 }
 

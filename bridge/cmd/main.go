@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -51,6 +52,7 @@ const (
 	envEnableLeaderElec = "BRIDGE_ENABLE_LEADER_ELECTION"
 	envRateLimit        = "BRIDGE_RATE_LIMIT_PER_SOURCE"
 	envRateLimitBurst   = "BRIDGE_RATE_LIMIT_BURST"
+	envShutdownDelay    = "BRIDGE_SHUTDOWN_DELAY"
 
 	defaultTLSCertFile = "/etc/bridge/tls/tls.crt"
 	defaultTLSKeyFile  = "/etc/bridge/tls/tls.key"
@@ -59,6 +61,31 @@ const (
 	defaultMetricsAddr = ":8080"
 	defaultRateLimit   = 20
 	defaultRateBurst   = 100
+
+	// defaultShutdownDelay keeps the credential listener serving after
+	// SIGTERM while kube-proxy on every node stops routing to the pod.
+	defaultShutdownDelay = 5 * time.Second
+
+	// gracefulShutdownTimeout is the manager's budget for stopping every
+	// runnable after SIGTERM. It is the pod's default termination grace
+	// period, which the chart does not change; kubelet kills the process
+	// then anyway.
+	gracefulShutdownTimeout = 30 * time.Second
+
+	// serverShutdownTimeout bounds the credential listener's graceful
+	// shutdown, which starts after the shutdown delay.
+	serverShutdownTimeout = 10 * time.Second
+
+	// leaderStopBudget is the part of gracefulShutdownTimeout left for the
+	// reconciler and the janitor to finish in-flight work: the manager
+	// stops them only after the credential listener has closed.
+	leaderStopBudget = 5 * time.Second
+
+	// maxShutdownDelay is the longest shutdown delay that leaves the
+	// listener's shutdown and the leader's runnables their budgets. A
+	// longer one would run the manager out of time before the reconciler
+	// and the janitor are stopped.
+	maxShutdownDelay = gracefulShutdownTimeout - serverShutdownTimeout - leaderStopBudget
 
 	leaderElectionID = "bridge.harbor.aetherize.io"
 
@@ -117,26 +144,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	mgrOpts := ctrl.Options{
-		Scheme: clientgoscheme.Scheme,
-		// /metrics is served by the manager's metrics server on its own
-		// port, reachable on the pod network only. It used to share the
-		// credential listener, which the NodePort exposes on every node
-		// to anything that can reach it. "0" disables it. The data-plane
-		// metrics register into the same controller-runtime registry.
-		Metrics: metricsserver.Options{BindAddress: envOrDefault(envMetricsAddr, defaultMetricsAddr)},
-
-		LeaderElection:          leaderElection,
-		LeaderElectionID:        leaderElectionID,
-		LeaderElectionNamespace: cfg.Namespace,
-
-		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
-
-		// Minimum-privilege RBAC: Secrets from BRIDGE_NAMESPACE only
-		// (ADR-0011), HarborAccess cluster-wide, limited by the selector
-		// (ADR-0026).
-		Cache: cfg.CacheOptions(),
+	shutdownDelay, err := shutdownDelayFromEnv()
+	if err != nil {
+		return err
 	}
+	mgrOpts := managerOptions(cfg, leaderElection)
 	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
 	if err != nil {
 		return fmt.Errorf("build manager: %w", err)
@@ -233,13 +245,7 @@ func run() error {
 		return fmt.Errorf("index HarborAccess by subject: %w", err)
 	}
 
-	server, err := dataplane.NewServer(dataplane.ServerConfig{
-		ListenAddr:   envOrDefault(envListenAddr, defaultListenAddr),
-		CertFile:     envOrDefault(envTLSCertFile, defaultTLSCertFile),
-		KeyFile:      envOrDefault(envTLSKeyFile, defaultTLSKeyFile),
-		ClientCAFile: os.Getenv(envTLSClientCAFile),
-		Handler:      credentialMux(handler),
-	})
+	server, err := dataplane.NewServer(serverConfig(credentialMux(handler), shutdownDelay))
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
@@ -251,12 +257,60 @@ func run() error {
 		return err
 	}
 
-	// Step 9: start the manager. Blocks until SIGTERM/SIGINT.
-	setupLog.Info("starting bridge", "leader_election", mgrOpts.LeaderElection)
+	// Step 9: start the manager. Blocks until SIGTERM/SIGINT. Return
+	// right after it: LeaderElectionReleaseOnCancel relies on the process
+	// exiting once the manager stops.
+	setupLog.Info("starting bridge", "leader_election", mgrOpts.LeaderElection, "shutdown_delay", shutdownDelay.String())
 	if err := mgr.Start(startupCtx); err != nil {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
+}
+
+// serverConfig builds the credential listener's config.
+func serverConfig(handler http.Handler, shutdownDelay time.Duration) dataplane.ServerConfig {
+	return dataplane.ServerConfig{
+		ListenAddr:      envOrDefault(envListenAddr, defaultListenAddr),
+		CertFile:        envOrDefault(envTLSCertFile, defaultTLSCertFile),
+		KeyFile:         envOrDefault(envTLSKeyFile, defaultTLSKeyFile),
+		ClientCAFile:    os.Getenv(envTLSClientCAFile),
+		Handler:         handler,
+		ShutdownDelay:   shutdownDelay,
+		ShutdownTimeout: serverShutdownTimeout,
+	}
+}
+
+// managerOptions builds the controller-runtime Manager's options.
+func managerOptions(cfg *controlplane.Config, leaderElection bool) ctrl.Options {
+	return ctrl.Options{
+		Scheme: clientgoscheme.Scheme,
+		// Stated rather than left to the default, because the shutdown
+		// delay is bounded by it (maxShutdownDelay).
+		GracefulShutdownTimeout: ptr.To(gracefulShutdownTimeout),
+		// /metrics is served by the manager's metrics server on its own
+		// port, reachable on the pod network only. It used to share the
+		// credential listener, which the NodePort exposes on every node
+		// to anything that can reach it. "0" disables it. The data-plane
+		// metrics register into the same controller-runtime registry.
+		Metrics: metricsserver.Options{BindAddress: envOrDefault(envMetricsAddr, defaultMetricsAddr)},
+
+		LeaderElection:          leaderElection,
+		LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: cfg.Namespace,
+		// A stopping leader hands the Lease back, so another replica
+		// resumes reconciling and sweeping at once instead of after the
+		// lease duration (15s). Safe only because the process exits as
+		// soon as the manager stops: run returns right after mgr.Start,
+		// and nothing may be added after it.
+		LeaderElectionReleaseOnCancel: true,
+
+		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
+
+		// Minimum-privilege RBAC: Secrets from BRIDGE_NAMESPACE only
+		// (ADR-0011), HarborAccess cluster-wide, limited by the selector
+		// (ADR-0026).
+		Cache: cfg.CacheOptions(),
+	}
 }
 
 // credentialMux routes the credential listener, which the NodePort exposes
@@ -331,6 +385,22 @@ func rateLimitFromEnv() (float64, int, error) {
 		burst = v
 	}
 	return perSource, burst, nil
+}
+
+// shutdownDelayFromEnv reads how long the credential listener keeps
+// serving after SIGTERM (a Go duration from 0, which closes it at once, to
+// maxShutdownDelay).
+func shutdownDelayFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(envShutdownDelay))
+	if raw == "" {
+		return defaultShutdownDelay, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 || d > maxShutdownDelay {
+		return 0, fmt.Errorf("%s %q must be a duration from 0s to %s: the listener's shutdown and the reconciler's must still fit into the %s the process has after SIGTERM",
+			envShutdownDelay, raw, maxShutdownDelay, gracefulShutdownTimeout)
+	}
+	return d, nil
 }
 
 // newLogger constructs a zap-backed logr.Logger at the requested level.

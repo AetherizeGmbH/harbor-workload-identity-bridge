@@ -224,3 +224,88 @@ func TestLeaderElectionFromEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestShutdownDelayFromEnv(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{raw: "", want: 5 * time.Second},
+		{raw: "0", want: 0},
+		{raw: "10s", want: 10 * time.Second},
+		{raw: " 1500ms ", want: 1500 * time.Millisecond},
+		{raw: "15s", want: 15 * time.Second},
+		{raw: "15.001s", wantErr: true},
+		{raw: "30s", wantErr: true},
+		{raw: "-1s", wantErr: true},
+		{raw: "5", wantErr: true},
+		{raw: "soon", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			t.Setenv(envShutdownDelay, tt.raw)
+			got, err := shutdownDelayFromEnv()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("shutdownDelayFromEnv() = %s, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("shutdownDelayFromEnv(): %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("shutdownDelayFromEnv() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestManagerOptions_LeaderElection: a stopping leader must hand the Lease
+// back, or reconciles and janitor sweeps pause for the lease duration on
+// every rollout of the leader.
+func TestManagerOptions_LeaderElection(t *testing.T) {
+	cfg := &controlplane.Config{Namespace: "harbor-bridge-system"}
+	for _, enabled := range []bool{true, false} {
+		opts := managerOptions(cfg, enabled)
+		if opts.LeaderElection != enabled {
+			t.Errorf("LeaderElection = %v, want %v", opts.LeaderElection, enabled)
+		}
+		if !opts.LeaderElectionReleaseOnCancel {
+			t.Error("LeaderElectionReleaseOnCancel = false, want true")
+		}
+		if opts.LeaderElectionID != leaderElectionID || opts.LeaderElectionNamespace != cfg.Namespace {
+			t.Errorf("Lease = %s/%s, want %s/%s", opts.LeaderElectionNamespace, opts.LeaderElectionID, cfg.Namespace, leaderElectionID)
+		}
+	}
+}
+
+// TestShutdownBudget: after SIGTERM the manager stops the credential
+// listener first (shutdown delay, then its graceful shutdown) and the
+// reconciler and the janitor after it, all within its graceful shutdown
+// timeout, which is also when kubelet kills the pod. The longest accepted
+// delay must still leave the leader's runnables their budget; otherwise
+// they are cut off mid-reconcile and the Lease is released while they run.
+func TestShutdownBudget(t *testing.T) {
+	opts := managerOptions(&controlplane.Config{Namespace: "harbor-bridge-system"}, true)
+	if opts.GracefulShutdownTimeout == nil || *opts.GracefulShutdownTimeout != 30*time.Second {
+		t.Fatalf("GracefulShutdownTimeout = %v, want 30s, the pod's default termination grace period", opts.GracefulShutdownTimeout)
+	}
+	t.Setenv(envShutdownDelay, maxShutdownDelay.String())
+	delay, err := shutdownDelayFromEnv()
+	if err != nil {
+		t.Fatalf("the longest shutdown delay is refused: %v", err)
+	}
+	sc := serverConfig(http.NotFoundHandler(), delay)
+	if sc.ShutdownDelay != delay {
+		t.Errorf("ShutdownDelay = %s, want %s", sc.ShutdownDelay, delay)
+	}
+	if sc.ShutdownTimeout <= 0 {
+		t.Fatalf("ShutdownTimeout = %s; the server's default is not part of the budget", sc.ShutdownTimeout)
+	}
+	if left := *opts.GracefulShutdownTimeout - sc.ShutdownDelay - sc.ShutdownTimeout; left < leaderStopBudget {
+		t.Errorf("the longest shutdown delay (%s) and the listener's shutdown (%s) leave %s of %s for the reconciler and the janitor, want at least %s",
+			sc.ShutdownDelay, sc.ShutdownTimeout, left, *opts.GracefulShutdownTimeout, leaderStopBudget)
+	}
+}
