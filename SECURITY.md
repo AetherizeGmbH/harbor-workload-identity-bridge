@@ -506,7 +506,7 @@ credential issued
   requested_image=harbor.example.com/production/myimg:v1   # asserted by the caller, max 512 chars
 
 credential denied
-  source=…  reason=invalid_token|no_matching_harboraccess|secret_owner_mismatch
+  source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch
   category=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other   # invalid_token only
   (subject, pod, node, audiences once the token is valid) requested_image=…
 ```

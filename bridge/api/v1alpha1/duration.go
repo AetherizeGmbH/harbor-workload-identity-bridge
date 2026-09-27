@@ -28,9 +28,9 @@ import (
 // still holds such a legacy value could not be written at all, not its
 // status and not its finalizer.
 //
-// A value that is not a Go duration decodes to zero (the data plane then
-// uses its 1h default); Err reports it, the reconciler surfaces it as
-// InvalidSpec, and MarshalJSON writes the original JSON back unchanged.
+// A value that is not a Go duration decodes to zero; Err reports it, the
+// reconciler surfaces it as InvalidSpec, the data plane refuses to serve
+// the object, and MarshalJSON writes the original JSON back unchanged.
 //
 // +kubebuilder:validation:Type=string
 type Duration struct {
