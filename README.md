@@ -272,7 +272,9 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
   kind cluster, installs Harbor + the chart (two bridge replicas),
   seeds private images, and asserts pulls end-to-end — then edits and
   deletes HarborAccess objects and checks in Harbor that grants changed,
-  the old identity is refused, and no robot is left behind.
+  the old identity is refused, and no robot is left behind. It also
+  checks that the bridge refuses ServiceAccount tokens not bound to a
+  pod or living longer than an hour (ADR-0028).
   `make e2e-pause` halts after the assertions so you can `kubectl`
   around the populated cluster. ~15 min.
 - **§2 Remote / manual cluster** — drive the bridge as a `go run`

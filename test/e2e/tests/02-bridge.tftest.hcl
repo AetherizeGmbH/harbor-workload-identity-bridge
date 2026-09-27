@@ -24,15 +24,17 @@
 #  16. pull_pod_revoked     — the OLD ServiceAccount must now be refused
 #  17. robot_check_update   — Harbor itself: old robot gone, new one present
 #                             (audit H2 — revocation, not just a data-plane 403)
-#  18. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
-#  19. harbor_access_teardown — scenario phase "none": every HarborAccess and
+#  18. token_rejection      — ADR-0028: the bridge refuses a token bound to no
+#                             pod and one living 2h, serves a pod-bound 1h one
+#  19. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
+#  20. harbor_access_teardown — scenario phase "none": every HarborAccess and
 #                             tenant namespace deleted WHILE the bridge runs;
 #                             tofu waits for each finalizer
-#  20. robot_check_teardown — Harbor itself: not one robot of this cluster left
+#  21. robot_check_teardown — Harbor itself: not one robot of this cluster left
 #
 # Teardown order. tofu test destroys the states in reverse order of the
-# LAST run that touched each. Stages 13 and 19 re-use the harbor_access
-# state after bridge_upgrade, and stage 19 empties it, so at cleanup time
+# LAST run that touched each. Stages 13 and 20 re-use the harbor_access
+# state after bridge_upgrade, and stage 20 empties it, so at cleanup time
 # no HarborAccess (and no finalizer) is left for an already-uninstalled
 # bridge to release. Before this, bridge_upgrade (the last run using the
 # bridge state) made cleanup uninstall the bridge FIRST, and deleting the
@@ -515,6 +517,150 @@ run "robot_check_update" {
     ]
     timeout_seconds  = 120
     fail_message     = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted and the new one present"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# ── ADR-0028 against a real apiserver and the deployed bridge. A Job runs as
+# token-ns/token-check (HarborAccess token-check; the ServiceAccount may
+# create tokens for itself and nothing else), asks the TokenRequest API for
+# three tokens with the bridge audience and sends each to the credential
+# endpoint through the bridge's Service:
+#   - bound to the Job's own pod, 1h → 200 with this ServiceAccount's robot
+#     credentials. The control: same ServiceAccount, audience and pod as
+#     the two tokens below;
+#   - bound to no pod, 1h            → 401, audit category not_pod_bound;
+#   - bound to the pod, 2h           → 401, audit category excessive_lifetime.
+# Before sending a token the Job checks the claims the apiserver really
+# issued (subject, audience, exp - iat, pod binding), so each 401 has the
+# one cause it is meant to test: an apiserver that lengthened the unbound
+# token would get it refused for its lifetime instead, and one that capped
+# the 2h token would fail the stage as a bridge bug. After the Job, the
+# bridge's audit log must hold each decision, found by the marker the Job
+# sent as the image. The Job goes with token-ns in harbor_access_teardown.
+run "token_rejection" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "token-rejection"
+    namespace            = "token-ns"
+    service_account_name = "token-check"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_field_refs = {
+      POD_NAME = "metadata.name"
+      POD_UID  = "metadata.uid"
+      SA_NAME  = "spec.serviceAccountName"
+    }
+    command = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_upgrade.credentials_url}'
+      aud=harbor-bridge
+      robot=bridge-dev.token-ns.token-check
+      sa=/var/run/secrets/kubernetes.io/serviceaccount
+      ns=$(cat "$sa/namespace")
+
+      # The bridge's serving certificate, off the wire like Harbor's in
+      # robot_push_test. The harness's issuer is selfSigned, so it is the
+      # CA cert-manager writes to ca.crt for the plugin; curl still checks
+      # that it names the Service host.
+      host=$${url#https://}; host=$${host%%/*}
+      openssl s_client -connect "$host" -servername "$${host%:*}" </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
+      test -s /tmp/bridge-ca.crt
+
+      # mint SECONDS BINDING: a token for this pod's ServiceAccount with the
+      # bridge audience, bound to this pod if BINDING is "pod". Never printed.
+      mint() {
+        jq -n --arg aud "$aud" --argjson exp "$1" --arg bind "$2" --arg pod "$POD_NAME" --arg uid "$POD_UID" '
+          {apiVersion: "authentication.k8s.io/v1", kind: "TokenRequest",
+           spec: ({audiences: [$aud], expirationSeconds: $exp}
+             + (if $bind == "pod" then {boundObjectRef: {apiVersion: "v1", kind: "Pod", name: $pod, uid: $uid}} else {} end))}' \
+          > /tmp/tokenrequest.json
+        code=$(curl -sS -o /tmp/tokenresponse.json -w '%%{http_code}' -X POST --cacert "$sa/ca.crt" \
+          -H "Authorization: Bearer $(cat "$sa/token")" -H 'Content-Type: application/json' \
+          --data @/tmp/tokenrequest.json \
+          "https://kubernetes.default.svc/api/v1/namespaces/$ns/serviceaccounts/$SA_NAME/token") || true
+        case "$code" in
+          200|201) jq -er .status.token /tmp/tokenresponse.json ;;
+          *) echo "TokenRequest ($1s, $2): HTTP $code" >&2; cat /tmp/tokenresponse.json >&2; return 1 ;;
+        esac
+      }
+
+      # claims TOKEN: the payload (base64url without padding) as JSON.
+      claims() {
+        p=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+        case $(( $${#p} % 4 )) in 2) p="$p==" ;; 3) p="$p=" ;; esac
+        printf '%s' "$p" | base64 -d
+      }
+
+      # issued NAME TOKEN SECONDS BINDING: the apiserver issued exactly what
+      # was asked, or the bridge's answer would prove nothing.
+      issued() {
+        claims "$2" | jq -e --arg sub "system:serviceaccount:$ns:$SA_NAME" --arg aud "$aud" \
+            --argjson life "$3" --arg bind "$4" --arg pod "$POD_NAME" --arg uid "$POD_UID" '
+          .sub == $sub
+          and (.aud | if type == "array" then any(.[]; . == $aud) else . == $aud end)
+          and .exp - .iat == $life
+          and (if $bind == "pod"
+               then .["kubernetes.io"].pod.name == $pod and .["kubernetes.io"].pod.uid == $uid
+               else .["kubernetes.io"].pod == null end)' >/dev/null \
+          || { echo "$1: the apiserver did not issue it as requested (subject, audience, $3s lifetime, binding $4)"; exit 1; }
+      }
+
+      # post MARKER TOKEN: ask the bridge, print the HTTP status. The image
+      # is only an audit marker; the harness finds it in the bridge log.
+      post() {
+        curl -sS -o /tmp/response -w '%%{http_code}' --cacert /tmp/bridge-ca.crt \
+          -H "Authorization: Bearer $2" -H 'Content-Type: application/json' \
+          --data "{\"image\":\"token-check/$1\"}" "$url"
+      }
+
+      # The control. The response carries a live password: only its shape
+      # is checked, and it is never printed.
+      tok=$(mint 3600 pod)
+      issued "pod-bound 1h token" "$tok" 3600 pod
+      code=$(post bound-1h "$tok") || true
+      if [ "$code" != 200 ]; then
+        echo "pod-bound 1h token: HTTP $code, want 200: $(cat /tmp/response 2>/dev/null)"; exit 1
+      fi
+      if ! jq -e --arg robot "$robot" '(.username | endswith($robot))
+          and (.password | type == "string" and length > 0)
+          and (.expires_in | type == "number") and .cache_key_type == "Registry"' /tmp/response >/dev/null; then
+        rm -f /tmp/response; echo "pod-bound 1h token: HTTP 200, but not with the credentials of $robot"; exit 1
+      fi
+      rm -f /tmp/response
+      echo "pod-bound 1h token: 200 with the credentials of $robot"
+
+      # refused MARKER NAME SECONDS BINDING
+      refused() {
+        tok=$(mint "$3" "$4")
+        issued "$2" "$tok" "$3" "$4"
+        code=$(post "$1" "$tok") || true
+        if [ "$code" = 200 ]; then
+          rm -f /tmp/response; echo "$2: ACCEPTED with HTTP 200, want 401"; exit 1
+        fi
+        body=$(cat /tmp/response 2>/dev/null || true)
+        if [ "$code" != 401 ] || [ "$body" != "invalid token" ]; then
+          echo "$2: HTTP $code ($body), want 401 invalid token"; exit 1
+        fi
+        echo "$2: 401 invalid token"
+      }
+      refused unbound-1h "unbound 1h token" 3600 none
+      refused bound-2h "pod-bound 2h token" 7200 pod
+    SH
+    ]
+    expect_bridge_log = [
+      ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"token-check/bound-1h\"", "\"harboraccess\":\"${run.bridge_upgrade.namespace}/token-check\"", "\"pod\":\"token-rejection-"],
+      ["\"logger\":\"audit\"", "\"msg\":\"credential denied\"", "\"requested_image\":\"token-check/unbound-1h\"", "\"category\":\"not_pod_bound\""],
+      ["\"logger\":\"audit\"", "\"msg\":\"credential denied\"", "\"requested_image\":\"token-check/bound-2h\"", "\"category\":\"excessive_lifetime\""],
+    ]
+    timeout_seconds  = 180
+    fail_message     = "ADR-0028: the bridge accepted an unbound or longer-than-1h token, refused a pod-bound 1h token, or did not log the decision with its category (see pod.log and bridge.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
