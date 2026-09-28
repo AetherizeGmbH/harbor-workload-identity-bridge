@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -27,7 +28,10 @@ const maxHostFileSize = 64 << 20
 // replaces. Before this check a planted symlink such as
 // `harbor-bridge-ca.crt.bak -> ../../cron.d/x` turned the next install
 // into a root write (or, for the read side, a copy of any host file into
-// a world-readable backup) anywhere on the node.
+// a world-readable backup) anywhere on the node. plugin.hostConfigDir
+// itself is opened component by component (openNodeDir): a release's
+// plugin.hostConfigDir can sit inside another release's, whose sync
+// container could otherwise replace it with a symlink.
 
 // readHostFile returns the content of the regular file at path. A missing
 // file returns an error that matches fs.ErrNotExist.
@@ -37,7 +41,13 @@ func readHostFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
-	f, err := openRegular(root, filepath.Base(path))
+	return readFileIn(root, filepath.Base(path))
+}
+
+// readFileIn returns the content of the regular file name in root. A
+// missing file returns an error that matches fs.ErrNotExist.
+func readFileIn(root *os.Root, name string) ([]byte, error) {
+	f, err := openRegular(root, name)
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +103,110 @@ func readAllCapped(f *os.File) ([]byte, error) {
 	return data, nil
 }
 
+// isExecutableHostFile reports whether path is a regular file with an
+// execute bit, without following a symlink in its last component.
+func isExecutableHostFile(path string) bool {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	fi, err := root.Lstat(filepath.Base(path))
+	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
+}
+
+// isRegularHostFile reports whether path is a regular file, without
+// following a symlink in its last component.
+func isRegularHostFile(path string) bool {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	fi, err := root.Lstat(filepath.Base(path))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// mkdirNodeDir creates the node directory dir (a host path) and its
+// parents when missing, with the node's usual mode (/etc/kubernetes is
+// 0755). It follows symlinks: the directories it is used for must be
+// outside what a pod on the node can write. plugin.hostConfigDir, which
+// every release's sync container writes, and whose parent can be another
+// release's plugin.hostConfigDir, goes through openNodeDir instead.
+func mkdirNodeDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	return nil
+}
+
+// openNodeDir opens the node directory nodeDir (an absolute, clean node
+// path) under hostRoot, the container path of the node's "/", and creates
+// it and its missing parents with the node's usual mode (0755). Every
+// component of nodeDir must be a directory, never a symlink: os.MkdirAll
+// and os.OpenRoot follow symlinks in a directory path, and os.Root follows
+// one that stays inside the directory it was opened on. A pod that can
+// write a parent of nodeDir (for plugin.hostConfigDir, the sync container
+// of a release whose plugin.hostConfigDir contains it) could otherwise
+// replace nodeDir with a symlink and send this installer's root writes into
+// a directory of its choice. Each component is opened relative to the one
+// before it and must be the directory Lstat saw (os.SameFile), so a swap
+// between the check and the open fails too. hostRoot itself is trusted.
+func openNodeDir(hostRoot, nodeDir string) (*os.Root, error) {
+	root, err := os.OpenRoot(hostRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", hostRoot, err)
+	}
+	for _, name := range strings.Split(strings.TrimPrefix(nodeDir, "/"), "/") {
+		if name == "" {
+			continue
+		}
+		next, err := openSubdir(root, name)
+		_ = root.Close()
+		if err != nil {
+			return nil, fmt.Errorf("open node directory %s: %w", nodeDir, err)
+		}
+		root = next
+	}
+	return root, nil
+}
+
+// openSubdir opens the directory name in parent, creating it when missing,
+// and refuses a symlink or anything else that is not a directory
+// (openNodeDir).
+func openSubdir(parent *os.Root, name string) (*os.Root, error) {
+	lfi, err := parent.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := parent.Mkdir(name, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return nil, err
+		}
+		lfi, err = parent.Lstat(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if lfi.Mode()&fs.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to follow symlink %s in %s", name, parent.Name())
+	}
+	if !lfi.IsDir() {
+		return nil, fmt.Errorf("%s in %s is not a directory (%s)", name, parent.Name(), lfi.Mode().Type())
+	}
+	dir, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := dir.Stat(".")
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if !os.SameFile(lfi, fi) {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s in %s changed while it was opened", name, parent.Name())
+	}
+	return dir, nil
+}
+
 // writeFileAtomic writes data to path via a same-directory temp file +
 // rename so a reader (kubelet, containerd) never sees a torn write.
 // When replacing different content it first preserves the old bytes at
@@ -102,17 +216,20 @@ func readAllCapped(f *os.File) ([]byte, error) {
 // instead of writing through it.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) (changed bool, err error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
-	// The parents are root-owned node directories (or the installer's
-	// own mount points), outside what a pod on the node can write.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, fmt.Errorf("mkdir %s: %w", dir, err)
+	if err := mkdirNodeDir(dir); err != nil {
+		return false, err
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return false, fmt.Errorf("open %s: %w", dir, err)
 	}
 	defer func() { _ = root.Close() }()
+	return writeFileIn(root, name, data, perm)
+}
 
+// writeFileIn is writeFileAtomic for the file name in the directory root.
+func writeFileIn(root *os.Root, name string, data []byte, perm os.FileMode) (changed bool, err error) {
+	path := filepath.Join(root.Name(), name)
 	f, err := openRegular(root, name)
 	switch {
 	case err == nil:
@@ -218,4 +335,14 @@ func copyFile(src, dst string, perm os.FileMode) (bool, error) {
 		return false, fmt.Errorf("read %s: %w", src, err)
 	}
 	return writeFileAtomic(dst, data, perm)
+}
+
+// copyFileIn copies src to the file name in the directory root atomically,
+// returning whether that file changed.
+func copyFileIn(src string, root *os.Root, name string, perm os.FileMode) (bool, error) {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", src, err)
+	}
+	return writeFileIn(root, name, data, perm)
 }

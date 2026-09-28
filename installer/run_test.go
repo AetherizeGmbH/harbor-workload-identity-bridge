@@ -71,6 +71,10 @@ func (f *fakeKubelet) state(string) (string, error) {
 	return st, nil
 }
 
+// newTestEnv builds a fake node. kubeletCmdline is the command line of the
+// running kubelet; nil means no kubelet process at all, which only none
+// mode and merge mode with explicit targets get by with (patch mode reads
+// kubelet's wiring before it writes, checkRewire).
 func newTestEnv(t *testing.T, mode string, kubeletCmdline []string) *testEnv {
 	t.Helper()
 	root := t.TempDir()
@@ -108,15 +112,25 @@ func newTestEnv(t *testing.T, mode string, kubeletCmdline []string) *testEnv {
 		SourceCA:         filepath.Join(src, "tls", "ca.crt"),
 		SourceClientCert: filepath.Join(src, "mtls", "tls.crt"),
 		SourceClientKey:  filepath.Join(src, "mtls", "tls.key"),
-		ProviderName:     "harbor-bridge-plugin",
+		ProviderName:     defaultProviderName,
 		KubeletUnit:      "kubelet",
 		StateDir:         "/var/lib/harbor-bridge",
 		ProcRoot:         fakeProc(t, procs),
 		verify:           verifyTiming{timeout: time.Second, interval: time.Millisecond, settle: time.Millisecond},
+		lockTimeout:      10 * time.Second,
 	}}
+	// Every systemd node has /run, where the node lock lives.
+	if err := os.MkdirAll(env.cfg.hostPath("/run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	env.kubelet = &fakeKubelet{t: t, env: env, baseArgs: base}
 	env.cfg.kubelet = env.kubelet
 	return env
+}
+
+// statePath is where this env's installer keeps its state file.
+func (e *testEnv) statePath() string {
+	return e.cfg.hostPath(filepath.Join(e.cfg.StateDir, e.cfg.files().State))
 }
 
 func (e *testEnv) hostFile(t *testing.T, nodePath string) string {
@@ -129,7 +143,7 @@ func (e *testEnv) hostFile(t *testing.T, nodePath string) string {
 }
 
 func TestRun_PatchFirstInstallThenIdempotent(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 
 	if err := run(env.cfg); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -161,7 +175,7 @@ func TestRun_PatchFirstInstallThenIdempotent(t *testing.T) {
 }
 
 func TestRun_PatchPreservesOperatorArgs(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	envPath := env.cfg.hostPath(defaultKubeletPath)
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -182,7 +196,7 @@ func TestRun_PatchPreservesOperatorArgs(t *testing.T) {
 }
 
 func TestRun_PatchConfigChangeRestarts(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -200,13 +214,13 @@ func TestRun_PatchConfigChangeRestarts(t *testing.T) {
 }
 
 func TestRun_PatchCrashWindowRetriesRestart(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate the crash between write and restart on a previous pass:
 	// files are current but the state file records nothing.
-	if err := os.Remove(env.cfg.hostPath(filepath.Join(env.cfg.StateDir, stateFileName))); err != nil {
+	if err := os.Remove(env.statePath()); err != nil {
 		t.Fatal(err)
 	}
 	if err := run(env.cfg); err != nil {
@@ -223,13 +237,7 @@ func TestRun_AutoResolvesToMergeAndPreservesCloudProvider(t *testing.T) {
 		"--image-credential-provider-bin-dir=/cloud/bin",
 		"--image-credential-provider-config=/cloud/config.json",
 	})
-	cloudCfg := env.cfg.hostPath("/cloud/config.json")
-	if err := os.MkdirAll(filepath.Dir(cloudCfg), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cloudCfg, []byte(eksConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.json", eksConfig)
 
 	if err := run(env.cfg); err != nil {
 		t.Fatalf("merge run: %v", err)
@@ -300,13 +308,7 @@ func TestRun_MergeExplicitOverridesSkipDiscovery(t *testing.T) {
 	env := newTestEnv(t, modeMerge, nil)
 	env.cfg.MergeBinDir = "/cloud/bin"
 	env.cfg.MergeConfigFile = "/cloud/config.yaml"
-	cloudCfg := env.cfg.hostPath("/cloud/config.yaml")
-	if err := os.MkdirAll(filepath.Dir(cloudCfg), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cloudCfg, []byte(gkeConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeCloudConfig(t, env, "/cloud/bin", "/cloud/config.yaml", gkeConfig)
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +332,7 @@ func TestRun_NoneInstallsFilesOnly(t *testing.T) {
 	if _, err := os.Stat(env.cfg.hostPath(defaultKubeletPath)); err == nil {
 		t.Fatal("mode none must not touch /etc/default/kubelet")
 	}
-	if _, err := os.Stat(env.cfg.hostPath(filepath.Join(env.cfg.StateDir, stateFileName))); err == nil {
+	if _, err := os.Stat(env.statePath()); err == nil {
 		t.Fatal("mode none must not write a state file")
 	}
 }
@@ -396,13 +398,55 @@ func TestLoadConfig_Validation(t *testing.T) {
 		"shell in unit name":   {"KUBELET_UNIT": "kubelet; reboot"},
 		"option as unit name":  {"KUBELET_UNIT": "--help"},
 		"relative merge paths": {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "bin", "INSTALL_MERGE_CONFIG_FILE": "/c.yaml"},
+		"provider name dot":    {"PROVIDER_NAME": "harbor.bridge"},
+		"provider name slash":  {"PROVIDER_NAME": "../kubelet"},
 	} {
 		if _, err := loadConfig(env(withBase(extra))); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := loadConfig(env(base)); err != nil {
+	// plugin.hostConfigDir is writable by every release's sync container:
+	// no bin dir or state dir in reach of it.
+	for name, extra := range map[string]map[string]string{
+		"bin dir equals config dir":        {"HOST_BIN_DIR": "/c"},
+		"bin dir inside config dir":        {"HOST_BIN_DIR": "/c/bin"},
+		"config dir inside bin dir":        {"HOST_BIN_DIR": "/c", "HOST_CONFIG_DIR": "/c/config"},
+		"merge bin dir inside config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/c/bin", "INSTALL_MERGE_CONFIG_FILE": "/x.yaml"},
+		"merge bin dir equals config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/c", "INSTALL_MERGE_CONFIG_FILE": "/x.yaml"},
+		"merge config inside config dir":   {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/x", "INSTALL_MERGE_CONFIG_FILE": "/c/credential-provider-config.yaml"},
+		"merge config deep in config dir":  {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/x", "INSTALL_MERGE_CONFIG_FILE": "/c/a/b.yaml"},
+		"state dir equals config dir":      {"STATE_DIR": "/c"},
+		"state dir inside config dir":      {"STATE_DIR": "/c/state"},
+		"default state dir in config dir":  {"HOST_CONFIG_DIR": "/var/lib"},
+		"config dir inside bin dir (deep)": {"HOST_BIN_DIR": "/opt", "HOST_CONFIG_DIR": "/opt/a/b"},
+	} {
+		if _, err := loadConfig(env(withBase(extra))); err == nil || !strings.Contains(err.Error(), "must not be") {
+			t.Errorf("%s: got %v, want an overlap refusal", name, err)
+		}
+	}
+	// Per path segment: a shared string prefix is no overlap, and the
+	// state dir may be a parent of the config dir.
+	for name, extra := range map[string]map[string]string{
+		"chart defaults":             {"HOST_BIN_DIR": "/etc/kubernetes/credential-provider", "HOST_CONFIG_DIR": "/etc/kubernetes/credential-provider-config"},
+		"config dir name extends":    {"HOST_BIN_DIR": "/c", "HOST_CONFIG_DIR": "/cc"},
+		"state dir above config dir": {"STATE_DIR": "/var/lib", "HOST_CONFIG_DIR": "/var/lib/hb"},
+		"state dir name extends":     {"STATE_DIR": "/c-state"},
+		"merge config next to it":    {"INSTALL_MODE": "merge", "INSTALL_MERGE_BIN_DIR": "/x", "INSTALL_MERGE_CONFIG_FILE": "/c.yaml"},
+	} {
+		if _, err := loadConfig(env(withBase(extra))); err != nil {
+			t.Errorf("%s: refused: %v", name, err)
+		}
+	}
+	if c, err := loadConfig(env(base)); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
+	} else if c.ProviderName != defaultProviderName || c.SourceConfig != "/config/credential-provider-config.yaml" {
+		t.Fatalf("default provider name = %q, rendered config at %q", c.ProviderName, c.SourceConfig)
+	}
+	// A non-default name reads the rendered config where the chart puts it
+	// for such a name and installers before ADR-0029 never look.
+	if c, err := loadConfig(env(withBase(map[string]string{"PROVIDER_NAME": "harbor-bridge-eu"}))); err != nil ||
+		c.ProviderName != "harbor-bridge-eu" || c.SourceConfig != "/config-v2/credential-provider-config.v2.yaml" {
+		t.Fatalf("PROVIDER_NAME not taken: %+v, %v", c, err)
 	}
 	if _, err := loadConfig(env(map[string]string{"INSTALL_MODE": "yolo", "HOST_BIN_DIR": "/b", "HOST_CONFIG_DIR": "/c"})); err == nil {
 		t.Fatal("invalid mode must fail")
@@ -422,37 +466,68 @@ func TestLoadConfig_Validation(t *testing.T) {
 }
 
 func TestStateRoundtripAndCorruption(t *testing.T) {
-	dir := t.TempDir()
-	want := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "h"}
-	if err := saveState(dir, want); err != nil {
+	path := filepath.Join(t.TempDir(), "installer-state.json")
+	want := target{mode: modePatch, binDir: "/b", configFile: "/c", entryHash: "e", fileHash: "f"}
+	if err := saveState(path, want.state()); err != nil {
 		t.Fatal(err)
 	}
-	got, err := loadState(dir)
+	got, err := loadState(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.matches(modePatch, "/b", "/c", "h") {
+	if !got.matches(want) {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
-	if got.matches(modeMerge, "/b", "/c", "h") {
+	if got.AppliedHash != "f" || got.EntryHash != "e" {
+		t.Fatalf("appliedHash must stay the whole-file hash and entryHash the entry hash: %+v", got)
+	}
+	if got.matchesLegacy(want) {
+		t.Fatal("a record with an entry hash must not match as legacy")
+	}
+	otherMode := want
+	otherMode.mode = modeMerge
+	if got.matches(otherMode) {
 		t.Fatal("matches must be mode-sensitive")
+	}
+	otherEntry := want
+	otherEntry.entryHash = "e2"
+	if got.matches(otherEntry) {
+		t.Fatal("matches must compare the entry hash")
+	}
+	otherFile := want
+	otherFile.fileHash = "f2"
+	if !got.matches(otherFile) {
+		t.Fatal("another install's change to the shared file must not count")
+	}
+
+	// A record without entryHash is from an installer before ADR-0029 (or
+	// an older one after a rollback): it matches only the whole-file hash.
+	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f"}
+	if err := saveState(path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = loadState(path); err != nil {
+		t.Fatal(err)
+	}
+	if got.matches(want) || !got.matchesLegacy(want) {
+		t.Fatalf("legacy record: matches=%v matchesLegacy=%v", got.matches(want), got.matchesLegacy(want))
 	}
 
 	// Corrupt state must degrade to nil, not error.
-	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte("{nope"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("{nope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err = loadState(dir)
+	got, err = loadState(path)
 	if err != nil || got != nil {
 		t.Fatalf("corrupt state must load as nil, got %+v err %v", got, err)
 	}
 
 	// Absent state → nil, no error. (*state)(nil).matches must be safe.
-	got, err = loadState(t.TempDir())
+	got, err = loadState(filepath.Join(t.TempDir(), "installer-state.json"))
 	if err != nil || got != nil {
 		t.Fatalf("absent state must load as nil, got %+v err %v", got, err)
 	}
-	if got.matches(modePatch, "/b", "/c", "h") {
+	if got.matches(want) || got.matchesLegacy(want) {
 		t.Fatal("nil state must not match")
 	}
 }
@@ -489,7 +564,7 @@ func TestRun_AutoStaysPatchAfterOwnInstall(t *testing.T) {
 	if env.restarts != 1 {
 		t.Fatalf("no-op re-roll restarted kubelet (restarts = %d)", env.restarts)
 	}
-	st, err := loadState(env.cfg.hostPath(env.cfg.StateDir))
+	st, err := loadState(env.statePath())
 	if err != nil || st == nil || st.Mode != modePatch {
 		t.Fatalf("state mode = %+v (err %v), want patch", st, err)
 	}
@@ -502,13 +577,13 @@ func TestRun_AutoStaysPatchAfterOwnInstall(t *testing.T) {
 // restart succeeds even when kubelet then crash-loops. The install must
 // fail and must not record success.
 func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.states = []string{"activating", "failed"}
 	err := run(env.cfg)
 	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
 		t.Fatalf("got %v, want a verification failure", err)
 	}
-	if st, _ := loadState(env.cfg.hostPath(env.cfg.StateDir)); st != nil {
+	if st, _ := loadState(env.statePath()); st != nil {
 		t.Fatal("success state recorded for an unverified restart")
 	}
 }
@@ -516,7 +591,7 @@ func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
 // TestRun_RestartVerification_FlapAfterActiveIsCaught: "active" once is not
 // enough — the unit must still be active after the settle period.
 func TestRun_RestartVerification_FlapAfterActiveIsCaught(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.states = []string{"active", "failed"}
 	if err := run(env.cfg); err == nil {
 		t.Fatal("a kubelet that fails right after reporting active passed verification")
@@ -527,7 +602,7 @@ func TestRun_RestartVerification_FlapAfterActiveIsCaught(t *testing.T) {
 // source /etc/default/kubelet, the flags never reach kubelet. Before, the
 // install "succeeded" and the plugin was silently never invoked.
 func TestRun_PatchVerification_UnitIgnoresEnvFile(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.ignoreEnvFile = true
 	err := run(env.cfg)
 	if err == nil || !strings.Contains(err.Error(), "does the kubelet unit source") {
@@ -536,12 +611,12 @@ func TestRun_PatchVerification_UnitIgnoresEnvFile(t *testing.T) {
 }
 
 func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.restartErr = errors.New("systemctl: unit not found")
 	if err := run(env.cfg); err == nil {
 		t.Fatal("restart failure swallowed")
 	}
-	if st, _ := loadState(env.cfg.hostPath(env.cfg.StateDir)); st != nil {
+	if st, _ := loadState(env.statePath()); st != nil {
 		t.Fatal("success state recorded although the restart failed")
 	}
 }
@@ -549,7 +624,7 @@ func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
 // TestRun_UnwritableStateDir_NoRestart: a state dir that cannot be written
 // would otherwise restart kubelet on every re-roll forever.
 func TestRun_UnwritableStateDir_NoRestart(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	stateParent := filepath.Dir(env.cfg.hostPath(env.cfg.StateDir))
 	if err := os.MkdirAll(stateParent, 0o755); err != nil {
 		t.Fatal(err)
@@ -588,7 +663,7 @@ func TestRun_MergeRefusalLeavesNoHalfInstall(t *testing.T) {
 }
 
 func TestRun_PatchRefusalLeavesNoHalfInstall(t *testing.T) {
-	env := newTestEnv(t, modePatch, nil)
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	envPath := env.cfg.hostPath(defaultKubeletPath)
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -647,5 +722,27 @@ func TestRunSync_RejectsNonPositiveInterval(t *testing.T) {
 	env.cfg.SyncInterval = 0
 	if err := runSync(context.Background(), env.cfg); err == nil {
 		t.Fatal("zero interval accepted")
+	}
+}
+
+// TestRun_MergeRefusesAConfigDirectory: kubelet 1.34+ accepts a directory
+// for --image-credential-provider-config. The installer does not merge
+// into one; it says so before it writes anything next to it, not even a
+// lock file.
+func TestRun_MergeRefusesAConfigDirectory(t *testing.T) {
+	env := newTestEnv(t, modeMerge, nil)
+	env.cfg.MergeBinDir = "/cloud/bin"
+	env.cfg.MergeConfigFile = "/cloud/providers.d"
+	if err := os.MkdirAll(env.cfg.hostPath("/cloud/providers.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("got %v, want a refusal naming the directory", err)
+	}
+	for _, p := range []string{"/cloud/providers.d.lock", "/cloud/bin/harbor-bridge-plugin"} {
+		if _, err := os.Lstat(env.cfg.hostPath(p)); !os.IsNotExist(err) {
+			t.Errorf("%s written although the merge was refused (err %v)", p, err)
+		}
 	}
 }

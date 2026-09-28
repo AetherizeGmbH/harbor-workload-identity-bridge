@@ -28,6 +28,17 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   Service's DNS name, because the node IP is not in the certificate.
 - The bridge and plugin images must come from a registry outside
   `plugin.matchImages` (the chart refuses otherwise; ADR-0021).
+- In auto/merge mode kubelet's `--image-credential-provider-config` must name a
+  file. Kubelet 1.34+ also accepts a directory of config files; the installer
+  refuses to merge into one. Point the flag at a file, or put the entry into a
+  file of that directory by other means and set `plugin.enabled: false`. Never
+  make that directory `plugin.hostConfigDir`: every release's sync container
+  can write `plugin.hostConfigDir`, kubelet loads every `*.yaml`, `*.yml` and
+  `*.json` file of the directory at every start, and no installer pass removes
+  a file planted there.
+- Several releases of the chart on one cluster (one per bridge) each need their
+  own `plugin.providerName` and share kubelet's config and bin dir (README,
+  "Several installs per cluster"; ADR-0029).
 
 ## Managed clouds: what to expect
 

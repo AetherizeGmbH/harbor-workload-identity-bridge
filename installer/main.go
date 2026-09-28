@@ -24,6 +24,11 @@
 // idempotency via a host state file). CA/mTLS rotation and binary
 // updates never restart kubelet.
 //
+// Several installs of the chart can share a node (ADR-0029): each has its
+// own provider name (PROVIDER_NAME), entry, binary and files, owns only its
+// own entry in the shared credential-provider config, and edits the shared
+// files and restarts kubelet only under a node-wide lock (lock.go).
+//
 // With --sync the installer instead runs as the DaemonSet's
 // long-running container: it re-copies the CA/mTLS files to the host
 // whenever the mounted Secret volumes rotate. It never touches kubelet.
@@ -36,6 +41,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -95,18 +101,22 @@ type config struct {
 	StateDir    string // STATE_DIR: node path, default /var/lib/harbor-bridge.
 	NodeIP      string // NODE_IP: substituted for the literal $(NODE_IP) in the rendered config.
 
+	// ProviderName names this install's provider entry and plugin binary,
+	// and derives its other node files (filesFor, ADR-0029).
+	ProviderName string // PROVIDER_NAME, default harbor-bridge-plugin.
+
 	// Fixed locations inside the plugin image / pod.
 	SourcePlugin     string
 	SourceConfig     string
 	SourceCA         string
 	SourceClientCert string
 	SourceClientKey  string
-	ProviderName     string
 	ProcRoot         string
 	SyncInterval     time.Duration
 
-	kubelet kubeletControl
-	verify  verifyTiming
+	kubelet     kubeletControl
+	verify      verifyTiming
+	lockTimeout time.Duration
 }
 
 func loadConfig(getenv func(string) string) (*config, error) {
@@ -127,17 +137,18 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		KubeletUnit:      def("KUBELET_UNIT", "kubelet"),
 		StateDir:         def("STATE_DIR", "/var/lib/harbor-bridge"),
 		NodeIP:           getenv("NODE_IP"),
+		ProviderName:     def("PROVIDER_NAME", defaultProviderName),
 		SourcePlugin:     "/plugin/harbor-bridge-plugin",
-		SourceConfig:     "/config/credential-provider-config.yaml",
 		SourceCA:         "/tls/ca.crt",
 		SourceClientCert: "/mtls/tls.crt",
 		SourceClientKey:  "/mtls/tls.key",
-		ProviderName:     "harbor-bridge-plugin",
 		ProcRoot:         "/proc",
 		SyncInterval:     60 * time.Second,
 		kubelet:          nsenterControl{},
 		verify:           defaultVerifyTiming,
+		lockTimeout:      defaultLockTimeout,
 	}
+	c.SourceConfig = sourceConfigPath(c.ProviderName)
 	switch c.Mode {
 	case modeAuto, modeMerge, modePatch, modeNone:
 	default:
@@ -163,8 +174,29 @@ func loadConfig(getenv func(string) string) (*config, error) {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 	}
+	// plugin.hostConfigDir is writable by the sync container of every
+	// release (and any pod with a hostPath on it). The bin dir holds the
+	// binaries kubelet runs, which the installer also takes as proof of
+	// another install's entry (siblingIn), and the state file decides
+	// about kubelet restarts: neither may be where those writers reach.
+	for name, dir := range map[string]string{"HOST_BIN_DIR": c.HostBinDir, "INSTALL_MERGE_BIN_DIR": c.MergeBinDir} {
+		if dir != "" && dirsOverlap(dir, c.HostConfigDir) {
+			return nil, fmt.Errorf("%s %q and HOST_CONFIG_DIR %q must not be the same directory or inside one another: every release's sync container can write HOST_CONFIG_DIR", name, dir, c.HostConfigDir)
+		}
+	}
+	if withinDir(c.StateDir, c.HostConfigDir) {
+		return nil, fmt.Errorf("STATE_DIR %q must not be HOST_CONFIG_DIR %q or inside it: every release's sync container can write HOST_CONFIG_DIR", c.StateDir, c.HostConfigDir)
+	}
+	// The merge target is a cloud's config, whose entries merge mode keeps
+	// as they are; kubelet runs them after this installer's restart.
+	if c.MergeConfigFile != "" && withinDir(c.MergeConfigFile, c.HostConfigDir) {
+		return nil, fmt.Errorf("INSTALL_MERGE_CONFIG_FILE %q must not be inside HOST_CONFIG_DIR %q: every release's sync container can write HOST_CONFIG_DIR; the chart-owned config there is for patch and none mode", c.MergeConfigFile, c.HostConfigDir)
+	}
 	if err := validUnitName(c.KubeletUnit); err != nil {
 		return nil, fmt.Errorf("KUBELET_UNIT: %w", err)
+	}
+	if err := validProviderName(c.ProviderName); err != nil {
+		return nil, fmt.Errorf("PROVIDER_NAME: %w", err)
 	}
 	return c, nil
 }
@@ -185,10 +217,52 @@ func validNodePath(p string) error {
 	return nil
 }
 
+// withinDir reports whether the node path p is dir or inside it. Both are
+// clean absolute paths (validNodePath); the comparison is per path
+// segment, so /a/b-c is not inside /a/b.
+func withinDir(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, dir+"/")
+}
+
+// dirsOverlap reports whether one of the node directories a and b is the
+// other or inside it.
+func dirsOverlap(a, b string) bool {
+	return withinDir(a, b) || withinDir(b, a)
+}
+
 // hostPath maps a node path to the path the container reads/writes it
 // at, under the HostRoot mount.
 func (c *config) hostPath(nodePath string) string {
 	return filepath.Join(c.HostRoot, filepath.Clean("/"+nodePath))
+}
+
+// openConfigDir opens plugin.hostConfigDir, creating it when missing, and
+// refuses a symlink in its path (openNodeDir): the sync container of every
+// release writes it, and a release's plugin.hostConfigDir can sit inside
+// another's.
+func (c *config) openConfigDir() (*os.Root, error) {
+	return openNodeDir(c.HostRoot, c.HostConfigDir)
+}
+
+// openDirOf opens the directory of the node path p: plugin.hostConfigDir
+// through openConfigDir, any other directory as it is, created when missing
+// if create is set (mkdirNodeDir).
+func (c *config) openDirOf(p string, create bool) (*os.Root, error) {
+	dir := filepath.Dir(p)
+	if dir == c.HostConfigDir {
+		return c.openConfigDir()
+	}
+	if create {
+		if err := mkdirNodeDir(c.hostPath(dir)); err != nil {
+			return nil, err
+		}
+	}
+	return os.OpenRoot(c.hostPath(dir))
+}
+
+// files returns this install's own node file names.
+func (c *config) files() nodeFiles {
+	return filesFor(c.ProviderName)
 }
 
 func logf(format string, args ...any) {

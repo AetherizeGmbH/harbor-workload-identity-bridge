@@ -155,7 +155,9 @@ bridge:
 
   # Names this bridge among several (its HarborAccess finalizer is
   # harbor.aetherize.io/robot-<instance>). Used only with a selector.
-  # Empty = the release name. DNS label, at most 50 characters.
+  # Empty = the release name, never fullnameOverride: set it whenever
+  # fullnameOverride is what tells two releases apart. DNS label, at most
+  # 50 characters.
   instance: ""
   # Requests per second (and burst) the credential endpoint accepts from
   # one source IP before it answers 429. Kubelet calls through its node's
@@ -276,15 +278,57 @@ plugin:
     tag: ""
     # Pin by digest (sha256:...); kubelet runs this binary as root on
     # every node. When set, tag is ignored.
+    #
+    # The image also carries the node installer. With several installs
+    # per cluster (providerName, ADR-0029), every release's plugin image
+    # (tag or digest), not only the chart, must be a version with
+    # ADR-0029. An older installer with a non-default providerName fails
+    # before it touches the node (the pods stay in Init:CrashLoopBackOff);
+    # with the default name it rewrites the shared kubelet config in
+    # patch/none mode with only its own entry.
     digest: ""
     pullPolicy: IfNotPresent
+
+  # Name of this install's kubelet credential-provider entry and of the
+  # plugin binary on the nodes (kubelet runs <bin dir>/<name>). Change it
+  # only to run several installs of this chart on one cluster, one per
+  # bridge (ADR-0029): every install needs its own name. Other installs'
+  # entries stay, and so do the cloud's entries in merge mode; but the
+  # chart-owned config (patch/none mode, and merge mode when kubelet
+  # reads it) keeps only the entries of this chart's installs that their
+  # records vouch for and drops everything else (README, "The chart-owned
+  # config stays the chart's"). A DNS label: lower-case letters, digits
+  # and "-", at most 63 characters, as a string (quote a name YAML would
+  # read as a number or boolean, e.g. "123"; with --set, use
+  # --set-string). A name other than the default also names the
+  # install's other node files: <hostConfigDir>/<name>.ca.crt (and
+  # .client.crt/.client.key with mTLS) and
+  # <install.stateDir>/<name>.installer-state.json. Renaming an
+  # existing install leaves the old entry and files on the nodes (README,
+  # "Several installs per cluster").
+  providerName: harbor-bridge-plugin
 
   # Where on each node the plugin binary and config are written in
   # patch/none modes. In every mode hostConfigDir also carries the
   # bridge CA (and mTLS client pair) — the provider entry references
   # them by absolute path. In merge mode the binary and provider entry
   # instead go into the paths discovered from kubelet's own flags, so
-  # hostBinaryDir is unused there.
+  # hostBinaryDir is unused there. Several installs on one cluster share
+  # the config file in hostConfigDir (kubelet reads one): in patch/none
+  # mode they must use the same two directories. The sync container of
+  # every release can write hostConfigDir, so hostBinaryDir (and
+  # install.binDir) must not be hostConfigDir, inside it, or contain it;
+  # the chart and the installer refuse that (ADR-0029). hostBinaryDir
+  # must hold only this chart's plugins: each install keeps its binary
+  # and a record of its entry (<providerName>.entry) there, and trusts
+  # another install's entry only through them. A release with its own
+  # hostConfigDir (auto/merge mode) needs one disjoint from every other
+  # release's directories: not the same as, inside, or containing another
+  # release's hostConfigDir, hostBinaryDir, install.binDir or
+  # install.stateDir; the chart compares only this release's own
+  # (README, "Shared CA and mTLS files"). hostConfigDir must never be
+  # kubelet's credential-provider config directory (kubelet 1.34+): kubelet
+  # loads every config file there, which every sync container could plant.
   hostBinaryDir: /etc/kubernetes/credential-provider
   hostConfigDir: /etc/kubernetes/credential-provider-config
 
@@ -329,7 +373,10 @@ plugin:
     configFile: ""
     # Systemd unit the installer restarts.
     kubeletUnit: kubelet
-    # Node directory holding the installer's idempotency state file.
+    # Node directory holding the installer's idempotency state file
+    # (installer-state.json, or <providerName>.installer-state.json). Not
+    # hostConfigDir or a directory inside it (the chart refuses that): the
+    # state file decides about kubelet restarts.
     stateDir: /var/lib/harbor-bridge
 
   # URL the on-node plugin uses to reach the bridge. Empty renders the

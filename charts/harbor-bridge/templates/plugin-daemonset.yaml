@@ -208,6 +208,12 @@ same addressing works without a host-root mount.
   value: {{ .Values.plugin.install.kubeletUnit | quote }}
 - name: STATE_DIR
   value: {{ .Values.plugin.install.stateDir | quote }}
+{{- if not (include "harbor-bridge.plugin.legacyNames" .) }}
+{{- /* Rendered only for a non-default name, so the pod template of an
+       existing install stays as it was (ADR-0029). */}}
+- name: PROVIDER_NAME
+  value: {{ include "harbor-bridge.plugin.providerName" . | quote }}
+{{- end }}
 - name: NODE_IP
   valueFrom:
     fieldRef:
@@ -230,7 +236,7 @@ same addressing works without a host-root mount.
 {{/* Read-only inputs both containers copy from. */}}
 {{- define "harbor-bridge.plugin.sourceMounts" -}}
 - name: kubelet-config
-  mountPath: /config
+  mountPath: {{ include "harbor-bridge.plugin.configMountPath" . }}
   readOnly: true
 - name: tls
   mountPath: /tls

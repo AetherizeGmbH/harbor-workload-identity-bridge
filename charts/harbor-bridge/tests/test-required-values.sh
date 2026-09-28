@@ -43,6 +43,20 @@ cases=(
   "bridge.tokenValidation.maxLifetime zero|--set|bridge.tokenValidation.maxLifetime=0s|must be a positive Go duration"
   "bridge.tokenValidation.maxLifetime negative|--set|bridge.tokenValidation.maxLifetime=-1h|must be a positive Go duration"
   "bridge.tokenValidation.requirePodBinding not a boolean|--set-string|bridge.tokenValidation.requirePodBinding=yes|must be true or false"
+  "plugin.providerName with a dot|--set|plugin.providerName=harbor.bridge|plugin.providerName=\"harbor.bridge\" must be a DNS label"
+  "plugin.providerName with a path|--set|plugin.providerName=../kubelet|plugin.providerName=\"../kubelet\" must be a DNS label"
+  "plugin.providerName in upper case|--set|plugin.providerName=Harbor|plugin.providerName=\"Harbor\" must be a DNS label"
+  "plugin.providerName over 63 characters|--set|plugin.providerName=$(printf 'a%.0s' {1..64})|must be a DNS label (lower-case letters, digits and -, at most 63 characters): it names the kubelet"
+  "plugin.providerName empty|--set|plugin.providerName=|plugin.providerName=\"\" must be a DNS label"
+  "plugin.providerName checked with plugin.enabled=false|--set|plugin.enabled=false,plugin.providerName=a_b|plugin.providerName=\"a_b\" must be a DNS label"
+  "plugin.providerName read as a number|--set|plugin.providerName=123|plugin.providerName must be a string, but it was read as the int64 123"
+  "plugin.hostBinaryDir equal to plugin.hostConfigDir|--set|plugin.hostBinaryDir=/etc/kubernetes/credential-provider-config|plugin.hostBinaryDir=\"/etc/kubernetes/credential-provider-config\" and plugin.hostConfigDir=\"/etc/kubernetes/credential-provider-config\" must not be the same directory or inside one another"
+  "plugin.hostBinaryDir inside plugin.hostConfigDir|--set|plugin.hostBinaryDir=/etc/kubernetes/credential-provider-config/bin|must not be the same directory or inside one another"
+  "plugin.hostConfigDir inside plugin.hostBinaryDir|--set|plugin.hostConfigDir=/etc/kubernetes/credential-provider/config|must not be the same directory or inside one another"
+  "plugin.install.binDir inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/kubernetes/credential-provider-config/bin,plugin.install.configFile=/etc/cp.yaml|plugin.install.binDir=\"/etc/kubernetes/credential-provider-config/bin\" and plugin.hostConfigDir"
+  "plugin.install.stateDir equal to plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config|plugin.install.stateDir=\"/etc/kubernetes/credential-provider-config\" must not be plugin.hostConfigDir"
+  "plugin.install.stateDir inside plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config/state|must not be plugin.hostConfigDir"
+  "plugin.install.configFile inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml|plugin.install.configFile=\"/etc/kubernetes/credential-provider-config/credential-provider-config.yaml\" must not be inside plugin.hostConfigDir"
 )
 
 failed=0
@@ -98,6 +112,81 @@ if out=$(render -f "${TMP}/values-no-matchimages.yaml" --set plugin.enabled=fals
 else
   echo "FAIL  plugin.enabled=false without matchImages must render"
   echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# An unquoted yes in a values file is YAML's boolean true, not the name
+# "yes": refused, never rendered as the provider name "true" (ADR-0029).
+printf 'plugin:\n  providerName: yes\n' > "${TMP}/values-provider-yes.yaml"
+out=$(render -f "${COMPLETE}" -f "${TMP}/values-provider-yes.yaml" 2>&1 || true)
+if echo "${out}" | grep -qF "plugin.providerName must be a string, but it was read as the bool true"; then
+  echo "PASS  plugin.providerName: yes (unquoted) in a values file"
+else
+  echo "FAIL  plugin.providerName: yes (unquoted) in a values file"
+  echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# The same name as a string renders it in the entry and in every node path.
+if out=$(render -f "${COMPLETE}" --set-string plugin.providerName=123 2>&1) \
+   && echo "${out}" | grep -qF -- '- name: "123"' \
+   && echo "${out}" | grep -qF '/etc/kubernetes/credential-provider-config/123.ca.crt"' \
+   && ! echo "${out}" | grep -qF '%!'; then
+  echo "PASS  plugin.providerName=123 via --set-string renders the name everywhere"
+else
+  echo "FAIL  plugin.providerName=123 via --set-string renders the name everywhere"
+  echo "      got: ${out}" | grep -E 'name: "123"|ca.crt|%!|Error' | head -3
+  failed=$((failed+1))
+fi
+
+# ADR-0029: a non-default provider name publishes the rendered config under
+# a ConfigMap key and at a mount path that installers before ADR-0029 never
+# read (they read /config/credential-provider-config.yaml), so an older
+# plugin image fails at that read, before it writes anything on the node.
+# The default name keeps the layout every installer reads.
+out=$(render -f "${COMPLETE}" --set plugin.providerName=harbor-bridge-eu 2>&1 || true)
+if echo "${out}" | grep -qxF '  credential-provider-config.v2.yaml: |' \
+   && ! echo "${out}" | grep -qxF '  credential-provider-config.yaml: |' \
+   && [ "$(echo "${out}" | grep -cxE ' +mountPath: /config-v2')" -eq 2 ] \
+   && ! echo "${out}" | grep -qxE ' +mountPath: /config'; then
+  echo "PASS  non-default plugin.providerName: rendered config where older installers never read"
+else
+  echo "FAIL  non-default plugin.providerName: rendered config where older installers never read"
+  echo "${out}" | grep -E 'credential-provider-config|mountPath: /config|Error' | head -5
+  failed=$((failed+1))
+fi
+out=$(render -f "${COMPLETE}" 2>&1 || true)
+if echo "${out}" | grep -qxF '  credential-provider-config.yaml: |' \
+   && [ "$(echo "${out}" | grep -cxE ' +mountPath: /config')" -eq 2 ] \
+   && ! echo "${out}" | grep -qE 'config-v2|config\.v2'; then
+  echo "PASS  default plugin.providerName keeps the rendered config's layout"
+else
+  echo "FAIL  default plugin.providerName keeps the rendered config's layout"
+  failed=$((failed+1))
+fi
+
+# A missing plugin.providerName renders exactly the default. `helm upgrade
+# --reuse-values` from a chart before ADR-0029 renders with that chart's
+# values, which lack the key; a null value removes the key the same way.
+if out=$(render -f "${COMPLETE}" --set plugin.providerName=null 2>&1) \
+   && [ "${out}" = "$(render -f "${COMPLETE}")" ]; then
+  echo "PASS  missing plugin.providerName (--reuse-values) renders the default"
+else
+  echo "FAIL  missing plugin.providerName (--reuse-values) renders the default"
+  echo "      got: ${out}" | head -3
+  failed=$((failed+1))
+fi
+
+# The overlap check compares per path segment: the defaults
+# /etc/kubernetes/credential-provider and
+# /etc/kubernetes/credential-provider-config share a string prefix but no
+# directory, and the state dir may be a parent of plugin.hostConfigDir. A
+# merge config whose name merely extends plugin.hostConfigDir is not in it.
+if render -f "${COMPLETE}" --set plugin.install.stateDir=/etc/kubernetes > /dev/null 2>&1 \
+   && render -f "${COMPLETE}" --set plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config.yaml > /dev/null 2>&1; then
+  echo "PASS  plugin directories compared per path segment"
+else
+  echo "FAIL  plugin directories compared per path segment"
   failed=$((failed+1))
 fi
 

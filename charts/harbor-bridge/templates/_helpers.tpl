@@ -125,6 +125,19 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- default .Release.Name .Values.bridge.instance -}}
 {{- end -}}
 
+{{/*
+finalizer is the finalizer the bridge sets on the HarborAccess objects it
+manages: a per-instance one with a selector (ADR-0026,
+bridge/controlplane/config.go Finalizer).
+*/}}
+{{- define "harbor-bridge.finalizer" -}}
+{{- if .Values.bridge.harborAccessSelector -}}
+harbor.aetherize.io/robot-{{ include "harbor-bridge.instance" . }}
+{{- else -}}
+harbor.aetherize.io/robot
+{{- end -}}
+{{- end -}}
+
 {{- define "harbor-bridge.validateRequiredValues" -}}
 {{- if not .Values.clusterName -}}
 {{- fail "clusterName is REQUIRED. Set --set clusterName=<dns-label> or values.yaml. Must be unique across clusters sharing one Harbor (ADR-0009)." -}}
@@ -178,6 +191,14 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
+{{- $rawProviderName := .Values.plugin.providerName -}}
+{{- if not (or (kindIs "invalid" $rawProviderName) (kindIs "string" $rawProviderName)) -}}
+{{- fail (printf "plugin.providerName must be a string, but it was read as the %s %v: values files and --set read unquoted values such as 123, 1e3, yes or on as numbers or booleans. Quote the name in the values file (providerName: \"123\") or pass it with --set-string (ADR-0029)." (kindOf $rawProviderName) $rawProviderName) -}}
+{{- end -}}
+{{- $providerName := include "harbor-bridge.plugin.providerName" . -}}
+{{- if or (gt (len $providerName) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $providerName)) -}}
+{{- fail (printf "plugin.providerName=%q must be a DNS label (lower-case letters, digits and -, at most 63 characters): it names the kubelet credential-provider entry and the plugin binary on every node. Keep the default harbor-bridge-plugin unless you run several installs per cluster; then give each its own name, e.g. harbor-bridge-eu (ADR-0029)." $providerName) -}}
+{{- end -}}
 {{- if .Values.tls.enabled -}}
 {{- if not .Values.tls.issuerRef.name -}}
 {{- fail "tls.issuerRef.name is REQUIRED when tls.enabled=true. Provide a cert-manager (Cluster)Issuer." -}}
@@ -211,6 +232,25 @@ selector string (sorted k=v pairs); the bridge validates the syntax.
 {{- if and $v (or (not (regexMatch "^/[A-Za-z0-9._/-]+$" (toString $v))) (contains "/../" (printf "%s/" $v)) (contains "/./" (printf "%s/" $v)) (contains "//" (toString $v)) (hasSuffix "/" (toString $v))) -}}
 {{- fail (printf "%s=%q must be an absolute, clean node path (letters, digits and . _ - / only)." $k (toString $v)) -}}
 {{- end -}}
+{{- end -}}
+{{- /* plugin.hostConfigDir is writable by the sync container of every
+       release. The installer trusts the plugin binaries and entry records
+       in the bin dir, and its state file decides about kubelet restarts, so
+       neither may be in reach of it (ADR-0029). plugin.install.configFile
+       names a cloud's config, whose entries merge mode keeps as they are,
+       so it may not be inside it either. Compared per path segment:
+       /a/b-c is not inside /a/b. The installer checks the same (loadConfig). */}}
+{{- $configDir := .Values.plugin.hostConfigDir -}}
+{{- range $k, $v := dict "plugin.hostBinaryDir" .Values.plugin.hostBinaryDir "plugin.install.binDir" $install.binDir -}}
+{{- if and $v $configDir (or (eq $v $configDir) (hasPrefix (printf "%s/" $v) $configDir) (hasPrefix (printf "%s/" $configDir) $v)) -}}
+{{- fail (printf "%s=%q and plugin.hostConfigDir=%q must not be the same directory or inside one another: the sync container of every release can write plugin.hostConfigDir, and the installer trusts what is in the plugin bin dir (ADR-0029)." $k (toString $v) $configDir) -}}
+{{- end -}}
+{{- end -}}
+{{- if and $install.stateDir $configDir (or (eq $install.stateDir $configDir) (hasPrefix (printf "%s/" $configDir) (toString $install.stateDir))) -}}
+{{- fail (printf "plugin.install.stateDir=%q must not be plugin.hostConfigDir=%q or inside it: the sync container of every release can write plugin.hostConfigDir, and the state file decides about kubelet restarts (ADR-0029)." (toString $install.stateDir) $configDir) -}}
+{{- end -}}
+{{- if and $install.configFile $configDir (hasPrefix (printf "%s/" $configDir) (toString $install.configFile)) -}}
+{{- fail (printf "plugin.install.configFile=%q must not be inside plugin.hostConfigDir=%q: the sync container of every release can write plugin.hostConfigDir, and merge mode keeps every other entry of that config for kubelet (ADR-0029). The chart-owned config there is for plugin.install.mode=patch or none." (toString $install.configFile) $configDir) -}}
 {{- end -}}
 {{- if not .Values.plugin.allowSelfMatchImages -}}
 {{- $pluginHost := include "harbor-bridge.registryHost" .Values.plugin.image.repository -}}
@@ -311,6 +351,91 @@ split is "true" when the plugin runs in a namespace of its own.
 
 {{- define "harbor-bridge.mTLSClientSecretName" -}}
 {{- printf "%s-mtls-client" (include "harbor-bridge.plugin.fullname" .) -}}
+{{- end -}}
+
+{{/*
+providerName is plugin.providerName (ADR-0029), the one place templates
+read it from. A missing key renders the default: `helm upgrade
+--reuse-values` renders this chart with the previous chart's values,
+which predate the key, and a null value unsets it. validateRequiredValues
+rejects every value that is not a string, because a number or boolean
+would not render back as the name the operator wrote.
+*/}}
+{{- define "harbor-bridge.plugin.providerName" -}}
+{{- if kindIs "invalid" .Values.plugin.providerName -}}
+harbor-bridge-plugin
+{{- else -}}
+{{- .Values.plugin.providerName -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+legacyNames is "true" for the default provider name, whose node files
+keep the names they had before provider names became configurable.
+*/}}
+{{- define "harbor-bridge.plugin.legacyNames" -}}
+{{- if eq (include "harbor-bridge.plugin.providerName" .) "harbor-bridge-plugin" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+configKey and configMountPath name where the install container reads the
+rendered provider config: the ConfigMap key, and the directory the
+ConfigMap is mounted at. The default provider name keeps the layout every
+installer reads (/config/credential-provider-config.yaml), so existing
+installs render the same manifests. Any other name uses a key and a mount
+path that installers before ADR-0029 never read: such an installer (an
+older plugin image) ignores PROVIDER_NAME and would install the entry of
+the new name without a binary of that name, which keeps kubelet from
+starting. With this layout it fails at reading the rendered config, before
+it writes anything on the node, and its sync container never starts. The
+installer derives the same path (installer/names.go sourceConfigPath).
+*/}}
+{{- define "harbor-bridge.plugin.configKey" -}}
+{{- if include "harbor-bridge.plugin.legacyNames" . -}}
+credential-provider-config.yaml
+{{- else -}}
+credential-provider-config.v2.yaml
+{{- end -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.configMountPath" -}}
+{{- if include "harbor-bridge.plugin.legacyNames" . -}}
+/config
+{{- else -}}
+/config-v2
+{{- end -}}
+{{- end -}}
+
+{{/*
+providerNameYAML is the provider name as a YAML scalar. The default stays
+bare, as it always rendered (one changed byte in the rendered config would
+restart kubelet on upgrade); any other name is quoted, because YAML 1.1
+reads DNS labels such as "yes", "on" or "123" as booleans or numbers when
+the installer parses the rendered config.
+*/}}
+{{- define "harbor-bridge.plugin.providerNameYAML" -}}
+{{- if include "harbor-bridge.plugin.legacyNames" . -}}
+harbor-bridge-plugin
+{{- else -}}
+{{- include "harbor-bridge.plugin.providerName" . | quote -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+hostFile is the node path of one of this install's files in
+plugin.hostConfigDir: harbor-bridge-<suffix> for the default provider
+name, <providerName>.<suffix> otherwise. A provider name has no dot, so
+two installs never share a file. The installer derives the same names
+(installer/names.go). Usage: include "harbor-bridge.plugin.hostFile" (list . "ca.crt")
+*/}}
+{{- define "harbor-bridge.plugin.hostFile" -}}
+{{- $ctx := index . 0 -}}
+{{- $suffix := index . 1 -}}
+{{- if include "harbor-bridge.plugin.legacyNames" $ctx -}}
+{{- printf "%s/harbor-bridge-%s" $ctx.Values.plugin.hostConfigDir $suffix -}}
+{{- else -}}
+{{- printf "%s/%s.%s" $ctx.Values.plugin.hostConfigDir (include "harbor-bridge.plugin.providerName" $ctx) $suffix -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

@@ -1,0 +1,43 @@
+# A second install on a cluster that already runs one (ADR-0026,
+# ADR-0029): its own kubelet provider name (entry, plugin binary and node
+# files), NodePort, audience and HarborAccess selector, and its own
+# clusterName because it shares the Harbor. mTLS is on so the per-install
+# client file names render too.
+#
+# It renders as a release of its own, next to the default golden's
+# harbor-bridge in harbor-bridge-system: release harbor-bridge-eu in
+# namespace harbor-bridge-eu (Makefile, CHART_CASES). The release name
+# names its objects, cluster-scoped RBAC, selector labels, the plugin's
+# mTLS CN and its finalizer instance; the namespace keeps its
+# leader-election Lease and its robot Secrets apart (README, "Several
+# installs per cluster").
+clusterName: prod-eu-west-2
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+
+plugin:
+  providerName: harbor-bridge-eu
+  matchImages:
+    - "harbor-eu.example.com"
+  audience: harbor-bridge-prod-eu-west-2
+
+bridge:
+  harborAccessSelector:
+    harbor.aetherize.io/bridge: harbor-eu
+  mTLS:
+    enabled: true
+    clientIssuerRef:
+      name: harbor-bridge-ca
+      kind: ClusterIssuer
+
+service:
+  nodePort: 31444
+
+tls:
+  enabled: true
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer

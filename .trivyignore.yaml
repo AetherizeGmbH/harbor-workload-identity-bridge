@@ -32,12 +32,13 @@ misconfigurations:
   # with hostPID — i.e. root on the host — so the mount adds no privilege.
   # The long-running sync container mounts only plugin.hostConfigDir, and
   # install.mode=none (golden none.yaml) mounts two narrow directories.
-  # Scoped to the two goldens that render an auto-mode DaemonSet.
+  # Scoped to the goldens that render an auto-mode DaemonSet.
   - id: KSV-0121 # disallowed volume (hostPath /) on the install container
     paths:
       - "charts/harbor-bridge/tests/golden/default.yaml"
       - "charts/harbor-bridge/tests/golden/mtls.yaml"
       - "charts/harbor-bridge/tests/golden/plugin-namespace.yaml"
+      - "charts/harbor-bridge/tests/golden/second-instance.yaml"
 
   # The e2e seed image is throwaway test scaffolding built during
   # `make e2e` to prep Harbor; it is never shipped or run in production, so

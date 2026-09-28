@@ -15,6 +15,9 @@
   Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
 {{- if .Values.plugin.enabled }}
   Plugin image : {{ include "harbor-bridge.plugin.image" . }} (install mode: {{ .Values.plugin.install.mode }})
+{{- if not (include "harbor-bridge.plugin.legacyNames" .) }}
+  Provider     : {{ include "harbor-bridge.plugin.providerName" . }} (one of several installs per cluster, ADR-0029)
+{{- end }}
 {{- else }}
   Plugin       : NOT deployed by this chart (plugin.enabled=false)
 {{- end }}
@@ -70,7 +73,9 @@ NEXT STEPS
   2. Install the plugin on every node yourself (plugin.enabled=false). Kubelet
      needs the plugin binary and this provider entry in the credential-provider
      config it reads (--image-credential-provider-config). The binary is in the
-     plugin image at /plugin/harbor-bridge-plugin:
+     plugin image at /plugin/harbor-bridge-plugin; install it in kubelet's
+     --image-credential-provider-bin-dir as {{ include "harbor-bridge.plugin.providerName" . }}
+     (kubelet runs the binary named like the entry):
 
        {{ include "harbor-bridge.plugin.image" . }}
 
@@ -78,7 +83,7 @@ NEXT STEPS
      {{ include "harbor-bridge.tlsSecretName" . }} — on the node at the
      HARBOR_BRIDGE_CA_BUNDLE path, or inline the PEM as its value):
 
-       - name: harbor-bridge-plugin
+       - name: {{ include "harbor-bridge.plugin.providerNameYAML" . }}
          apiVersion: credentialprovider.kubelet.k8s.io/v1
          matchImages: ["<your Harbor host>"]
          defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
@@ -86,7 +91,7 @@ NEXT STEPS
            - name: HARBOR_BRIDGE_ENDPOINT
              value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
            - name: HARBOR_BRIDGE_CA_BUNDLE
-             value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-ca.crt"
+             value: {{ include "harbor-bridge.plugin.hostFile" (list . "ca.crt") | quote }}
          tokenAttributes:
            serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
            requireServiceAccount: true
@@ -104,8 +109,12 @@ NEXT STEPS
      Each carries a finalizer that revokes its Harbor robot; without the
      bridge running, those deletions (and the deletion of their namespaces)
      wait forever. If that already happened, reinstall the bridge — or remove
-     the "harbor.aetherize.io/robot" finalizer by hand and delete the leftover
+     the "{{ include "harbor-bridge.finalizer" . }}" finalizer by hand and delete the leftover
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
+{{- if .Values.plugin.enabled }}
+     `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
+     and its files on the nodes; README "Uninstalling" shows how to remove them.
+{{- end }}
 
 {{- if not .Values.tls.enabled }}
 

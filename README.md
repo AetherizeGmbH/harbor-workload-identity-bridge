@@ -292,9 +292,49 @@ Delete your `HarborAccess` objects **before** `helm uninstall`. Each one
 carries a finalizer that revokes its Harbor robot, and only a running
 bridge can release it — after the bridge is gone, deleting those objects
 (or their namespaces) waits forever. If that already happened, reinstall
-the bridge, or remove the `harbor.aetherize.io/robot` finalizer by hand and
-delete the leftover `robot$bridge-<clusterName>.*` robots in Harbor. Helm
-keeps the CRD (`crds/`); delete it yourself when you are done.
+the bridge, or remove its finalizer by hand and delete the leftover
+`robot$bridge-<clusterName>.*` robots in Harbor. The finalizer is
+`harbor.aetherize.io/robot`, or, for a bridge with
+`bridge.harborAccessSelector`, `harbor.aetherize.io/robot-<instance>`
+(`bridge.instance`, default the release name; ADR-0026); the chart's
+NOTES print the right one. Helm keeps the CRD (`crds/`); delete it
+yourself when you are done.
+
+`helm uninstall` removes nothing on the nodes. The provider entry named
+`plugin.providerName` stays in kubelet's credential-provider config, and
+the plugin binary with its record (`<providerName>.entry`), the CA (and
+mTLS) files, the state file, the lock files and the `.bak` copies the installer keeps of every file it
+replaced stay on disk. Kubelet keeps running the plugin for its
+`matchImages`; with the bridge gone the plugin fails and adds no
+credentials, so those pulls go ahead with whatever other credentials
+apply (a later service on the same NodePort would also need a
+certificate from the pinned CA to receive a token). Renaming
+`plugin.providerName` leaves the old entry behind in the same way. To
+clean a node:
+
+1. Remove the entry from the config kubelet reads
+   (`--image-credential-provider-config`; in patch and none mode
+   `<plugin.hostConfigDir>/credential-provider-config.yaml`). Kubelet
+   refuses a config without providers: if it was the last entry, also
+   remove the two `--image-credential-provider-*` flags (patch mode:
+   from `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`).
+2. Restart kubelet (`systemctl restart kubelet`). Do this before you
+   delete the binary: kubelet does not start while an entry's binary is
+   missing.
+3. Delete `<bin-dir>/<providerName>` and its record
+   `<bin-dir>/<providerName>.entry`, the CA and mTLS files in
+   `plugin.hostConfigDir` and the state file in `plugin.install.stateDir`
+   (file names in [Several installs per cluster](#several-installs-per-cluster-adr-0029)),
+   each with its `.bak` copy. The binary's `.bak` is an earlier plugin
+   binary, executable, in kubelet's bin dir.
+4. Once the last install is gone from the node, also delete the backups
+   of the shared files (`<provider config>.bak`; in patch mode
+   `/etc/default/kubelet.bak`) and the lock files:
+   `/run/harbor-bridge-installer.lock` and a `<config>.lock` next to
+   every provider config an installer edited or checked, also in a pass
+   it refused: next to the cloud's config in merge mode, and in patch
+   mode next to the chart-owned config and next to any config kubelet
+   read before patch mode moved it.
 
 ### How the node install works — modes and upgrades (ADR-0021)
 
@@ -313,7 +353,8 @@ Kubelet reads the credential-provider config **once at boot** (no hot
 reload), but execs the plugin *binary* per pull. The installer therefore
 restarts kubelet exactly when the effective config content (or the
 kubelet flags) changed — tracked via a content hash in
-`/var/lib/harbor-bridge/installer-state.json` on each node:
+`/var/lib/harbor-bridge/installer-state.json` on each node (one state
+file per install, see below):
 
 - `helm upgrade` changing `matchImages`/`audience` **converges without
   operator action** (the DaemonSet re-rolls, the installer detects the
@@ -322,6 +363,167 @@ kubelet flags) changed — tracked via a content hash in
 - No-op re-rolls, plugin binary updates, and CA/mTLS rotation never
   restart kubelet (the plugin re-reads the CA on every exec; the
   DaemonSet's long-running container syncs rotated certs to the node).
+
+### Several installs per cluster (ADR-0029)
+
+A cluster can run several bridges, for example one per Harbor instance
+([ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)).
+Each is a Helm release with a release name and a namespace of its own
+and its own plugin DaemonSet. Kubelet has one credential-provider config
+and one bin dir, so the releases share them: on every node, each
+release's installer adds and updates only the provider entry named by
+its `plugin.providerName` and leaves every other entry alone: the other
+releases' and the cloud's. Values for a second release
+(`helm install harbor-bridge-eu … --namespace harbor-bridge-eu --create-namespace`)
+next to a first one that keeps the default provider name:
+
+```yaml
+clusterName: prod-eu-west-2          # distinct when both bridges use the same Harbor
+plugin:
+  providerName: harbor-bridge-eu     # kubelet entry and binary name; unique per release
+  audience: harbor-bridge-prod-eu-west-2
+  matchImages: ["harbor-eu.example.com"]   # must not overlap the other release's
+bridge:
+  harborAccessSelector:              # give every release a selector, and label
+    harbor.aetherize.io/bridge: harbor-eu  # each HarborAccess for its bridge
+service:
+  nodePort: 31444                    # the first release keeps 31443
+```
+
+- **A release name per release.** The release name names the chart's
+  cluster-scoped objects (the RBAC for the kubelet audience and, with
+  `plugin.namespace`, the trust-manager Bundle), the plugin's mTLS client
+  CN and, by default, `bridge.instance`, which names the bridge's
+  finalizer. Two releases with the same name, even in different
+  namespaces, collide. `fullnameOverride` replaces the release name in
+  the object names and the CN, but `bridge.instance` follows only the
+  release name: whenever `fullnameOverride` is what tells two releases
+  apart, set `bridge.instance` explicitly too.
+- **A namespace per release.** Install each release into a namespace of
+  its own. The bridge's leader-election Lease has a fixed name
+  (`bridge.harbor.aetherize.io`) in the release namespace, so two bridges
+  there elect one leader between them and the other bridge's control
+  plane does not run (leader election is on with the default two
+  replicas). Each bridge's janitor also lists the robot Secrets of its
+  `clusterName` in its namespace and deletes those whose HarborAccess its
+  selector does not match: two bridges with the same `clusterName` (on
+  different Harbors) in one namespace delete each other's Secrets.
+- **A plugin namespace per release, or one created outside Helm.** With
+  `plugin.namespace`, give each release its own, or create a shared one
+  yourself and set `plugin.createNamespace=false` on every release.
+  Otherwise the first release owns the Namespace object, installing the
+  next one fails on it, and uninstalling the first deletes it together
+  with the other releases' plugin DaemonSets.
+- **Selectors on every release.** A bridge without
+  `bridge.harborAccessSelector` sees every HarborAccess and marks the
+  other bridge's objects `AudienceMismatch`. Label each HarborAccess for
+  its bridge and give each release a selector.
+- **Node files.** The default name keeps `harbor-bridge-plugin`,
+  `harbor-bridge-ca.crt` (`harbor-bridge-client.crt`/`.key` with mTLS)
+  and `installer-state.json`. Any other name uses `<name>` in the bin
+  dir, `<name>.ca.crt` (`<name>.client.crt`/`.key`) in
+  `plugin.hostConfigDir` and `<name>.installer-state.json` in
+  `plugin.install.stateDir`. Every install also keeps a record of its
+  entry next to its binary, `<name>.entry` (`harbor-bridge-plugin.entry`
+  for the default name, mode `0600`).
+- **Upgrade first, chart and plugin image.** Every release on the
+  cluster must run a chart version with ADR-0029 **and a plugin image
+  with its installer** before you add the second. The installer runs from
+  `plugin.image` (`plugin.image.tag`, which defaults to the chart's
+  version, or `plugin.image.digest`): a release that pins an older tag or
+  digest keeps the older installer after the chart upgrade. With the
+  default provider name, an older installer in patch or none mode
+  rewrites the shared config with only its own entry, takes no locks and
+  writes no record, so the other installs drop its entry in turn. With a
+  non-default `plugin.providerName`, an older installer stops before it
+  touches the node: the install container fails with
+  `read rendered credential-provider config: open /config/credential-provider-config.yaml: no such file or directory`,
+  the pods stay in `Init:CrashLoopBackOff`, and nothing changes on the
+  node until the release gets a plugin image with ADR-0029. Add the
+  second release only once every existing release's plugin DaemonSet
+  runs such an image on every node, that is, once
+  `kubectl -n <plugin namespace> rollout status daemonset/<fullname>-plugin`
+  has finished for each (`<fullname>` is the release name or
+  `fullnameOverride`). From then on, never roll a release back to a chart
+  or plugin image before ADR-0029 while another release's plugin is on
+  the nodes. (A single install can roll back: the installer keeps its
+  state file readable for older installers, so an unchanged config does
+  not restart kubelet.)
+- **Same directories.** In patch and none mode all releases must use the
+  same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
+  refuses to point kubelet at other directories while the config kubelet
+  reads holds another release's entry (in a chart-owned config, only an
+  entry that release's record in kubelet's bin dir vouches for). In auto
+  mode a later release merges into whatever config kubelet already runs,
+  and its binary goes into kubelet's bin dir. When that config is another release's
+  chart-owned config, it treats it as the chart's (see "The chart-owned
+  config stays the chart's" below). Otherwise keep kubelet's config out
+  of every `plugin.hostConfigDir`: the installer refuses a kubelet config
+  inside its own `plugin.hostConfigDir` that is not the chart-owned one,
+  and a `plugin.install.configFile` inside it. Never make
+  `plugin.hostConfigDir` kubelet's config directory (Kubernetes 1.34+):
+  kubelet loads every config file of it, which every sync container can
+  add and no pass removes.
+- **Shared CA and mTLS files.** Each release keeps its CA file and its
+  mTLS client certificate and key in `plugin.hostConfigDir`, and every
+  release's sync container mounts that directory read-write as root. Where
+  releases share it (always in patch and none mode), a compromised sync
+  container of one release can read the other releases' mTLS client keys
+  and replace their pinned CA until their own sync container restores it
+  (every 60 s). That breaks the other release's pulls, and, together with
+  a position on the path to its bridge's endpoint, lets the attacker
+  impersonate that bridge; the token check still applies. In auto or
+  merge mode a `plugin.hostConfigDir` per release avoids this
+  (SECURITY.md). Per-release directories must be disjoint: never the
+  same as, inside, or containing another release's
+  `plugin.hostConfigDir`, `plugin.hostBinaryDir`, `plugin.install.binDir`
+  or `plugin.install.stateDir`, or kubelet's credential-provider bin dir.
+  `/etc/kubernetes/credential-provider-config/eu` under the default
+  directory, for example, is in reach of the default release's sync
+  container, which can read the CA and mTLS key there and replace the
+  directory with a symlink. The installer refuses a symlink in its own
+  `plugin.hostConfigDir`'s path, but kubelet follows one when it mounts
+  the directory into a `none`-mode install container and every sync
+  container, and the chart and the installer compare only one release's
+  own directories.
+- **Disjoint `matchImages`.** Kubelet runs every provider whose
+  `matchImages` match an image, pools their credentials and tries them
+  in order until a pull succeeds (read in the kubelet source; see
+  ADR-0029). Overlapping patterns still pull, but every pull calls each
+  matching bridge, and a bridge without a HarborAccess for the pod
+  answers 403 and logs a denial each time.
+- **Concurrent rollouts are safe.** The installers serialise on
+  `/run/harbor-bridge-installer.lock` and on a `.lock` file next to the
+  provider config, and each restarts kubelet only for changes to its own
+  entry.
+- **The chart-owned config stays the chart's.** In patch and none mode
+  each pass rewrites `<plugin.hostConfigDir>/credential-provider-config.yaml`
+  to its own entry plus the other releases' entries, and drops anything
+  else, as the single install always did. It keeps another release's
+  entry only when that release's binary and its record, holding exactly
+  that entry, are in kubelet's bin dir (`plugin.hostBinaryDir`), which
+  the sync containers cannot write. A merge pass into such a config (its
+  own, or one another release's record names) does the same. That keeps
+  every installer from writing or keeping a planted or changed entry,
+  not kubelet from reading one: kubelet reads the file whenever it
+  starts, so a sync container that swaps its own version in before a
+  kubelet start, including the restart an installer triggers right after
+  its write, gets its entries run (SECURITY.md; open decision O6). Keep
+  `plugin.hostBinaryDir` for this chart's plugins only; the chart
+  refuses a `plugin.hostBinaryDir` or `plugin.install.stateDir` in reach
+  of `plugin.hostConfigDir`.
+- **The installer refuses names it does not own**: in a cloud's config
+  (merge mode), a provider entry of that name that is not a bridge
+  entry; for a non-default name, a file of that name in kubelet's bin
+  dir that is not this plugin (GKE keeps kubelet itself there) and has
+  no record of this install next to it. In a cloud's config it also
+  refuses to write or restart kubelet onto a config kubelet would exit
+  on: an entry whose binary is missing from kubelet's bin dir or not
+  executable, a repeated name, or a name kubelet refuses. A refused pass
+  changes no config, binary, record, CA, mTLS or state file; only lock
+  files (see [Uninstalling](#uninstalling)) may be new.
+- Removing one release, or renaming its provider, leaves its entry on
+  the nodes: see [Uninstalling](#uninstalling).
 
 ### Bootstrap ordering (chicken-and-egg)
 
@@ -422,7 +624,7 @@ contract, not individually run.
 | 7 | Harbor compatibility matrix — parameterised e2e + `harbor-compat` CI + auto-PR'd table, ADR-0020 | ✅ Mechanism shipped; table auto-fills on the first matrix run |
 | 8 | Cloud-agnostic node install: Go installer with `auto`/`merge`/`patch`/`none` modes, content-hash kubelet restarts, optional plugin (Talos), GKE e2e harness, ADRs 0021, 0022 and 0024 | ✅ Code + kind e2e complete; first `make e2e-gke` run against a real project still outstanding |
 | 9 | Lifecycle hardening: level-triggered robot convergence, rotation-safe caching, complete revocation, HA data plane, ADRs 0023 and 0025 | ✅ Code + kind e2e (lifecycle stages) complete |
-| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, token lifetime cap and pod binding, signed releases with provenance, gosec and fuzzing, ADRs 0026–0028, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
+| 10 | Security review: one audience and label-selected HarborAccess objects per bridge, optional plugin namespace, audit log and rate limit, https to Harbor, token lifetime cap and pod binding, several chart-managed installs per cluster (configurable plugin provider name), signed releases with provenance, gosec and fuzzing, ADRs 0026–0029, [threat model](docs/threat-models/harbor-workload-identity-bridge.md) | ✅ Complete |
 
 ### Next
 
@@ -446,17 +648,9 @@ In order.
 
 ### Open decisions (TODO)
 
-Open items from the 2026-09 security review (threat model items O2 and
-O5). None blocks a single-bridge install today.
+Open items from the 2026-09 security review and ADR-0029 (threat model
+items O2 and O6). Neither blocks a single install today.
 
-- [ ] **Configurable plugin provider names (O5).** The plugin's provider
-  name and file names are fixed (`harbor-bridge-plugin`), so only one
-  chart-installed plugin can exist per node, and one plugin talks to one
-  bridge. *Limits now:* several bridges on one cluster (ADR-0026) work on
-  the bridge side, but every bridge after the first needs its plugin
-  installed by hand (`plugin.enabled=false`, a renamed copy of the binary
-  and its own kubelet provider entry). This is the only item that limits
-  what the chart can do.
 - [ ] **mTLS client identity (O2).** With mTLS on, the bridge accepts any
   client certificate its CA signed; with a shared ClusterIssuer, anyone who
   may create cert-manager Certificates can get one. Decide on a dedicated
@@ -464,6 +658,18 @@ O5). None blocks a single-bridge install today.
   default. *Limits now:* nothing functional; mTLS is optional defense in
   depth, and every request still needs a valid, audience-bound
   ServiceAccount token.
+- [ ] **Chart-owned config out of the sync containers' reach (O6).** Every
+  release's sync container can write `plugin.hostConfigDir`, where kubelet's
+  chart-owned config (patch and none mode) and every release's CA and mTLS
+  files live. It can swap its own config in between an installer's write
+  and the kubelet restart that installer triggers, or before a reboot,
+  and kubelet then runs its entries (SECURITY.md). Decide on a directory
+  per release for the CA and mTLS files that only that release's sync
+  container mounts. *Limits now:* with one release per node, only that
+  release's own sync container can do this, to its own pulls; with
+  several releases sharing `plugin.hostConfigDir`, any release's sync
+  container can redirect another release's pods' tokens and read its
+  mTLS key.
 
 ## Support and services
 

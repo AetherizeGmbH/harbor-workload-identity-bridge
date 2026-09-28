@@ -2,7 +2,14 @@
 The kubelet credential-provider config the chart installs onto each
 node. Mirrors the KEP-4412 v1 schema. Kubelet reads this from the
 path `<plugin.hostConfigDir>/credential-provider-config.yaml` after
-the DaemonSet copies it there.
+the DaemonSet copies it there (patch/none mode), or the installer
+merges its one entry into the config kubelet already reads (merge
+mode). With several installs per cluster each installer owns only the
+entry named plugin.providerName (ADR-0029).
+
+A non-default plugin.providerName publishes the config under another key
+(harbor-bridge.plugin.configKey), which installers before ADR-0029 never
+read.
 
 `cacheType: ServiceAccount` is the KEP-4412 beta (k8s 1.34) field
 that tells kubelet to project an SA-bound token per pod rather than
@@ -17,11 +24,11 @@ metadata:
   labels:
     {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
 data:
-  credential-provider-config.yaml: |
+  {{ include "harbor-bridge.plugin.configKey" . }}: |
     apiVersion: kubelet.config.k8s.io/v1
     kind: CredentialProviderConfig
     providers:
-      - name: harbor-bridge-plugin
+      - name: {{ include "harbor-bridge.plugin.providerNameYAML" . }}
         apiVersion: credentialprovider.kubelet.k8s.io/v1
         matchImages:
           {{- range .Values.plugin.matchImages }}
@@ -36,7 +43,7 @@ data:
             # $(NODE_IP) is substituted by the installer.
             value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
           - name: HARBOR_BRIDGE_CA_BUNDLE
-            value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-ca.crt"
+            value: {{ include "harbor-bridge.plugin.hostFile" (list . "ca.crt") | quote }}
           {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
           # The node's IP is not in the bridge certificate; verify it
           # against the bridge Service's name, which is.
@@ -45,9 +52,9 @@ data:
           {{- end }}
           {{- if .Values.bridge.mTLS.enabled }}
           - name: HARBOR_BRIDGE_CLIENT_CERT
-            value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-client.crt"
+            value: {{ include "harbor-bridge.plugin.hostFile" (list . "client.crt") | quote }}
           - name: HARBOR_BRIDGE_CLIENT_KEY
-            value: "{{ .Values.plugin.hostConfigDir }}/harbor-bridge-client.key"
+            value: {{ include "harbor-bridge.plugin.hostFile" (list . "client.key") | quote }}
           {{- end }}
         tokenAttributes:
           serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}

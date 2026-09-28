@@ -199,6 +199,7 @@ FUZZ_TARGETS ?= \
 	./installer:FuzzMergeProvider \
 	./installer:FuzzMergeExtraArgs \
 	./installer:FuzzKubeletCmdline \
+	./installer:FuzzNodeFiles_Injective \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \
 	./bridge/internal/robotsecret:FuzzName_Injective \
 	./bridge/dataplane:FuzzJSONAudience \
@@ -263,23 +264,28 @@ CHART_DIR ?= charts/harbor-bridge
 CHART_TESTS_DIR ?= $(CHART_DIR)/tests
 GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 
-# Each golden case is <values file suffix>:<golden file>. The single list
-# drives lint, golden diff, and golden update so they cannot drift; the
-# release config (.releaserc.json) commits every tests/golden/*.yaml.
-CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace
-HELM_TEMPLATE = helm template harbor-bridge $(CHART_DIR) --kube-version 1.34.0 --namespace harbor-bridge-system
+# Each golden case is <values file suffix>:<golden file>[:<release>:<namespace>]
+# (release harbor-bridge in namespace harbor-bridge-system unless given). The
+# single list drives lint, golden diff, and golden update so they cannot drift;
+# the release config (.releaserc.json) commits every tests/golden/*.yaml.
+CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace second-instance:second-instance:harbor-bridge-eu:harbor-bridge-eu
+# CHART_CASE splits the case in the loop variable c into v (values file
+# suffix), g (golden file), rel (release name) and ns (namespace).
+CHART_CASE = IFS=:; set -- $$c; unset IFS; v=$$1; g=$$2; rel=$${3:-harbor-bridge}; ns=$${4:-harbor-bridge-system}
+HELM_TEMPLATE = helm template "$$rel" $(CHART_DIR) --kube-version 1.34.0 --namespace "$$ns"
 
 .PHONY: chart-lint
 chart-lint: ## helm lint the chart against every test values file
 	@set -e; for c in $(CHART_CASES); do \
-		helm lint $(CHART_DIR) -f $(CHART_TESTS_DIR)/values-$${c%%:*}.yaml; \
+		$(CHART_CASE); \
+		helm lint $(CHART_DIR) --namespace "$$ns" -f $(CHART_TESTS_DIR)/values-$$v.yaml; \
 	done
 
 .PHONY: chart-golden
 chart-golden: ## Diff current render against the checked-in golden files
 	@set -e; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	for c in $(CHART_CASES); do \
-		v=$${c%%:*}; g=$${c##*:}; \
+		$(CHART_CASE); \
 		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$$v.yaml > "$$tmp/$$g.yaml"; \
 		diff -u -B $(GOLDEN_DIR)/$$g.yaml "$$tmp/$$g.yaml" || { echo "golden mismatch for values-$$v.yaml — run 'make chart-golden-update' if intentional"; exit 1; }; \
 	done; echo "golden render unchanged"
@@ -287,7 +293,8 @@ chart-golden: ## Diff current render against the checked-in golden files
 .PHONY: chart-golden-update
 chart-golden-update: ## Re-capture golden files after intentional template changes
 	@set -e; for c in $(CHART_CASES); do \
-		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$${c%%:*}.yaml > $(GOLDEN_DIR)/$${c##*:}.yaml; \
+		$(CHART_CASE); \
+		$(HELM_TEMPLATE) -f $(CHART_TESTS_DIR)/values-$$v.yaml > $(GOLDEN_DIR)/$$g.yaml; \
 	done; echo "golden files refreshed; commit them after review"
 
 .PHONY: chart-test-required
