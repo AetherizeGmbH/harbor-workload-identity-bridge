@@ -33,9 +33,11 @@
 # the discovered GKE provider config path/format (installer logs show
 # it), whether GKE containerd ships a config_path (trust DS logs), and
 # whether the loopback NodePort routes under Dataplane V2 — if pull_pod
-# fails with the plugin unable to reach the bridge, set bridge_endpoint =
-# "https://$(NODE_IP):31443" on bridge_install/bridge_upgrade (see the R4
-# note in ADR-0022 about the cert SAN implications).
+# fails with the plugin unable to reach the bridge, rerun with
+# TF_VAR_bridge_endpoint='https://$(NODE_IP):31443' (see the R4 note in
+# ADR-0022 about the cert SAN implications). Every install run
+# (bridge_install, bridge_upgrade, bridge_mtls) passes that one variable,
+# so a later helm upgrade never falls back to the loopback endpoint.
 #
 # Variables: inside a run block `var` holds only CLI/TF_VAR values, so
 # every optional one is read with try(var.x, <default>).
@@ -183,6 +185,8 @@ run "bridge_install" {
     ]
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
+    # R4 escape hatch; empty keeps the loopback NodePort (header note).
+    bridge_endpoint = try(var.bridge_endpoint, "")
   }
 }
 
@@ -276,7 +280,7 @@ run "pull_pod" {
     command              = ["sh", "-c"]
     args                 = ["echo test-pull/image-puller pulled your-project; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "GKE bridge pull failed. Check the installer logs (merge target), the bridge logs (issuer / JWKS), and whether the loopback NodePort routes under Dataplane V2 (R4: bridge_endpoint)"
+    fail_message         = "GKE bridge pull failed. Check the installer logs (merge target), the bridge logs (issuer / JWKS), and whether the loopback NodePort routes under Dataplane V2 (R4: TF_VAR_bridge_endpoint)"
   }
 }
 
@@ -475,6 +479,8 @@ run "bridge_upgrade" {
     ]
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
+    # R4 escape hatch; empty keeps the loopback NodePort (header note).
+    bridge_endpoint = try(var.bridge_endpoint, "")
   }
 }
 
@@ -828,7 +834,9 @@ run "bridge_mtls" {
     ]
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
-    mtls         = true
+    # R4 escape hatch; empty keeps the loopback NodePort (header note).
+    bridge_endpoint = try(var.bridge_endpoint, "")
+    mtls            = true
   }
 }
 

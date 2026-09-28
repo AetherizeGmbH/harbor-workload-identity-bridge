@@ -284,7 +284,8 @@ test-only privileged DaemonSet. The first run should record the runtime
 findings flagged in [ADR-0022](docs/adr/0022-gke-e2e-harness.md)
 (discovered GKE provider-config path/format, containerd `config_path`,
 loopback-NodePort behaviour under Dataplane V2 — escape hatch:
-`bridge_endpoint` variable on the install module).
+`TF_VAR_bridge_endpoint='https://$(NODE_IP):31443'`, which every install
+run of the harness passes to the install module).
 
 ---
 
