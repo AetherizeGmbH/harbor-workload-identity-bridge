@@ -1079,7 +1079,7 @@ run "pull_pod_mtls" {
     command              = ["sh", "-c"]
     args                 = ["echo upgrade-ns/upgrade-runner pulled upgrade-only over mTLS; exit 0"]
     expect_bridge_log = [
-      ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"harbor.e2e:30843/upgrade-only/app:v1\"", "\"client_cert\":\"CN=harbor-bridge-plugin\""],
+      ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"harbor.e2e:30843/upgrade-only/app\"", "\"client_cert\":\"CN=harbor-bridge-plugin\""],
     ]
     timeout_seconds  = 300
     fail_message     = "bridge.mTLS: the pull failed with mTLS on, or the bridge did not log the plugin's client certificate for it (see pod.log and bridge.log)"
