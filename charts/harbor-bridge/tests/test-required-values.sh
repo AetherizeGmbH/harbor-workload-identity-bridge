@@ -90,6 +90,19 @@ cases=(
   "bridge.harborAccessSelector value read as a number|--set|bridge.harborAccessSelector.tier=1|bridge.harborAccessSelector.tier must be a string, but it was read as the int64 1"
   "bridge.rateLimit.burst not a whole number|--set|bridge.rateLimit.burst=1.5|bridge.rateLimit.burst=1.5 must be a positive whole number"
   "bridge.rateLimit.burst zero|--set|bridge.rateLimit.burst=0|bridge.rateLimit.burst=0 must be a positive whole number"
+  "plugin.defaultCacheDuration in days|--set|plugin.defaultCacheDuration=1d|plugin.defaultCacheDuration=\"1d\" must be a Go duration of at least 0"
+  "plugin.defaultCacheDuration without a unit|--set|plugin.defaultCacheDuration=3600|plugin.defaultCacheDuration=\"3600\" must be a Go duration"
+  "plugin.defaultCacheDuration with a space|--set|plugin.defaultCacheDuration=24 h|plugin.defaultCacheDuration=\"24 h\" must be a Go duration"
+  "plugin.defaultCacheDuration negative|--set|plugin.defaultCacheDuration=-1h|plugin.defaultCacheDuration=\"-1h\" must be a Go duration of at least 0"
+  "plugin.matchImages entry with a port glob|--set|plugin.matchImages={harbor.example.com:*}|plugin.matchImages entry \"harbor.example.com:*\" is not host[:port][/path]"
+  "plugin.matchImages entry with a scheme|--set|plugin.matchImages={https://harbor.example.com}|plugin.matchImages entry \"https://harbor.example.com\" is not host[:port][/path]"
+  "plugin.matchImages entry with a path glob|--set|plugin.matchImages={harbor.example.com/*}|plugin.matchImages entry \"harbor.example.com/*\" is not host[:port][/path]"
+  "plugin.matchImages entry with a space|--set-json|plugin.matchImages=[\"harbor.example.com \"]|plugin.matchImages entry \"harbor.example.com \" is not host[:port][/path]"
+  "plugin.matchImages entry with a %-escape|--set|plugin.matchImages={harbor.example.com/a%zz}|plugin.matchImages entry \"harbor.example.com/a%zz\" is not host[:port][/path]"
+  "service.type ClusterIP with the default endpoint|--set|service.type=ClusterIP|service.type=ClusterIP gives the bridge no node port"
+  "service.nodePort null with the default endpoint|--set|service.nodePort=null|service.nodePort=null must be a fixed port while plugin.bridgeEndpoint is empty"
+  "service.nodePort not a port with the default endpoint|--set|service.nodePort=70000|service.nodePort=70000 must be a fixed port"
+  "default endpoint checked with plugin.enabled=false|--set|plugin.enabled=false,service.type=ClusterIP|service.type=ClusterIP gives the bridge no node port"
 )
 
 failed=0
@@ -345,6 +358,48 @@ if out=$(render -f "${COMPLETE}" -f "${TMP}/values-burst.yaml" 2>&1) \
 else
   echo "FAIL  bridge.rateLimit.burst from a values file renders as an integer"
   grep -m 2 -A1 -E 'BRIDGE_RATE_LIMIT_BURST|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# Durations kubelet accepts render as written, including 0 and a leading
+# fraction.
+ok=""
+for d in 0 .5h 1h30m 90s; do
+  out=$(render -f "${COMPLETE}" --set-string "plugin.defaultCacheDuration=${d}" 2>&1 || true)
+  grep -qxF "        defaultCacheDuration: \"${d}\"" <<<"${out}" || ok+=" ${d}"
+done
+if [ -z "${ok}" ]; then
+  echo "PASS  valid plugin.defaultCacheDuration values render"
+else
+  echo "FAIL  valid plugin.defaultCacheDuration values render:${ok}"
+  failed=$((failed+1))
+fi
+
+# matchImages forms kubelet matches: host:port, a literal path prefix, a
+# glob in a host label, an IPv6 literal, a digest path.
+if out=$(render -f "${COMPLETE}" --set 'plugin.matchImages={harbor.e2e:30843/your-project,*.harbor.example.com,registry.internal:5000,[fd00::1]:5000,harbor.example.com/lib/img@sha256:ab}' 2>&1) \
+   && grep -qxF '          - "[fd00::1]:5000"' <<<"${out}" \
+   && grep -qxF '          - "harbor.e2e:30843/your-project"' <<<"${out}"; then
+  echo "PASS  valid plugin.matchImages forms render"
+else
+  echo "FAIL  valid plugin.matchImages forms render"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# ADR-0008: a LoadBalancer Service allocates node ports too, so it keeps
+# the one the default endpoint names. With an explicit plugin.bridgeEndpoint
+# any Service type works, and a null nodePort lets the apiserver pick one.
+if out=$(render -f "${COMPLETE}" --set service.type=LoadBalancer 2>&1) \
+   && grep -qxF '      nodePort: 31443' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set service.type=ClusterIP,plugin.bridgeEndpoint=https://bridge.example.com:8443 2>&1) \
+   && ! grep -q 'nodePort' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set service.nodePort=null,plugin.bridgeEndpoint=https://bridge.example.com:8443 2>&1) \
+   && grep -qxF '  type: NodePort' <<<"${out}" && ! grep -q 'nodePort' <<<"${out}"; then
+  echo "PASS  service.type and service.nodePort with a node port or an explicit endpoint"
+else
+  echo "FAIL  service.type and service.nodePort with a node port or an explicit endpoint"
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 

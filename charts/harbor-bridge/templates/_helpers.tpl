@@ -234,6 +234,21 @@ harbor.aetherize.io/robot
 {{- if not (kindIs "bool" $requirePodBinding) -}}
 {{- fail (printf "bridge.tokenValidation.requirePodBinding=%q must be true or false (ADR-0028)." (toString $requirePodBinding)) -}}
 {{- end -}}
+{{- $cacheDuration := toString .Values.plugin.defaultCacheDuration -}}
+{{- if not (regexMatch "^(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$" $cacheDuration) -}}
+{{- fail (printf "plugin.defaultCacheDuration=%q must be a Go duration of at least 0, such as 1h or 90m (units h, m, s, ms, us, ns; there is no d): kubelet does not start with any other value in its credential-provider config." $cacheDuration) -}}
+{{- end -}}
+{{- /* The default endpoint is the loopback NodePort (ADR-0008), fixed at
+       render time: it needs a node port, and one known now. */}}
+{{- if not .Values.plugin.bridgeEndpoint -}}
+{{- if not (has .Values.service.type (list "NodePort" "LoadBalancer")) -}}
+{{- fail (printf "service.type=%s gives the bridge no node port, but with plugin.bridgeEndpoint empty the plugin calls https://127.0.0.1:<service.nodePort> (ADR-0008). Use NodePort or LoadBalancer, or set plugin.bridgeEndpoint to a URL of the bridge every node can reach." (toString .Values.service.type)) -}}
+{{- end -}}
+{{- $nodePort := toString .Values.service.nodePort -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $nodePort)) (gt (atoi $nodePort) 65535) -}}
+{{- fail (printf "service.nodePort=%s must be a fixed port while plugin.bridgeEndpoint is empty: the plugin's endpoint https://127.0.0.1:<service.nodePort> is rendered at install time and cannot follow a port the apiserver picks. Set a port in the cluster's node port range (30000-32767 by default), or set plugin.bridgeEndpoint." (ternary "null" $nodePort (kindIs "invalid" .Values.service.nodePort))) -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
@@ -263,6 +278,16 @@ harbor.aetherize.io/robot
 {{- if .Values.plugin.enabled -}}
 {{- if not .Values.plugin.matchImages -}}
 {{- fail "plugin.matchImages is REQUIRED when plugin.enabled=true. Without match patterns kubelet never invokes the plugin." -}}
+{{- end -}}
+{{- /* host[:port][/path] as kubelet matches it: globs only in the host's
+       labels, a numeric port, a literal path prefix. Kubelet does not start
+       with an entry it cannot parse as the host of an https URL (a port
+       glob, a space, a bad %-escape); an entry with a scheme or a path glob
+       parses but never matches an image. */}}
+{{- range .Values.plugin.matchImages -}}
+{{- if not (regexMatch "^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9_*-]+(\\.[A-Za-z0-9_*-]+)*)(:[0-9]+)?(/[A-Za-z0-9._/:@-]*)?$" (toString .)) -}}
+{{- fail (printf "plugin.matchImages entry %q is not host[:port][/path] as kubelet matches it: a registry host (the glob * only in its labels, e.g. *.harbor.example.com), an optional numeric port and an optional literal path prefix, with no scheme, spaces or %%. Kubelet does not start with an entry it cannot parse, such as a port glob (harbor.example.com:*), and an entry with a scheme or a path glob never matches an image." (toString .)) -}}
+{{- end -}}
 {{- end -}}
 {{- $install := .Values.plugin.install | default dict -}}
 {{- if not (has $install.mode (list "auto" "merge" "patch" "none")) -}}

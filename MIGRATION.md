@@ -13,9 +13,10 @@
 ### Unreleased: the chart refuses values the bridge cannot work with
 
 Each of these values used to render, and the install then failed at
-runtime: the bridge crash-looped, created no robot, or ran without the
-check the value was meant to switch on. `helm install` and `helm upgrade`
-now fail at template time with a message naming the value.
+runtime: the bridge crash-looped, created no robot, or ran reconcilers on
+every replica; kubelet did not start; or image pulls failed. `helm
+install` and `helm upgrade` now fail at template time with a message
+naming the value.
 
 | Change | What to do |
 | --- | --- |
@@ -25,6 +26,8 @@ now fail at template time with a message naming the value.
 | `bridge.leaderElection` must be `true`, `false` or unset, and `false` is refused with `bridge.replicas` above 1 | Leave it unset (on when `bridge.replicas > 1`) or set it to `true`. A string such as `on` left leader election off, and with election off every replica ran the reconciler and the janitor, which race on robot creation and password rotation (ADR-0025). |
 | `bridge.harborAccessSelector` values must be strings | Quote values that YAML or `--set` read as booleans or numbers (`"true"`, `"1"`), or pass them with `--set-string`. Unquoted, they rendered as `%!s(bool=true)` and the bridge refused to start. |
 | `bridge.rateLimit.burst` must be a positive whole number, and renders as an integer | Nothing for whole numbers: a burst of `1000000` or more from a values file now renders as `1000000` instead of `1e+06`, which the bridge refused. Replace a fraction or `0`. |
+| `plugin.defaultCacheDuration` must be a Go duration of at least 0 (`1h`, `90m`, `0`); `plugin.matchImages` entries must have the form `host[:port][/path]` (a glob only in the host's labels, a numeric port, a literal path prefix; no scheme, spaces or `%`) | Rewrite `1d` as `24h` and a bare number such as `3600` as `3600s`. Remove a scheme or a path glob from a `matchImages` entry, and replace a port glob with the port. Kubelet does not start with a duration or entry it cannot parse, so the installer's kubelet restart left the node without a running kubelet; an entry with a scheme or a path glob never matched an image. |
+| With `plugin.bridgeEndpoint` empty, `service.type` must be `NodePort` or `LoadBalancer` and `service.nodePort` a fixed port; a `LoadBalancer` Service now gets `service.nodePort` too | Nothing with the defaults. The default endpoint `https://127.0.0.1:<service.nodePort>` is rendered at install time: with `ClusterIP` there was no node port, with `LoadBalancer` the apiserver picked another one, and with `nodePort: null` the plugin dialled port 443. Set `plugin.bridgeEndpoint` to keep another Service type or a dynamic node port. |
 
 ### Unreleased: HarborAccess tokenTTL syntax, required spec
 

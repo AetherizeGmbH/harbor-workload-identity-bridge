@@ -364,7 +364,7 @@ Originally-planned section (kept for archaeology):
 ### Templates
 
 - `bridge-deployment.yaml` — Deployment, `BRIDGE_*` env, projected volumes for: admin creds Secret (mounted at `BRIDGE_HARBOR_ADMIN_DIR`), TLS cert (mounted at `/etc/bridge/tls`), the cert-manager-managed CA.
-- `bridge-service.yaml` — NodePort, port 8443 → nodePort 31443 (or dynamic).
+- `bridge-service.yaml` — NodePort, port 8443 → nodePort 31443 (a dynamic nodePort, or another Service type, only with an explicit `plugin.bridgeEndpoint`: the default endpoint names the port at render time).
 - `bridge-certificate.yaml` — cert-manager `Certificate` resource targeting the bridge Service DNS.
 - `bridge-rbac.yaml` — ClusterRole + ClusterRoleBinding for `system:service-account-issuer-discovery`; Role + RoleBinding in the bridge namespace for Secret get/list/watch; ClusterRole + Binding for `harboraccesses.harbor.aetherize.io` get/list/watch + finalizers + status.
 - `plugin-daemonset.yaml` — DaemonSet that mounts host paths and copies the plugin binary + credential-provider config on container start.

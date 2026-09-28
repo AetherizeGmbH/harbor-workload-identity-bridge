@@ -274,6 +274,10 @@ plugin:
   # Use the bare host (or host:port) form to match any image from a
   # registry. Subdomain globs work: `*.harbor.example.com`.
   # Example: ["harbor.example.com", "*.harbor.example.com"]
+  # The chart refuses an entry that is not host[:port][/path] in that
+  # form (a scheme, a space, a %, a glob in the port or path): kubelet
+  # does not start with an entry it cannot parse, and the others never
+  # match an image.
   matchImages: []
 
   # Audience the kubelet projects the SA token with. Must match
@@ -434,7 +438,9 @@ plugin:
 
   # How long kubelet may cache credentials returned by the plugin.
   # Bounded above by the HarborAccess CR's spec.tokenTTL; this is just
-  # kubelet's view, not a contract with Harbor.
+  # kubelet's view, not a contract with Harbor. A Go duration (1h, 90m;
+  # there is no d unit): kubelet does not start with any other value, so
+  # the chart refuses it.
   defaultCacheDuration: 1h
 
   resources:
@@ -457,6 +463,11 @@ plugin:
 
 # Service shape. ADR-0008: NodePort by default so plugin pods can reach
 # the bridge via node-local routing (plugin → 127.0.0.1:<nodePort>).
+# That default endpoint (plugin.bridgeEndpoint empty) is rendered at
+# install time, so it needs type NodePort or LoadBalancer (which
+# allocates node ports too) and a fixed nodePort; the chart refuses
+# anything else. Another type, or nodePort null for a port the apiserver
+# picks, needs plugin.bridgeEndpoint.
 service:
   type: NodePort
   port: 8443
