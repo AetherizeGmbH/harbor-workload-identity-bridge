@@ -15,9 +15,9 @@ import (
 
 // Several installs of the chart (ADR-0029) run one installer each on every
 // node, possibly at the same moment. They share kubelet's one
-// credential-provider config, /etc/default/kubelet and the kubelet unit, so
-// every read-modify-write of those files and every kubelet restart runs
-// under an exclusive flock(2). The locks, always taken in this order:
+// credential-provider config, the kubelet environment file and the kubelet
+// unit, so every read-modify-write of those files and every kubelet restart
+// runs under an exclusive flock(2). The locks, always taken in this order:
 //
 //   - the node lock (nodeLockPath), a fixed node path that every install
 //     finds whatever its chart values. Every mode that may touch kubelet
@@ -28,7 +28,7 @@ import (
 //     before it reads it. Patch mode, which may point kubelet away from the
 //     config kubelet reads now, first takes that config's lock, then its
 //     own (one lock when both are the same), and holds both from before it
-//     checks the current config (checkRewire) until the pass ends
+//     checks the current config (blockingInstalls) until the pass ends
 //     (lockPatchConfigs): none mode, whose pod mounts only the two plugin
 //     directories, takes only its own config lock and cannot see the node
 //     lock, and could otherwise add an entry to either config after patch

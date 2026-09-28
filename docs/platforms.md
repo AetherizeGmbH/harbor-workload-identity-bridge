@@ -5,7 +5,7 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 
 | Platform | Chart settings | What happens on each node | Verified |
 |---|---|---|---|
-| kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`, kubelet restarted and verified | yes (CI e2e) |
+| kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in the environment file the kubelet unit reads (`/etc/default/kubelet` with Debian packages and on kind, `/etc/sysconfig/kubelet` with RPM packages; ADR-0034), kubelet restarted and verified | kind: yes (CI e2e); RPM packages: unit-tested, not run |
 | GKE Standard | defaults | kubelet already runs GKE's `auth-provider-gcp` → **merge** into that config (YAML), binary into its bin dir | harness ready (`make e2e-gke`), never run |
 | EKS (AL2023) | defaults | kubelet already runs `ecr-credential-provider` → **merge** into `/etc/eks/image-credential-provider/config.json` (stays JSON) | merge unit-tested, not run |
 | AKS | defaults | kubelet already runs `acr-credential-provider` → **merge** into its config | merge unit-tested, not run |
@@ -23,7 +23,8 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   creates the RBAC that lets kubelets request tokens for `plugin.audience`.
 - Each node must reach the bridge. Default: the bridge NodePort on the node's
   own loopback (`https://127.0.0.1:31443`). On dataplanes that do not route
-  loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`. The
+  loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`
+  (the installer puts an IPv6 node address in brackets). The
   chart then has the plugin verify the bridge certificate against the bridge
   Service's DNS name, because the node IP is not in the certificate. Both the
   `$(NODE_IP)` substitution and that server name
@@ -48,10 +49,26 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 
 **Restarts.** In auto/merge/patch mode the installer restarts kubelet once per
 node when (and only when) the effective credential-provider config changes,
-then waits until kubelet is stably active before it records success. Running
-containers are not affected. A node whose kubelet does not come back fails the
-DaemonSet pod on that node (visible in `kubectl logs ds/…-plugin -c install`);
-it does not continue silently.
+then waits until kubelet is stably active (one kubelet process up for the
+whole settle period, 15 s) before it records success. Running containers are
+not affected. Before it writes anything it checks its own provider entry the
+way kubelet does (`matchImages`, `defaultCacheDuration`, the audience) and
+refuses one kubelet would exit on. When kubelet still does not come back, or in
+patch mode does not pick up the flags, the installer restores the config (and
+the kubelet environment file) it replaced, restarts kubelet onto them and fails the
+DaemonSet pod on that node; with kubelet running again,
+`kubectl logs ds/…-plugin -c install` shows why. Until then kubelet is down for
+about the verification timeout (90 s), and the node is `NotReady` for that
+time. The installer records the content as rejected in its state file and does
+not restart kubelet onto the same content again on the pod's retries: roll out
+corrected values, or fix the node and delete the state file there to retry
+(ADR-0033). A changed kubelet (an upgraded binary, or another command line or
+`--config` file) gets one more try with the same content by itself: an upgrade
+to 1.34, where the `KubeletServiceAccountTokenForCredentialProviders` gate is
+on by default, can make kubelet accept what it rejected. If kubelet does not
+come back on the restored files either, the node stays `NotReady` and
+`kubectl logs` cannot reach it: run `journalctl -u kubelet` on the node; the
+`.bak` copy next to each restored file holds the content kubelet rejected.
 
 **Node replacement and reboots.** New or reimaged nodes run the DaemonSet and
 converge the same way. If a platform resets the provider config at boot (GKE COS

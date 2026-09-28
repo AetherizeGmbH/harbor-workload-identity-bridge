@@ -418,9 +418,12 @@ container:
   the kubelet flags) actually changed, tracked by a content hash in
   `/var/lib/harbor-bridge/installer-state.json` (one state file per
   install, ADR-0029). It then waits until the
-  unit is stably active (and, in patch mode, until the running kubelet
-  carries the flags) before it records success; otherwise the pod fails
-  loudly. Running containers survive the restart (containerd owns them).
+  unit is stably active, one kubelet process up for the whole settle
+  period (and, in patch mode, until the running kubelet carries the
+  flags), before it records success. Otherwise it restores the files it
+  replaced, restarts kubelet onto them, records the content as rejected so
+  that no retry restarts the same kubelet onto it again, and fails the pod
+  (ADR-0033). Running containers survive the restart (containerd owns them).
   Binary drops and CA/mTLS rotation never restart kubelet.
 - opens every host file relative to its directory and accepts only a
   regular file: a symlink, FIFO or device in place of a file it reads
@@ -442,10 +445,14 @@ container:
   container, a symlink planted before the pod starts is followed. Keep
   every release's `plugin.hostConfigDir` disjoint from every other
   release's directories (the bullet on the CA and mTLS files below).
-- in `patch` mode parse-merges `/etc/default/kubelet`, preserving
-  operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
-  node's existing `CredentialProviderConfig`, preserving foreign
-  provider entries and unknown fields.
+- in `patch` mode parse-merges the environment file the kubelet unit
+  reads, and only `/etc/default/kubelet` or `/etc/sysconfig/kubelet`
+  (ADR-0034), preserving operator-set `KUBELET_EXTRA_ARGS`; in `merge`
+  mode it edits the node's existing `CredentialProviderConfig`,
+  preserving foreign provider entries and unknown fields. Both files, and
+  their `.bak` copies, keep the node's owner and group and at most its
+  permission bits (never wider than `0644`): a `0600` config stays
+  `0600`.
 - edits only the provider entry named `plugin.providerName` when several
   installs share a node ([ADR-0029](docs/adr/0029-configurable-plugin-provider-name.md)),
   and does so under an exclusive `flock` (`/run/harbor-bridge-installer.lock`
@@ -506,7 +513,10 @@ container:
   holds another install's entry; in a config in reach of a
   `plugin.hostConfigDir`, only an entry a record in kubelet's bin dir
   vouches for counts, so a planted entry cannot keep kubelet on that
-  config.
+  config. It moves kubelet anyway when the config it moves to keeps that
+  install's entry, which takes that install's record in the new bin dir
+  (ADR-0035): a writer of `plugin.hostConfigDir` cannot bring that about,
+  since only root on the node writes the bin dir.
 - in `merge` mode into a cloud's config, keeps every other entry, but
   refuses to write the config, or restart kubelet onto it, when kubelet
   would exit at startup: an entry whose binary is missing from kubelet's

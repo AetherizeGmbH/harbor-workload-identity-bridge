@@ -14,8 +14,9 @@
 //   - merge: inject our provider entry into the node's existing
 //     CredentialProviderConfig and drop the binary into the existing
 //     bin dir. Foreign providers and unknown fields are preserved.
-//   - patch: own bin/config dirs + parse-merge of /etc/default/kubelet
-//     (KUBELET_EXTRA_ARGS), then restart kubelet.
+//   - patch: own bin/config dirs + parse-merge of KUBELET_EXTRA_ARGS in
+//     the environment file the kubelet unit reads (/etc/default/kubelet or
+//     /etc/sysconfig/kubelet, ADR-0034), then restart kubelet.
 //   - none:  copy files only; the operator owns the kubelet flags.
 //
 // Kubelet reads the credential-provider config once at startup but
@@ -91,8 +92,9 @@ type config struct {
 	HostBinDir    string // HOST_BIN_DIR: node path for the plugin binary (patch/none).
 	HostConfigDir string // HOST_CONFIG_DIR: node path for config + CA/mTLS files (all modes).
 
-	// Merge-mode overrides. When set, discovery of the kubelet flags
-	// is skipped and these node paths are used directly.
+	// Merge-mode overrides, only with mode merge (loadConfig). When set,
+	// discovery of the kubelet flags is skipped and these node paths are
+	// used directly.
 	MergeBinDir     string // INSTALL_MERGE_BIN_DIR, optional.
 	MergeConfigFile string // INSTALL_MERGE_CONFIG_FILE, optional.
 
@@ -163,6 +165,13 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	if (c.MergeBinDir == "") != (c.MergeConfigFile == "") {
 		return nil, fmt.Errorf("INSTALL_MERGE_BIN_DIR and INSTALL_MERGE_CONFIG_FILE must be set together")
 	}
+	// The overrides skip discovery, which auto mode needs to choose a
+	// mode; patch and none mode have no use for them. Silently ignoring
+	// them sent the plugin elsewhere (or, in auto mode, patched kubelet's
+	// flags) instead of into the named files.
+	if c.MergeBinDir != "" && c.Mode != modeMerge {
+		return nil, fmt.Errorf("INSTALL_MERGE_BIN_DIR and INSTALL_MERGE_CONFIG_FILE (plugin.install.binDir/configFile) name merge-mode targets and are used only with INSTALL_MODE=merge, not %q; set plugin.install.mode=merge, or clear them", c.Mode)
+	}
 	for name, v := range map[string]string{
 		"HOST_BIN_DIR": c.HostBinDir, "HOST_CONFIG_DIR": c.HostConfigDir, "STATE_DIR": c.StateDir,
 		"INSTALL_MERGE_BIN_DIR": c.MergeBinDir, "INSTALL_MERGE_CONFIG_FILE": c.MergeConfigFile,
@@ -202,7 +211,7 @@ func loadConfig(getenv func(string) string) (*config, error) {
 }
 
 // nodePathChars is the character set of node paths. The paths are written
-// unquoted into KUBELET_EXTRA_ARGS in /etc/default/kubelet (an
+// unquoted into KUBELET_EXTRA_ARGS in the kubelet environment file (an
 // EnvironmentFile) and into the provider config, where a space, quote or
 // "$" would split or expand them.
 var nodePathChars = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)

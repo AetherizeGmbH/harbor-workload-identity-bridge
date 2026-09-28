@@ -90,8 +90,10 @@ func (c *config) writeRecord(binDir string, r entryRecord) error {
 // beginRecord records entryJSON in binDir before the pass writes the binary
 // and the config chartOwned (empty for a cloud's config): the entries the
 // record held, one of which the config may hold now, plus entryJSON. A
-// record that is missing or cannot be parsed contributes none.
-func (c *config) beginRecord(binDir string, entryJSON []byte, chartOwned string) error {
+// record that is missing or cannot be parsed contributes none. It returns
+// the record it wrote, which a rollback writes again (ADR-0033): it holds
+// both the entry the config held before the pass and the new one.
+func (c *config) beginRecord(binDir string, entryJSON []byte, chartOwned string) (*entryRecord, error) {
 	r := c.readRecord(filepath.Join(binDir, c.files().Record))
 	if r == nil {
 		r = &entryRecord{}
@@ -100,7 +102,10 @@ func (c *config) beginRecord(binDir string, entryJSON []byte, chartOwned string)
 		r.Entries = append(r.Entries, entryJSON)
 	}
 	r.ChartOwnedConfig = chartOwned
-	return c.writeRecord(binDir, *r)
+	if err := c.writeRecord(binDir, *r); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 // commitRecord reduces the record in binDir to entryJSON once the config

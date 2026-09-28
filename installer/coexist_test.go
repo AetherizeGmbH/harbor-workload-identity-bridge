@@ -1107,12 +1107,16 @@ func TestRun_PatchReadsAConfigDirectoryBeforeMovingKubelet(t *testing.T) {
 	}
 	// Without another install's entry in the directory, patch mode moves
 	// kubelet to its own directories, as it always did.
-	if err := checkRewire(env.cfg, kubeletWiring{BinDir: "/opt/cp/bin", ConfigFile: "/opt/cp/providers.d"}); err != nil {
-		t.Fatalf("a directory without bridge entries was refused: %v", err)
+	rendered, err := os.ReadFile(env.cfg.SourceConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if others, err := env.cfg.blockingInstalls(kubeletWiring{BinDir: "/opt/cp/bin", ConfigFile: "/opt/cp/providers.d"}, rendered, renderedEntry(t, env)); err != nil || len(others) > 0 {
+		t.Fatalf("a directory without bridge entries was refused: %q, %v", others, err)
 	}
 
 	writeHostFile(t, env, "/opt/cp/providers.d/10-bridge.yaml", renderedConfig)
-	err := run(env.cfg)
+	err = run(env.cfg)
 	if err == nil || !strings.Contains(err.Error(), `holds the provider entries "harbor-bridge-plugin"`) {
 		t.Fatalf("got %v, want a refusal", err)
 	}
@@ -1235,7 +1239,7 @@ func TestRun_PatchMovesKubeletAwayFromPlantedEntries(t *testing.T) {
 // may read exactly that config (a file, or since Kubernetes 1.34 the
 // directory it writes into, a layout the docs rule out but patch mode must
 // not race either). Patch mode with other directories must wait
-// for that lock before it reads the config (checkRewire), or it moves
+// for that lock before it reads the config (blockingInstalls), or it moves
 // kubelet away from an entry the none-mode install adds meanwhile. That
 // holds too when kubelet reads this install's own config (or the directory
 // plugin.hostConfigDir) and only the bin dir differs: then the lock of the
@@ -1787,7 +1791,7 @@ func TestEntryRecord_RoundTripsEveryEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.cfg.beginRecord(binDir, raw, ""); err != nil {
+	if _, err := env.cfg.beginRecord(binDir, raw, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !env.cfg.readRecord(binDir + "/" + filesFor(defaultProviderName).Record).holds(raw) {

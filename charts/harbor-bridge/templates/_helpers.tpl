@@ -225,6 +225,12 @@ harbor.aetherize.io/robot
 {{- if ne (empty $install.binDir) (empty $install.configFile) -}}
 {{- fail "plugin.install.binDir and plugin.install.configFile must be set together (both name merge-mode targets)." -}}
 {{- end -}}
+{{- /* Auto mode discovers kubelet's paths to choose a mode and would
+       ignore the overrides; patch and none mode have no use for them.
+       The installer checks the same (loadConfig). */}}
+{{- if and $install.binDir (ne (toString $install.mode) "merge") -}}
+{{- fail (printf "plugin.install.binDir and plugin.install.configFile name merge-mode targets and are used only with plugin.install.mode=merge, not %q: in auto mode the installer discovers kubelet's paths and would ignore them. Set plugin.install.mode=merge, or clear them." (toString $install.mode)) -}}
+{{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9:_.@-]*$" (toString $install.kubeletUnit)) -}}
 {{- fail (printf "plugin.install.kubeletUnit=%q is not a valid systemd unit name." (toString $install.kubeletUnit)) -}}
 {{- end -}}

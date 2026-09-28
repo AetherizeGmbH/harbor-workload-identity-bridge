@@ -235,8 +235,10 @@ helm install harbor-bridge \
 #    on managed nodes (EKS / GKE / AKS) whose node image already runs
 #    kubelet with --image-credential-provider-* flags, it MERGES our
 #    provider entry into the existing config (foreign providers are
-#    preserved); on self-managed nodes (kind, kubeadm) it PATCHES
-#    /etc/default/kubelet, preserving your KUBELET_EXTRA_ARGS. Either
+#    preserved); on self-managed nodes (kind, kubeadm) it PATCHES the
+#    environment file the kubelet unit reads (/etc/default/kubelet, or
+#    /etc/sysconfig/kubelet with RPM packages), preserving your
+#    KUBELET_EXTRA_ARGS. Either
 #    way kubelet restarts once per node when — and only when — the
 #    effective config content changed, and the installer verifies it
 #    came back healthy; running containers survive the restart.
@@ -335,7 +337,8 @@ clean a node:
    `<plugin.hostConfigDir>/credential-provider-config.yaml`). Kubelet
    refuses a config without providers: if it was the last entry, also
    remove the two `--image-credential-provider-*` flags (patch mode:
-   from `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`).
+   from `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`, or
+   `/etc/sysconfig/kubelet` with RPM packages).
 2. Restart kubelet (`systemctl restart kubelet`). Do this before you
    delete the binary: kubelet does not start while an entry's binary is
    missing.
@@ -347,7 +350,8 @@ clean a node:
    binary, executable, in kubelet's bin dir.
 4. Once the last install is gone from the node, also delete the backups
    of the shared files (`<provider config>.bak`; in patch mode
-   `/etc/default/kubelet.bak`) and the lock files:
+   `/etc/default/kubelet.bak` or `/etc/sysconfig/kubelet.bak`) and the
+   lock files:
    `/run/harbor-bridge-installer.lock` and a `<config>.lock` next to
    every provider config an installer edited or checked, also in a pass
    it refused: next to the cloud's config in merge mode, and in patch
@@ -361,9 +365,9 @@ The DaemonSet runs the `harbor-bridge-installer` binary on every node.
 
 | Mode | What it does | When |
 | --- | --- | --- |
-| `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch` | Almost always the right choice |
+| `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch`. Flags that this install's own last patch-mode pass set (its state file says so) → `patch`, which moves kubelet when `plugin.hostBinaryDir` or `plugin.hostConfigDir` changed. While other installs that have not moved yet share the old directories, it stays there and also puts its files into the new ones; kubelet moves in the pass of the last of them (ADR-0035) | Almost always the right choice |
 | `merge` | Injects our provider entry into the node's **existing** `CredentialProviderConfig` (JSON or YAML — EKS/GKE/AKS formats both work; foreign providers and unknown fields round-trip untouched) and drops the binary into the existing bin dir. Kubelet flags untouched. | Managed nodes (EKS AL2023, GKE, AKS) |
-| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of `/etc/default/kubelet` — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet that sources `/etc/default/kubelet`) |
+| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of the environment file the kubelet unit reads (`/etc/default/kubelet`, or `/etc/sysconfig/kubelet` with RPM packages; ADR-0034) — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet whose unit reads one of the two files) |
 | `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | k3s/RKE2 (flags via their kubelet args), strict-privilege environments |
 | `plugin.enabled=false` | No DaemonSet at all; NOTES print the provider entry to install | Talos (system extension), baked node images |
 
@@ -381,6 +385,21 @@ file per install, see below):
 - No-op re-rolls, plugin binary updates, and CA/mTLS rotation never
   restart kubelet (the plugin re-reads the CA on every exec; the
   DaemonSet's long-running container syncs rotated certs to the node).
+- A value kubelet rejects no longer keeps the node down until someone
+  repairs it, but it still costs an outage. The installer refuses a
+  provider entry kubelet would exit on (`matchImages`,
+  `defaultCacheDuration`, the audience) before it writes anything. When
+  kubelet still does not come back after the restart (or, in patch mode,
+  runs without the flags), the installer waits out its verification
+  timeout (90 s), restores the files it replaced, restarts kubelet onto
+  them and fails the pod with the reason. Kubelet is down for about that
+  time, longer than the node-monitor grace period (40 s, 50 s since
+  Kubernetes 1.32): the node turns `NotReady` and its pods drop out of
+  Service endpoints until kubelet runs again. The installer does not
+  restart kubelet onto the same content again: roll out corrected values,
+  change kubelet (an upgraded binary, or another command line or
+  `--config` file, gets one more try by itself), or fix the node and
+  delete the state file there to retry (ADR-0033).
 
 ### Several installs per cluster (ADR-0029)
 
@@ -471,7 +490,12 @@ service:
   same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
   refuses to point kubelet at other directories while the config kubelet
   reads holds another release's entry (in a chart-owned config, only an
-  entry that release's record in kubelet's bin dir vouches for). In auto
+  entry that release's record in kubelet's bin dir vouches for), unless
+  that release has its binary and record in the new bin dir and its
+  entry in the new config already. To change the directories of all
+  releases, change them in each, in auto mode: each release's pass puts
+  its files into the new directories and keeps kubelet on the old ones,
+  and the last one moves kubelet (ADR-0035). In auto
   mode a later release merges into whatever config kubelet already runs,
   and its binary goes into kubelet's bin dir. When that config is another release's
   chart-owned config, it treats it as the chart's (see "The chart-owned
