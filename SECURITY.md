@@ -447,9 +447,12 @@ container:
   release's directories (the bullet on the CA and mTLS files below).
 - in `patch` mode parse-merges the environment file the kubelet unit
   reads, and only `/etc/default/kubelet` or `/etc/sysconfig/kubelet`
-  (ADR-0034), preserving operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
-  node's existing `CredentialProviderConfig`, preserving foreign
-  provider entries and unknown fields.
+  (ADR-0034), preserving operator-set `KUBELET_EXTRA_ARGS`; in `merge`
+  mode it edits the node's existing `CredentialProviderConfig`,
+  preserving foreign provider entries and unknown fields. Both files, and
+  their `.bak` copies, keep the node's owner and group and at most its
+  permission bits (never wider than `0644`): a `0600` config stays
+  `0600`.
 - edits only the provider entry named `plugin.providerName` when several
   installs share a node ([ADR-0029](docs/adr/0029-configurable-plugin-provider-name.md)),
   and does so under an exclusive `flock` (`/run/harbor-bridge-installer.lock`

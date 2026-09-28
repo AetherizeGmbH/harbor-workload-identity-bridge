@@ -286,3 +286,109 @@ func TestOpenNodeDir_CreatesAndRefusesSymlinks(t *testing.T) {
 		t.Fatalf("the symlink target holds %v (err %v)", entries, err)
 	}
 }
+
+func modeOf(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode().Perm()
+}
+
+// TestWriteForeignFile_KeepsTheNodesModeAndOwner: a file the installer
+// edits but does not own (a cloud's credential-provider config, the kubelet
+// environment file) used to come back as 0644, owned by the installer, and
+// so did its .bak: a 0600 file became world-readable, on every pass.
+func TestWriteForeignFile_KeepsTheNodesModeAndOwner(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A group the file can move to without privileges, when the user has
+	// a supplementary one; the owner must survive the rename.
+	gid := os.Getgid()
+	if groups, err := os.Getgroups(); err == nil {
+		for _, g := range groups {
+			if g != gid {
+				gid = g
+				break
+			}
+		}
+	}
+	if err := os.Chown(path, os.Getuid(), gid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeForeignFile(path, []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path, path + ".bak"} {
+		if m := modeOf(t, p); m != 0o600 {
+			t.Errorf("%s: mode %o, want the node's 0600", filepath.Base(p), m)
+		}
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o := ownerOf(fi); o == nil || o.uid != os.Getuid() || o.gid != gid {
+			t.Errorf("%s: owner %+v, want %d:%d", filepath.Base(p), o, os.Getuid(), gid)
+		}
+	}
+	// Unchanged content: the mode stays too.
+	if _, err := writeForeignFile(path, []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if m := modeOf(t, path); m != 0o600 {
+		t.Fatalf("an unchanged pass changed the mode to %o", m)
+	}
+	// Wider than the installer's default: capped, never kept group- or
+	// world-writable.
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeForeignFile(path, []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if m := modeOf(t, path); m != 0o644 {
+		t.Fatalf("mode %o, want 0644", m)
+	}
+	// A new file gets the default.
+	fresh := filepath.Join(dir, "fresh")
+	if _, err := writeForeignFile(fresh, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if m := modeOf(t, fresh); m != 0o644 {
+		t.Fatalf("new file mode %o, want 0644", m)
+	}
+}
+
+// TestRestoreIn_PutsBackModeAndOwner: a rollback restores the file as it
+// was, permissions included (ADR-0033).
+func TestRestoreIn_PutsBackModeAndOwner(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := os.WriteFile(filepath.Join(dir, "env"), []byte("A=1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := readPrior(root, "env")
+	if err != nil || !prior.existed || prior.meta.perm != 0o640 {
+		t.Fatalf("prior = %+v, %v", prior, err)
+	}
+	if _, err := writeFileIn(root, "env", []byte("A=2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreIn(root, "env", prior); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "env")); string(got) != "A=1\n" {
+		t.Fatalf("content %q", got)
+	}
+	if m := modeOf(t, filepath.Join(dir, "env")); m != 0o640 {
+		t.Fatalf("mode %o, want 0640", m)
+	}
+}

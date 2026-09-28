@@ -259,12 +259,11 @@ func runPatchOn(cfg *config, rendered []byte, entry map[string]any, own kubeletW
 		return fmt.Errorf("mode patch: %w", err)
 	}
 	envPath := cfg.hostPath(envFile)
-	existingEnv, err := readHostFile(envPath)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	priorEnv, err := readPriorHostFile(envPath)
+	if err != nil {
 		return fmt.Errorf("read %s: %w", envFile, err)
 	}
-	priorEnv := priorContent{existed: err == nil, data: existingEnv}
-	desiredEnv, err := mergeExtraArgs(existingEnv, own.BinDir, configPath)
+	desiredEnv, err := mergeExtraArgs(priorEnv.data, own.BinDir, configPath)
 	if err != nil {
 		return fmt.Errorf("%s: %w", envFile, err)
 	}
@@ -292,7 +291,9 @@ func runPatchOn(cfg *config, rendered []byte, entry map[string]any, own kubeletW
 	if err := cfg.commitRecord(own.BinDir, entryJSON, configPath); err != nil {
 		return err
 	}
-	envChanged, err := writeFileAtomic(envPath, desiredEnv, 0o644)
+	// The environment file is the node's, not the chart's: it keeps its
+	// owner and at most its permissions (writeForeignIn).
+	envChanged, err := writeForeignFile(envPath, desiredEnv)
 	if err != nil {
 		return err
 	}
@@ -300,8 +301,8 @@ func runPatchOn(cfg *config, rendered []byte, entry map[string]any, own kubeletW
 	// record first: while the config is restored it holds both entries.
 	var rb rollback
 	rb.step(func() error { return cfg.writeRecord(own.BinDir, *begun) })
-	rb.file(configPath, func() error { return restoreIn(dir, configName, priorConfig, 0o644) })
-	rb.file(envFile, func() error { return restoreHostFile(envPath, priorEnv, 0o644) })
+	rb.file(configPath, func() error { return restoreIn(dir, configName, priorConfig) })
+	rb.file(envFile, func() error { return restoreHostFile(envPath, priorEnv) })
 
 	want := own
 	verify := func() error {
@@ -706,12 +707,16 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 
 	// Read, validate, and merge first: an unknown schema or a missing file
 	// is refused before anything is written (no half-install).
-	existing, err := readFileIn(dir, name)
+	prior, err := readPrior(dir, name)
+	if err == nil && !prior.existed {
+		err = fs.ErrNotExist
+	}
 	if err != nil {
 		// Kubelet refuses to start when the flag points at a missing
 		// file, so on a live node this indicates a wrong override.
 		return fmt.Errorf("read node credential-provider config %s: %w", wiring.ConfigFile, err)
 	}
+	existing := prior.data
 	chartOwned := wiring.ConfigFile == own
 	if !chartOwned {
 		// Under the config's lock: a none-mode install writes its record
@@ -753,7 +758,9 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	if err != nil {
 		return err
 	}
-	written, err := writeFileIn(dir, name, merged, 0o644)
+	// Usually the cloud's file: it keeps its owner and at most its
+	// permissions (writeForeignIn).
+	written, err := writeForeignIn(dir, name, merged)
 	if err != nil {
 		return err
 	}
@@ -766,9 +773,7 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	// Kubelet's config as this pass found it (ADR-0033); the record first.
 	var rb rollback
 	rb.step(func() error { return cfg.writeRecord(wiring.BinDir, *begun) })
-	rb.file(wiring.ConfigFile, func() error {
-		return restoreIn(dir, name, priorContent{existed: true, data: existing}, 0o644)
-	})
+	rb.file(wiring.ConfigFile, func() error { return restoreIn(dir, name, prior) })
 	return finishWithRestart(cfg, t, mergeChanged || written, nil, &rb)
 }
 

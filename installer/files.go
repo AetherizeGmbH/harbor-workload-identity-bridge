@@ -245,36 +245,116 @@ func openSubdir(parent *os.Root, name string) (*os.Root, error) {
 // path+".bak". Returns whether the on-disk content changed. All
 // operations are relative to the directory and never follow a symlink in
 // the last component (see readHostFile); rename replaces a symlink
-// instead of writing through it.
+// instead of writing through it. For the installer's own files: they get
+// mode perm, and the installer's owner (writeForeignFile for other files).
 func writeFileAtomic(path string, data []byte, perm os.FileMode) (changed bool, err error) {
-	dir, name := filepath.Dir(path), filepath.Base(path)
-	if err := mkdirNodeDir(dir); err != nil {
+	root, err := openParent(path)
+	if err != nil {
 		return false, err
+	}
+	defer func() { _ = root.Close() }()
+	return writeFileIn(root, filepath.Base(path), data, perm)
+}
+
+// writeForeignFile is writeFileAtomic for a node file the installer edits
+// but does not own (writeForeignIn).
+func writeForeignFile(path string, data []byte) (changed bool, err error) {
+	root, err := openParent(path)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = root.Close() }()
+	return writeForeignIn(root, filepath.Base(path), data)
+}
+
+// openParent opens the directory of the host path path, creating it when
+// missing (mkdirNodeDir).
+func openParent(path string) (*os.Root, error) {
+	dir := filepath.Dir(path)
+	if err := mkdirNodeDir(dir); err != nil {
+		return nil, err
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return false, fmt.Errorf("open %s: %w", dir, err)
+		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	defer func() { _ = root.Close() }()
-	return writeFileIn(root, name, data, perm)
+	return root, nil
+}
+
+// fileMeta is the permission bits and owner a written file gets.
+type fileMeta struct {
+	perm os.FileMode
+	// owner is nil for the installer's own (root on the node).
+	owner *fileOwner
+}
+
+type fileOwner struct{ uid, gid int }
+
+// ownerOf returns the owner of the file fi describes.
+func ownerOf(fi os.FileInfo) *fileOwner {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	return &fileOwner{uid: int(st.Uid), gid: int(st.Gid)}
 }
 
 // writeFileIn is writeFileAtomic for the file name in the directory root.
+// The file gets mode perm, also when its content is current (a prior
+// version may have written it with other permissions).
 func writeFileIn(root *os.Root, name string, data []byte, perm os.FileMode) (changed bool, err error) {
+	return writeIn(root, name, data, func(os.FileInfo) fileMeta { return fileMeta{perm: perm} })
+}
+
+// foreignFileMode is the mode of a node file the installer edits but does
+// not own when it creates it, and the most it leaves on one that exists
+// (writeForeignIn).
+const foreignFileMode os.FileMode = 0o644
+
+// writeForeignIn is writeFileIn for a node file that the installer edits
+// but does not own: kubelet's credential-provider config in merge mode
+// (usually the cloud's) and the kubelet environment file in patch mode.
+// An existing file keeps its owner and group and its permission bits,
+// capped at foreignFileMode, and so does its .bak: the installer never
+// makes it readable by more users than it was, nor group- or
+// world-writable. A file that did not exist gets foreignFileMode.
+func writeForeignIn(root *os.Root, name string, data []byte) (changed bool, err error) {
+	return writeIn(root, name, data, func(existing os.FileInfo) fileMeta {
+		if existing == nil {
+			return fileMeta{perm: foreignFileMode}
+		}
+		return fileMeta{perm: existing.Mode().Perm() & foreignFileMode, owner: ownerOf(existing)}
+	})
+}
+
+// writeIn writes data as the file name in root (writeFileAtomic), with the
+// metadata meta returns for the file as it is (nil when there is none).
+// That metadata also applies to the .bak and, when the content is current,
+// to the file itself.
+func writeIn(root *os.Root, name string, data []byte, meta func(existing os.FileInfo) fileMeta) (changed bool, err error) {
 	path := filepath.Join(root.Name(), name)
 	f, err := openRegular(root, name)
+	var m fileMeta
 	switch {
 	case err == nil:
+		fi, serr := f.Stat()
+		if serr != nil {
+			_ = f.Close()
+			return false, fmt.Errorf("stat %s: %w", path, serr)
+		}
+		m = meta(fi)
 		old, rerr := readAllCapped(f)
 		if rerr != nil {
 			_ = f.Close()
 			return false, fmt.Errorf("read %s: %w", path, rerr)
 		}
 		if bytes.Equal(old, data) {
-			// Content is current; still enforce the mode (a prior
-			// version may have written with different permissions).
-			// fchmod on the open file, never chmod by name.
-			cerr := f.Chmod(perm)
+			// Content is current; still enforce the mode. fchmod on the
+			// open file, never chmod by name.
+			var cerr error
+			if fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != m.perm {
+				cerr = f.Chmod(m.perm)
+			}
 			_ = f.Close()
 			if cerr != nil {
 				return false, fmt.Errorf("chmod %s: %w", path, cerr)
@@ -282,27 +362,29 @@ func writeFileIn(root *os.Root, name string, data []byte, perm os.FileMode) (cha
 			return false, nil
 		}
 		_ = f.Close()
-		if err := replaceFile(root, name+".bak", old, perm); err != nil {
+		if err := replaceFile(root, name+".bak", old, m); err != nil {
 			return false, fmt.Errorf("write backup %s.bak: %w", path, err)
 		}
 	case errors.Is(err, fs.ErrNotExist):
 		// First write — no backup.
+		m = meta(nil)
 	default:
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	if err := replaceFile(root, name, data, perm); err != nil {
+	if err := replaceFile(root, name, data, m); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
 }
 
 // replaceFile atomically replaces name in root with data: a fresh
-// O_EXCL temp file, fchmod, fsync, rename, then fsync of the directory.
-// The syncs matter because these files decide whether kubelet starts:
-// without them a power loss right after the install can leave an empty
-// or truncated config that kubelet refuses at boot.
-func replaceFile(root *os.Root, name string, data []byte, perm os.FileMode) error {
+// O_EXCL temp file, fchown (when m names an owner), fchmod, fsync,
+// rename, then fsync of the directory. The syncs matter because these
+// files decide whether kubelet starts: without them a power loss right
+// after the install can leave an empty or truncated config that kubelet
+// refuses at boot.
+func replaceFile(root *os.Root, name string, data []byte, m fileMeta) error {
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return fmt.Errorf("random temp suffix: %w", err)
@@ -317,7 +399,14 @@ func replaceFile(root *os.Root, name string, data []byte, perm os.FileMode) erro
 		_ = tmp.Close()
 		return fmt.Errorf("write %s: %w", tmpName, err)
 	}
-	if err := tmp.Chmod(perm); err != nil {
+	if m.owner != nil {
+		// Before the chmod: a chown can clear mode bits.
+		if err := chownIfOther(tmp, *m.owner); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("chown %s: %w", tmpName, err)
+		}
+	}
+	if err := tmp.Chmod(m.perm); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("chmod %s: %w", tmpName, err)
 	}
@@ -334,45 +423,82 @@ func replaceFile(root *os.Root, name string, data []byte, perm os.FileMode) erro
 	return syncDir(root)
 }
 
+// chownIfOther gives f the owner o unless it has it already.
+func chownIfOther(f *os.File, o fileOwner) error {
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if cur := ownerOf(fi); cur != nil && *cur == o {
+		return nil
+	}
+	return f.Chown(o.uid, o.gid)
+}
+
 // priorContent is a node file as a pass found it before its own write,
 // which a rollback restores (ADR-0033).
 type priorContent struct {
 	existed bool
 	data    []byte
+	meta    fileMeta // its permission bits and owner
 }
 
 // readPrior reads the file name in root as priorContent. A missing file did
 // not exist; anything but a regular file is an error (openRegular).
 func readPrior(root *os.Root, name string) (priorContent, error) {
-	data, err := readFileIn(root, name)
+	f, err := openRegular(root, name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return priorContent{}, nil
 	case err != nil:
 		return priorContent{}, err
 	}
-	return priorContent{existed: true, data: data}, nil
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return priorContent{}, err
+	}
+	data, err := readAllCapped(f)
+	if err != nil {
+		return priorContent{}, err
+	}
+	return priorContent{existed: true, data: data, meta: fileMeta{perm: fi.Mode().Perm(), owner: ownerOf(fi)}}, nil
+}
+
+// readPriorHostFile is readPrior for the host path path; a missing
+// directory is a missing file.
+func readPriorHostFile(path string) (priorContent, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return priorContent{}, nil
+	case err != nil:
+		return priorContent{}, err
+	}
+	defer func() { _ = root.Close() }()
+	return readPrior(root, filepath.Base(path))
 }
 
 // restoreIn puts the file name in root back as p describes it: the same
-// content, written like any other (writeFileIn, so its .bak then holds the
-// content being replaced), or no file when it did not exist.
-func restoreIn(root *os.Root, name string, p priorContent, perm os.FileMode) error {
+// content, permission bits and owner, written like any other (writeIn, so
+// its .bak then holds the content being replaced), or no file when it did
+// not exist.
+func restoreIn(root *os.Root, name string, p priorContent) error {
 	if p.existed {
-		_, err := writeFileIn(root, name, p.data, perm)
+		_, err := writeIn(root, name, p.data, func(os.FileInfo) fileMeta { return p.meta })
 		return err
 	}
 	return removeRegularIn(root, name)
 }
 
 // restoreHostFile is restoreIn for the host path path.
-func restoreHostFile(path string, p priorContent, perm os.FileMode) error {
+func restoreHostFile(path string, p priorContent) error {
 	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return fmt.Errorf("open %s: %w", filepath.Dir(path), err)
 	}
 	defer func() { _ = root.Close() }()
-	return restoreIn(root, filepath.Base(path), p, perm)
+	return restoreIn(root, filepath.Base(path), p)
 }
 
 // removeRegularIn removes the file name in root, when there is one, and
