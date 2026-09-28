@@ -77,16 +77,29 @@ ADR-0029 (per-install state and records); neither is reversed.
    the `.bak` copies and `journalctl -u <unit>`. The `.bak` copies are not
    restored automatically, because another install or a cloud agent may
    have written the file after them.
-3. **Do not apply rejected content again.** After a failed restart or
-   verification the pass records the content in its state file
-   (`rejected`: mode, paths, the kubelet unit, `entryHash` and `appliedHash`
-   of the rejected content, the error and the time), whether or not the
-   rollback succeeded. A later pass whose content has exactly these values
-   refuses before it writes anything and does not restart kubelet; it names
-   the recorded error and the way out: new content (a changed rendered
-   entry, a changed shared file, a changed `/etc/default/kubelet`, another
-   `plugin.install.kubeletUnit`), or deleting the state file on the node
-   after fixing the node. A verified restart writes a new state without
+3. **Do not apply rejected content again to the same kubelet.** After a
+   failed restart or verification the pass records the content in its
+   state file (`rejected`: mode, paths, the kubelet unit, `entryHash` and
+   `appliedHash` of the rejected content, the kubelet, the error and the
+   time), whether or not the rollback succeeded. The kubelet is a hash over
+   the content of the binary at the path the running kubelet process was
+   started from (`/proc/<pid>/exe`; after a package upgrade that path holds
+   the binary the next restart runs), the process's command line without the
+   two credential-provider flags, and the content of its `--config` file,
+   taken when the pass records the rejection (after the rollback, when it
+   restored anything). A later pass whose content has exactly these
+   values refuses before it writes anything and does not restart kubelet;
+   it names the recorded error and the way out: new content (a changed
+   rendered entry, a changed shared file, a changed `/etc/default/kubelet`,
+   another `plugin.install.kubeletUnit`), a changed kubelet, or deleting the
+   state file on the node after fixing the node. A pass with the same
+   content and a different kubelet tries it once more: the version- and
+   gate-dependent rejections above end with a kubelet upgrade (the gate is
+   beta and on by default since 1.34) or a gate turned on in the command
+   line or the config file, which a pass that restarted another kubelet did
+   not test. When either side cannot tell the kubelet (no single host
+   kubelet process, a binary that is not a readable regular file), the
+   rejection stays. A verified restart writes a new state without
    `rejected`. `schemaVersion` stays 1; installers that do not know the
    field ignore it.
 
@@ -103,9 +116,14 @@ ADR-0029 (per-install state and records); neither is reversed.
 - The same holds for a kubelet unit that does not pass the flags on in
   patch mode: two restarts, then no more until the content changes.
 - A verification that failed for a transient reason (a node too slow to
-  settle within the timeout) is not retried for the same content. The
-  error says how to retry: delete the state file on the node, or roll out
-  new content.
+  settle within the timeout) is not retried for the same content and the
+  same kubelet. The error says how to retry: delete the state file on the
+  node, or roll out new content.
+- A kubelet upgrade, or another kubelet command line or `--config` file,
+  gets one more try with rejected content by itself, without access to the
+  node; when kubelet still rejects it, that costs one more rollback. A pass
+  that finds a rejection for its content reads the kubelet binary once
+  (about 100 MiB) to tell.
 - After a rollback the `.bak` copy of each restored file holds the content
   kubelet rejected (the content before the last write, as always).
 - The crash-window path keeps its gap: when an interrupted pass wrote

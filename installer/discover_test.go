@@ -19,6 +19,7 @@ type procEntry struct {
 	ppid    int    // 0 = default: 1 (a child of init), or 0 for pid 1 itself
 	cgroup  string // "" = default: 0::/system.slice/<comm>.service
 	mntns   string // "" = default: the host's mount namespace
+	exe     string // "" = no exe link; otherwise the node path it names
 }
 
 const hostMntNS = "mnt:[4026531841]"
@@ -62,6 +63,12 @@ func writeProcEntry(t *testing.T, root string, pid int, p procEntry) {
 	_ = os.Remove(filepath.Join(nsDir, "mnt"))
 	if err := os.Symlink(mntns, filepath.Join(nsDir, "mnt")); err != nil {
 		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(dir, "exe"))
+	if p.exe != "" {
+		if err := os.Symlink(p.exe, filepath.Join(dir, "exe")); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

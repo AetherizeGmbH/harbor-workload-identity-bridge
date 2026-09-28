@@ -393,7 +393,9 @@ file per install, see below):
   Kubernetes 1.32): the node turns `NotReady` and its pods drop out of
   Service endpoints until kubelet runs again. The installer does not
   restart kubelet onto the same content again: roll out corrected values,
-  or fix the node and delete the state file there to retry (ADR-0033).
+  change kubelet (an upgraded binary, or another command line or
+  `--config` file, gets one more try by itself), or fix the node and
+  delete the state file there to retry (ADR-0033).
 
 ### Several installs per cluster (ADR-0029)
 

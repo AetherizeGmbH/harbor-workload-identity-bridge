@@ -729,7 +729,9 @@ func (c *config) rejectRestart(statePath string, st *state, t target, changedNow
 		kept := *st
 		rec = &kept
 	}
-	rec.Rejected = t.rejection(c.KubeletUnit, msg, time.Now())
+	// After the rollback kubelet runs again, from the binary that rejected
+	// the content (kubeletIdentity).
+	rec.Rejected = t.rejection(c.KubeletUnit, c.kubeletIdentity(), msg, time.Now())
 	stateFile := filepath.Join(c.StateDir, c.files().State)
 	if err := saveState(statePath, rec); err != nil {
 		return fmt.Errorf("%s. Recording the rejected content in %s failed too (%w), so the next pass restarts kubelet onto it again", msg, stateFile, err)
@@ -750,7 +752,16 @@ func (c *config) refuseRejected(t target) error {
 	if r == nil {
 		return nil
 	}
-	return fmt.Errorf("refusing to restart kubelet onto content it already rejected: the pass at %s that restarted kubelet unit %q onto exactly this content failed: %s. This pass changes nothing on the node. Fix the cause and roll out new content (a changed plugin.* value renders a new provider entry), or fix the node and delete %s on it to try the same content again (ADR-0033)",
+	// Another kubelet did not test this content: a kubelet upgrade, or a
+	// feature gate turned on, can make kubelet accept what it rejected. The
+	// pass tries once; if kubelet rejects it again, that kubelet is recorded.
+	if r.Kubelet != "" {
+		if now := c.kubeletIdentity(); !r.testedBy(now) {
+			logf("the content kubelet rejected at %s is tried again: kubelet's binary, command line or --config file changed since (ADR-0033)", r.At)
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing to restart kubelet onto content it already rejected: the pass at %s that restarted kubelet unit %q onto exactly this content failed: %s. This pass changes nothing on the node. Fix the cause and roll out new content (a changed plugin.* value renders a new provider entry), change kubelet (another kubelet binary, command line or --config file tries the same content once more), or fix the node and delete %s on it to try the same content again (ADR-0033)",
 		r.At, r.Unit, r.Reason, filepath.Join(c.StateDir, c.files().State))
 }
 

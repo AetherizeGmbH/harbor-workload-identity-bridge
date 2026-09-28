@@ -65,9 +65,21 @@ type rejection struct {
 	Unit        string `json:"unit"`
 	EntryHash   string `json:"entryHash"`
 	AppliedHash string `json:"appliedHash"`
+	// Kubelet identifies the kubelet that rejected the content
+	// (kubeletIdentity): another kubelet binary, command line or config
+	// file did not test it. Empty when the pass could not tell.
+	Kubelet string `json:"kubelet,omitempty"`
 	// Reason is the error the pass failed with, At when (RFC 3339, UTC).
 	Reason string `json:"reason"`
 	At     string `json:"at"`
+}
+
+// testedBy reports whether the kubelet identified by kubelet
+// (kubeletIdentity) is the one that rejected the content, as far as either
+// side can tell: an unknown identity counts as the same kubelet, so the
+// rejection stays.
+func (r *rejection) testedBy(kubelet string) bool {
+	return r.Kubelet == "" || kubelet == "" || r.Kubelet == kubelet
 }
 
 const stateSchemaVersion = 1
@@ -122,14 +134,15 @@ func saveState(path string, s *state) error {
 }
 
 // rejection returns the record (state.Rejected) that marks t, restarted
-// through unit, as content kubelet rejected at at, with the error reason.
-// Every field of t counts: a changed entry, a changed shared file or
-// /etc/default/kubelet, other paths or another unit are new content, which
-// a pass may try again.
-func (t target) rejection(unit, reason string, at time.Time) *rejection {
+// through unit, as content the kubelet identified by kubelet
+// (kubeletIdentity) rejected at at, with the error reason. Every field of t
+// counts: a changed entry, a changed shared file or /etc/default/kubelet,
+// other paths or another unit are new content, which a pass may try again;
+// so is the same content for another kubelet (rejection.testedBy).
+func (t target) rejection(unit, kubelet, reason string, at time.Time) *rejection {
 	return &rejection{
 		Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, Unit: unit,
-		EntryHash: t.entryHash, AppliedHash: t.fileHash,
+		EntryHash: t.entryHash, AppliedHash: t.fileHash, Kubelet: kubelet,
 		Reason: reason, At: at.UTC().Format(time.RFC3339),
 	}
 }

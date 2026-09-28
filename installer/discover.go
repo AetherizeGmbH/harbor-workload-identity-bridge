@@ -215,3 +215,47 @@ func flagValue(argv []string, flag string) string {
 	}
 	return value
 }
+
+// maxKubeletBinarySize bounds the kubelet binary kubeletIdentity hashes
+// (about 100 MiB in current releases).
+const maxKubeletBinarySize = 1 << 30
+
+// kubeletIdentity identifies the kubelet that a restart of its unit runs,
+// for the rejection record (ADR-0033): a hash over the content of the
+// binary at the path the running kubelet process was started from (after
+// a package upgrade that path holds the new binary, which the next
+// restart runs), the process's command line without the two
+// credential-provider flags, and the content of its --config file. Content
+// kubelet rejected is tried once more when any of these changed: a kubelet
+// upgrade, or a feature gate turned on in the command line or the config
+// file. It is "" when it cannot tell (no single host kubelet process, or a
+// binary it cannot read as a regular file); a rejection then stays.
+func (c *config) kubeletIdentity() string {
+	pid, cmdline, err := findKubelet(c.ProcRoot)
+	if err != nil {
+		return ""
+	}
+	exe, err := os.Readlink(filepath.Join(c.ProcRoot, strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return ""
+	}
+	exe = strings.TrimSuffix(exe, " (deleted)")
+	if validNodePath(exe) != nil {
+		return ""
+	}
+	binary, err := hashHostFile(c.hostPath(exe), maxKubeletBinarySize)
+	if err != nil {
+		return ""
+	}
+	config := []byte("no --config")
+	if p := flagValue(cmdline, "--config"); p != "" {
+		config = []byte("unreadable --config " + p)
+		if validNodePath(p) == nil {
+			if data, err := readHostFile(c.hostPath(p)); err == nil {
+				config = data
+			}
+		}
+	}
+	args := stripCredentialProviderFlags(cmdline[1:])
+	return contentHash([]byte(binary), []byte(strings.Join(args, "\x00")), config)
+}

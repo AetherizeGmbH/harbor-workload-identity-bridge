@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -62,6 +63,11 @@ func readFileIn(root *os.Root, name string) ([]byte, error) {
 // same file (no swap between the check and the open). O_NONBLOCK keeps a
 // FIFO swapped in at that moment from blocking the open.
 func openRegular(root *os.Root, name string) (*os.File, error) {
+	return openRegularMax(root, name, maxHostFileSize)
+}
+
+// openRegularMax is openRegular with the size cap maxSize.
+func openRegularMax(root *os.Root, name string, maxSize int64) (*os.File, error) {
 	lfi, err := root.Lstat(name)
 	if err != nil {
 		return nil, err
@@ -85,11 +91,37 @@ func openRegular(root *os.Root, name string) (*os.File, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("%s in %s changed while it was opened", name, root.Name())
 	}
-	if fi.Size() > maxHostFileSize {
+	if fi.Size() > maxSize {
 		_ = f.Close()
-		return nil, fmt.Errorf("%s in %s is larger than %d bytes", name, root.Name(), maxHostFileSize)
+		return nil, fmt.Errorf("%s in %s is larger than %d bytes", name, root.Name(), maxSize)
 	}
 	return f, nil
+}
+
+// hashHostFile returns the hex SHA-256 of the regular file at path, opened
+// under the rules of readHostFile and read in a stream: the kubelet binary
+// (kubeletIdentity) is larger than maxHostFileSize. It refuses a file
+// larger than maxSize.
+func hashHostFile(path string, maxSize int64) (string, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+	f, err := openRegularMax(root, filepath.Base(path), maxSize)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return "", err
+	}
+	if n > maxSize {
+		return "", fmt.Errorf("%s is larger than %d bytes", path, maxSize)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func readAllCapped(f *os.File) ([]byte, error) {

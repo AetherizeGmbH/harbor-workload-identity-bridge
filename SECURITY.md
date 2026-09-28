@@ -422,7 +422,7 @@ container:
   period (and, in patch mode, until the running kubelet carries the
   flags), before it records success. Otherwise it restores the files it
   replaced, restarts kubelet onto them, records the content as rejected so
-  that no retry restarts kubelet onto it again, and fails the pod
+  that no retry restarts the same kubelet onto it again, and fails the pod
   (ADR-0033). Running containers survive the restart (containerd owns them).
   Binary drops and CA/mTLS rotation never restart kubelet.
 - opens every host file relative to its directory and accepts only a

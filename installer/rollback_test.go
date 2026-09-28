@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -332,7 +333,7 @@ func TestValidateEntry(t *testing.T) {
 
 func TestState_RejectsExactlyTheRecordedContent(t *testing.T) {
 	rejected := target{mode: modePatch, binDir: "/b", configFile: "/c", entryHash: "e", fileHash: "f"}
-	st := &state{Rejected: rejected.rejection("kubelet", "boom", time.Unix(0, 0))}
+	st := &state{Rejected: rejected.rejection("kubelet", "", "boom", time.Unix(0, 0))}
 	if r := st.rejects(rejected, "kubelet"); r == nil || r.Reason != "boom" || r.At != "1970-01-01T00:00:00Z" {
 		t.Fatalf("rejects = %+v", r)
 	}
@@ -352,5 +353,173 @@ func TestState_RejectsExactlyTheRecordedContent(t *testing.T) {
 	}
 	if (*state)(nil).rejects(rejected, "kubelet") != nil || (&state{}).rejects(rejected, "kubelet") != nil {
 		t.Error("a state without a rejection rejects")
+	}
+}
+
+// withKubelet gives env's kubelet the binary content binary at
+// /usr/bin/kubelet, and the running process an exe link to it.
+func withKubelet(t *testing.T, env *testEnv, binary string) {
+	t.Helper()
+	writeHostFile(t, env, "/usr/bin/kubelet", binary)
+	env.kubelet.exe = "/usr/bin/kubelet"
+	raw, err := os.ReadFile(filepath.Join(env.cfg.ProcRoot, strconv.Itoa(fakeKubeletPID), "cmdline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProcEntry(t, env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: splitCmdline(raw), exe: env.kubelet.exe})
+}
+
+// TestRun_RejectedContentIsTriedAgainOnAnotherKubelet: content that the
+// kubelet of a node rejected (for example tokenAttributes on a 1.33
+// kubelet with the feature gate off) is not applied again to the same
+// kubelet. Another kubelet binary, command line or config file did not test
+// it: the next pass tries it once more, without a manual deletion of the
+// state file. The same binary content written anew is the same kubelet.
+func TestRun_RejectedContentIsTriedAgainOnAnotherKubelet(t *testing.T) {
+	const kubeletConfig = "/var/lib/kubelet/config.yaml"
+	for name, tc := range map[string]struct {
+		change  func(t *testing.T, env *testEnv)
+		retried bool
+	}{
+		"kubelet upgraded": {change: func(t *testing.T, env *testEnv) {
+			writeHostFile(t, env, "/usr/bin/kubelet", "kubelet v1.34.0")
+		}, retried: true},
+		"feature gate in the config file": {change: func(t *testing.T, env *testEnv) {
+			writeHostFile(t, env, kubeletConfig, "kind: KubeletConfiguration\nfeatureGates:\n  KubeletServiceAccountTokenForCredentialProviders: true\n")
+		}, retried: true},
+		"feature gate on the command line": {change: func(t *testing.T, env *testEnv) {
+			// The operator adds the flag and restarts kubelet.
+			env.kubelet.baseArgs = append(env.kubelet.baseArgs, "--feature-gates=KubeletServiceAccountTokenForCredentialProviders=true")
+			raw, err := os.ReadFile(filepath.Join(env.cfg.ProcRoot, strconv.Itoa(fakeKubeletPID), "cmdline"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := append(splitCmdline(raw), "--feature-gates=KubeletServiceAccountTokenForCredentialProviders=true")
+			writeProcEntry(t, env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args, exe: env.kubelet.exe})
+		}, retried: true},
+		"same binary reinstalled": {change: func(t *testing.T, env *testEnv) {
+			path := env.cfg.hostPath("/usr/bin/kubelet")
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			writeHostFile(t, env, "/usr/bin/kubelet", "kubelet v1.33.4")
+		}},
+		"nothing changed": {change: func(*testing.T, *testEnv) {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet", "--config=" + kubeletConfig})
+			withKubelet(t, env, "kubelet v1.33.4")
+			writeHostFile(t, env, kubeletConfig, "kind: KubeletConfiguration\n")
+			if err := run(env.cfg); err != nil {
+				t.Fatal(err)
+			}
+			setRendered(t, env, renderedWith("harbor-alt.example.com"))
+			failRestarts(env, 2)
+			if err := run(env.cfg); err == nil || !strings.Contains(err.Error(), "recorded as rejected") {
+				t.Fatalf("got %v, want the rejection", err)
+			}
+			rejected := mustLoadState(t, env).Rejected
+			if rejected == nil || rejected.Kubelet == "" {
+				t.Fatalf("rejection = %+v, want one that names the kubelet", rejected)
+			}
+			env.kubelet.statusFn = nil
+			if err := run(env.cfg); err == nil || !strings.Contains(err.Error(), "already rejected") {
+				t.Fatalf("same kubelet: got %v, want a refusal", err)
+			}
+			tc.change(t, env)
+			err := run(env.cfg)
+			switch {
+			case tc.retried && (err != nil || env.restarts != 4):
+				t.Fatalf("got %v with %d restarts, want the content tried again (4 restarts)", err, env.restarts)
+			case tc.retried:
+				if st := mustLoadState(t, env); st.Rejected != nil {
+					t.Fatalf("state = %+v, want no rejection after the verified restart", st)
+				}
+			case err == nil || !strings.Contains(err.Error(), "already rejected") || env.restarts != 3:
+				t.Fatalf("got %v with %d restarts, want a refusal without a restart", err, env.restarts)
+			}
+		})
+	}
+}
+
+// TestRun_RejectedAgainByTheNewKubeletRecordsIt: when the new kubelet
+// rejects the content too, its identity replaces the old one, and the
+// retries restart nothing.
+func TestRun_RejectedAgainByTheNewKubeletRecordsIt(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	withKubelet(t, env, "kubelet v1.33.4")
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	setRendered(t, env, renderedWith("harbor-alt.example.com"))
+	failRestarts(env, 2, 4)
+	if err := run(env.cfg); err == nil {
+		t.Fatal("want the rejection")
+	}
+	first := mustLoadState(t, env).Rejected
+	writeHostFile(t, env, "/usr/bin/kubelet", "kubelet v1.34.0")
+	if err := run(env.cfg); err == nil || !strings.Contains(err.Error(), "recorded as rejected") {
+		t.Fatalf("got %v, want a second rejection", err)
+	}
+	second := mustLoadState(t, env).Rejected
+	if env.restarts != 5 || second == nil || second.Kubelet == "" || second.Kubelet == first.Kubelet {
+		t.Fatalf("restarts = %d, rejections %+v then %+v: want the new kubelet recorded", env.restarts, first, second)
+	}
+	if err := run(env.cfg); err == nil || !strings.Contains(err.Error(), "already rejected") || env.restarts != 5 {
+		t.Fatalf("got %v with %d restarts, want a refusal", err, env.restarts)
+	}
+}
+
+func TestRejection_TestedBy(t *testing.T) {
+	r := &rejection{Kubelet: "a"}
+	if !r.testedBy("a") || r.testedBy("b") {
+		t.Fatal("a known kubelet must match only itself")
+	}
+	if !r.testedBy("") || !(&rejection{}).testedBy("b") {
+		t.Fatal("an unknown kubelet on either side must keep the rejection")
+	}
+}
+
+// TestKubeletIdentity: the identity follows the binary at the path of the
+// running kubelet (also when a package upgrade replaced it after the start,
+// which /proc shows as "(deleted)"), its command line without the
+// credential-provider flags, and its --config file; it is "" when the
+// binary cannot be read.
+func TestKubeletIdentity(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet", "--config=/var/lib/kubelet/config.yaml", "--v=2"})
+	if got := env.cfg.kubeletIdentity(); got != "" {
+		t.Fatalf("identity without an exe link = %q, want none", got)
+	}
+	withKubelet(t, env, "kubelet v1.33.4")
+	base := env.cfg.kubeletIdentity()
+	if base == "" {
+		t.Fatal("no identity for a readable binary without its config file")
+	}
+	writeHostFile(t, env, "/var/lib/kubelet/config.yaml", "kind: KubeletConfiguration\n")
+	withConfig := env.cfg.kubeletIdentity()
+	if withConfig == "" || withConfig == base {
+		t.Fatalf("config file did not count: %q vs %q", withConfig, base)
+	}
+	// Our own flags are no part of it: patch mode adds them with the
+	// content it tests.
+	writeProcEntry(t, env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", exe: "/usr/bin/kubelet (deleted)", cmdline: []string{
+		"/usr/bin/kubelet", "--config=/var/lib/kubelet/config.yaml", "--v=2",
+		flagBinDir + "=/etc/kubernetes/credential-provider", flagConfigFile, "/etc/kubernetes/credential-provider-config/" + configFileName,
+	}})
+	if got := env.cfg.kubeletIdentity(); got != withConfig {
+		t.Fatalf("identity with the credential-provider flags and a replaced binary = %q, want %q", got, withConfig)
+	}
+	writeProcEntry(t, env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", exe: "/usr/bin/kubelet", cmdline: []string{"/usr/bin/kubelet", "--config=/var/lib/kubelet/config.yaml", "--v=4"}})
+	if got := env.cfg.kubeletIdentity(); got == withConfig {
+		t.Fatal("another command line did not count")
+	}
+	if err := os.Remove(env.cfg.hostPath("/usr/bin/kubelet")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/opt/kubelet", env.cfg.hostPath("/usr/bin/kubelet")); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.cfg.kubeletIdentity(); got != "" {
+		t.Fatalf("identity of a symlinked binary = %q, want none", got)
 	}
 }

@@ -61,10 +61,13 @@ about the verification timeout (90 s), and the node is `NotReady` for that
 time. The installer records the content as rejected in its state file and does
 not restart kubelet onto the same content again on the pod's retries: roll out
 corrected values, or fix the node and delete the state file there to retry
-(ADR-0033). If kubelet does not come back
-on the restored files either, the node stays `NotReady` and `kubectl logs`
-cannot reach it: run `journalctl -u kubelet` on the node; the `.bak` copy next
-to each restored file holds the content kubelet rejected.
+(ADR-0033). A changed kubelet (an upgraded binary, or another command line or
+`--config` file) gets one more try with the same content by itself: an upgrade
+to 1.34, where the `KubeletServiceAccountTokenForCredentialProviders` gate is
+on by default, can make kubelet accept what it rejected. If kubelet does not
+come back on the restored files either, the node stays `NotReady` and
+`kubectl logs` cannot reach it: run `journalctl -u kubelet` on the node; the
+`.bak` copy next to each restored file holds the content kubelet rejected.
 
 **Node replacement and reboots.** New or reimaged nodes run the DaemonSet and
 converge the same way. If a platform resets the provider config at boot (GKE COS

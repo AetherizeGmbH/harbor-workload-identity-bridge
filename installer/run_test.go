@@ -40,6 +40,9 @@ type fakeKubelet struct {
 	pid int
 	// ignoreEnvFile models a unit that does not source /etc/default/kubelet.
 	ignoreEnvFile bool
+	// exe is the node path of the binary a restart starts kubelet from
+	// (/proc/<pid>/exe); "" leaves the fake process without an exe link.
+	exe string
 }
 
 const fakeKubeletPID = 321
@@ -63,7 +66,7 @@ func (f *fakeKubelet) restart(unit string) error {
 			}
 		}
 	}
-	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args})
+	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args, exe: f.exe})
 	return nil
 }
 
