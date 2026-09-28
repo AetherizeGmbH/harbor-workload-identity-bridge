@@ -129,6 +129,12 @@ variable "bridge_replicas" {
   description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (audit H1). The install waits until every replica is Ready (null_resource.bridge_rollout), and the bridge_replicas stage asks each one for credentials directly."
 }
 
+variable "critical_pods_quota" {
+  type        = bool
+  default     = false
+  description = "Create a ResourceQuota for PriorityClass system-node-critical pods in the namespace, before the chart. The plugin DaemonSet runs in that class (plugin.priorityClassName default), and GKE admits such pods outside kube-system only in a namespace with a quota for it (docs/platforms.md, GKE): without one the DaemonSet creates no pods and the install times out. kind needs none."
+}
+
 variable "issuer_name" {
   type        = string
   default     = "harbor-bridge-ca"
@@ -299,6 +305,29 @@ resource "kubectl_manifest" "cluster_issuer" {
   depends_on = [kubectl_manifest.root_ca]
 }
 
+# docs/platforms.md (GKE) shows the same quota. One pod per node; the
+# limit only has to exceed the node count.
+resource "kubernetes_resource_quota_v1" "critical_pods" {
+  count = var.critical_pods_quota ? 1 : 0
+
+  metadata {
+    name      = "harbor-bridge-critical-pods"
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+  }
+  spec {
+    hard = {
+      pods = "1000"
+    }
+    scope_selector {
+      match_expression {
+        scope_name = "PriorityClass"
+        operator   = "In"
+        values     = ["system-node-critical"]
+      }
+    }
+  }
+}
+
 # CRDs are installed automatically by helm from the chart's crds/
 # directory on first install. No separate kubectl_manifest needed.
 
@@ -358,6 +387,7 @@ resource "helm_release" "bridge" {
 
   depends_on = [
     kubectl_manifest.cluster_issuer,
+    kubernetes_resource_quota_v1.critical_pods,
   ]
 }
 

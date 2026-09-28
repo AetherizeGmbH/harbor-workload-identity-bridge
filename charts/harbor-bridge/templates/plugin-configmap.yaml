@@ -11,9 +11,18 @@ A non-default plugin.providerName publishes the config under another key
 (harbor-bridge.plugin.configKey), which installers before ADR-0029 never
 read.
 
-`cacheType: ServiceAccount` is the KEP-4412 beta (k8s 1.34) field
-that tells kubelet to project an SA-bound token per pod rather than
-caching one credential per image.
+`cacheType: ServiceAccount` (KEP-4412, beta and on by default from k8s
+1.34) makes the pulling pod's ServiceAccount (namespace, name and UID),
+not its token, part of kubelet's credential cache key, next to the
+registry (cacheKeyType Registry, ADR-0016): kubelet requests a token for
+the plugin only on a cache miss, and pods of the same ServiceAccount share
+the cached credentials (SECURITY.md, "Replay of cached credentials"). They
+are that ServiceAccount's robot's, valid for every pod that runs as it;
+cacheType Token would key the cache by each pod's token instead.
+The YAML comment on cacheType in the rendered config below is wrong about
+this. It stays until the rendered config changes for another reason: every
+byte of it reaches the node, and in patch mode a changed byte restarts
+kubelet.
 */}}
 {{- if .Values.plugin.enabled }}
 apiVersion: v1
@@ -44,11 +53,16 @@ data:
             value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
           - name: HARBOR_BRIDGE_CA_BUNDLE
             value: {{ include "harbor-bridge.plugin.hostFile" (list . "ca.crt") | quote }}
-          {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
+          {{- with include "harbor-bridge.plugin.serverName" . }}
+          {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" $) }}
           # The node's IP is not in the bridge certificate; verify it
           # against the bridge Service's name, which is.
+          {{- else }}
+          # The endpoint's host is not in the bridge certificate; verify
+          # it against the bridge Service's name, which is.
+          {{- end }}
           - name: HARBOR_BRIDGE_SERVER_NAME
-            value: "{{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc"
+            value: {{ . | quote }}
           {{- end }}
           {{- if .Values.bridge.mTLS.enabled }}
           - name: HARBOR_BRIDGE_CLIENT_CERT

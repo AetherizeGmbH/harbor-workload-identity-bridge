@@ -237,12 +237,15 @@ call and logged only as the directory path, never the values
 `BRIDGE_HARBOR_URL` and `BRIDGE_OIDC_ISSUER` refuse a `user:password@`
 part at startup: the bridge never authenticated with it. Only
 `BRIDGE_OIDC_JWKS_URL` may carry one (it is sent as Basic auth to the
-JWKS endpoint). The startup log shows URLs with the whole
-`user:password@` part redacted, user name included, and configuration
-errors never repeat a URL's credentials. A URL setting with an `@` after
-its host part is refused: a `/`, `?` or `#` inside a password ends the
-host early (percent-encode them), and the value would otherwise be
-accepted and logged with part of the password in it.
+JWKS endpoint). The chart refuses one in `bridge.oidcJWKSURL`, where it
+would be stored in plain text in the Deployment and the Helm release: set
+such a URL in `bridge.extraEnv` from a Secret instead. The startup log
+shows URLs with the whole `user:password@` part redacted, user name
+included, and configuration errors never repeat a URL's credentials. A
+URL setting with an `@` after its host part is refused: a `/`, `?` or `#`
+inside a password ends the host early (percent-encode them), and the
+value would otherwise be accepted and logged with part of the password
+in it.
 
 ## What the bridge does *not* defend against
 
@@ -398,7 +401,8 @@ every `plugin.install.mode` except `none`
 container:
 
 - runs as root (`runAsUser: 0`) and `privileged: true`.
-- runs with `hostPID: true` and mounts the host's `/` read-write at
+- runs in the host PID namespace (`hostPID: true`, a pod setting that the
+  sync container shares, below) and mounts the host's `/` read-write at
   `/host`. The broad mount is required because `merge` mode writes
   into whatever paths the node's kubelet flags point at — those are
   discovered at runtime from `/proc/<kubelet>/cmdline` and cannot be
@@ -587,8 +591,20 @@ Operator choices:
   `seccompProfile: RuntimeDefault`, read-only root filesystem, and a
   single hostPath mount: `plugin.hostConfigDir`, which also holds the CA
   and mTLS files of every other release that uses the same directory
-  (see above). It never sees the host root, never uses nsenter, never
-  touches kubelet.
+  (see above). It never sees the host root, never uses nsenter, and never
+  restarts or reconfigures kubelet. Outside `none` mode it shares the
+  pod's host PID namespace (`hostPID` is set per pod, and the install
+  container needs it). Residual: a compromised sync container can list
+  the node's processes and read their command lines, including other
+  pods' arguments; as root it can signal other root processes, kubelet
+  and containerd included unless an enforcing AppArmor or SELinux profile
+  confines it (the default container profiles still let it signal other
+  containers under the same profile); and it can read the environment and
+  root filesystem (`/proc/<pid>/environ`, `/proc/<pid>/root`) of other
+  containers that run as root without capabilities, such as their mounted
+  ServiceAccount tokens. Processes holding capabilities it lacks, kubelet
+  and containerd among them, stay closed to those reads, so this is not a
+  host-root compromise. `plugin.install.mode: none` has no `hostPID`.
 - The DaemonSet pods get no ServiceAccount token (they never call the
   Kubernetes API).
 - `plugin.enabled: false` removes the DaemonSet entirely, for nodes
@@ -687,7 +703,7 @@ their own RBAC.
 | Pod security (bridge) | hardened by default (`runAsNonRoot`, `runAsUser: 65532`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, drops `ALL` capabilities, `seccompProfile: RuntimeDefault`) | Keep the defaults; relax only if a sidecar genuinely requires it |
 | Bridge namespace RBAC | unset | Restrict `secrets` get/list/watch to the bridge ServiceAccount only |
 | Helm caller RBAC | unset | Restrict who can `helm upgrade` this chart — they can swap the binary kubelet runs on every node |
-| Network exposure | NodePort `:31443` | Cluster-local only; firewall the NodePort to the cluster network. With Cilium kube-proxy replacement, socketLB intercepts host-netns `127.0.0.1:31443` from kubelet without exposing the port externally |
+| Network exposure | NodePort `:31443` | Cluster-local only; firewall the NodePort to the cluster network. With Cilium kube-proxy replacement, socketLB intercepts host-netns `127.0.0.1:31443` from kubelet without exposing the port externally. Avoid `service.type: LoadBalancer`: the chart sets no annotations or source ranges on the Service, many managed clouds (GKE and AKS among them) make a load balancer reachable from outside the cluster, and its clients usually reach the bridge from a node's address (kube-proxy SNAT), sharing that node's per-source rate limit and audit `source=` |
 | `HarborAccess` authorship | any principal RBAC-granted `create harboraccesses` | **Cluster-privileged** — whoever authors a CR grants any project to any SA identity. Restrict to the platform team; gate any tenant-writable path behind an admission policy constraining projects / `serviceAccountRef` per namespace. See *Unauthorized HarborAccess authorship* above |
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |

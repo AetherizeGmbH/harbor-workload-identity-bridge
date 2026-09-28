@@ -23,7 +23,10 @@
 #   - the ServiceAccount token issuer is GKE's container.googleapis.com
 #     URL, read from the cluster's discovery document; the bridge fetches
 #     the signing keys from the in-cluster apiserver (oidc_jwks_url);
-#   - no kubelet journal in the failure diagnostics (no node access).
+#   - no kubelet journal in the failure diagnostics (no node access);
+#   - the bridge namespace gets a ResourceQuota for system-node-critical
+#     pods (critical_pods_quota): GKE admits the plugin pods of that
+#     PriorityClass outside kube-system only with one.
 #
 # Teardown order: as in the kind harness, harbor_access_teardown empties
 # the HarborAccess state while the bridge still runs, so cleanup never
@@ -31,9 +34,11 @@
 #
 # Runtime findings to fold back into ADR-0022 after the first real run:
 # the discovered GKE provider config path/format (installer logs show
-# it), whether GKE containerd ships a config_path (trust DS logs), and
-# whether the loopback NodePort routes under Dataplane V2 — if pull_pod
-# fails with the plugin unable to reach the bridge, rerun with
+# it), whether GKE containerd ships a config_path (trust DS logs), that
+# the quota lets the plugin DaemonSet create its pods (no FailedCreate
+# "insufficient quota to match these scopes"), and whether the loopback
+# NodePort routes under Dataplane V2 — if pull_pod fails with the plugin
+# unable to reach the bridge, rerun with
 # TF_VAR_bridge_endpoint='https://$(NODE_IP):31443' (see the R4 note in
 # ADR-0022 about the cert SAN implications). Every install run
 # (bridge_install, bridge_upgrade, bridge_mtls) passes that one variable,
@@ -171,6 +176,10 @@ run "bridge_install" {
     oidc_issuer           = run.gke.oidc_issuer
     oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
     token_command         = "gcloud auth print-access-token"
+    # GKE admits the plugin's system-node-critical pods only with a quota.
+    # bridge_upgrade shares this state and must pass the same value, or it
+    # destroys the quota.
+    critical_pods_quota = true
     # install_mode stays "auto" — on GKE it MUST resolve to merge. If it
     # resolved to patch, the installer fails loudly and helm's DaemonSet
     # rollout wait surfaces it here. upgrade-only is added by bridge_upgrade.
@@ -467,6 +476,7 @@ run "bridge_upgrade" {
     oidc_issuer           = run.gke.oidc_issuer
     oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
     token_command         = "gcloud auth print-access-token"
+    critical_pods_quota   = true # as in bridge_install (same state)
     match_images = [
       "${run.gke.harbor_hostname}/your-project",
       "${run.gke.harbor_hostname}/project-alpha",
@@ -835,8 +845,9 @@ run "bridge_mtls" {
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
     # R4 escape hatch; empty keeps the loopback NodePort (header note).
-    bridge_endpoint = try(var.bridge_endpoint, "")
-    mtls            = true
+    bridge_endpoint     = try(var.bridge_endpoint, "")
+    mtls                = true
+    critical_pods_quota = true # as in bridge_install (same state)
   }
 }
 

@@ -54,9 +54,10 @@ metadata:
     app.kubernetes.io/instance: harbor-bridge-eu
     app.kubernetes.io/component: plugin
 # Plugin pods do not talk to the K8s API — the binary running on the
-# node makes a single HTTPS call to the bridge and exits. The SA is
-# attached purely so the DaemonSet pod can mount the bridge-tls Secret
-# (read-only) to pull ca.crt onto each node.
+# node makes a single HTTPS call to the bridge and exits. The DaemonSet
+# gets a ServiceAccount of its own, without a token, so it does not run
+# as the namespace's default ServiceAccount; its Secret and ConfigMap
+# volumes do not depend on it.
 automountServiceAccountToken: false
 
 ---
@@ -357,6 +358,8 @@ spec:
       securityContext:
         runAsNonRoot: false  # need root to write onto the host
         runAsUser: 0
+      nodeSelector:
+        kubernetes.io/os: linux
       tolerations:
         - operator: Exists
       initContainers:
@@ -451,7 +454,8 @@ spec:
               readOnly: true
           securityContext:
             # Copies CA/mTLS files as root into a root-owned host dir —
-            # no capabilities, no nsenter, no /proc, never privileged.
+            # no capabilities, no nsenter, never privileged. Outside none
+            # mode it shares the pod's host PID namespace (SECURITY.md).
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -557,6 +561,8 @@ spec:
                     app.kubernetes.io/instance: harbor-bridge-eu
                     app.kubernetes.io/component: bridge
                 topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kubernetes.io/os: linux
       containers:
         - name: bridge
           image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge:0.11.4
@@ -724,7 +730,6 @@ spec:
     - 127.0.0.1
   usages:
     - server auth
-    - client auth
   issuerRef:
     name: harbor-bridge-ca
     kind: ClusterIssuer
