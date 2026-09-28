@@ -139,12 +139,7 @@ NEXT STEPS
      the bridge every node reaches) instead.
 {{- end }}
 
-{{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
-
-     Replace $(NODE_IP) with a concrete address: only the chart's installer
-     substitutes it, and kubelet passes the value to the plugin unchanged.
-{{- end }}
-{{- if and .Values.plugin.bridgeEndpoint .Values.tls.enabled }}
+{{- if $serverName }}
 
      HARBOR_BRIDGE_SERVER_NAME makes the plugin verify the bridge certificate
      against the bridge Service's name, because the certificate does not name a
