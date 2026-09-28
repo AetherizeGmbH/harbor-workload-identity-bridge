@@ -256,6 +256,18 @@ func (n *NexusConfig) LoadAdminCreds() (*AdminCreds, error) {
 	return readAdminCredsDir(n.AdminDir)
 }
 
+// LoadCA reads the PEM bundle at CAFile; nil when CAFile is unset.
+func (n *NexusConfig) LoadCA() ([]byte, error) {
+	if n.CAFile == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(n.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", EnvNexusCAFile, err)
+	}
+	return pem, nil
+}
+
 // Finalizer returns the finalizer this bridge sets on the HarborAccess
 // objects it manages: the shared FinalizerName without a selector, a
 // per-instance one with a selector, so that a bridge can release a CR that
