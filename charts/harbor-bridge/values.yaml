@@ -394,7 +394,9 @@ plugin:
   # ADR-0008 default: https://127.0.0.1:<service.nodePort> (node-local
   # loopback NodePort). The literal $(NODE_IP) is substituted with the
   # node's IP by the installer — use e.g. "https://$(NODE_IP):31443" on
-  # dataplanes that do not route loopback NodePorts.
+  # dataplanes that do not route loopback NodePorts. Write it without
+  # brackets: the installer brackets an IPv6 address itself. The
+  # installer refuses an endpoint that is not an https URL with a host.
   bridgeEndpoint: ""
 
   # The plugin can only run after its own image was pulled, so the

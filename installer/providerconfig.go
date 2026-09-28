@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"reflect"
 	"slices"
@@ -105,6 +106,9 @@ func validateEntry(entry map[string]any) error {
 			problems = append(problems, fmt.Sprintf("defaultCacheDuration %q is negative", d))
 		}
 	}
+	if problem := bridgeEndpointProblem(entry); problem != "" {
+		problems = append(problems, problem)
+	}
 	if raw, present := entry["tokenAttributes"]; present {
 		ta, _ := raw.(map[string]any)
 		if apiVersion != credentialProviderAPIVersions[0] {
@@ -121,9 +125,37 @@ func validateEntry(entry map[string]any) error {
 		}
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("kubelet would refuse the rendered provider entry %v and not start: %s; fix the chart values (plugin.matchImages, plugin.defaultCacheDuration, plugin.audience)", entry["name"], strings.Join(problems, "; "))
+		return fmt.Errorf("kubelet would refuse the rendered provider entry %v and not start, or the plugin would fail on every pull: %s; fix the chart values (plugin.matchImages, plugin.defaultCacheDuration, plugin.audience, plugin.bridgeEndpoint)", entry["name"], strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// bridgeEndpointProblem describes what is wrong with the entry's
+// HARBOR_BRIDGE_ENDPOINT, the checks the plugin runs on every exec
+// (plugin/main.go loadConfig): an https URL with a host. The plugin
+// refuses anything else and returns no credentials for any pull, which
+// kubelet only logs; the installer refuses it before it writes the entry
+// and restarts kubelet onto it.
+func bridgeEndpointProblem(entry map[string]any) string {
+	env, _ := entry["env"].([]any)
+	for _, e := range env {
+		m, _ := e.(map[string]any)
+		if m["name"] != bridgeEndpointEnv {
+			continue
+		}
+		value, _ := m["value"].(string)
+		u, err := url.Parse(value)
+		switch {
+		case err != nil:
+			return fmt.Sprintf("%s %q is not a valid URL: %v", bridgeEndpointEnv, value, err)
+		case u.Scheme != "https":
+			return fmt.Sprintf("%s %q does not use https", bridgeEndpointEnv, value)
+		case u.Host == "":
+			return fmt.Sprintf("%s %q has no host", bridgeEndpointEnv, value)
+		}
+		return ""
+	}
+	return fmt.Sprintf("%s is not set", bridgeEndpointEnv)
 }
 
 // mergeProvider inserts entry into the CredentialProviderConfig in
@@ -380,13 +412,32 @@ func isJSON(doc []byte) bool {
 
 // substituteNodeIP replaces the literal $(NODE_IP) placeholder the
 // chart may render into the provider config (plugin.bridgeEndpoint)
-// with the node's actual IP from the downward API.
+// with the node's actual IP from the downward API (status.hostIP, the
+// node's primary address). The placeholder is a URL host: an IPv6 address
+// goes in brackets ("https://[fd00::5]:31443"), which a bare IPv6 address
+// in a URL needs, also when the operator already wrote "[$(NODE_IP)]" to
+// work around its absence; an IPv4 address in brackets is no valid host
+// and is refused. NODE_IP must be an IP address without a zone.
 func substituteNodeIP(rendered []byte, nodeIP string) ([]byte, error) {
-	if !bytes.Contains(rendered, []byte("$(NODE_IP)")) {
+	const placeholder = "$(NODE_IP)"
+	if !bytes.Contains(rendered, []byte(placeholder)) {
 		return rendered, nil
 	}
 	if nodeIP == "" {
 		return nil, fmt.Errorf("rendered config references $(NODE_IP) but NODE_IP is not set")
 	}
-	return bytes.ReplaceAll(rendered, []byte("$(NODE_IP)"), []byte(nodeIP)), nil
+	addr, err := netip.ParseAddr(nodeIP)
+	if err != nil || addr.Zone() != "" {
+		return nil, fmt.Errorf("rendered config references $(NODE_IP), but NODE_IP %q is not an IP address", nodeIP)
+	}
+	bracketed := []byte("[" + placeholder + "]")
+	if addr.Is4() {
+		if bytes.Contains(rendered, bracketed) {
+			return nil, fmt.Errorf("plugin.bridgeEndpoint puts $(NODE_IP) in brackets, which is no valid URL host for this node's IPv4 address %s; write it without brackets (the installer brackets IPv6 addresses itself)", nodeIP)
+		}
+		return bytes.ReplaceAll(rendered, []byte(placeholder), []byte(addr.String())), nil
+	}
+	host := []byte("[" + addr.String() + "]")
+	out := bytes.ReplaceAll(rendered, bracketed, host)
+	return bytes.ReplaceAll(out, []byte(placeholder), host), nil
 }

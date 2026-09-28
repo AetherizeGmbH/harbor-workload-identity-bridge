@@ -493,6 +493,43 @@ func TestRun_NodeIPSubstitution(t *testing.T) {
 	if !strings.Contains(got, "https://192.0.2.9:31443") {
 		t.Fatalf("NODE_IP not substituted:\n%s", got)
 	}
+	// An IPv6 node gets a URL the plugin accepts.
+	env.cfg.NodeIP = "2001:db8::9"
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	got = env.hostFile(t, "/etc/kubernetes/credential-provider-config/"+configFileName)
+	if !strings.Contains(got, "https://[2001:db8::9]:31443") {
+		t.Fatalf("IPv6 NODE_IP not bracketed:\n%s", got)
+	}
+}
+
+// TestRun_RefusesABridgeEndpointThePluginRejects: the plugin refuses an
+// endpoint that is no https URL with a host on every exec, and kubelet only
+// logs that. The installer refuses it before it writes anything.
+func TestRun_RefusesABridgeEndpointThePluginRejects(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plain http":    "http://127.0.0.1:31443",
+		"no host":       "https://",
+		"bad port":      "https://127.0.0.1:port",
+		"unbracketed 6": "https://fd00::5:31443",
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"})
+			doc := strings.Replace(renderedConfig, "https://127.0.0.1:31443", endpoint, 1)
+			if err := os.WriteFile(env.cfg.SourceConfig, []byte(doc), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := run(env.cfg)
+			if err == nil || !strings.Contains(err.Error(), bridgeEndpointEnv) {
+				t.Fatalf("got %v, want a refusal naming %s", err, bridgeEndpointEnv)
+			}
+			if env.restarts != 0 {
+				t.Fatal("kubelet restarted")
+			}
+			assertAbsent(t, env, defaultKubeletPath, env.cfg.ownConfigPath(), binDir+"/harbor-bridge-plugin")
+		})
+	}
 }
 
 func TestLoadConfig_Validation(t *testing.T) {

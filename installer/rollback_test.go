@@ -321,6 +321,7 @@ func TestValidateEntry(t *testing.T) {
 		"missing cacheType":       func(e map[string]any) { delete(e["tokenAttributes"].(map[string]any), "cacheType") },
 		"missing audience":        func(e map[string]any) { delete(e["tokenAttributes"].(map[string]any), "serviceAccountTokenAudience") },
 		"duration without a unit": func(e map[string]any) { e["defaultCacheDuration"] = "60" },
+		"no endpoint":             func(e map[string]any) { e["env"] = []any{} },
 	}
 	for name, mutate := range bad {
 		e := valid()
