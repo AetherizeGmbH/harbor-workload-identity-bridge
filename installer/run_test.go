@@ -40,9 +40,11 @@ type fakeKubelet struct {
 	statusFn func() unitStatus
 	// pid is the main PID of the kubelet the last restart started.
 	pid int
-	// envFiles are the unit's EnvironmentFile= files in order; nil is
-	// kubeadm's Debian unit (kubeadmEnvFiles).
-	envFiles []string
+	// envFiles are the unit's EnvironmentFile= settings in order, each
+	// with "-" before it as in kubeadm's units unless requiredEnvFiles
+	// names it; nil is kubeadm's Debian unit (kubeadmEnvFiles).
+	envFiles         []string
+	requiredEnvFiles map[string]bool
 	// envAssignments is the unit's Environment= property.
 	envAssignments string
 	// ignoreEnvFile models a unit that reads its environment files but
@@ -68,7 +70,11 @@ func (f *fakeKubelet) environment(unit string) (unitEnvironment, error) {
 	if unit != "kubelet" {
 		f.t.Fatalf("unexpected unit %q", unit)
 	}
-	return unitEnvironment{Files: f.unitEnvFiles(), Assignments: f.envAssignments}, nil
+	var refs []envFileRef
+	for _, path := range f.unitEnvFiles() {
+		refs = append(refs, envFileRef{Path: path, Optional: !f.requiredEnvFiles[path]})
+	}
+	return unitEnvironment{Files: refs, Assignments: f.envAssignments}, nil
 }
 
 const fakeKubeletPID = 321
@@ -84,21 +90,35 @@ func (f *fakeKubelet) restart(unit string) error {
 	f.pid = fakeKubeletPID + f.env.restarts
 	args := append([]string(nil), f.baseArgs...)
 	if !f.ignoreEnvFile {
-		// As systemd reads the unit's environment files: in order, the
+		// As systemd reads the unit's environment files: in order,
+		// wildcard expressions expanded, files it cannot load skipped, the
 		// last assignment wins.
+		unit, err := f.environment(unit)
+		if err != nil {
+			f.t.Fatal(err)
+		}
 		var extra []string
-		for _, file := range f.unitEnvFiles() {
-			raw, err := os.ReadFile(f.env.cfg.hostPath(file))
+		for _, ref := range unit.Files {
+			files, err := f.env.cfg.expandEnvFile(ref.Path)
 			if err != nil {
-				continue
+				f.t.Fatalf("expand %s: %v", ref.Path, err)
 			}
-			assignments, err := parseEnvFile(string(raw))
-			if err != nil {
-				f.t.Fatalf("systemd would not read %s as the test expects: %v", file, err)
-			}
-			for _, a := range assignments {
-				if a.key == extraArgsKey {
-					extra = splitArgs(a.value)
+			for _, file := range files {
+				raw, err := os.ReadFile(f.env.cfg.hostPath(file))
+				if err != nil {
+					continue
+				}
+				assignments, err := parseEnvFile(string(raw))
+				switch {
+				case errors.Is(err, errUnloadableEnvFile) && ref.Optional:
+					continue
+				case err != nil:
+					f.t.Fatalf("systemd would not read %s as the test expects: %v", file, err)
+				}
+				for _, a := range assignments {
+					if a.key == extraArgsKey {
+						extra = splitArgs(a.value)
+					}
 				}
 			}
 		}

@@ -31,9 +31,21 @@ type kubeletControl interface {
 // a later file overriding an earlier one, and its Environment= settings,
 // which every file overrides.
 type unitEnvironment struct {
-	Files []string
+	Files []envFileRef
 	// Assignments is the Environment= property as systemctl prints it.
 	Assignments string
+}
+
+// envFileRef is one EnvironmentFile= setting of a unit.
+type envFileRef struct {
+	// Path is a file name or a wildcard expression, which systemd expands
+	// (expandEnvFile), as systemctl prints it.
+	Path string
+	// Optional is set for a setting with "-" before the name
+	// (ignore_errors=yes): systemd then skips a file it cannot load, and a
+	// wildcard expression that matches nothing, instead of failing the
+	// unit.
+	Optional bool
 }
 
 // unitStatus is what systemd reports about the kubelet unit.
@@ -116,18 +128,19 @@ func (c nsenterControl) environment(unit string) (unitEnvironment, error) {
 }
 
 // parseUnitEnvironment parses `systemctl show` output: one
-// "EnvironmentFiles=<path> (ignore_errors=yes|no)" line per file, in the
+// "EnvironmentFiles=<path> (ignore_errors=yes|no)" line per setting, in the
 // order systemd reads them, and one "Environment=" line.
 func parseUnitEnvironment(out []byte) unitEnvironment {
 	var env unitEnvironment
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if v, ok := strings.CutPrefix(line, "EnvironmentFiles="); ok {
+			ref := envFileRef{Path: v}
 			if i := strings.LastIndex(v, " (ignore_errors="); i >= 0 {
-				v = v[:i]
+				ref = envFileRef{Path: v[:i], Optional: v[i:] == " (ignore_errors=yes)"}
 			}
-			if v != "" {
-				env.Files = append(env.Files, v)
+			if ref.Path != "" {
+				env.Files = append(env.Files, ref)
 			}
 		} else if v, ok := strings.CutPrefix(line, "Environment="); ok {
 			env.Assignments = v

@@ -37,7 +37,20 @@ corrects one of the facts it rests on; ADR-0021 is not reversed.
 1. **Ask systemd which files the unit reads.** Before it writes anything,
    patch mode (also when `auto` resolves to it) runs
    `systemctl show --property=EnvironmentFiles --property=Environment <unit>`
-   through `nsenter` and reads each listed file that exists.
+   through `nsenter` and reads each listed file that exists, as systemd
+   reads it. `systemctl show` prints a wildcard expression of
+   `EnvironmentFile=` unexpanded; systemd expands it with `glob(3)` in the
+   C locale (`safe_glob`), so the installer expands it the same way:
+   matches sorted bytewise, a leading `.` matched only by a literal `.`,
+   `[!…]` and `[^…]` negated. It refuses an expression with a character
+   class, equivalence class or collating symbol, which it does not
+   evaluate, and a symlink among the matched directories, which systemd
+   follows and the installer does not. A file systemd skips assigns
+   nothing: behind a `-` setting (`ignore_errors=yes`) a directory, or a
+   file with a NUL byte or with a name or value that is not valid UTF-8,
+   which systemd does not load at all. Without `-` such a file keeps the
+   unit from starting, and the installer refuses it; so it does when the
+   file is one it would edit.
 2. **Edit only an operator file, and the one that counts.** The installer
    writes only `/etc/default/kubelet` or `/etc/sysconfig/kubelet`, never
    another file the unit names (kubeadm regenerates

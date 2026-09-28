@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,8 @@ func TestKubeletEnvFile_PicksTheAssignmentThatCounts(t *testing.T) {
 	for name, tc := range map[string]struct {
 		files    []string
 		contents map[string]string
+		dirs     []string // directories to create
+		required []string // settings without "-"
 		env      string
 		want     string // "" is a refusal
 	}{
@@ -95,13 +98,38 @@ func TestKubeletEnvFile_PicksTheAssignmentThatCounts(t *testing.T) {
 		"Environment= other var":     {files: kubeadmEnvFiles, env: `MY_KUBELET_EXTRA_ARGS=1`, want: defaultKubeletPath},
 		"relative path":              {files: []string{"etc/default/kubelet"}},
 		"unreadable (a symlink)":     {files: []string{defaultKubeletPath, "/etc/link.env"}},
+		// systemd expands a wildcard expression; `systemctl show` prints
+		// it as it is. The assignment in a matching file counts.
+		"wildcard match assigns":    {files: []string{defaultKubeletPath, "/etc/kubelet.d/*.env"}, contents: map[string]string{defaultKubeletPath: "KUBELET_EXTRA_ARGS=--from-default\n", "/etc/kubelet.d/10.env": "KUBELET_EXTRA_ARGS=--from-glob\n"}},
+		"wildcard match sets other": {files: []string{defaultKubeletPath, "/etc/kubelet.d/*.env"}, contents: map[string]string{"/etc/kubelet.d/10.env": "FOO=1\n"}, want: defaultKubeletPath},
+		"wildcard matches nothing":  {files: []string{defaultKubeletPath, "/etc/nothing/*.env"}, want: defaultKubeletPath},
+		"wildcard names the file":   {files: []string{"/etc/default/kube*"}, contents: map[string]string{defaultKubeletPath: "KUBELET_EXTRA_ARGS=--a\n"}, want: defaultKubeletPath},
+		"wildcard over directories": {files: []string{defaultKubeletPath, "/etc/k/*/x.env"}, contents: map[string]string{"/etc/k/a/x.env": "KUBELET_EXTRA_ARGS=--a\n"}},
+		"character class":           {files: []string{defaultKubeletPath, "/etc/kubelet.d/[[:digit:]]*.env"}, contents: map[string]string{"/etc/kubelet.d/10.env": "FOO=1\n"}},
+		"optional directory":        {files: []string{defaultKubeletPath, "/etc/kubelet.d/*.env"}, dirs: []string{"/etc/kubelet.d/sub.env"}, want: defaultKubeletPath},
+		"required directory":        {files: []string{defaultKubeletPath, "/etc/kubelet.d/*.env"}, dirs: []string{"/etc/kubelet.d/sub.env"}, required: []string{"/etc/kubelet.d/*.env"}},
+		// A file systemd does not load sets nothing; behind "-" it is
+		// skipped, without "-" the unit does not start. The file patch
+		// mode edits must load.
+		"optional unloadable file": {files: kubeadmEnvFiles, contents: map[string]string{kubeadmFlagsEnv: "KUBELET_EXTRA_ARGS=\xff\n"}, want: defaultKubeletPath},
+		"required unloadable file": {files: kubeadmEnvFiles, contents: map[string]string{kubeadmFlagsEnv: "KUBELET_EXTRA_ARGS=\xff\n"}, required: []string{kubeadmFlagsEnv}},
+		"unloadable operator file": {files: kubeadmEnvFiles, contents: map[string]string{defaultKubeletPath: "FOO=\xff\n"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 			env.kubelet.envFiles = tc.files
 			env.kubelet.envAssignments = tc.env
+			env.kubelet.requiredEnvFiles = map[string]bool{}
+			for _, path := range tc.required {
+				env.kubelet.requiredEnvFiles[path] = true
+			}
 			for path, content := range tc.contents {
 				writeHostFile(t, env, path, content)
+			}
+			for _, dir := range tc.dirs {
+				if err := os.MkdirAll(env.cfg.hostPath(dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if name == "unreadable (a symlink)" {
 				writeHostFile(t, env, "/etc/target.env", "KUBELET_EXTRA_ARGS=--v=2\n")
@@ -188,8 +216,8 @@ func TestParseUnitEnvironment(t *testing.T) {
 		"EnvironmentFiles=/etc/sysconfig/kubelet (ignore_errors=no)\n" +
 		"Environment=KUBELET_KUBECONFIG_ARGS=--kubeconfig=/etc/kubernetes/kubelet.conf \"A=b c\"\n"
 	got := parseUnitEnvironment([]byte(out))
-	if strings.Join(got.Files, ",") != kubeadmFlagsEnv+","+rpmKubeletEnvFile {
-		t.Fatalf("files = %q", got.Files)
+	if want := []envFileRef{{kubeadmFlagsEnv, true}, {rpmKubeletEnvFile, false}}; !slices.Equal(got.Files, want) {
+		t.Fatalf("files = %+v, want %+v", got.Files, want)
 	}
 	if !strings.HasPrefix(got.Assignments, "KUBELET_KUBECONFIG_ARGS=") {
 		t.Fatalf("assignments = %q", got.Assignments)
@@ -209,7 +237,13 @@ func TestRun_KindNode(t *testing.T) {
 		"EnvironmentFiles=/etc/default/kubelet (ignore_errors=yes)\n"
 	unit := parseUnitEnvironment([]byte(out))
 	env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"})
-	env.kubelet.envFiles, env.kubelet.envAssignments = unit.Files, unit.Assignments
+	for _, f := range unit.Files {
+		if !f.Optional {
+			t.Fatalf("%s: kind's unit reads it with \"-\"", f.Path)
+		}
+		env.kubelet.envFiles = append(env.kubelet.envFiles, f.Path)
+	}
+	env.kubelet.envAssignments = unit.Assignments
 	writeHostFile(t, env, defaultKubeletPath, "KUBELET_EXTRA_ARGS=--runtime-cgroups=/system.slice/containerd.service")
 	if err := run(env.cfg); err != nil {
 		t.Fatal(err)
@@ -217,5 +251,123 @@ func TestRun_KindNode(t *testing.T) {
 	want := "KUBELET_EXTRA_ARGS=\"--runtime-cgroups=/system.slice/containerd.service " + flagBinDir + "=" + binDir + " " + flagConfigFile + "=" + env.cfg.ownConfigPath() + "\"\n"
 	if got := env.hostFile(t, defaultKubeletPath); got != want {
 		t.Fatalf("/etc/default/kubelet:\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRun_PatchRefusesAnAssignmentFromAWildcardFile: the unit's second
+// EnvironmentFile= setting is a wildcard expression whose match overrides
+// KUBELET_EXTRA_ARGS of /etc/default/kubelet. The installer used to read
+// the expression as a file name, missed the match, wrote
+// /etc/default/kubelet, restarted kubelet and failed its verification.
+// It now refuses before it writes anything or restarts kubelet.
+func TestRun_PatchRefusesAnAssignmentFromAWildcardFile(t *testing.T) {
+	env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"})
+	env.kubelet.envFiles = []string{defaultKubeletPath, "/etc/kubelet.d/*.env"}
+	writeHostFile(t, env, defaultKubeletPath, "KUBELET_EXTRA_ARGS=--from-default\n")
+	writeHostFile(t, env, "/etc/kubelet.d/10.env", "KUBELET_EXTRA_ARGS=--from-glob\n")
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "/etc/kubelet.d/10.env") || !strings.Contains(err.Error(), "plugin.install.mode=none") {
+		t.Fatalf("got %v, want a refusal that names the matching file", err)
+	}
+	if env.restarts != 0 {
+		t.Fatalf("kubelet restarted %d times", env.restarts)
+	}
+	if got := env.hostFile(t, defaultKubeletPath); got != "KUBELET_EXTRA_ARGS=--from-default\n" {
+		t.Fatalf("%s changed:\n%s", defaultKubeletPath, got)
+	}
+	assertAbsent(t, env, env.cfg.ownConfigPath(), binDir+"/harbor-bridge-plugin", stateDir)
+}
+
+// TestGlobMatch pins the matcher against glibc's fnmatch(FNM_PERIOD) in the
+// C locale; the file cases were checked against systemd 257 (kindest/node
+// v1.37.0) with EnvironmentFile= settings.
+func TestGlobMatch(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"*.env", "10.env", true},
+		{"*.env", ".hidden.env", false},
+		{".*.env", ".hidden.env", true},
+		{`\.*.env`, ".hidden.env", true},
+		{"?a.env", ".a.env", false},
+		{"[.]a.env", ".a.env", false},
+		{"[0-9]*.env", "10.env", true},
+		{"[0-9]*.env", "B.env", false},
+		{"[!0-9]*.env", "B.env", true},
+		{"[!0-9]*.env", "10.env", false},
+		{"[^0-9a-z_]*.env", "B.env", true},
+		{"[^0-9a-z_]*.env", "a.env", false},
+		{"?0.env", "20.env", true},
+		{"?0.env", "0.env", false},
+		{"[x].env", "x.env", true},
+		{"[x].env", "[x].env", false},
+		{`\[x].env`, "[x].env", true},
+		{"[x.env", "[x.env", true},
+		{"[]]x.env", "]x.env", true},
+		{"[!]]x.env", "-x.env", true},
+		{"[!]]x.env", "]x.env", false},
+		{"[a-]x.env", "-x.env", true},
+		{`[\]]x.env`, "]x.env", true},
+		{"a*b*c", "aXbYc", true},
+		{"a*b*c", "aXbY", false},
+		{"a*", "a", true},
+		{"*a", "ba", true},
+		{"*a*", "bab", true},
+		{"**", "x", true},
+		{`a\*`, "a*", true},
+		{`a\*`, "ab", false},
+		{`abc\`, `abc\`, false},
+		{"k.env", "k.env", true},
+		{"k.env", "k.envx", false},
+	} {
+		got, err := globMatch(tc.pattern, tc.name)
+		if err != nil || got != tc.want {
+			t.Errorf("globMatch(%q, %q) = %v, %v; want %v", tc.pattern, tc.name, got, err, tc.want)
+		}
+	}
+	for _, pattern := range []string{"[[:digit:]]0.env", "[[=a=]]", "[[.a.]]"} {
+		if _, err := globMatch(pattern, "10.env"); err == nil {
+			t.Errorf("%q: accepted", pattern)
+		}
+	}
+}
+
+// TestExpandEnvFile: the files and the order systemd reads for a setting,
+// as systemd 257 read them from the same tree (sorted bytewise; a matched
+// directory is returned and then skipped by the reader, a wildcard only
+// descends into directories).
+func TestExpandEnvFile(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	for _, f := range []string{"10.env", "20.env", "B.env", "a.env", ".hidden.env", "_x.env", "[x].env", "notes.txt"} {
+		writeHostFile(t, env, "/etc/g.d/"+f, "V=1\n")
+	}
+	for _, f := range []string{"/etc/g2/a/k.env", "/etc/g2/b/k.env", "/etc/g2/file"} {
+		writeHostFile(t, env, f, "D=1\n")
+	}
+	if err := os.MkdirAll(env.cfg.hostPath("/etc/g.d/sub.env"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for pattern, want := range map[string][]string{
+		"/etc/g.d/*.env":       {"/etc/g.d/10.env", "/etc/g.d/20.env", "/etc/g.d/B.env", "/etc/g.d/[x].env", "/etc/g.d/_x.env", "/etc/g.d/a.env", "/etc/g.d/sub.env"},
+		"/etc/g.d/[0-9]*.env":  {"/etc/g.d/10.env", "/etc/g.d/20.env"},
+		"/etc/g2/*/k.env":      {"/etc/g2/a/k.env", "/etc/g2/b/k.env"},
+		"/etc/g2/*":            {"/etc/g2/a", "/etc/g2/b", "/etc/g2/file"},
+		"/etc/*2/?/k.env":      {"/etc/g2/a/k.env", "/etc/g2/b/k.env"},
+		"/etc/nothing/*.env":   nil,
+		"/etc/g.d/*.none":      nil,
+		`/etc/g.d/\[x].env`:    {"/etc/g.d/[x].env"},
+		"/etc/default/kubelet": {"/etc/default/kubelet"},
+	} {
+		got, err := env.cfg.expandEnvFile(pattern)
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("%s: got %q, %v; want %q", pattern, got, err, want)
+		}
+	}
+	if err := os.Symlink("g2", env.cfg.hostPath("/etc/link")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := env.cfg.expandEnvFile("/etc/l*/a/k.env"); err == nil {
+		t.Errorf("a symlink on the way: got %q, want an error", got)
 	}
 }
