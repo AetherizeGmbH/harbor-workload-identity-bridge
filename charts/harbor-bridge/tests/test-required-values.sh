@@ -3,6 +3,11 @@
 # clear message. If any of these *succeeds*, a required-value check
 # was silently dropped — caught by the test.
 set -euo pipefail
+# Feed a render to grep and head with here-strings (grep -q ... <<<"${out}"),
+# never through a pipe from echo: grep -q and head exit before they have read
+# everything, echo then dies of SIGPIPE (exit 141) while it still writes the
+# render, and pipefail turns that into a failed check (or, outside a
+# condition, set -e into an aborted run).
 
 CHART_DIR="${CHART_DIR:-charts/harbor-bridge}"
 COMPLETE="${CHART_DIR}/tests/values-complete.yaml"
@@ -65,12 +70,12 @@ failed=0
 for case in "${cases[@]}"; do
   IFS='|' read -r label flag setval want <<< "${case}"
   out=$(render -f "${COMPLETE}" "${flag}" "${setval}" 2>&1 || true)
-  if echo "${out}" | grep -qF "${want}"; then
+  if grep -qF "${want}" <<<"${out}"; then
     echo "PASS  ${label}"
   else
     echo "FAIL  ${label}"
     echo "      expected error containing: ${want}"
-    echo "      got: ${out}" | head -3
+    head -3 <<<"      got: ${out}"
     failed=$((failed+1))
   fi
 done
@@ -91,21 +96,21 @@ tls:
     name: harbor-bridge-ca
 YAML
 out=$(render -f "${TMP}/values-no-matchimages.yaml" 2>&1 || true)
-if echo "${out}" | grep -q "plugin.matchImages is REQUIRED"; then
+if grep -q "plugin.matchImages is REQUIRED" <<<"${out}"; then
   echo "PASS  plugin.matchImages (empty list)"
 else
   echo "FAIL  plugin.matchImages (empty list)"
-  echo "      got: ${out}" | head -3
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 
 # plugin.enabled=false: matchImages is not required, and no plugin object
 # may render (issue #46).
 if out=$(render -f "${TMP}/values-no-matchimages.yaml" --set plugin.enabled=false 2>&1); then
-  if echo "${out}" | grep -qE '^kind: DaemonSet|name: harbor-bridge-plugin$'; then
+  if grep -qE '^kind: DaemonSet|name: harbor-bridge-plugin$' <<<"${out}"; then
     echo "FAIL  plugin.enabled=false still renders plugin objects"
     failed=$((failed+1))
-  elif ! echo "${out}" | grep -q 'request-serviceaccounts-token-audience'; then
+  elif ! grep -q 'request-serviceaccounts-token-audience' <<<"${out}"; then
     echo "FAIL  plugin.enabled=false dropped the kubelet audience RBAC"
     failed=$((failed+1))
   else
@@ -113,7 +118,7 @@ if out=$(render -f "${TMP}/values-no-matchimages.yaml" --set plugin.enabled=fals
   fi
 else
   echo "FAIL  plugin.enabled=false without matchImages must render"
-  echo "      got: ${out}" | head -3
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 
@@ -121,23 +126,23 @@ fi
 # "yes": refused, never rendered as the provider name "true" (ADR-0029).
 printf 'plugin:\n  providerName: yes\n' > "${TMP}/values-provider-yes.yaml"
 out=$(render -f "${COMPLETE}" -f "${TMP}/values-provider-yes.yaml" 2>&1 || true)
-if echo "${out}" | grep -qF "plugin.providerName must be a string, but it was read as the bool true"; then
+if grep -qF "plugin.providerName must be a string, but it was read as the bool true" <<<"${out}"; then
   echo "PASS  plugin.providerName: yes (unquoted) in a values file"
 else
   echo "FAIL  plugin.providerName: yes (unquoted) in a values file"
-  echo "      got: ${out}" | head -3
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 
 # The same name as a string renders it in the entry and in every node path.
 if out=$(render -f "${COMPLETE}" --set-string plugin.providerName=123 2>&1) \
-   && echo "${out}" | grep -qF -- '- name: "123"' \
-   && echo "${out}" | grep -qF '/etc/kubernetes/credential-provider-config/123.ca.crt"' \
-   && ! echo "${out}" | grep -qF '%!'; then
+   && grep -qF -- '- name: "123"' <<<"${out}" \
+   && grep -qF '/etc/kubernetes/credential-provider-config/123.ca.crt"' <<<"${out}" \
+   && ! grep -qF '%!' <<<"${out}"; then
   echo "PASS  plugin.providerName=123 via --set-string renders the name everywhere"
 else
   echo "FAIL  plugin.providerName=123 via --set-string renders the name everywhere"
-  echo "      got: ${out}" | grep -E 'name: "123"|ca.crt|%!|Error' | head -3
+  grep -m 3 -E 'name: "123"|ca.crt|%!|Error' <<<"${out}" || true
   failed=$((failed+1))
 fi
 
@@ -147,20 +152,20 @@ fi
 # plugin image fails at that read, before it writes anything on the node.
 # The default name keeps the layout every installer reads.
 out=$(render -f "${COMPLETE}" --set plugin.providerName=harbor-bridge-eu 2>&1 || true)
-if echo "${out}" | grep -qxF '  credential-provider-config.v2.yaml: |' \
-   && ! echo "${out}" | grep -qxF '  credential-provider-config.yaml: |' \
-   && [ "$(echo "${out}" | grep -cxE ' +mountPath: /config-v2')" -eq 2 ] \
-   && ! echo "${out}" | grep -qxE ' +mountPath: /config'; then
+if grep -qxF '  credential-provider-config.v2.yaml: |' <<<"${out}" \
+   && ! grep -qxF '  credential-provider-config.yaml: |' <<<"${out}" \
+   && [ "$(grep -cxE ' +mountPath: /config-v2' <<<"${out}")" -eq 2 ] \
+   && ! grep -qxE ' +mountPath: /config' <<<"${out}"; then
   echo "PASS  non-default plugin.providerName: rendered config where older installers never read"
 else
   echo "FAIL  non-default plugin.providerName: rendered config where older installers never read"
-  echo "${out}" | grep -E 'credential-provider-config|mountPath: /config|Error' | head -5
+  grep -m 5 -E 'credential-provider-config|mountPath: /config|Error' <<<"${out}" || true
   failed=$((failed+1))
 fi
 out=$(render -f "${COMPLETE}" 2>&1 || true)
-if echo "${out}" | grep -qxF '  credential-provider-config.yaml: |' \
-   && [ "$(echo "${out}" | grep -cxE ' +mountPath: /config')" -eq 2 ] \
-   && ! echo "${out}" | grep -qE 'config-v2|config\.v2'; then
+if grep -qxF '  credential-provider-config.yaml: |' <<<"${out}" \
+   && [ "$(grep -cxE ' +mountPath: /config' <<<"${out}")" -eq 2 ] \
+   && ! grep -qE 'config-v2|config\.v2' <<<"${out}"; then
   echo "PASS  default plugin.providerName keeps the rendered config's layout"
 else
   echo "FAIL  default plugin.providerName keeps the rendered config's layout"
@@ -175,7 +180,7 @@ if out=$(render -f "${COMPLETE}" --set plugin.providerName=null 2>&1) \
   echo "PASS  missing plugin.providerName (--reuse-values) renders the default"
 else
   echo "FAIL  missing plugin.providerName (--reuse-values) renders the default"
-  echo "      got: ${out}" | head -3
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 
@@ -205,12 +210,12 @@ fi
 # ADR-0028: the token policy reaches the bridge's environment.
 if out=$(render -f "${COMPLETE}" --set bridge.tokenValidation.maxLifetime=90m \
      --set bridge.tokenValidation.requirePodBinding=false 2>&1) \
-   && echo "${out}" | grep -A1 'name: BRIDGE_TOKEN_MAX_LIFETIME' | grep -q 'value: "90m"' \
-   && echo "${out}" | grep -A1 'name: BRIDGE_REQUIRE_POD_BOUND_TOKEN' | grep -q 'value: "false"'; then
+   && grep -q 'value: "90m"' <<<"$(grep -A1 'name: BRIDGE_TOKEN_MAX_LIFETIME' <<<"${out}")" \
+   && grep -q 'value: "false"' <<<"$(grep -A1 'name: BRIDGE_REQUIRE_POD_BOUND_TOKEN' <<<"${out}")"; then
   echo "PASS  bridge.tokenValidation renders into the bridge env"
 else
   echo "FAIL  bridge.tokenValidation renders into the bridge env"
-  echo "      got: ${out}" | head -3
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 
