@@ -77,8 +77,13 @@ cases=(
   "harbor.url over plain http in upper case|--set|harbor.url=HTTP://harbor.example.com|uses plain http"
   "bridge.oidcIssuer with credentials|--set|bridge.oidcIssuer=https://user:s3cret@kubernetes.default.svc.cluster.local|bridge.oidcIssuer must not contain \"@\""
   "bridge.oidcIssuer empty|--set|bridge.oidcIssuer=|bridge.oidcIssuer must be an http:// or https:// URL with a host"
-  "bridge.oidcJWKSURL with an @ after the host|--set|bridge.oidcJWKSURL=https://jwks:s3cr/et@jwks.example.com/keys|bridge.oidcJWKSURL has an \"@\" after its host part"
-  "bridge.oidcJWKSURL without a host|--set|bridge.oidcJWKSURL=https://jwks:s3cret@/keys|bridge.oidcJWKSURL must be an http:// or https:// URL with a host"
+  "bridge.oidcJWKSURL with credentials|--set|bridge.oidcJWKSURL=https://jwks:s3cret@jwks.example.com/keys|bridge.oidcJWKSURL must not contain \"@\": a user:password@ part here would be stored in plain text"
+  "bridge.oidcJWKSURL with an @ after the host|--set|bridge.oidcJWKSURL=https://jwks:s3cr/et@jwks.example.com/keys|bridge.oidcJWKSURL must not contain \"@\""
+  "bridge.oidcJWKSURL without a host|--set|bridge.oidcJWKSURL=https:///keys|bridge.oidcJWKSURL must be an http:// or https:// URL with a host"
+  "bridge.oidcJWKSURL over plain http|--set|bridge.oidcJWKSURL=http://jwks.example.com/keys|bridge.oidcJWKSURL uses plain http"
+  "bridge.oidcJWKSURL over plain http to a name that starts like a loopback address|--set|bridge.oidcJWKSURL=http://127.0.0.1.example.com/keys|bridge.oidcJWKSURL uses plain http"
+  "bridge.oidcIssuer over plain http for discovery|--set|bridge.oidcIssuer=http://issuer.example.com|bridge.oidcIssuer uses plain http"
+  "bridge.oidcIssuer over plain http in upper case|--set|bridge.oidcIssuer=HTTP://issuer.example.com|bridge.oidcIssuer uses plain http"
   "bridge.leaderElection not a boolean|--set|bridge.leaderElection=on|bridge.leaderElection must be true, false or null (null: on when bridge.replicas > 1), but it was read as the string on"
   "bridge.leaderElection=false with several replicas|--set|bridge.leaderElection=false|bridge.leaderElection=false with bridge.replicas=2: every replica would run the reconciler and the janitor"
   "bridge.harborAccessSelector value read as a boolean|--set|bridge.harborAccessSelector.eu=true|bridge.harborAccessSelector.eu must be a string, but it was read as the bool true"
@@ -233,8 +238,10 @@ fi
 leaked=""
 for setval in 'harbor.url=https://admin:s3cret@harbor.example.com' \
               'bridge.oidcIssuer=https://admin:s3cret@kubernetes.default.svc.cluster.local' \
+              'bridge.oidcJWKSURL=https://jwks:s3cret@jwks.example.com/keys' \
               'bridge.oidcJWKSURL=https://jwks:s3cr/et@jwks.example.com/keys' \
-              'bridge.oidcJWKSURL=s3cret:pw@jwks.example.com/keys'; do
+              'bridge.oidcJWKSURL=s3cret:pw@jwks.example.com/keys' \
+              'bridge.oidcJWKSURL=http://s3cret.example.com/keys'; do
   for cmd in render notes; do
     out=$("${cmd}" -f "${COMPLETE}" --set "${setval}" 2>&1 || true)
     if ! grep -qF 'it could hold a credential' <<<"${out}" || grep -q 's3cr' <<<"${out}"; then
@@ -249,16 +256,39 @@ else
   failed=$((failed+1))
 fi
 
-# bridge.oidcJWKSURL may carry user:password@ (net/http sends it as Basic
-# auth), and an @ written as %40 after the host stays allowed everywhere.
-if out=$(render -f "${COMPLETE}" --set 'bridge.oidcJWKSURL=https://jwks:pw@jwks.example.com/keys%40v1' \
+# An @ written as %40 after the host stays allowed.
+if out=$(render -f "${COMPLETE}" --set 'bridge.oidcJWKSURL=https://jwks.example.com/keys%40v1' \
      --set 'harbor.url=https://harbor.example.com/a%40b' 2>&1) \
-   && grep -qF 'value: "https://jwks:pw@jwks.example.com/keys%40v1"' <<<"${out}" \
+   && grep -qF 'value: "https://jwks.example.com/keys%40v1"' <<<"${out}" \
    && grep -qF 'value: "https://harbor.example.com/a%40b"' <<<"${out}"; then
-  echo "PASS  bridge.oidcJWKSURL with credentials, and %40 after the host, render"
+  echo "PASS  %40 after the host renders"
 else
-  echo "FAIL  bridge.oidcJWKSURL with credentials, and %40 after the host, render"
+  echo "FAIL  %40 after the host renders"
   head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# Plain http stays allowed where the bridge allows it: to a loopback host,
+# and for an issuer the bridge fetches nothing from because a JWKS URL is
+# set (bridge.oidcJWKSURL, or BRIDGE_OIDC_JWKS_URL in bridge.extraEnv, the
+# way to pass one with credentials from a Secret).
+refused=""
+for args in 'bridge.oidcJWKSURL=http://127.0.0.1:8001/openid/v1/jwks' \
+            'bridge.oidcJWKSURL=http://127.10.0.1:8001/keys' \
+            'bridge.oidcJWKSURL=http://localhost:8001/keys' \
+            'bridge.oidcJWKSURL=HTTP://LocalHost/keys' \
+            'bridge.oidcJWKSURL=http://[::1]:8001/keys' \
+            'bridge.oidcIssuer=http://127.0.0.1:8001' \
+            'bridge.oidcIssuer=http://issuer.example.com,bridge.oidcJWKSURL=https://kubernetes.default.svc/openid/v1/jwks'; do
+  render -f "${COMPLETE}" --set "${args}" > /dev/null 2>&1 || refused+=" ${args}"
+done
+render -f "${COMPLETE}" --set bridge.oidcIssuer=http://issuer.example.com \
+  --set-json 'bridge.extraEnv=[{"name":"BRIDGE_OIDC_JWKS_URL","valueFrom":{"secretKeyRef":{"name":"jwks","key":"url"}}}]' \
+  > /dev/null 2>&1 || refused+=" extraEnv"
+if [ -z "${refused}" ]; then
+  echo "PASS  plain http to a loopback host, and an http issuer with a JWKS URL, render"
+else
+  echo "FAIL  plain http to a loopback host, and an http issuer with a JWKS URL, render:${refused}"
   failed=$((failed+1))
 fi
 

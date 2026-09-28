@@ -237,12 +237,15 @@ call and logged only as the directory path, never the values
 `BRIDGE_HARBOR_URL` and `BRIDGE_OIDC_ISSUER` refuse a `user:password@`
 part at startup: the bridge never authenticated with it. Only
 `BRIDGE_OIDC_JWKS_URL` may carry one (it is sent as Basic auth to the
-JWKS endpoint). The startup log shows URLs with the whole
-`user:password@` part redacted, user name included, and configuration
-errors never repeat a URL's credentials. A URL setting with an `@` after
-its host part is refused: a `/`, `?` or `#` inside a password ends the
-host early (percent-encode them), and the value would otherwise be
-accepted and logged with part of the password in it.
+JWKS endpoint). The chart refuses one in `bridge.oidcJWKSURL`, where it
+would be stored in plain text in the Deployment and the Helm release: set
+such a URL in `bridge.extraEnv` from a Secret instead. The startup log
+shows URLs with the whole `user:password@` part redacted, user name
+included, and configuration errors never repeat a URL's credentials. A
+URL setting with an `@` after its host part is refused: a `/`, `?` or `#`
+inside a password ends the host early (percent-encode them), and the
+value would otherwise be accepted and logged with part of the password
+in it.
 
 ## What the bridge does *not* defend against
 

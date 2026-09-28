@@ -102,7 +102,10 @@ bridge:
   # Managed clouds use their own issuer URL (GKE:
   # https://container.googleapis.com/v1/projects/…/clusters/…, EKS:
   # https://oidc.eks.<region>.amazonaws.com/id/…) — set it, and set
-  # oidcJWKSURL below.
+  # oidcJWKSURL below. No "@" (write one in the path as %40). With
+  # oidcJWKSURL empty the bridge fetches the discovery document from here,
+  # so it must be https (plain http only to 127.0.0.1, ::1 or localhost;
+  # the chart refuses anything else).
   oidcIssuer: https://kubernetes.default.svc.cluster.local
 
   # Where the bridge fetches the token-signing keys. Empty = OIDC
@@ -111,11 +114,17 @@ bridge:
   # apiserver's own JWKS endpoint, https://kubernetes.default.svc/openid/v1/jwks:
   # the keys come from inside the cluster (no internet egress needed, the
   # cluster CA + the bridge's token below authenticate it), and the
-  # issuer claim is still checked against oidcIssuer. Of the URL settings
-  # only this one may carry user:password@ (sent as Basic auth):
-  # percent-encode "/", "?", "#" and "@" inside it, and write an "@" after
-  # the host as %40 (the chart refuses a literal one there). oidcIssuer
-  # takes no "@" at all.
+  # issuer claim is still checked against oidcIssuer. https (plain http
+  # only to 127.0.0.1, ::1 or localhost). No "@" (write one in the path
+  # as %40): the chart refuses a user:password@ part, because this value
+  # is stored in plain text in the Deployment and the Helm release. For a
+  # JWKS endpoint that needs credentials, leave this empty and set
+  # BRIDGE_OIDC_JWKS_URL in bridge.extraEnv from a Secret:
+  #   extraEnv:
+  #     - name: BRIDGE_OIDC_JWKS_URL
+  #       valueFrom:
+  #         secretKeyRef: {name: bridge-jwks-url, key: url}
+  # The bridge sends the user:password@ part as Basic auth.
   oidcJWKSURL: ""
 
   # CA bundle used to verify the OIDC issuer's TLS cert. For the

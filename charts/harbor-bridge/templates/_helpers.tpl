@@ -156,10 +156,24 @@ harbor.aetherize.io/robot
 {{- if not .Values.harbor.url -}}
 {{- fail "harbor.url is REQUIRED. The bridge needs the Harbor base URL to manage robots." -}}
 {{- end -}}
-{{- include "harbor-bridge.validateURL" (list "harbor.url" .Values.harbor.url "the bridge authenticates to Harbor only with harbor.adminCredsSecret") -}}
-{{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "a token's iss claim never carries one, so no token would match") -}}
+{{- include "harbor-bridge.validateURL" (list "harbor.url" .Values.harbor.url "a user:password@ part never takes effect (the bridge authenticates to Harbor only with harbor.adminCredsSecret) and only ends up in logs") -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "a user:password@ part never takes effect (a token's iss claim never carries one, so no token would match) and only ends up in logs") -}}
 {{- with .Values.bridge.oidcJWKSURL -}}
-{{- include "harbor-bridge.validateURL" (list "bridge.oidcJWKSURL" . "") -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcJWKSURL" . "a user:password@ part here would be stored in plain text in the bridge Deployment and the Helm release. For a JWKS endpoint that needs credentials, leave bridge.oidcJWKSURL empty and set BRIDGE_OIDC_JWKS_URL through bridge.extraEnv from a Secret (valueFrom.secretKeyRef)") -}}
+{{- include "harbor-bridge.requireTLSUnlessLoopback" (list "bridge.oidcJWKSURL" . "the token signing keys") -}}
+{{- end -}}
+{{- /* The bridge fetches from the issuer only for OIDC discovery, when no
+       JWKS URL is set (bridge.oidcJWKSURL, or BRIDGE_OIDC_JWKS_URL in
+       bridge.extraEnv). Otherwise the issuer is only compared with each
+       token's iss claim, and plain http is harmless. */}}
+{{- $jwksFromEnv := false -}}
+{{- range .Values.bridge.extraEnv -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "BRIDGE_OIDC_JWKS_URL") -}}
+{{- $jwksFromEnv = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or .Values.bridge.oidcJWKSURL $jwksFromEnv) -}}
+{{- include "harbor-bridge.requireTLSUnlessLoopback" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "the discovery document that names the token signing keys (no JWKS URL is set)") -}}
 {{- end -}}
 {{- if and (hasPrefix "http://" (lower (trim .Values.harbor.url))) (not .Values.harbor.allowInsecureHTTP) -}}
 {{- fail "harbor.url uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (harbor.caSecret for a private CA), or set harbor.allowInsecureHTTP=true." -}}
@@ -303,29 +317,52 @@ harbor.aetherize.io/robot
 {{- end -}}
 
 {{/*
-validateURL checks a URL setting of the bridge (bridge/controlplane/config.go
-requireURL) at template time: an http or https scheme and a host, no
-literal "@" after the host part (a "/", "?" or "#" inside a password ends
-the host early), and no "@" at all when the setting takes no
-user:password@ part. A non-empty third element is the reason it takes
-none: harbor.url and bridge.oidcIssuer take none, bridge.oidcJWKSURL may
-carry one (net/http sends it as Basic auth to the JWKS endpoint). Messages
+validateURL checks a URL setting of the bridge at template time: an http or
+https scheme and a host (bridge/controlplane/config.go requireURL), and no
+"@" at all. The third element says why the setting takes no user:password@
+part. The bridge refuses one in harbor.url and bridge.oidcIssuer, where it
+never takes effect. It accepts one in bridge.oidcJWKSURL and sends it as
+Basic auth, but the chart refuses it there too: the value would be stored
+in plain text in the Deployment and the Helm release, and a Secret can
+carry it instead (bridge.extraEnv). An "@" after the host part usually
+means a "/", "?" or "#" inside a password ended the host early. Messages
 never repeat the value: it may hold a credential.
-Usage: include "harbor-bridge.validateURL" (list "<setting>" <value> "<reason or empty>")
+Usage: include "harbor-bridge.validateURL" (list "<setting>" <value> "<why it takes no user:password@ part>")
 */}}
 {{- define "harbor-bridge.validateURL" -}}
 {{- $name := index . 0 -}}
 {{- $url := index . 1 | toString | trim -}}
-{{- $noUserinfo := index . 2 -}}
+{{- $why := index . 2 -}}
 {{- $omitted := "The value is left out of this message: it could hold a credential." -}}
-{{- if and $noUserinfo (contains "@" $url) -}}
-{{- fail (printf "%s must not contain \"@\". A user:password@ part never takes effect (%s) and only ends up in logs; an \"@\" after the host part usually means a \"/\", \"?\" or \"#\" inside a password ended the host early. Write an \"@\" that belongs to the path, query or fragment as %%40. %s" $name $noUserinfo $omitted) -}}
+{{- if contains "@" $url -}}
+{{- fail (printf "%s must not contain \"@\": %s. An \"@\" after the host part usually means a \"/\", \"?\" or \"#\" inside a password ended the host early. Write an \"@\" that belongs to the path, query or fragment as %%40. %s" $name $why $omitted) -}}
 {{- end -}}
-{{- if not (regexMatch "^(?i:https?)://([^/?#]*@)?[^/?#@]+([/?#].*)?$" $url) -}}
+{{- if not (regexMatch "^(?i:https?)://[^/?#]+([/?#].*)?$" $url) -}}
 {{- fail (printf "%s must be an http:// or https:// URL with a host; the bridge refuses to start otherwise. %s" $name $omitted) -}}
 {{- end -}}
-{{- if regexMatch "^[^:]+://[^/?#]*[/?#].*@" $url -}}
-{{- fail (printf "%s has an \"@\" after its host part: a \"/\", \"?\" or \"#\" inside a user:password@ part ends the host early, and the credentials never reach the endpoint. Percent-encode them (%%2F, %%3F, %%23), and write an \"@\" that belongs to the path, query or fragment as %%40. %s" $name $omitted) -}}
+{{- end -}}
+
+{{/*
+requireTLSUnlessLoopback refuses a URL, already checked by validateURL, that
+the bridge fetches the token signing keys (or the discovery document naming
+them) from over plain http, unless its host is a loopback address: the
+bridge refuses it at startup (0.11.1, bridge/dataplane/oidc.go
+requireTLSUnlessLoopback). The keys decide every credential, and anyone on
+the path of a plain-http fetch could substitute them and forge a token for
+any ServiceAccount. The chart knows a loopback
+host as localhost, a dotted 127.x.x.x address or [::1]; it refuses other
+spellings of a loopback address that the bridge would accept.
+Usage: include "harbor-bridge.requireTLSUnlessLoopback" (list "<setting>" <value> "<what the bridge fetches from it>")
+*/}}
+{{- define "harbor-bridge.requireTLSUnlessLoopback" -}}
+{{- $name := index . 0 -}}
+{{- $url := index . 1 | toString | trim -}}
+{{- if regexMatch "^(?i:http)://" $url -}}
+{{- $host := lower (regexReplaceAll "^[^:]+://(\\[[^\\]]*\\]|[^/?#:]*).*$" $url "${1}") -}}
+{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" -}}
+{{- if not (or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127(\\.%s){3}$" $octet) $host)) -}}
+{{- fail (printf "%s uses plain http: the bridge fetches %s from it, and anyone on the network path could substitute the keys and forge a token for any ServiceAccount, so the bridge refuses to start. Use https; plain http is allowed only to 127.0.0.1, ::1 or localhost. The value is left out of this message: it could hold a credential." $name (index . 2)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
