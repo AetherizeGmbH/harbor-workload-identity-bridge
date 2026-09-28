@@ -99,10 +99,9 @@ cases=(
   "plugin.matchImages entry with a path glob|--set|plugin.matchImages={harbor.example.com/*}|plugin.matchImages entry \"harbor.example.com/*\" is not host[:port][/path]"
   "plugin.matchImages entry with a space|--set-json|plugin.matchImages=[\"harbor.example.com \"]|plugin.matchImages entry \"harbor.example.com \" is not host[:port][/path]"
   "plugin.matchImages entry with a %-escape|--set|plugin.matchImages={harbor.example.com/a%zz}|plugin.matchImages entry \"harbor.example.com/a%zz\" is not host[:port][/path]"
-  "service.type ClusterIP with the default endpoint|--set|service.type=ClusterIP|service.type=ClusterIP gives the bridge no node port"
+  "service.type ClusterIP with the default endpoint|--set|service.type=ClusterIP|service.type=ClusterIP gives the bridge no node port, but with plugin.bridgeEndpoint empty the plugin calls https://127.0.0.1:<service.nodePort> (ADR-0008). Use service.type=NodePort, or set plugin.bridgeEndpoint"
   "service.nodePort null with the default endpoint|--set|service.nodePort=null|service.nodePort=null must be a fixed port while plugin.bridgeEndpoint is empty"
   "service.nodePort not a port with the default endpoint|--set|service.nodePort=70000|service.nodePort=70000 must be a fixed port"
-  "default endpoint checked with plugin.enabled=false|--set|plugin.enabled=false,service.type=ClusterIP|service.type=ClusterIP gives the bridge no node port"
 )
 
 failed=0
@@ -395,11 +394,92 @@ if out=$(render -f "${COMPLETE}" --set service.type=LoadBalancer 2>&1) \
    && out=$(render -f "${COMPLETE}" --set service.type=ClusterIP,plugin.bridgeEndpoint=https://bridge.example.com:8443 2>&1) \
    && ! grep -q 'nodePort' <<<"${out}" \
    && out=$(render -f "${COMPLETE}" --set service.nodePort=null,plugin.bridgeEndpoint=https://bridge.example.com:8443 2>&1) \
-   && grep -qxF '  type: NodePort' <<<"${out}" && ! grep -q 'nodePort' <<<"${out}"; then
+   && grep -qxF '  type: NodePort' <<<"${out}" && ! grep -q 'nodePort' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set plugin.bridgeEndpoint=https://bridge.example.com:8443 2>&1) \
+   && grep -qxF '      nodePort: 31443' <<<"${out}"; then
   echo "PASS  service.type and service.nodePort with a node port or an explicit endpoint"
 else
   echo "FAIL  service.type and service.nodePort with a node port or an explicit endpoint"
   head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# A LoadBalancer Service that the default endpoint of the chart's plugin
+# does not use keeps the node port the apiserver picked: pinning it to
+# service.nodePort would move it on upgrade, and fail when another Service
+# (another release's default NodePort) holds that port.
+if out=$(render -f "${COMPLETE}" --set service.type=LoadBalancer,plugin.bridgeEndpoint=https://10.0.0.5:8443 -s templates/bridge-service.yaml 2>&1) \
+   && grep -qxF '  type: LoadBalancer' <<<"${out}" && ! grep -q 'nodePort' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set service.type=LoadBalancer,plugin.enabled=false -s templates/bridge-service.yaml 2>&1) \
+   && grep -qxF '  type: LoadBalancer' <<<"${out}" && ! grep -q 'nodePort' <<<"${out}"; then
+  echo "PASS  LoadBalancer keeps its node port without the default endpoint of the chart's plugin"
+else
+  echo "FAIL  LoadBalancer keeps its node port without the default endpoint of the chart's plugin"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# Without the chart's plugin nothing calls the default endpoint: any Service
+# type and a dynamic node port render, and the NOTES print a placeholder
+# (with the server name the chart's certificate needs) instead of a
+# 127.0.0.1 URL that reaches nothing.
+ok=""
+for args in service.type=ClusterIP service.nodePort=null service.type=LoadBalancer; do
+  if out=$(notes -f "${COMPLETE}" --set "plugin.enabled=false,${args}" 2>&1) \
+     && grep -qF 'value: "<https URL of the bridge that every node reaches>"' <<<"${out}" \
+     && grep -qF 'value: "harbor-bridge.harbor-bridge-system.svc"' <<<"$(grep -A1 'name: HARBOR_BRIDGE_SERVER_NAME' <<<"${out}")" \
+     && ! grep -qF '127.0.0.1:31443' <<<"${out}"; then
+    :
+  else
+    ok+=" ${args}"
+  fi
+done
+if [ -z "${ok}" ]; then
+  echo "PASS  plugin.enabled=false without a known node port: placeholder endpoint in the NOTES"
+else
+  echo "FAIL  plugin.enabled=false without a known node port: placeholder endpoint in the NOTES:${ok}"
+  failed=$((failed+1))
+fi
+
+# The plugin verifies the chart's certificate against the bridge Service's
+# name whenever the endpoint's host is not one the certificate names (the
+# Service's names, localhost, 127.0.0.1): a cluster IP or a load balancer
+# address, as $(NODE_IP) already did. Hosts the certificate names, and an
+# operator-provided certificate, get no server name, so their rendered
+# config does not change (a changed byte restarts kubelet).
+svcname='value: "harbor-bridge.harbor-bridge-system.svc"'
+servername() { grep -A1 'name: HARBOR_BRIDGE_SERVER_NAME' <<<"${out}" || true; }
+if out=$(render -f "${COMPLETE}" --set service.type=ClusterIP,plugin.bridgeEndpoint=https://10.96.0.50:8443 -s templates/plugin-configmap.yaml 2>&1) \
+   && grep -qF "${svcname}" <<<"$(servername)" \
+   && grep -qF "# The endpoint's host is not in the bridge certificate; verify" <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set 'plugin.bridgeEndpoint=https://[::1]:31443' -s templates/plugin-configmap.yaml 2>&1) \
+   && grep -qF "${svcname}" <<<"$(servername)" \
+   && out=$(render -f "${COMPLETE}" --set 'plugin.bridgeEndpoint=https://$(NODE_IP):31443' -s templates/plugin-configmap.yaml 2>&1) \
+   && grep -qF "${svcname}" <<<"$(servername)" \
+   && grep -qF "# The node's IP is not in the bridge certificate; verify it" <<<"${out}" \
+   && out=$(notes -f "${COMPLETE}" --set plugin.enabled=false,plugin.bridgeEndpoint=https://10.96.0.50:8443 2>&1) \
+   && grep -qF "${svcname}" <<<"$(servername)" \
+   && grep -qF 'value: "https://10.96.0.50:8443"' <<<"${out}"; then
+  echo "PASS  explicit endpoint outside the certificate gets the Service's name as server name"
+else
+  echo "FAIL  explicit endpoint outside the certificate gets the Service's name as server name"
+  grep -m 4 -E 'HARBOR_BRIDGE|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+nameless=""
+for args in plugin.bridgeEndpoint=https://localhost:31443 \
+            plugin.bridgeEndpoint=https://harbor-bridge.harbor-bridge-system.svc.cluster.local:8443 \
+            plugin.bridgeEndpoint=https://10.96.0.50:8443,tls.enabled=false,tls.existingSecret=bridge-tls; do
+  out=$(render -f "${COMPLETE}" --set "${args}" -s templates/plugin-configmap.yaml 2>&1 || true)
+  if ! grep -qF 'HARBOR_BRIDGE_ENDPOINT' <<<"${out}" || grep -qF 'HARBOR_BRIDGE_SERVER_NAME' <<<"${out}"; then
+    nameless+=" ${args}"
+  fi
+done
+if [ -z "${nameless}" ] \
+   && [ "$(render -f "${COMPLETE}" --set plugin.bridgeEndpoint=https://127.0.0.1:31443 2>&1)" = "$(render -f "${COMPLETE}" 2>&1)" ]; then
+  echo "PASS  endpoint the certificate names, or an operator certificate: no server name"
+else
+  echo "FAIL  endpoint the certificate names, or an operator certificate: no server name:${nameless}"
   failed=$((failed+1))
 fi
 

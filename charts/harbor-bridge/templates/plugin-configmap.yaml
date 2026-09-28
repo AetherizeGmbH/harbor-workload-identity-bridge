@@ -44,11 +44,16 @@ data:
             value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
           - name: HARBOR_BRIDGE_CA_BUNDLE
             value: {{ include "harbor-bridge.plugin.hostFile" (list . "ca.crt") | quote }}
-          {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
+          {{- with include "harbor-bridge.plugin.serverName" . }}
+          {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" $) }}
           # The node's IP is not in the bridge certificate; verify it
           # against the bridge Service's name, which is.
+          {{- else }}
+          # The endpoint's host is not in the bridge certificate; verify
+          # it against the bridge Service's name, which is.
+          {{- end }}
           - name: HARBOR_BRIDGE_SERVER_NAME
-            value: "{{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc"
+            value: {{ . | quote }}
           {{- end }}
           {{- if .Values.bridge.mTLS.enabled }}
           - name: HARBOR_BRIDGE_CLIENT_CERT

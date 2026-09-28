@@ -426,6 +426,12 @@ plugin:
   # dataplanes that do not route loopback NodePorts. Write it without
   # brackets: the installer brackets an IPv6 address itself. The
   # installer refuses an endpoint that is not an https URL with a host.
+  # The plugin verifies
+  # the bridge certificate against the bridge Service's name when the
+  # host here is not in the certificate: for $(NODE_IP), and with the
+  # chart-issued certificate (tls.enabled) for every host other than the
+  # Service's names, localhost and 127.0.0.1, such as a cluster IP. With
+  # tls.enabled=false your certificate must name any other host you set.
   bridgeEndpoint: ""
 
   # The plugin can only run after its own image was pulled, so the
@@ -463,11 +469,20 @@ plugin:
 
 # Service shape. ADR-0008: NodePort by default so plugin pods can reach
 # the bridge via node-local routing (plugin → 127.0.0.1:<nodePort>).
-# That default endpoint (plugin.bridgeEndpoint empty) is rendered at
-# install time, so it needs type NodePort or LoadBalancer (which
-# allocates node ports too) and a fixed nodePort; the chart refuses
-# anything else. Another type, or nodePort null for a port the apiserver
-# picks, needs plugin.bridgeEndpoint.
+# The chart's plugin gets that default endpoint (plugin.bridgeEndpoint
+# empty) at install time, so it needs a Service with node ports (NodePort,
+# or LoadBalancer, which allocates them too) and a fixed nodePort; the
+# chart refuses anything else. Another type, or nodePort null for a port
+# the apiserver picks, needs plugin.bridgeEndpoint (or plugin.enabled=
+# false). A LoadBalancer Service gets nodePort only for the default
+# endpoint of the chart's plugin.
+# Prefer NodePort. The chart sets no annotations or source ranges on the
+# Service, and many managed clouds (GKE and AKS among them) give a
+# LoadBalancer Service an address reachable from outside the cluster: the
+# credential endpoint would be exposed there. Its clients also usually
+# reach the bridge from a node's address (kube-proxy SNAT with
+# externalTrafficPolicy Cluster), so the per-source rate limit and the
+# audit source= field cannot tell them from that node's kubelet.
 service:
   type: NodePort
   port: 8443

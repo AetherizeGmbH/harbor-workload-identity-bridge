@@ -16,7 +16,8 @@ spec:
       protocol: TCP
       {{- /* A LoadBalancer Service allocates node ports too: the plugin's
              default endpoint needs the one it names. An empty nodePort
-             lets the apiserver pick one (only with plugin.bridgeEndpoint). */}}
-      {{- if and (has .Values.service.type (list "NodePort" "LoadBalancer")) .Values.service.nodePort }}
+             lets the apiserver pick one (only with plugin.bridgeEndpoint,
+             or without the chart's plugin). */}}
+      {{- if include "harbor-bridge.service.nodePort" . }}
       nodePort: {{ .Values.service.nodePort }}
       {{- end }}

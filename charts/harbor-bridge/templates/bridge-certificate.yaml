@@ -28,12 +28,12 @@ spec:
   subject:
     organizations: [aetherize.harbor-workload-identity-bridge]
   commonName: {{ include "harbor-bridge.bridge.fullname" . }}
+  {{- /* harbor-bridge.plugin.serverName checks endpoints against these
+         names and the IP address. */}}
   dnsNames:
-    - {{ include "harbor-bridge.bridge.fullname" . }}
-    - {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}
-    - {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc
-    - {{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
-    - localhost
+    {{- range splitList " " (include "harbor-bridge.bridge.certDNSNames" .) }}
+    - {{ . }}
+    {{- end }}
   ipAddresses:
     - 127.0.0.1
   usages:

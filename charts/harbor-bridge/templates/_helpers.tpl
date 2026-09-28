@@ -238,11 +238,12 @@ harbor.aetherize.io/robot
 {{- if not (regexMatch "^(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$" $cacheDuration) -}}
 {{- fail (printf "plugin.defaultCacheDuration=%q must be a Go duration of at least 0, such as 1h or 90m (units h, m, s, ms, us, ns; there is no d): kubelet does not start with any other value in its credential-provider config." $cacheDuration) -}}
 {{- end -}}
-{{- /* The default endpoint is the loopback NodePort (ADR-0008), fixed at
-       render time: it needs a node port, and one known now. */}}
-{{- if not .Values.plugin.bridgeEndpoint -}}
+{{- /* The chart's plugin calls the loopback NodePort by default (ADR-0008),
+       fixed at render time: it needs a node port, and one known now. Without
+       the chart's plugin the NOTES print a placeholder instead. */}}
+{{- if and .Values.plugin.enabled (not .Values.plugin.bridgeEndpoint) -}}
 {{- if not (has .Values.service.type (list "NodePort" "LoadBalancer")) -}}
-{{- fail (printf "service.type=%s gives the bridge no node port, but with plugin.bridgeEndpoint empty the plugin calls https://127.0.0.1:<service.nodePort> (ADR-0008). Use NodePort or LoadBalancer, or set plugin.bridgeEndpoint to a URL of the bridge every node can reach." (toString .Values.service.type)) -}}
+{{- fail (printf "service.type=%s gives the bridge no node port, but with plugin.bridgeEndpoint empty the plugin calls https://127.0.0.1:<service.nodePort> (ADR-0008). Use service.type=NodePort, or set plugin.bridgeEndpoint to an https URL of the bridge every node can reach." (toString .Values.service.type)) -}}
 {{- end -}}
 {{- $nodePort := toString .Values.service.nodePort -}}
 {{- if or (not (regexMatch "^[1-9][0-9]*$" $nodePort)) (gt (atoi $nodePort) 65535) -}}
@@ -589,6 +590,58 @@ installer substitutes a literal $(NODE_IP) with the node's IP).
 {{- .Values.plugin.bridgeEndpoint -}}
 {{- else -}}
 https://127.0.0.1:{{ .Values.service.nodePort }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+service.nodePort is "true" when the bridge Service names service.nodePort:
+always for type NodePort, and for type LoadBalancer only when the chart's
+plugin calls the default endpoint, the one case that needs that port.
+Otherwise a LoadBalancer Service keeps the node port the apiserver picked:
+pinning it would move an existing Service to service.nodePort on upgrade,
+and fail when another Service (e.g. another release's default NodePort)
+holds that port.
+*/}}
+{{- define "harbor-bridge.service.nodePort" -}}
+{{- if .Values.service.nodePort -}}
+{{- if or (eq .Values.service.type "NodePort") (and (eq .Values.service.type "LoadBalancer") .Values.plugin.enabled (not .Values.plugin.bridgeEndpoint)) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+bridge.certDNSNames are the DNS names of the chart-issued serving
+certificate (bridge-certificate.yaml), space-separated. Its one IP address
+is 127.0.0.1.
+*/}}
+{{- define "harbor-bridge.bridge.certDNSNames" -}}
+{{- $fullname := include "harbor-bridge.bridge.fullname" . -}}
+{{- $fullname }} {{ $fullname }}.{{ .Release.Namespace }} {{ $fullname }}.{{ .Release.Namespace }}.svc {{ $fullname }}.{{ .Release.Namespace }}.svc.cluster.local localhost
+{{- end -}}
+
+{{/*
+plugin.serverName is the name the plugin verifies the bridge certificate
+against (HARBOR_BRIDGE_SERVER_NAME) when the endpoint's host is not in the
+certificate, or "" when no such name is needed: the bridge Service's name,
+for an endpoint with $(NODE_IP) (the chart's certificate names no node IP), and,
+with the chart-issued certificate (tls.enabled), for an explicit endpoint
+whose host is not one of its names. The default endpoint (127.0.0.1) and an
+explicit one on a host the certificate names get none, so their rendered
+config stays the same. An operator-provided certificate (tls.enabled=false)
+names what the operator chose: the chart adds no server name for an
+explicit endpoint then.
+*/}}
+{{- define "harbor-bridge.plugin.serverName" -}}
+{{- $endpoint := include "harbor-bridge.plugin.bridgeEndpoint" . -}}
+{{- $svc := printf "%s.%s.svc" (include "harbor-bridge.bridge.fullname" .) .Release.Namespace -}}
+{{- if contains "$(NODE_IP)" $endpoint -}}
+{{- $svc -}}
+{{- else if and .Values.tls.enabled .Values.plugin.bridgeEndpoint -}}
+{{- $host := lower (regexReplaceAll "^[^:/?#]+://(?:[^/?#@]*@)?(\\[[^\\]]*\\]|[^/?#:]*).*$" $endpoint "${1}") -}}
+{{- if not (has $host (append (splitList " " (include "harbor-bridge.bridge.certDNSNames" .)) "127.0.0.1")) -}}
+{{- $svc -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

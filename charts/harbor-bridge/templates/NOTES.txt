@@ -72,6 +72,17 @@ NEXT STEPS
        --image-credential-provider-config={{ .Values.plugin.hostConfigDir }}/credential-provider-config.yaml
 {{- end }}
 {{- else }}
+{{- /* Without the chart's plugin the default endpoint applies only when the
+       Service names a node port (harbor-bridge.service.nodePort). */}}
+{{- $endpoint := include "harbor-bridge.plugin.bridgeEndpoint" . }}
+{{- $serverName := include "harbor-bridge.plugin.serverName" . }}
+{{- $noNodePort := and (not .Values.plugin.bridgeEndpoint) (not (include "harbor-bridge.service.nodePort" .)) }}
+{{- if $noNodePort }}
+{{- $endpoint = "<https URL of the bridge that every node reaches>" }}
+{{- if .Values.tls.enabled }}
+{{- $serverName = printf "%s.%s.svc" (include "harbor-bridge.bridge.fullname" .) .Release.Namespace }}
+{{- end }}
+{{- end }}
 
   2. Install the plugin on every node yourself (plugin.enabled=false). Kubelet
      needs the plugin binary and this provider entry in the credential-provider
@@ -92,22 +103,27 @@ NEXT STEPS
          defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
          env:
            - name: HARBOR_BRIDGE_ENDPOINT
-             value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
+             value: {{ $endpoint | quote }}
            - name: HARBOR_BRIDGE_CA_BUNDLE
              value: {{ include "harbor-bridge.plugin.hostFile" (list . "ca.crt") | quote }}
-{{- if .Values.plugin.bridgeEndpoint }}
-{{- if .Values.tls.enabled }}
+{{- with $serverName }}
+           # The endpoint's host is not in the bridge certificate; the Service's name is.
            - name: HARBOR_BRIDGE_SERVER_NAME
-             value: "{{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc"
-{{- else }}
-           # - name: HARBOR_BRIDGE_SERVER_NAME   # a name your certificate carries,
-           #   value: "<name>"                   # unless it names the endpoint's host
-{{- end }}
+             value: {{ . | quote }}
 {{- end }}
          tokenAttributes:
            serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
            requireServiceAccount: true
            cacheType: ServiceAccount
+{{- if $noNodePort }}
+
+     With service.type={{ .Values.service.type }}{{ if eq .Values.service.type "NodePort" }} and no service.nodePort{{ end }} the bridge Service
+     has no node port this chart knows{{ if eq .Values.service.type "LoadBalancer" }} (it fixes a LoadBalancer
+     Service's node port only for its own plugin){{ end }}, so the default
+     endpoint https://127.0.0.1:<node port> does not apply. Write an https URL
+     of the bridge that every node reaches (e.g. with the Service's cluster IP
+     and port {{ .Values.service.port }}), or set plugin.bridgeEndpoint.
+{{- end }}
 
 {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
 
