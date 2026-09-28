@@ -65,7 +65,10 @@ const (
 // namespace and name (CRD pattern and BRIDGE_CLUSTER_NAME validation).
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-var generationPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var (
+	generationPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+	hashSuffixPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+)
 
 // ErrInvalidIdentity is returned by IdentityName, RoleID and UserID when
 // an input is not a DNS label of the allowed length. The naming guarantees
@@ -142,19 +145,44 @@ func NewGeneration() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// ParseUserID splits a user id built by UserID into its identity name and
-// generation. ok is false for any other id, including role ids.
+// ParseUserID splits a user id into its identity name and generation. ok
+// is true exactly for ids of the shape UserID builds: an identity name of
+// at most 173 characters, either natural ("bridge-<cluster>.<ns>.<sa>")
+// or truncated ("bridge-<cluster>.<ns>.<start of sa>.<16 hex digits>"),
+// whose parts are lower-case DNS labels within the cluster, namespace and
+// ServiceAccount limits, then '_' and a generation of 16 lower-case hex
+// digits. Whether a truncated name's digest belongs to its ServiceAccount
+// cannot be checked without the full name. ok is false for any other id,
+// including role ids.
 func ParseUserID(userID string) (identity, generation string, ok bool) {
 	i := strings.LastIndex(userID, generationSeparator)
 	if i < 0 {
 		return "", "", false
 	}
 	identity, generation = userID[:i], userID[i+1:]
-	if !generationPattern.MatchString(generation) || !strings.HasPrefix(identity, namePrefix) ||
-		strings.Contains(identity, generationSeparator) || len(userID) > NameCap {
+	if !generationPattern.MatchString(generation) || !isIdentityName(identity) {
 		return "", "", false
 	}
 	return identity, generation, true
+}
+
+// isIdentityName reports whether name has the shape IdentityName builds
+// (see ParseUserID).
+func isIdentityName(name string) bool {
+	rest, ok := strings.CutPrefix(name, namePrefix)
+	if !ok || len(name) > identityNameCap {
+		return false
+	}
+	parts := strings.Split(rest, ".")
+	switch len(parts) {
+	case 3:
+		return validateIdentity(parts[0], parts[1], parts[2]) == nil
+	case 4:
+		// The cut keeps at least one character of the ServiceAccount name
+		// and trims trailing hyphens, so that part is a DNS label too.
+		return validateIdentity(parts[0], parts[1], parts[2]) == nil && hashSuffixPattern.MatchString(parts[3])
+	}
+	return false
 }
 
 // ClusterPrefix returns the ownership prefix of the given cluster:
@@ -203,11 +231,16 @@ func hashOf(s string) string {
 // Format is the Nexus repository format a NexusAccess grants.
 type Format string
 
-// Formats the bridge grants. Nexus 3.94 and later serve OCI repositories
-// in a format of their own, with their own privileges.
+// Formats the bridge grants: docker only. Nexus 3.94 and later serve OCI
+// repositories in a format of their own ("oci", privileges
+// nx-repository-view-oci-…, names that must be lower-case), whose clients
+// authenticate through a separate "OCI Bearer Token Realm" (community
+// OpenAPI spec, OciAttributes.forceBasicAuth). Whether that realm's
+// tokens expire, survive a password change or die with their user is not
+// known, and ADR-0033's rotation rests on exactly that for docker; the
+// format is added once it has been analysed (ADR-0033, question 8).
 const (
 	FormatDocker Format = "docker"
-	FormatOCI    Format = "oci"
 )
 
 // Access is the permission a NexusAccess grants on a repository, in the
@@ -264,8 +297,8 @@ var privilegeActions = map[Access][]string{
 // not exist (ADR-0033). The repository name is used verbatim: privilege
 // names are case-sensitive.
 func RepositoryPrivileges(format Format, repository string, access Access) ([]string, error) {
-	if format != FormatDocker && format != FormatOCI {
-		return nil, fmt.Errorf("repository format %q is not one of %q, %q", format, FormatDocker, FormatOCI)
+	if format != FormatDocker {
+		return nil, fmt.Errorf("repository format %q is not %q, the only format the bridge grants", format, FormatDocker)
 	}
 	if err := ValidateRepositoryName(repository); err != nil {
 		return nil, err

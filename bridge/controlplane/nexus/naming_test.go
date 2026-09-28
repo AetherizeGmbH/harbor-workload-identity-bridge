@@ -92,6 +92,27 @@ func TestIdentityName_TruncatesDeterministically(t *testing.T) {
 	}
 }
 
+// A cut that ends in a hyphen of the ServiceAccount name drops it, so no
+// "-." precedes the digest. With a 62-character cluster name the budget
+// for "<ns>.<sa>" is 86 characters: the namespace, the dot and 22
+// characters of the ServiceAccount name, whose 22nd is a hyphen here.
+func TestIdentityName_TruncationTrimsAHyphenAtTheCut(t *testing.T) {
+	cluster := strings.Repeat("c", 62)
+	ns := strings.Repeat("n", 63)
+	sa := "a" + strings.Repeat("-b", 126)
+	if sa[21] != '-' {
+		t.Fatalf("test setup: the ServiceAccount name's 22nd character is %q, want a hyphen", sa[21])
+	}
+	got, err := IdentityName(cluster, ns, sa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := "bridge-" + cluster + "." + ns + "." + sa
+	if want := "bridge-" + cluster + "." + ns + "." + sa[:21] + "." + hashOf(full); got != want {
+		t.Errorf("IdentityName = %q, want %q", got, want)
+	}
+}
+
 var nameChars = regexp.MustCompile(`^[a-z0-9.-]+$`)
 
 // The naming guarantees rest on DNS-label inputs, and a namespace longer
@@ -136,10 +157,26 @@ func TestUserID_AndParse(t *testing.T) {
 	if !ok || identity != "bridge-prod.flux-system.source-controller" || g != gen {
 		t.Errorf("ParseUserID(%q) = %q, %q, %v", id, identity, g, ok)
 	}
-	for _, bad := range []string{"", "bridge-prod.flux-system.source-controller", "bridge-prod.a.b_", "bridge-prod.a.b_0123", "bridge-prod.a.b_0123456789ABCDEF", "bridge-prod.a_b_0123456789abcdef", "admin_0123456789abcdef", "_0123456789abcdef"} {
+	const g16 = "_0123456789abcdef"
+	for _, bad := range []string{
+		"", "bridge-prod.flux-system.source-controller", "bridge-prod.a.b_", "bridge-prod.a.b_0123",
+		"bridge-prod.a.b_0123456789ABCDEF", "bridge-prod.a_b" + g16, "admin" + g16, g16,
+		// identity parts that are not lower-case DNS labels
+		"bridge-X" + g16, "bridge-prod.Team.Svc" + g16, "bridge-.." + g16, "bridge-prod..sa" + g16,
+		"bridge-prod.ns.sa-" + g16, "bridge-prod.-ns.sa" + g16, "bridge-" + strings.Repeat("c", 64) + ".ns.sa" + g16,
+		// neither two nor three dots, or a truncated shape without a digest
+		"bridge-prod.ns" + g16, "bridge-prod.ns.sa.x.y" + g16, "bridge-prod.ns.sa.0123456789abcdeg" + g16,
+		"bridge-prod.ns.sa.0123456789ABCDEF" + g16,
+		// longer than UserID ever builds
+		"bridge-prod.ns." + strings.Repeat("s", 170) + g16,
+	} {
 		if _, _, ok := ParseUserID(bad); ok {
 			t.Errorf("ParseUserID(%q) accepted a name UserID never builds", bad)
 		}
+	}
+	truncated := "bridge-prod.ns.sa.0123456789abcdef" + g16
+	if identity, _, ok := ParseUserID(truncated); !ok || identity != "bridge-prod.ns.sa.0123456789abcdef" {
+		t.Errorf("ParseUserID(%q) = %q, %v; want the truncated shape accepted", truncated, identity, ok)
 	}
 	for _, g := range []string{"", "0123", "0123456789ABCDEF", "0123456789abcdefg", "0123456789abcdeg", "../../etc/passwd"} {
 		if _, err := UserID("prod", "ns", "sa", g); !errors.Is(err, ErrInvalidIdentity) {
@@ -210,9 +247,9 @@ func TestRepositoryPrivileges(t *testing.T) {
 	}{
 		{FormatDocker, "apps", AccessPull, []string{"nx-repository-view-docker-apps-read"}},
 		{FormatDocker, "apps", AccessPush, []string{"nx-repository-view-docker-apps-add", "nx-repository-view-docker-apps-edit"}},
-		{FormatOCI, "Mixed-Case.repo_1", AccessPullPush, []string{
-			"nx-repository-view-oci-Mixed-Case.repo_1-add", "nx-repository-view-oci-Mixed-Case.repo_1-edit",
-			"nx-repository-view-oci-Mixed-Case.repo_1-read",
+		{FormatDocker, "Mixed-Case.repo_1", AccessPullPush, []string{
+			"nx-repository-view-docker-Mixed-Case.repo_1-add", "nx-repository-view-docker-Mixed-Case.repo_1-edit",
+			"nx-repository-view-docker-Mixed-Case.repo_1-read",
 		}},
 	}
 	for _, tc := range cases {
@@ -238,6 +275,7 @@ func TestRepositoryPrivileges(t *testing.T) {
 		access Access
 	}{
 		{"maven2", "apps", AccessPull},
+		{"oci", "apps", AccessPull}, // not analysed yet (ADR-0033)
 		{"*", "apps", AccessPull},
 		{FormatDocker, "*", AccessPull},
 		{FormatDocker, "", AccessPull},
