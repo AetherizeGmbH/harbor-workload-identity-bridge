@@ -688,6 +688,70 @@ their own RBAC.
   Harbor API unreachable, or refusing the bridge's admin credential) —
   keep `tokenTTL` short and alert on `reason=DeletionBlocked`.
 
+## Nexus backend (preview, ADR-0036)
+
+With `nexus.enabled` the bridge also manages local users and roles in
+Sonatype Nexus Repository
+([ADR-0036](docs/adr/0036-nexus-repository-backend.md), Proposed). What
+that adds to the model above:
+
+- **The Nexus credential is admin-equivalent.** Creating users and
+  assigning roles is enough to give oneself `nx-admin`, so whoever holds
+  the credential in `nexus.adminCredsSecret` controls Nexus, whatever role
+  it has. Give it a role with `nx-users-all`, `nx-roles-all` and
+  `nx-privileges-read` only (the bridge never needs `nx-all`; the live
+  test runs every client call as such a user), keep it only in that
+  Secret, and restrict who can read Secrets in the release namespace. The
+  bridge reads it on every Nexus call, so a rotated Secret needs no
+  restart. Theft of this credential is a threat-model entry the
+  maintainer has not rated yet (ADR-0036 decision j).
+- **Remote lockout of that credential (Nexus 3.94 and later; read from
+  Nexus's source, not verified at runtime).** Nexus's failed-login rate
+  limiter keys on the username alone. Anyone who reaches Nexus's HTTP port
+  (every developer with registry access, any pod that can reach it) and
+  knows the username can block it with four wrong passwords; from then on
+  even the right password gets `429`, and every request within
+  `nexus.auth.ratelimit.max-delay-seconds` of the previous one keeps the
+  block alive. The bridge then stops every call with the credential for
+  `nexus.rateLimitBackoff` after each `429`, so rotation, the deletion of
+  replaced users and the revocation of deleted NexusAccess objects' users
+  stop, and the bound on a leaked bearer token below no longer holds.
+  Mitigations: a dedicated account with a long random username (never
+  `admin`) that appears nowhere but in the Secret; limiting who can reach
+  Nexus's REST API; an alert on the maximum of `bridge_nexus_rate_limited`
+  across the bridge replicas (meanwhile every NexusAccess reports
+  `NexusRateLimited`, one being deleted `DeletionBlocked`). An
+  administrator's update of the account or a Nexus restart ends the block;
+  restarting the bridge ends its backoff. Nexus counts per node, so an HA
+  Nexus allows proportionally more wrong passwords.
+- **A leaked docker bearer token has no expiry.** Nexus hands out one
+  persistent token per user; a password change, disabling the user, or
+  deleting and re-creating it under the same id does not revoke it
+  (verified on 3.76.1). Only a user id that never exists again does, so
+  every rotation creates a user under a new id and deletes the previous
+  one `NexusUserRetireGrace` (5 minutes) after the Secret write. While
+  the credential above works, a token lives at most 24 h + 1 min + 5 min
+  after its user was created. After a node compromise, delete the
+  NexusAccess's Secret (`kubectl -n <bridge-namespace> delete secret
+  nexususer-<namespace>.<name>`): the forced rotation deletes the previous
+  user at once.
+- **Lockout of a workload's user.** If the docker connector's logins pass
+  through the same limiter (not known), wrong passwords for a workload's
+  Nexus user id block that identity's pulls on every node. The id carries
+  a random 64-bit generation and changes at every rotation; readers of
+  the NexusAccess status (`status.user.userId`), of its Secret and of the
+  audit log can target it until then.
+- **NexusAccess authorship is cluster-privileged**, like HarborAccess
+  authorship: whoever creates a NexusAccess grants any docker repository
+  to any ServiceAccount identity (see *Unauthorized HarborAccess
+  authorship*). The bridge grants a repository only through Nexus's own
+  built-in repository-view privileges; a privilege someone created under
+  such a name while the repository does not exist is never granted
+  (`PrivilegeConflict`).
+- **Rights the bridge cannot see.** The `nx-anonymous` role (with
+  anonymous access on) and the DefaultRole realm widen what every bridge
+  user may do beyond its NexusAccess. Turn anonymous access off.
+
 ## Hardening the bridge
 
 | Lever | Default | Recommendation |
@@ -768,7 +832,7 @@ credential issued
 
 credential denied
   reason=no_matching_nexusaccess|invalid_nexusaccess_spec|nexusaccess_deleting|secret_owner_mismatch|grants_incomplete
-  missing_repositories=…                 # grants_incomplete only: repositories the spec names that Nexus lacks
+  missing_repositories=…                 # grants_incomplete only: repositories the role does not grant
 
 credential unavailable
   reason=secret_missing|secret_incomplete|secret_for_previous_identity|secret_unreadable|nexusaccess_lookup_failed|nexus_identity_unknown
