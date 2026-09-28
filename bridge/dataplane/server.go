@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	"golang.org/x/time/rate"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -46,13 +47,22 @@ type ServerConfig struct {
 	// OIDC) but ADR-0008 leaves the door open.
 	ClientCAFile string
 
-	// Handler is the HTTP handler. Typically a mux carrying the
-	// credential endpoint, /metrics, and /healthz.
+	// Handler is the HTTP handler: the credential endpoint only. The
+	// listener is exposed on every node (NodePort), so health, readiness
+	// and /metrics are served on their own ports (ADR-0025).
 	Handler http.Handler
 
 	// ShutdownTimeout bounds graceful shutdown when ctx cancels.
 	// Defaults to 10 seconds.
 	ShutdownTimeout time.Duration
+
+	// ShutdownDelay is how long the listener keeps accepting connections
+	// after ctx cancels, before the graceful shutdown starts. Kubernetes
+	// sends SIGTERM while kube-proxy on every node is still removing the
+	// terminating pod from the Service; until it has, new NodePort
+	// connections still reach this pod, and a closed listener refuses
+	// them, which fails the image pull. Zero shuts down at once.
+	ShutdownDelay time.Duration
 
 	// ReloadInterval is how often the serving key pair and the client CA
 	// bundle are re-read from disk (in addition to file-change events), so
@@ -62,8 +72,9 @@ type ServerConfig struct {
 }
 
 // Server is a manager.Runnable HTTPS server. The manager calls Start with
-// a context tied to SIGTERM; Start blocks until the context cancels, then
-// performs a graceful Shutdown bounded by ShutdownTimeout.
+// a context tied to SIGTERM; Start blocks until the context cancels, keeps
+// serving for ShutdownDelay, then performs a graceful Shutdown bounded by
+// ShutdownTimeout.
 type Server struct {
 	cfg  ServerConfig
 	srv  *http.Server
@@ -203,9 +214,10 @@ func (s *Server) Addr() string {
 	return s.cfg.ListenAddr
 }
 
-// Start implements manager.Runnable. Blocks until ctx is cancelled, then
-// performs a graceful Shutdown bounded by cfg.ShutdownTimeout. Returning
-// from Start signals manager that this runnable is done.
+// Start implements manager.Runnable. Blocks until ctx is cancelled, keeps
+// serving for cfg.ShutdownDelay, then performs a graceful Shutdown bounded
+// by cfg.ShutdownTimeout. Returning from Start signals manager that this
+// runnable is done.
 func (s *Server) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("dataplane-server")
 
@@ -222,11 +234,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// the listener.
 	reloadCtx, stopReload := context.WithCancel(ctx)
 	defer stopReload()
-	go func() {
-		if err := s.cert.Start(reloadCtx); err != nil {
-			logger.Error(err, "certificate watcher stopped")
-		}
-	}()
+	go s.watchCertificate(reloadCtx, logger)
 	if s.ca != nil {
 		go s.ca.watch(reloadCtx, s.cfg.ReloadInterval, logger.Error)
 	}
@@ -246,6 +254,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		if stopped, err := s.drain(logger, errCh); stopped {
+			return err
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 		defer cancel()
 		logger.Info("shutting down data-plane server", "timeout", s.cfg.ShutdownTimeout)
@@ -264,6 +275,61 @@ func (s *Server) Start(ctx context.Context) error {
 		// TLS handshake setup failure, etc.). Return so the manager
 		// can shut everything down.
 		return err
+	}
+}
+
+// watchCertificate keeps the serving pair fresh for the lifetime of ctx.
+// certwatcher reloads it on file events and polls it every ReloadInterval,
+// but its Start gives up on both, polling included, when it cannot add the
+// file watches within 10 seconds (e.g. the node's inotify watches are used
+// up). The replica would then serve its startup certificate until it
+// expires, while staying ready. So the pair is polled here instead, which
+// keeps ADR-0025's promise that a renewed certificate needs no restart.
+func (s *Server) watchCertificate(ctx context.Context, logger logr.Logger) {
+	err := s.cert.Start(ctx)
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	logger.Error(err, "cannot watch the serving certificate files; polling them instead", "interval", s.cfg.ReloadInterval)
+	t := time.NewTicker(s.cfg.ReloadInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			// ReadCertificate swaps in only a pair that parses as a
+			// matching pair; on error the previous one stays in use.
+			if err := s.cert.ReadCertificate(); err != nil {
+				logger.Error(err, "serving certificate reload failed; keeping the previous pair")
+			}
+		}
+	}
+}
+
+// drain keeps the listener serving for cfg.ShutdownDelay after ctx was
+// cancelled. Keep-alives are switched off first, so every connection closes
+// after its current response and its client reconnects through the Service
+// to another replica, rather than reusing a connection Shutdown later
+// closes. Readiness deliberately stays true: the EndpointSlice marks a
+// terminating pod not ready whatever its probe says, and a failing probe
+// would also clear its "serving" condition, which kube-proxy uses to keep
+// routing to terminating pods when no ready one is left (one replica
+// mid-rollout). stopped reports that the listener died during the delay;
+// err is then its error.
+func (s *Server) drain(logger logr.Logger, serveErr <-chan error) (stopped bool, err error) {
+	if s.cfg.ShutdownDelay <= 0 {
+		return false, nil
+	}
+	s.srv.SetKeepAlivesEnabled(false)
+	logger.Info("serving on until the Service stops routing to this pod", "delay", s.cfg.ShutdownDelay)
+	t := time.NewTimer(s.cfg.ShutdownDelay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return false, nil
+	case err := <-serveErr:
+		return true, err
 	}
 }
 

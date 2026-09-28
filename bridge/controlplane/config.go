@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -127,7 +126,8 @@ type Config struct {
 	// HarborAdminDir is the path to a Kubernetes Secret mounted as a volume,
 	// containing files named "username" and "password" with the Harbor admin
 	// (or per-cluster system robot) credentials. See ADR-0009 for the
-	// per-cluster-system-robot recommendation.
+	// per-cluster-system-robot recommendation. The Harbor client reads them
+	// on every call (AdminCredsReader), so a rotated Secret needs no restart.
 	HarborAdminDir string
 
 	// HarborRobotPrefix is the robot name prefix the Harbor instance is
@@ -478,16 +478,9 @@ type AdminCreds struct {
 // referenced by HarborAdminDir. Layout matches the standard Kubernetes
 // Secret-as-volume convention: each key becomes a file whose contents are
 // the corresponding value. We require keys "username" and "password".
+// Both come from the same version of the volume (readAdminCredsDir).
 func (c *Config) LoadAdminCreds() (*AdminCreds, error) {
-	username, err := readSecretFile(filepath.Join(c.HarborAdminDir, adminUsernameKey))
-	if err != nil {
-		return nil, err
-	}
-	password, err := readSecretFile(filepath.Join(c.HarborAdminDir, adminPasswordKey))
-	if err != nil {
-		return nil, err
-	}
-	return &AdminCreds{Username: username, Password: password}, nil
+	return readAdminCredsDir(c.HarborAdminDir)
 }
 
 func readSecretFile(path string) (string, error) {

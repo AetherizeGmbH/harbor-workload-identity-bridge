@@ -184,7 +184,7 @@ Originally-planned section (kept for archaeology):
 1. `bridge/dataplane/server.go`
    - Wraps `http.Server` with TLS from disk and graceful shutdown.
    - `NewServer(cfg ServerConfig) (*Server, error)` returns something that implements `sigs.k8s.io/controller-runtime/pkg/manager.Runnable` so it can be added to the manager.
-   - `ServerConfig`: ListenAddr (default `:8443`), CertFile, KeyFile, ClientCAFile (optional, enables mTLS — ADR-0008 mention), the assembled `http.Handler` (mux containing the credential handler + healthz + metrics endpoint).
+   - `ServerConfig`: ListenAddr (default `:8443`), CertFile, KeyFile, ClientCAFile (optional, enables mTLS — ADR-0008 mention), the assembled `http.Handler` (mux containing the credential handler + healthz + metrics endpoint). *Superseded:* the handler carries only the credential endpoint; health, readiness and `/metrics` have their own ports (ADR-0025).
    - On Start(ctx): start listener; on ctx.Done() perform `srv.Shutdown(timeout)` with a 10s timeout. Returning from Start signals manager shutdown.
    - TLS files reload? Defer to cert-manager handling (Phase 5) — cert-manager rotates the underlying Secret, the pod mounts via projected volume, cert change triggers a pod restart from cert-manager's renewBefore. Phase 5 may add `kubernetes-sigs/controller-runtime/pkg/certwatcher` for in-process reload if pod restarts are too disruptive.
 
@@ -218,6 +218,7 @@ Originally-planned section (kept for archaeology):
    - `+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch` — data plane reads bridge-namespace Secrets.
    - `+kubebuilder:rbac:groups=harbor.aetherize.io,resources=harboraccesses,verbs=get;list;watch` — data plane lists CRs to route requests.
    - Plus the existing controlplane RBAC. `make manifests` regenerates `config/rbac/`.
+   - *Superseded:* nothing generates RBAC (`make manifests` generates CRDs only). The chart's hand-maintained [bridge-rbac.yaml](../charts/harbor-bridge/templates/bridge-rbac.yaml) is the only source, and the reconciler's markers were removed: the Secrets one named no namespace, so it would have generated a cluster-wide Secret grant (ADR-0011).
 
 **Tests:**
 
@@ -439,7 +440,7 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 - **Permission-edit blip**: between a `spec.permissions` edit and the next reconcile, the data plane could mint credentials for permissions the in-Harbor robot doesn't yet have. Harbor's `/service/token` will issue a JWT that doesn't include the not-yet-granted scope; containerd's pull fails with 403 until reconcile catches up. Operator-perceptible blip; acceptable.
 - **Janitor at scale**: lists all Harbor robots on each sweep. O(robots) per 5min. Fine for hundreds, marginal for thousands; consider Harbor query-param filter if it becomes a problem.
 - **CRD validation tests**: the CRD CEL/pattern markers are not round-tripped through a real apiserver. Add envtest-based validation tests in Phase 6 polish.
-- **`controlplane.Config.LoadAdminCreds` reload**: credentials load once at startup. If admin creds rotate, the bridge needs a restart. cert-manager pattern (pod restarts on Secret change) covers this — chart concern.
+- ~~**`controlplane.Config.LoadAdminCreds` reload**: credentials load once at startup. If admin creds rotate, the bridge needs a restart. cert-manager pattern (pod restarts on Secret change) covers this — chart concern.~~ Resolved: nothing restarted the pods on a Secret change (the chart cannot hash a Secret it does not own). The Harbor client now reads the credentials from `BRIDGE_HARBOR_ADMIN_DIR` on every call (`controlplane.AdminCredsReader`, both keys from one `..data` version of the volume).
 
 ## Open questions
 

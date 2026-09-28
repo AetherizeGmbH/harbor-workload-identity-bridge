@@ -20,15 +20,14 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
-	corev1 "k8s.io/api/core/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -53,6 +52,7 @@ const (
 	envEnableLeaderElec = "BRIDGE_ENABLE_LEADER_ELECTION"
 	envRateLimit        = "BRIDGE_RATE_LIMIT_PER_SOURCE"
 	envRateLimitBurst   = "BRIDGE_RATE_LIMIT_BURST"
+	envShutdownDelay    = "BRIDGE_SHUTDOWN_DELAY"
 
 	defaultTLSCertFile = "/etc/bridge/tls/tls.crt"
 	defaultTLSKeyFile  = "/etc/bridge/tls/tls.key"
@@ -61,6 +61,31 @@ const (
 	defaultMetricsAddr = ":8080"
 	defaultRateLimit   = 20
 	defaultRateBurst   = 100
+
+	// defaultShutdownDelay keeps the credential listener serving after
+	// SIGTERM while kube-proxy on every node stops routing to the pod.
+	defaultShutdownDelay = 5 * time.Second
+
+	// gracefulShutdownTimeout is the manager's budget for stopping every
+	// runnable after SIGTERM. It is the pod's default termination grace
+	// period, which the chart does not change; kubelet kills the process
+	// then anyway.
+	gracefulShutdownTimeout = 30 * time.Second
+
+	// serverShutdownTimeout bounds the credential listener's graceful
+	// shutdown, which starts after the shutdown delay.
+	serverShutdownTimeout = 10 * time.Second
+
+	// leaderStopBudget is the part of gracefulShutdownTimeout left for the
+	// reconciler and the janitor to finish in-flight work: the manager
+	// stops them only after the credential listener has closed.
+	leaderStopBudget = 5 * time.Second
+
+	// maxShutdownDelay is the longest shutdown delay that leaves the
+	// listener's shutdown and the leader's runnables their budgets. A
+	// longer one would run the manager out of time before the reconciler
+	// and the janitor are stopped.
+	maxShutdownDelay = gracefulShutdownTimeout - serverShutdownTimeout - leaderStopBudget
 
 	leaderElectionID = "bridge.harbor.aetherize.io"
 
@@ -115,41 +140,15 @@ func run() error {
 	}
 
 	// Step 3: build the controller-runtime Manager.
-	mgrOpts := ctrl.Options{
-		Scheme: clientgoscheme.Scheme,
-		// /metrics is served by the manager's metrics server on its own
-		// port, reachable on the pod network only. It used to share the
-		// credential listener, which the NodePort exposes on every node
-		// to anything that can reach it. "0" disables it. The data-plane
-		// metrics register into the same controller-runtime registry.
-		Metrics: metricsserver.Options{BindAddress: envOrDefault(envMetricsAddr, defaultMetricsAddr)},
-
-		LeaderElection:          envBool(envEnableLeaderElec, false),
-		LeaderElectionID:        leaderElectionID,
-		LeaderElectionNamespace: cfg.Namespace,
-
-		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
-
-		// Cache scoping — minimum-privilege RBAC. HarborAccess CRs are
-		// cluster-scoped (operators put them in any namespace), so the
-		// default cluster-wide watch is correct for those. Secrets, by
-		// contrast, are only read from BRIDGE_NAMESPACE (ADR-0011);
-		// without this ByObject override the cache would list/watch
-		// secrets cluster-wide and require cluster-scoped Secret RBAC.
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}: {
-					Namespaces: map[string]cache.Config{
-						cfg.Namespace: {},
-					},
-				},
-				// ADR-0026: with a selector the reconciler and the data
-				// plane only ever see the HarborAccess objects this bridge
-				// serves. nil keeps every object.
-				&harborv1alpha1.HarborAccess{}: {Label: cfg.HarborAccessSelector},
-			},
-		},
+	leaderElection, err := leaderElectionFromEnv()
+	if err != nil {
+		return err
 	}
+	shutdownDelay, err := shutdownDelayFromEnv()
+	if err != nil {
+		return err
+	}
+	mgrOpts := managerOptions(cfg, leaderElection)
 	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
 	if err != nil {
 		return fmt.Errorf("build manager: %w", err)
@@ -159,19 +158,10 @@ func run() error {
 		return fmt.Errorf("add healthz: %w", err)
 	}
 
-	// Step 4: load Harbor admin credentials and build the Harbor client.
-	adminCreds, err := cfg.LoadAdminCreds()
+	// Step 4: build the Harbor client.
+	harborClient, err := newHarborClient(cfg, logger.WithName("harbor-credentials"))
 	if err != nil {
-		return fmt.Errorf("load admin creds: %w", err)
-	}
-	harborTransport, err := harbor.NewTransport(cfg.HarborCAFile)
-	if err != nil {
-		return fmt.Errorf("build harbor transport: %w", err)
-	}
-	harborClient, err := harbor.NewClient(cfg.HarborURL, adminCreds.Username, adminCreds.Password, harborTransport,
-		harbor.WithRobotPrefix(cfg.HarborRobotPrefix))
-	if err != nil {
-		return fmt.Errorf("build harbor client: %w", err)
+		return err
 	}
 
 	// Step 5: instantiate Reconciler and register with the manager.
@@ -246,37 +236,104 @@ func run() error {
 		return fmt.Errorf("index HarborAccess by subject: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle(dataplane.CredentialsPath, handler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	server, err := dataplane.NewServer(dataplane.ServerConfig{
-		ListenAddr:   envOrDefault(envListenAddr, defaultListenAddr),
-		CertFile:     envOrDefault(envTLSCertFile, defaultTLSCertFile),
-		KeyFile:      envOrDefault(envTLSKeyFile, defaultTLSKeyFile),
-		ClientCAFile: os.Getenv(envTLSClientCAFile),
-		Handler:      mux,
-	})
+	server, err := dataplane.NewServer(serverConfig(credentialMux(handler), shutdownDelay))
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
-	if err := mgr.Add(server); err != nil {
-		return fmt.Errorf("add server: %w", err)
-	}
-	// Ready means "can serve credentials": the listener is bound (it
-	// binds only after the informer caches synced).
-	if err := mgr.AddReadyzCheck("dataplane", server.ReadyCheck); err != nil {
-		return fmt.Errorf("add readyz: %w", err)
+	// Ready means "can serve credentials": the listener is bound, and it
+	// binds only after the HarborAccess and Secret caches the handler
+	// reads have synced. A replica whose caches do not sync within
+	// CacheSyncTimeout exits with an error.
+	if err := controlplane.AddAfterCacheSync(mgr, "dataplane", server, controlplane.CacheSyncTimeout); err != nil {
+		return err
 	}
 
-	// Step 9: start the manager. Blocks until SIGTERM/SIGINT.
-	setupLog.Info("starting bridge", "leader_election", mgrOpts.LeaderElection)
+	// Step 9: start the manager. Blocks until SIGTERM/SIGINT. Return
+	// right after it: LeaderElectionReleaseOnCancel relies on the process
+	// exiting once the manager stops.
+	setupLog.Info("starting bridge", "leader_election", mgrOpts.LeaderElection, "shutdown_delay", shutdownDelay.String())
 	if err := mgr.Start(startupCtx); err != nil {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
+}
+
+// serverConfig builds the credential listener's config.
+func serverConfig(handler http.Handler, shutdownDelay time.Duration) dataplane.ServerConfig {
+	return dataplane.ServerConfig{
+		ListenAddr:      envOrDefault(envListenAddr, defaultListenAddr),
+		CertFile:        envOrDefault(envTLSCertFile, defaultTLSCertFile),
+		KeyFile:         envOrDefault(envTLSKeyFile, defaultTLSKeyFile),
+		ClientCAFile:    os.Getenv(envTLSClientCAFile),
+		Handler:         handler,
+		ShutdownDelay:   shutdownDelay,
+		ShutdownTimeout: serverShutdownTimeout,
+	}
+}
+
+// newHarborClient builds the Harbor client. It reads the admin credentials
+// from BRIDGE_HARBOR_ADMIN_DIR on every Harbor call, so a rotated Secret
+// takes effect without a restart; reading them once here fails startup on
+// a missing or empty file.
+func newHarborClient(cfg *controlplane.Config, log logr.Logger) (harbor.Client, error) {
+	adminCreds := controlplane.NewAdminCredsReader(cfg, log)
+	username, password, err := adminCreds.Read()
+	if err != nil {
+		return nil, fmt.Errorf("load admin creds: %w", err)
+	}
+	transport, err := harbor.NewTransport(cfg.HarborCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("build harbor transport: %w", err)
+	}
+	c, err := harbor.NewClient(cfg.HarborURL, username, password, transport,
+		harbor.WithRobotPrefix(cfg.HarborRobotPrefix),
+		harbor.WithCredentialSource(adminCreds.Read))
+	if err != nil {
+		return nil, fmt.Errorf("build harbor client: %w", err)
+	}
+	return c, nil
+}
+
+// managerOptions builds the controller-runtime Manager's options.
+func managerOptions(cfg *controlplane.Config, leaderElection bool) ctrl.Options {
+	return ctrl.Options{
+		Scheme: clientgoscheme.Scheme,
+		// Stated rather than left to the default, because the shutdown
+		// delay is bounded by it (maxShutdownDelay).
+		GracefulShutdownTimeout: ptr.To(gracefulShutdownTimeout),
+		// /metrics is served by the manager's metrics server on its own
+		// port, reachable on the pod network only. It used to share the
+		// credential listener, which the NodePort exposes on every node
+		// to anything that can reach it. "0" disables it. The data-plane
+		// metrics register into the same controller-runtime registry.
+		Metrics: metricsserver.Options{BindAddress: envOrDefault(envMetricsAddr, defaultMetricsAddr)},
+
+		LeaderElection:          leaderElection,
+		LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: cfg.Namespace,
+		// A stopping leader hands the Lease back, so another replica
+		// resumes reconciling and sweeping at once instead of after the
+		// lease duration (15s). Safe only because the process exits as
+		// soon as the manager stops: run returns right after mgr.Start,
+		// and nothing may be added after it.
+		LeaderElectionReleaseOnCancel: true,
+
+		HealthProbeBindAddress: envOrDefault(envHealthAddr, defaultHealthAddr),
+
+		// Minimum-privilege RBAC: Secrets from BRIDGE_NAMESPACE only
+		// (ADR-0011), HarborAccess cluster-wide, limited by the selector
+		// (ADR-0026).
+		Cache: cfg.CacheOptions(),
+	}
+}
+
+// credentialMux routes the credential listener, which the NodePort exposes
+// on every node: it serves the credential endpoint and nothing else
+// (ADR-0025). Health, readiness and /metrics have their own ports.
+func credentialMux(credentials http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle(dataplane.CredentialsPath, credentials)
+	return mux
 }
 
 // validatorConfig maps the bridge config onto the validator's, all but the
@@ -344,6 +401,22 @@ func rateLimitFromEnv() (float64, int, error) {
 	return perSource, burst, nil
 }
 
+// shutdownDelayFromEnv reads how long the credential listener keeps
+// serving after SIGTERM (a Go duration from 0, which closes it at once, to
+// maxShutdownDelay).
+func shutdownDelayFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(envShutdownDelay))
+	if raw == "" {
+		return defaultShutdownDelay, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 || d > maxShutdownDelay {
+		return 0, fmt.Errorf("%s %q must be a duration from 0s to %s: the listener's shutdown and the reconciler's must still fit into the %s the process has after SIGTERM",
+			envShutdownDelay, raw, maxShutdownDelay, gracefulShutdownTimeout)
+	}
+	return d, nil
+}
+
 // newLogger constructs a zap-backed logr.Logger at the requested level.
 // We deliberately bypass zap.UseFlagOptions: BRIDGE_LOG_LEVEL is the
 // only knob we expose.
@@ -368,18 +441,26 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-// envBool returns the env var parsed as bool. Falls back to def when
-// unset or unparseable; the controlplane config layer fail-fast-validates
-// the bools it owns, but the leader-election flag is benign enough that
-// "default off" is the right unparseable behaviour.
-func envBool(key string, def bool) bool {
-	v := os.Getenv(key)
-	switch v {
-	case "true", "1", "yes":
-		return true
-	case "false", "0", "no", "":
-		return false
-	default:
-		return def
+// leaderElectionFromEnv reads BRIDGE_ENABLE_LEADER_ELECTION. Unset or
+// empty means off (one replica). A value that is not a boolean fails
+// startup instead of meaning "off": with several replicas, election
+// silently off runs the reconciler and the janitor on every replica, which
+// ADR-0025 keeps leader-only; two reconcilers race on robot creation and
+// password rotation and can leave a Secret holding a password Harbor
+// already replaced. "yes" and "no" stay accepted, as before.
+func leaderElectionFromEnv() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(envEnableLeaderElec))
+	switch raw {
+	case "":
+		return false, nil
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
 	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s %q must be true or false", envEnableLeaderElec, raw)
+	}
+	return v, nil
 }

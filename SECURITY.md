@@ -198,8 +198,8 @@ matched: an empty `harbor.robotNamePrefix` selects `robot$`.
 The bridge emits one structured audit line per credential issuance
 (see *Audit log shape* below). The line names the matched CR, the
 robot username, and the requested image, but **never the robot
-password**. Admin credentials loaded at startup are read from disk
-and logged only as the directory path, never the values
+password**. The admin credentials are read from disk for every Harbor
+call and logged only as the directory path, never the values
 (see `Sanitized()` in [`bridge/controlplane/config.go`](bridge/controlplane/config.go)).
 `BRIDGE_HARBOR_URL` and `BRIDGE_OIDC_ISSUER` refuse a `user:password@`
 part at startup: the bridge never authenticated with it. Only
@@ -249,6 +249,12 @@ Mitigations:
   shared `admin` user). Limit it to robot-account management on
   the projects you actually reference. See [ADR-0009](docs/adr/0009-multi-cluster-topology.md)
   for the recommendation.
+- To rotate that credential, refresh it in Harbor and update the Secret
+  named by `harbor.adminCredsSecret`. The bridge reads the mounted files
+  on every Harbor call, so the new value takes effect without a restart
+  once kubelet has updated the volume (usually within a minute or two);
+  the bridge then logs `Harbor admin credentials changed on disk`. Until
+  then Harbor calls fail with `401`, and reconciles retry.
 - Run the bridge under a strict `PodSecurityContext`: non-root,
   read-only root FS, no privilege escalation, dropped capabilities.
 - Lock down `secrets` access in the bridge namespace via RBAC to

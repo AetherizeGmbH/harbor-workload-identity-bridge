@@ -54,6 +54,16 @@ default.
 | A plain-http `bridge.oidcJWKSURL`, a plain-http `bridge.oidcIssuer` used for discovery, or a plain-http `jwks_uri` in the discovery document fails at startup unless the host is `127.0.0.1`, `::1` or `localhost` | Use https (the chart's defaults and `https://kubernetes.default.svc/openid/v1/jwks` already do). `make run-local` through `kubectl proxy` on `127.0.0.1` keeps working. |
 | The data plane serves a robot Secret only when its username is the robot of the HarborAccess's current `serviceAccountRef` (`harbor.robotNamePrefix` plus `bridge-<clusterName>.<namespace>.<name>`); otherwise `503`, `reason=secret_for_previous_identity` | Nothing, if `harbor.robotNamePrefix` matches Harbor's `robot_name_prefix`. If it does not, every pull now fails with `503` (the reconciler already reported `Ready=False`): set it to Harbor's prefix. |
 
+### Unreleased: bridge process lifecycle
+
+| Change | What to do |
+| --- | --- |
+| The credential port (`8443`, exposed by the NodePort) no longer answers `GET /healthz`; it serves only `POST /v1/credentials` | Nothing for the chart: its probes use the health port (`8081`). Point any health check of your own at `/healthz` or `/readyz` on the health port. |
+| `BRIDGE_ENABLE_LEADER_ELECTION` (`bridge.leaderElection`) must be a boolean. Other values, such as `on` (what `--set bridge.leaderElection=on` renders), used to switch leader election off without a warning, so with several replicas every replica reconciled; they now stop the bridge at startup. `True` and `TRUE` now mean on | Leave `bridge.leaderElection` unset (on when `bridge.replicas > 1`) or set it to `true` or `false`. |
+| A replica reports ready only once its HarborAccess and Secret caches have synced; before, it was ready as soon as its listener was bound, and the first credential request waited for the caches. A replica whose caches do not sync within 2 minutes exits with an error, as the leader's reconciler already did | Nothing. A bridge pod that exits at startup naming the HarborAccess or Secret cache lacks RBAC for that type, or the HarborAccess CRD is missing. |
+| After SIGTERM the bridge keeps its credential listener open for 5 seconds before it shuts down, so connections that kube-proxy still routes to a terminating replica are served instead of refused (which failed image pulls during rollouts and drains). A stopping leader hands its Lease over at once | Nothing. If kube-proxy converges more slowly in your cluster, set `BRIDGE_SHUTDOWN_DELAY` through `bridge.extraEnv` (a Go duration from `0`, which turns the delay off, to `15s`). Longer values stop the bridge at startup: the listener's shutdown (up to 10 seconds) and the reconciler's must still fit into the pod's 30-second termination grace period. |
+| The bridge reads the Harbor admin credentials (`harbor.adminCredsSecret`) on every Harbor call instead of once at startup | Nothing. After rotating the admin password or the system robot's secret, update the Secret; a restart is no longer needed. |
+
 ### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 
 | Change | What to do |

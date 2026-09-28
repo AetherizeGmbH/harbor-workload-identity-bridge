@@ -185,12 +185,25 @@ func WithCallTimeout(d time.Duration) Option {
 	return func(c *goClient) { c.callTimeout = d }
 }
 
+// CredentialSource returns the Basic Auth username and password for one
+// Harbor API request.
+type CredentialSource func() (username, password string, err error)
+
+// WithCredentialSource makes the client ask source for the credentials on
+// every request, in place of the username and password passed to
+// NewClient, so rotated credentials take effect without a new client. A
+// request fails before it is sent when source returns an error.
+func WithCredentialSource(source CredentialSource) Option {
+	return func(c *goClient) { c.credentials = source }
+}
+
 // goClient is the production Client implementation, backed by
 // github.com/goharbor/go-client.
 type goClient struct {
 	robots      sdkrobot.API
 	robotPrefix string
 	callTimeout time.Duration
+	credentials CredentialSource // nil: the static username and password
 }
 
 // call derives the context for one Harbor API call.
@@ -241,7 +254,9 @@ type noLogger struct{}
 func (noLogger) Printf(string, ...any) {}
 func (noLogger) Debugf(string, ...any) {}
 
-// NewClient builds a Client connected to harborURL using HTTP Basic Auth.
+// NewClient builds a Client connected to harborURL using HTTP Basic Auth
+// with username and password, or with the credentials WithCredentialSource
+// supplies.
 // transport is optional; pass non-nil to override the default (httptest
 // servers, custom TLS, mTLS, instrumented round-trippers, etc.). nil
 // selects defaultTransport.
@@ -285,14 +300,30 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 	rt.SetResponseReader(newErrorBodyResponse)
 
 	c := &goClient{
-		robots:      sdkrobot.New(rt, strfmt.Default, httptransport.BasicAuth(username, password)),
 		robotPrefix: DefaultRobotPrefix,
 		callTimeout: DefaultCallTimeout,
 	}
 	for _, o := range opts {
 		o(c)
 	}
+	auth := httptransport.BasicAuth(username, password)
+	if c.credentials != nil {
+		auth = sourcedBasicAuth(c.credentials)
+	}
+	c.robots = sdkrobot.New(rt, strfmt.Default, auth)
 	return c, nil
+}
+
+// sourcedBasicAuth sets Basic Auth from source on each request. The error
+// wraps source's, which must not carry the credentials themselves.
+func sourcedBasicAuth(source CredentialSource) runtime.ClientAuthInfoWriter {
+	return runtime.ClientAuthInfoWriterFunc(func(r runtime.ClientRequest, reg strfmt.Registry) error {
+		username, password, err := source()
+		if err != nil {
+			return fmt.Errorf("harbor credentials: %w", err)
+		}
+		return httptransport.BasicAuth(username, password).AuthenticateRequest(r, reg)
+	})
 }
 
 // refuseRedirect is the Harbor client's http.Client.CheckRedirect: Harbor's
