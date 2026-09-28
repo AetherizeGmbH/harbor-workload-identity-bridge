@@ -100,7 +100,7 @@ envtest-setup: $(SETUP_ENVTEST) ## Fetch kube-apiserver + etcd binaries for envt
 .PHONY: envtest
 envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
 	@KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-		go test ./bridge/controlplane/... -run TestEnvtest -count=1 -v -timeout 180s
+		go test ./bridge/controlplane/... ./bridge/cmd/... -run TestEnvtest -count=1 -v -timeout 180s
 
 # Optional pin for the Harbor Helm chart version the e2e harness installs.
 # Empty → the harness default (test/e2e/modules/harbor/main.tf). Set e.g.
