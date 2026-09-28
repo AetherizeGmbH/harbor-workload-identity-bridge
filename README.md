@@ -1012,6 +1012,15 @@ limits today.
   extracted), and the threat-model additions of decision j, which nobody
   has rated yet. *Limits now:* the Nexus backend is a preview, verified
   against Nexus 3.76.1 only ([Caveats](#caveats-adr-0033)).
+- [ ] **Run the Nexus e2e harness; decide whether CI runs it.**
+  `make e2e-nexus` (HOW-TO-TEST.md §1c) has not run yet, and `make e2e`
+  and CI run the Harbor harness only (ADR-0033 implementation note 18).
+  *Options:* a CI job for it (the image is linux/amd64, so it runs
+  natively on CI runners; the scheduled rotation waits out the 5-minute
+  retire grace), or local runs only. *Limits now:* the NexusAccess
+  lifecycle, routing and rotation are tested against a fake Nexus (unit
+  and envtest) and the REST client against a live 3.76.1, but not end to
+  end with kubelet, containerd and a real Nexus.
 
 #### Nodes
 
