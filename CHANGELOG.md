@@ -1,3 +1,9 @@
+## [0.11.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.3...v0.11.4) (2026-09-28)
+
+### Bug Fixes
+
+* **installer:** roll back rejected kubelet restarts, patch the env file kubelet reads ([#141](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/141)) ([8c1e2c0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/8c1e2c018295c5cb4225f9bf45f218bd06fc1185))
+
 ## [0.11.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.2...v0.11.3) (2026-09-28)
 
 ### Bug Fixes
