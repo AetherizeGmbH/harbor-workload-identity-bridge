@@ -19,6 +19,21 @@ render() {
     --namespace harbor-bridge-system "$@"
 }
 
+# doc_with LINE prints the YAML document of ${out} that has LINE as a whole
+# line, and fails when there is none.
+doc_with() {
+  local doc="" line
+  while IFS= read -r line; do
+    if [ "${line}" = "---" ]; then
+      if grep -qxF -- "$1" <<<"${doc}"; then printf '%s' "${doc}"; return 0; fi
+      doc=""
+    else
+      doc+="${line}"$'\n'
+    fi
+  done <<<"${out}"
+  grep -qxF -- "$1" <<<"${doc}" && printf '%s' "${doc}"
+}
+
 # notes renders like render, plus the NOTES (helm template leaves them out).
 notes() {
   helm install harbor-bridge "${CHART_DIR}" --dry-run=client \
@@ -562,6 +577,22 @@ if out=$(notes -f "${CHART_DIR}/tests/values-plugin-namespace.yaml" 2>&1) \
 else
   echo "FAIL  NOTES list the certificates the chart requests"
   grep -m 5 -E 'certificate|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# The serving certificate is for serving only, with mTLS too: its key pair
+# must not also pass as a client certificate. The plugin's client
+# certificate keeps client auth.
+if out=$(render -f "${CHART_DIR}/tests/values-mtls.yaml" 2>&1) \
+   && serving=$(doc_with '  secretName: harbor-bridge-tls') \
+   && client=$(doc_with '  secretName: harbor-bridge-plugin-mtls-client') \
+   && grep -qxF '    - server auth' <<<"${serving}" \
+   && ! grep -qF 'client auth' <<<"${serving}" \
+   && grep -qxF '    - client auth' <<<"${client}"; then
+  echo "PASS  serving certificate has server auth only, client certificate client auth"
+else
+  echo "FAIL  serving certificate has server auth only, client certificate client auth"
+  grep -m 6 -E '^  secretName|- (server|client) auth|Error' <<<"${out}" || true
   failed=$((failed+1))
 fi
 

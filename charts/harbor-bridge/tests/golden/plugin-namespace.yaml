@@ -768,7 +768,6 @@ spec:
     - 127.0.0.1
   usages:
     - server auth
-    - client auth
   issuerRef:
     name: harbor-bridge-ca
     kind: ClusterIssuer

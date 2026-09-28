@@ -36,11 +36,10 @@ spec:
     {{- end }}
   ipAddresses:
     - 127.0.0.1
+  {{- /* Serving only, with mTLS too: the plugin presents its own client
+         certificate (below), and the bridge makes no mTLS calls. */}}
   usages:
     - server auth
-    {{- if .Values.bridge.mTLS.enabled }}
-    - client auth
-    {{- end }}
   issuerRef:
     name: {{ .Values.tls.issuerRef.name }}
     kind: {{ .Values.tls.issuerRef.kind }}
