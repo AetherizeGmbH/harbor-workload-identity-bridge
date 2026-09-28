@@ -126,6 +126,10 @@ NEXT STEPS
 
        {{ .Values.plugin.audience }}
 
+     and its spec.trustPolicy.issuer must equal (byte for byte):
+
+       {{ .Values.bridge.oidcIssuer }}
+
   4. Uninstalling: delete your HarborAccess objects BEFORE `helm uninstall`.
      Each carries a finalizer that revokes its Harbor robot; without the
      bridge running, those deletions (and the deletion of their namespaces)

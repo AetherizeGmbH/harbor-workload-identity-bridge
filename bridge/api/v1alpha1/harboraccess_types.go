@@ -20,14 +20,17 @@ import (
 // (see docs/adr/0004-trust-policy-as-crd-field.md).
 type TrustPolicy struct {
 	// Issuer is the OIDC issuer expected on incoming service-account tokens.
-	// Typically the cluster service-account issuer, e.g. https://kubernetes.default.svc.
+	// It must equal the bridge's configured issuer byte for byte (chart:
+	// bridge.oidcIssuer, default https://kubernetes.default.svc.cluster.local),
+	// which is the cluster's service-account issuer as printed by
+	// kubectl get --raw /.well-known/openid-configuration.
 	// +kubebuilder:validation:Pattern=`^https?://.+`
 	// +kubebuilder:validation:MinLength=1
 	Issuer string `json:"issuer"`
 
-	// Audience must appear in the aud claim of incoming SA tokens. Must match the
-	// kubelet credential-provider config's serviceAccountTokenAudience for the
-	// registry hostname being authenticated.
+	// Audience must appear in the aud claim of incoming SA tokens. It must equal
+	// the one audience the bridge serves (chart: plugin.audience), which is the
+	// serviceAccountTokenAudience of the kubelet credential-provider entry.
 	// +kubebuilder:validation:MinLength=1
 	Audience string `json:"audience"`
 }
