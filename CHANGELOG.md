@@ -1,3 +1,9 @@
+## [0.11.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.1...v0.11.2) (2026-09-28)
+
+### Bug Fixes
+
+* **bridge:** graceful shutdown, real readiness, rotating Harbor admin credentials ([#136](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/136)) ([d3d0625](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/d3d062562868d4970aa7f2c8d3f339da822b460c))
+
 ## [0.11.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.0...v0.11.1) (2026-09-28)
 
 ### Bug Fixes
