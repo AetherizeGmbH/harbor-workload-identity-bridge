@@ -14,7 +14,10 @@
 #   8. harbor_access        — scenario phase "initial" (modules/harbor-access-scenario)
 #  8b. bridge_replicas      — every bridge replica, asked at its own address,
 #                             issues credentials (audit H1)
-#   9. pull_pod*            — one Job per scenario; success = end-to-end works
+#   9. pull_pod*            — one Job per scenario; success = end-to-end works.
+#                             pull_pod_cross_tenant / _before_grant: an
+#                             identity is refused on a project it was not
+#                             granted (Harbor decides, not the bridge)
 #  10. robot_push_test      — the minted pull,push robot really can push
 #  11. bridge_upgrade       — helm upgrade widening matchImages; the installer
 #                             must restart kubelet (ADR-0021) …
@@ -48,7 +51,8 @@
 # Multi-tenant / collision coverage:
 #   - team-a/svc-b → project-alpha and team/a-svc-b → project-beta collide
 #     under the old hyphen-joined robot names but are distinct under
-#     ADR-0018's dot-joined scheme; each pulls only its own project.
+#     ADR-0018's dot-joined scheme; each pulls its own project, and
+#     team-a/svc-b is refused on project-beta (pull_pod_cross_tenant).
 #   - app-ns/runner's HarborAccess lives in app-ns: cluster-wide CR pickup.
 #   - beta-ns/beta-runner: one robot, pull,push on beta-1/2/3.
 #
@@ -352,6 +356,58 @@ run "pull_pod_beta" {
     args                 = ["echo team/a-svc-b pulled project-beta; exit 0"]
     timeout_seconds      = 300
     fail_message         = "ADR-0018 collision regression or isolation break: team/a-svc-b could not pull project-beta"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# Tenant isolation, checked by Harbor: the bridge ignores the requested
+# image (it only logs it) and hands every identity its own robot, so what
+# keeps a tenant out of another tenant's project is the robot's grant in
+# Harbor alone. team-a/svc-b holds pull on project-alpha only; project-beta
+# (collide-two's project, private, in matchImages) must refuse it. A grant
+# too broad in Harbor (a system-wide or wrong-project permission, a
+# Harbor version reading a grant more widely) passes every positive pull
+# and fails here.
+run "pull_pod_cross_tenant" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-cross-tenant-beta"
+    namespace            = "team-a"
+    service_account_name = "svc-b"
+    image                = "harbor.e2e:30843/project-beta/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "tenant isolation broken: team-a/svc-b (granted project-alpha only) could pull project-beta, or the pull failed for a reason other than authorization"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# … and the same for the identity that gains a grant later: test-pull/
+# image-puller may not pull project-gamma yet. pull_pod_granted repeats
+# this pull after harbor_access_update added the grant, so between the two
+# only the grant changes.
+run "pull_pod_before_grant" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-before-grant-gamma"
+    namespace            = "test-pull"
+    service_account_name = "image-puller"
+    image                = "harbor.e2e:30843/project-gamma/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "tenant isolation broken: test-pull/image-puller could pull project-gamma before any HarborAccess granted it, or the pull failed for a reason other than authorization"
     node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }

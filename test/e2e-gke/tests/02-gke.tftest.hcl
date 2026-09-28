@@ -316,6 +316,48 @@ run "pull_pod_beta" {
   }
 }
 
+# Tenant isolation, checked by Harbor (details at pull_pod_cross_tenant
+# of the kind harness): team-a/svc-b holds pull on project-alpha only.
+run "pull_pod_cross_tenant" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "pull-cross-tenant-beta"
+    namespace            = "team-a"
+    service_account_name = "svc-b"
+    image                = "${run.gke.harbor_hostname}/project-beta/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "tenant isolation broken on GKE: team-a/svc-b (granted project-alpha only) could pull project-beta, or the pull failed for a reason other than authorization"
+  }
+}
+
+# test-pull/image-puller may not pull project-gamma before the grant that
+# pull_pod_granted relies on.
+run "pull_pod_before_grant" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "pull-before-grant-gamma"
+    namespace            = "test-pull"
+    service_account_name = "image-puller"
+    image                = "${run.gke.harbor_hostname}/project-gamma/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "tenant isolation broken on GKE: test-pull/image-puller could pull project-gamma before any HarborAccess granted it, or the pull failed for a reason other than authorization"
+  }
+}
+
 run "pull_pod_gamma" {
   command = apply
   module {
