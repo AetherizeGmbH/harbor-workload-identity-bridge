@@ -22,6 +22,8 @@
 #  11. bridge_upgrade       — helm upgrade widening matchImages; the installer
 #                             must restart kubelet (ADR-0021) …
 #  12. pull_pod_upgrade     — … or this pull of the new project fails
+#  12b. pull_pod_warm_*     — refill kubelet's credential cache on the first
+#                             worker for stages 14 and 16, pinned there
 #  13. harbor_access_update — scenario phase "updated": a permission grant,
 #                             grants removed from a robot that stays, and a
 #                             ServiceAccount change, applied in place
@@ -552,6 +554,56 @@ run "pull_pod_upgrade" {
   }
 }
 
+# ── kubelet's cached credentials. bridge_upgrade restarted kubelet on every
+# node, and kubelet keeps its credential cache in memory only, so no
+# credential from the earlier pulls survives. Two warm-up pulls, both on
+# the first worker, fill the cache again for the two stages that claim to
+# use it: pull_pod_granted (test-pull/image-puller) and pull_pod_revoked
+# (team-a/svc-b), pinned to the same node. kubelet caches per
+# ServiceAccount and, as the bridge answers cacheKeyType Registry, per
+# registry host, so any image on harbor.e2e:30843 fills the entry those
+# pulls use, for the robot's tokenTTL (1h). Nothing restarts kubelet in
+# between.
+run "pull_pod_warm_puller" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-warm-puller"
+    namespace            = "test-pull"
+    service_account_name = "image-puller"
+    node_name            = run.cluster.node_names[1]
+    image                = "harbor.e2e:30843/your-project/alpine:test3"
+    command              = ["sh", "-c"]
+    args                 = ["echo test-pull/image-puller warmed the kubelet credential cache; exit 0"]
+    timeout_seconds      = 300
+    fail_message         = "warm-up pull failed: test-pull/image-puller could not pull your-project on the first worker"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+run "pull_pod_warm_svc_b" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-warm-svc-b"
+    namespace            = "team-a"
+    service_account_name = "svc-b"
+    node_name            = run.cluster.node_names[1]
+    image                = "harbor.e2e:30843/project-alpha/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo team-a/svc-b warmed the kubelet credential cache; exit 0"]
+    timeout_seconds      = 300
+    fail_message         = "warm-up pull failed: team-a/svc-b could not pull project-alpha on the first worker"
+    node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
 # ── Lifecycle: edit two HarborAccess objects in place. The wait inside the
 # scenario module blocks until each is Ready at its NEW generation.
 # (From here on the install module's outputs come from run.bridge_upgrade:
@@ -569,9 +621,10 @@ run "harbor_access_update" {
   }
 }
 
-# The grant added to test-access must reach Harbor. image-puller may still
-# have its credentials cached by kubelet from pull_pod: the password must
-# not have changed (no rotation on a spec edit), only the robot's grants.
+# The grant added to test-access must reach Harbor. On the node of
+# pull_pod_warm_puller, kubelet pulls with the credential it cached before
+# the edit: this passes only if the password did not change (no rotation
+# on a spec edit) and the robot's grants did.
 run "pull_pod_granted" {
   command = apply
   module {
@@ -582,6 +635,7 @@ run "pull_pod_granted" {
     name                 = "pull-granted-gamma"
     namespace            = "test-pull"
     service_account_name = "image-puller"
+    node_name            = run.cluster.node_names[1]
     image                = "harbor.e2e:30843/project-gamma/app:v1"
     command              = ["sh", "-c"]
     args                 = ["echo test-pull/image-puller pulled newly granted project-gamma; exit 0"]
@@ -666,10 +720,11 @@ run "pull_pod_renamed" {
   }
 }
 
-# … and the old identity must be refused. kubelet on the node that ran
-# pull_pod_alpha may still cache the OLD robot's credentials for up to the
-# tokenTTL — this passes only if that robot was revoked in Harbor (a
-# data-plane 403 alone would not stop a cached password).
+# … and the old identity must be refused. On the node of
+# pull_pod_warm_svc_b, kubelet still holds the OLD robot's credential for
+# the tokenTTL and pulls with it without asking the bridge: this passes
+# only if that robot was revoked in Harbor (a data-plane 403 alone would
+# not stop a cached password).
 run "pull_pod_revoked" {
   command = apply
   module {
@@ -680,6 +735,7 @@ run "pull_pod_revoked" {
     name                 = "pull-revoked-alpha"
     namespace            = "team-a"
     service_account_name = "svc-b"
+    node_name            = run.cluster.node_names[1]
     image                = "harbor.e2e:30843/project-alpha/app:v1"
     command              = ["sh", "-c"]
     args                 = ["echo SHOULD NOT RUN; exit 0"]

@@ -84,11 +84,12 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and read another — verifies the `pull,push` action |
 | 11 | `bridge_upgrade` | `helm upgrade` adding a `matchImages` entry — the installer must restart kubelet |
 | 12 | `pull_pod_upgrade` | Pulls the newly matched project |
+| 12b | `pull_pod_warm_*` | The upgrade restarted kubelet, which emptied its credential cache. Pulls as `test-pull/image-puller` and `team-a/svc-b`, both on the first worker, cache their credentials there again for stages 14 and 16 |
 | 13 | `harbor_access_update` | Scenario phase `updated`: a grant added to `test-access`, `multi-access` narrowed (`beta-3` dropped, `beta-2` cut to `pull`), `collide-one` moved to a new ServiceAccount; waits for the new generation to be applied |
-| 14 | `pull_pod_granted` | The newly granted project pulls (grant reached Harbor, no rotation broke kubelet's cache) |
+| 14 | `pull_pod_granted` | On the warmed node, with kubelet's cached credential: the newly granted project pulls (the grant reached Harbor, and no rotation broke the cached password) |
 | 14b | `robot_narrowed` | With the unchanged `multi-access` robot Secret: push to `beta-1` and pull from `beta-2` still work, push to `beta-2` and pull from `beta-3` get an authorization error from Harbor |
 | 15 | `pull_pod_renamed` | The new ServiceAccount pulls |
-| 16 | `pull_pod_revoked` | The old ServiceAccount must get an authorization failure |
+| 16 | `pull_pod_revoked` | On the warmed node, where kubelet still caches the old robot's credential: the old ServiceAccount must get an authorization failure, so the robot was revoked in Harbor, not only refused by the bridge |
 | 17 | `robot_check_update` | Asks Harbor: the old robot is gone, the new one exists, the cluster's robots are exactly one per HarborAccess (the query stage 21 relies on), and the narrowed robot stores exactly its new grants |
 | 18 | `token_rejection` | [ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md): a Job running as `token-ns/token-check` mints three tokens through the TokenRequest API and sends each to the bridge's Service. Bound to its own pod for 1h: `200` with the robot's credentials. Bound to no pod: `401`. Bound to the pod for 2h: `401`. The Job first checks the claims the apiserver issued, and the bridge's audit log must show each decision with its category (`not_pod_bound`, `excessive_lifetime`) |
 | 19 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |

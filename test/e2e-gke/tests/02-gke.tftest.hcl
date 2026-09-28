@@ -512,6 +512,12 @@ run "harbor_access_update" {
   }
 }
 
+# Unlike the kind harness, the GKE harness does not pin this stage and
+# pull_pod_revoked to the node of a warm-up pull (spot nodes can be
+# replaced mid-run), and bridge_upgrade restarted kubelet everywhere: both
+# pull with fresh credentials from the bridge. The kind harness carries the
+# cached-credential checks (no rotation on a spec edit, revocation that
+# stops a cached password).
 run "pull_pod_granted" {
   command = apply
   module {
@@ -526,7 +532,7 @@ run "pull_pod_granted" {
     command              = ["sh", "-c"]
     args                 = ["echo test-pull/image-puller pulled project-gamma; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "permission update did not take effect in Harbor, or a rotation broke kubelet-cached credentials"
+    fail_message         = "permission update did not take effect in Harbor"
   }
 }
 
