@@ -90,7 +90,8 @@ The audience (`aud`) claim must carry the one audience the bridge
 serves (`plugin.audience`, [ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)),
 and the matching `HarborAccess` must name exactly that audience. A CR
 that names another audience gets `Ready=False, reason=AudienceMismatch`
-and no credentials: otherwise a CR author could name, say, the
+and no credentials (a robot it already had is disabled, see *Credential
+lifetime, rotation, and revocation*): otherwise a CR author could name, say, the
 apiserver's default audience and make every automounted token of that
 ServiceAccount, including tokens leaked to third-party webhooks,
 redeemable for Harbor credentials. The convention is
@@ -100,10 +101,16 @@ bridge even where the issuers happen to agree.
 
 Several bridges on one cluster each serve only the HarborAccess objects
 their `bridge.harborAccessSelector` matches. A bridge revokes its robot
-for an object that stops matching and releases its own per-instance
-finalizer. Bridges that share a Harbor must use different `clusterName`
-values (the robot ownership prefix). On the nodes, each bridge's release
-has its own kubelet provider entry and plugin binary
+for an object that stops matching, then releases its own finalizers
+(the per-instance one, and the shared one if the object's status names a
+robot of its `clusterName`, i.e. it served the object before it had a
+selector). An object the bridge refuses (another audience, for example)
+gets no finalizer from it, and no Harbor lookup; one an older bridge
+finalized while refusing it loses the finalizer once no robot of it is
+left ([ADR-0032](docs/adr/0032-finalizer-ownership.md)). Bridges that
+share a Harbor must use different `clusterName` values (the robot
+ownership prefix). On the nodes, each bridge's release has its own
+kubelet provider entry and plugin binary
 (`plugin.providerName`, [ADR-0029](docs/adr/0029-configurable-plugin-provider-name.md)).
 Keep their `plugin.matchImages` disjoint: kubelet runs every matching
 provider for a pull, so with overlapping patterns each bridge receives a
@@ -602,6 +609,17 @@ their own RBAC.
   password. The janitor sweeps for anything left behind
   every 5 minutes. While Harbor is unreachable, the finalizer holds and
   the HarborAccess reports `reason=DeletionBlocked`.
+- **Refused HarborAccess.** A HarborAccess reported as
+  `AudienceMismatch`, `IssuerMismatch` or `InvalidSpec` gets no usable
+  robot ([ADR-0030](docs/adr/0030-refused-harboraccess-suspends-its-robot.md)).
+  The bridge deletes its Secret (even while Harbor is unreachable). If it
+  already had a robot, the bridge disables it in Harbor (description
+  token `suspended=true`), or deletes it when its grants cannot be written
+  back (a pre-0.5.5 `*`), so a password handed out earlier stops working
+  at once. Fixing the HarborAccess gives the robot a new password while it
+  is still disabled, then re-enables it. A wrong `plugin.audience`
+  therefore suspends every robot until it is corrected. A robot an
+  administrator disabled is left disabled.
 - **Residual window.** The bridge stops issuing credentials for a
   HarborAccess the moment it is marked for deletion (`credential denied`,
   `reason=harboraccess_deleting`), even while the deletion is blocked.
@@ -686,19 +704,20 @@ switches off the SDK's wire dumps, which the go-openapi runtime would
 otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
 bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
-Denials (token rejected, no matching CR, CR being deleted, Secret owner
-mismatch) are the `credential denied` lines above, on the same
-fixed-info audit logger. A request with a valid token that gets no
-credentials for another reason is a `credential unavailable` line: the
-robot Secret does not exist yet, or it still holds the robot of the
-previous `serviceAccountRef` (`503`, the plugin retries; the latter also
-on every pull while `harbor.robotNamePrefix` does not match Harbor's
-`robot_name_prefix`), or it is incomplete, the robot name cannot be
-derived, or the Kubernetes API failed (`500`, also on the regular log
-with the full error). So is a token the bridge could not judge because
-it could not fetch the signing keys (`503`, see below). Requests refused
-before the token is checked (rate limit, missing bearer, bad body) are
-counted in the metrics below but not logged one by one.
+Denials (token rejected, no matching CR, invalid HarborAccess spec, CR
+being deleted, Secret owner mismatch) are the `credential denied` lines
+above, on the same fixed-info audit logger. A request with a valid token
+that gets no credentials for another reason is a
+`credential unavailable` line: the robot Secret does not exist yet, or
+it still holds the robot of the previous `serviceAccountRef` (`503`, the
+plugin retries; the latter also on every pull while
+`harbor.robotNamePrefix` does not match Harbor's `robot_name_prefix`),
+or it is incomplete, the robot name cannot be derived, or the Kubernetes
+API failed (`500`, also on the regular log with the full error). So is a
+token the bridge could not judge because it could not fetch the signing
+keys (`503`, see below). Requests refused before the token is checked
+(rate limit, missing bearer, bad body) are counted in the metrics below
+but not logged one by one.
 
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never

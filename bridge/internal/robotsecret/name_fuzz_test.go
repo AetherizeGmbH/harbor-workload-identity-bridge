@@ -13,7 +13,9 @@ var (
 	dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 )
 
-// Two HarborAccess objects must never share a password Secret (ADR-0018).
+// Two HarborAccess objects must never share a password Secret (ADR-0018),
+// and the name of an admitted HarborAccess's Secret leads back to it
+// (ParseName), which is how a Secret event is mapped to its HarborAccess.
 func FuzzName_Injective(f *testing.F) {
 	f.Add("a", "b.c", "a.b", "c")
 	f.Add("team-a", "x", "team", "a-x")
@@ -26,6 +28,9 @@ func FuzzName_Injective(f *testing.F) {
 		}
 		if (ns1 != ns2 || n1 != n2) && Name(ns1, n1) == Name(ns2, n2) {
 			t.Fatalf("%s/%s and %s/%s share Secret %q", ns1, n1, ns2, n2, Name(ns1, n1))
+		}
+		if ns, n, ok := ParseName(Name(ns1, n1)); !ok || ns != ns1 || n != n1 {
+			t.Fatalf("ParseName(Name(%q, %q)) = %q, %q, %v", ns1, n1, ns, n, ok)
 		}
 	})
 }

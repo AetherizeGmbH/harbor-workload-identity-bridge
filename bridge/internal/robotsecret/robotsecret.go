@@ -95,6 +95,25 @@ func Name(haNamespace, haName string) string {
 	return NamePrefix + mid + "." + digest
 }
 
+// ParseName returns the HarborAccess a robot-Secret name was computed
+// for. It inverts Name for names that were not hash-truncated, which
+// covers every admitted HarborAccess (a DNS-label namespace and a name of
+// at most 63 characters give at most 133 characters). A truncated name
+// parses into a HarborAccess that does not exist. The result says which
+// HarborAccess the name points at, not who owns the Secret: ownership is
+// the labels' business (Owner, StampedForOther).
+func ParseName(name string) (haNamespace, haName string, ok bool) {
+	rest, found := strings.CutPrefix(name, NamePrefix)
+	if !found {
+		return "", "", false
+	}
+	haNamespace, haName, found = strings.Cut(rest, ".")
+	if !found || haNamespace == "" || haName == "" {
+		return "", "", false
+	}
+	return haNamespace, haName, true
+}
+
 // Labels returns the ownership labels for the Secret of the given
 // HarborAccess in the given cluster.
 func Labels(cluster, haNamespace, haName string) map[string]string {

@@ -193,6 +193,34 @@ func (c *Config) Finalizer() string {
 	return FinalizerName + "-" + c.Instance
 }
 
+// ReleasedFinalizers returns the finalizers this bridge removes once it
+// has revoked a HarborAccess's robots: its own (Finalizer), and the one
+// the same installation set in its other mode, so that adding or removing
+// the selector does not leave a finalizer nobody removes. With a selector
+// that is the shared finalizer, which only this bridge's pre-selector
+// installation can have set (ADR-0026 point 3). Without one it is the
+// per-instance finalizer of a selector since removed, which the bridge
+// can name only while BRIDGE_INSTANCE still names the instance.
+func (c *Config) ReleasedFinalizers() []string {
+	switch {
+	case c.selective():
+		return []string{c.Finalizer(), FinalizerName}
+	case c.Instance != "":
+		return []string{FinalizerName, FinalizerName + "-" + c.Instance}
+	default:
+		return []string{FinalizerName}
+	}
+}
+
+// statusRobotIsOurs reports whether the robot ha's status records, if any,
+// has this bridge's clusterName prefix. Every bridge that serves ha
+// records its robot there (markReady), so a robot of another clusterName
+// means another bridge served ha since.
+func (c *Config) statusRobotIsOurs(ha *harborv1alpha1.HarborAccess) bool {
+	return ha.Status.Robot == nil ||
+		harbor.OwnsRobot(c.ClusterName, strings.TrimPrefix(ha.Status.Robot.Name, c.HarborRobotPrefix))
+}
+
 // Selects reports whether this bridge manages ha.
 func (c *Config) Selects(ha *harborv1alpha1.HarborAccess) bool {
 	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(ha.Labels))

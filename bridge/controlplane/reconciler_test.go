@@ -142,6 +142,7 @@ type mockHarbor struct {
 	updateCalls  []mockUpdateCall
 	refreshCalls []int64
 	listCalls    int
+	getByName    int // GetByName calls
 
 	// errOnGetByName, if non-nil, is returned from GetByName for the
 	// matching name (use to simulate Harbor errors mid-reconcile).
@@ -261,6 +262,7 @@ func (m *mockHarbor) List(_ context.Context) ([]harbor.Robot, error) {
 func (m *mockHarbor) GetByName(_ context.Context, name string) (*harbor.Robot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.getByName++
 	if err, ok := m.errOnGetByName[name]; ok && err != nil {
 		return nil, err
 	}
@@ -298,6 +300,13 @@ func (m *mockHarbor) Update(_ context.Context, current *harbor.Robot, descriptio
 	m.updateCalls = append(m.updateCalls, mockUpdateCall{ID: current.ID, WireName: current.WireName, Description: description, Perms: perms})
 	if m.errOnUpdate != nil {
 		return m.errOnUpdate
+	}
+	// The real client refuses to send a project Harbor would misread
+	// (validatePermissions), e.g. a pre-0.5.5 "*".
+	for _, p := range perms {
+		if err := harbor.ValidateProjectName(p.Project); err != nil {
+			return fmt.Errorf("update robot %d: %w", current.ID, err)
+		}
 	}
 	r, ok := m.robots[current.ID]
 	if !ok {
@@ -499,12 +508,12 @@ func TestReconcile_SecretNameCollision_RefusesToOverwrite(t *testing.T) {
 	}
 }
 
-// AUDIT.md F2 (robot-name collision): the robot name
-// "bridge-<cluster>-<saNs>-<saName>" is dash-joined and ambiguous, so two
-// distinct SA refs can collapse onto one robot. When the existing robot's
-// description names a different HarborAccess, the reconciler must refuse to
-// adopt it — no permission overwrite, no password rotation that would break
-// the rightful owner's stored Secret.
+// AUDIT.md F2 (robot-name collision): the robot name is derived from the
+// serviceAccountRef alone, so two HarborAccess objects for the same
+// ServiceAccount map to one robot. When the existing robot's description
+// names a different HarborAccess, the reconciler must refuse to adopt it —
+// no permission overwrite, no password rotation that would break the
+// rightful owner's stored Secret.
 func TestReconcile_RobotNameCollision_RefusesForeignHarborAccess(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()

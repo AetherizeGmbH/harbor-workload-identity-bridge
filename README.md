@@ -72,7 +72,11 @@ For the operator:
 - **One rotation point.** The bridge rotates every robot's password
   every 24h, without breaking a single cached credential (kubelet is
   never told to cache past the next rotation). The whole cluster's
-  blast-radius window is 24h, no matter how many namespaces.
+  blast-radius window is 24h, no matter how many namespaces. A
+  `HarborAccess` the bridge refuses (wrong audience or issuer, invalid
+  spec) gets its robot disabled in Harbor and its Secret deleted until it
+  is fixed; fixing it re-enables the robot with a new password
+  ([ADR-0030](docs/adr/0030-refused-harboraccess-suspends-its-robot.md)).
 - **Revocation you can rely on.** Editing a `HarborAccess` changes the
   robot's grants in Harbor on the next reconcile (and reverts edits made
   in the Harbor UI); pointing it at another ServiceAccount or deleting it
@@ -289,16 +293,29 @@ robot appears in Harbor's admin UI, the bridge namespace gets a
 ### Uninstalling
 
 Delete your `HarborAccess` objects **before** `helm uninstall`. Each one
-carries a finalizer that revokes its Harbor robot, and only a running
-bridge can release it — after the bridge is gone, deleting those objects
-(or their namespaces) waits forever. If that already happened, reinstall
-the bridge, or remove its finalizer by hand and delete the leftover
-`robot$bridge-<clusterName>.*` robots in Harbor. The finalizer is
-`harbor.aetherize.io/robot`, or, for a bridge with
+the bridge serves carries a finalizer that revokes its Harbor robot, and
+only a running bridge can release it — after the bridge is gone, deleting
+those objects (or their namespaces) waits forever. If that already
+happened, reinstall the bridge, or remove its finalizer by hand and delete
+the leftover `robot$bridge-<clusterName>.*` robots in Harbor. The
+finalizer is `harbor.aetherize.io/robot`, or, for a bridge with
 `bridge.harborAccessSelector`, `harbor.aetherize.io/robot-<instance>`
 (`bridge.instance`, default the release name; ADR-0026); the chart's
 NOTES print the right one. Helm keeps the CRD (`crds/`); delete it
 yourself when you are done.
+
+Changing `bridge.harborAccessSelector` or `bridge.instance` later: a bridge
+that gains a selector releases the shared finalizer from the objects it
+served, including those that stop matching. Removing the selector leaves
+`harbor.aetherize.io/robot-<instance>` on existing objects; the bridge
+releases it only when `BRIDGE_INSTANCE` still names the instance, which
+the chart sets only together with a selector. A renamed instance never
+releases the old `harbor.aetherize.io/robot-<old instance>`. An object an
+older bridge refused or found in `RobotConflict` carries the shared
+finalizer without having been served; if it stops matching a new
+selector, the finalizer stays (upgrade first: the bridge releases it from
+refused objects it still selects). Remove such finalizers by hand once the
+objects are served under the new settings.
 
 `helm uninstall` removes nothing on the nodes. The provider entry named
 `plugin.providerName` stays in kubelet's credential-provider config, and

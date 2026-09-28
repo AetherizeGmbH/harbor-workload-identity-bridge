@@ -32,6 +32,25 @@ func TestName_DotDelimiterIsInjective(t *testing.T) {
 	}
 }
 
+func TestParseName(t *testing.T) {
+	for name, want := range map[string][3]string{
+		"robot-team-a.flux-access":         {"team-a", "flux-access", "true"},
+		"robot-team.a.b":                   {"team", "a.b", "true"},
+		"robot-team":                       {"", "", "false"},
+		"robot-.x":                         {"", "", "false"},
+		"robot-x.":                         {"", "", "false"},
+		"harbor-admin":                     {"", "", "false"},
+		"robotteam.x":                      {"", "", "false"},
+		Name("tenant", "app"):              {"tenant", "app", "true"},
+		Name("a", strings.Repeat("n", 63)): {"a", strings.Repeat("n", 63), "true"},
+	} {
+		ns, n, ok := ParseName(name)
+		if ns != want[0] || n != want[1] || (ok && want[2] != "true") || (!ok && want[2] == "true") {
+			t.Errorf("ParseName(%q) = %q, %q, %v, want %v", name, ns, n, ok, want)
+		}
+	}
+}
+
 func TestName_Overflow(t *testing.T) {
 	long := strings.Repeat("z", 300)
 	got := Name("team", long)

@@ -62,6 +62,31 @@ func RobotDescription(cluster, haNamespace, haName string) string {
 		robotDescriptionTag, cluster, haNamespace, haName)
 }
 
+// robotSuspendedToken marks a robot the bridge disabled because its
+// HarborAccess is refused (ADR-0030). It is the only thing that tells the
+// bridge's own disable apart from an administrator's, which the bridge
+// never undoes (ADR-0023). Additive to the ADR-0012 format.
+const robotSuspendedToken = "suspended=true"
+
+// SuspendedRobotDescription is RobotDescription plus the suspension token.
+func SuspendedRobotDescription(cluster, haNamespace, haName string) string {
+	return RobotDescription(cluster, haNamespace, haName) + " " + robotSuspendedToken
+}
+
+// RobotSuspended reports whether a bridge-written robot description
+// carries the suspension token.
+func RobotSuspended(description string) bool {
+	if !strings.HasPrefix(description, robotDescriptionTag+" ") {
+		return false
+	}
+	for _, tok := range strings.Fields(description) {
+		if tok == robotSuspendedToken {
+			return true
+		}
+	}
+	return false
+}
+
 // RobotBelongsToCluster reports whether the given robot description marks
 // the robot as belonging to the given cluster. This is the defense-in-depth
 // check from ADR-0009 that catches the documented prefix-collision class

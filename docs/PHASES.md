@@ -71,13 +71,13 @@ Evolution rule: additive only. Never reorder or remove existing tokens. The `man
 `Ready` / `RobotProvisioned` / `TrustPolicyApplied`. Reasons used by the reconciler ([reconciler.go](../bridge/controlplane/reconciler.go)):
 
 - `ReconcileSucceeded` — happy path Ready=True.
-- `IssuerMismatch` — CR's `trustPolicy.issuer` ≠ bridge's `BRIDGE_OIDC_ISSUER`. Terminal (no retry).
-- `RobotConflict` — existing Harbor robot at our name does not carry our cluster's description tag. Terminal.
-- `InvalidSpec` — `RobotName` returned `ErrClusterNameTooLong` etc. Terminal.
+- `IssuerMismatch` — CR's `trustPolicy.issuer` ≠ bridge's `BRIDGE_OIDC_ISSUER`. Like `AudienceMismatch` and `InvalidSpec` a refusal: an existing robot is suspended (ADR-0030), re-checked every `ResyncInterval`.
+- `RobotConflict` — the robot at our name is not this cluster's (description tag) or belongs to another HarborAccess (typically one for the same ServiceAccount), or the robot Secret's name is taken by a Secret the bridge does not own for this HarborAccess. Resolved outside the CR, so re-checked every `ResyncInterval`, and at once when a HarborAccess for the same ServiceAccount is deleted or the blocking Secret changes.
+- `InvalidSpec` — a missing spec, a name longer than 63 characters, a project name Harbor does not accept (such as `*`), a `tokenTTL` that is not a Go duration, or `RobotName` returned `ErrClusterNameTooLong` or `ErrInvalidRobotName` (an identity Harbor cannot name). A refusal, see `IssuerMismatch`.
 - `HarborError` — transient Harbor failure; reconciler returns the error so controller-runtime retries with backoff.
 - `EnforcedByBridge` — TrustPolicyApplied reason; status of bridge enforcement until #17520 lands.
 
-The `markNotReady` vs `markTransientError` distinction is load-bearing for retry semantics — see [Phase 2 follow-up commit 2a73e08](https://github.com/...).
+The split between `refuse` / `markNotReadyWithRequeue` (resolved by a change to the CR, the bridge or something outside the CR; re-checked on the resync interval, no error) and `markTransientError` (returns the error, so controller-runtime retries with backoff) is load-bearing for retry semantics.
 
 ### Data plane HTTP API
 

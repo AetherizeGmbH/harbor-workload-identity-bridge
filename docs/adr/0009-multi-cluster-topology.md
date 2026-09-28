@@ -10,6 +10,11 @@ and the "cluster names must not be hyphen-prefixes of each other" operator
 burden is removed. The rest of this ADR (bridge-per-cluster, ownership as a
 safety invariant, per-cluster admin creds, issuer-mismatch detection) stands.
 
+**§6 is superseded in part by [ADR-0030](0030-refused-harboraccess-suspends-its-robot.md)**:
+an issuer mismatch is still detected at reconcile time, but the reconciler
+no longer "stops without touching Harbor". It suspends a robot the
+HarborAccess already has and deletes its robot Secret.
+
 ## Context
 
 Many real-world Harbor users run **N Kubernetes clusters against 1 Harbor instance** (production / staging / dev clusters all pulling from the same registry, or geographic separation like `prod-eu-west` / `prod-us-east`). The bridge has to support this from day one — retrofitting cluster scope into robot names and reconciler ownership later would be a breaking change for every operator and a hazard for shared Harbor instances during the transition.

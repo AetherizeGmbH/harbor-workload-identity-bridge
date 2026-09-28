@@ -129,3 +129,25 @@ func TestMisnamedRobot(t *testing.T) {
 		})
 	}
 }
+
+// The suspension token (ADR-0030) is additive: a suspended robot is still
+// recognised as the HarborAccess's robot by every check that reads the
+// description.
+func TestSuspendedRobotDescription(t *testing.T) {
+	desc := SuspendedRobotDescription("prod", "team", "app")
+	if !RobotSuspended(desc) || RobotSuspended(RobotDescription("prod", "team", "app")) {
+		t.Fatalf("RobotSuspended wrong for %q", desc)
+	}
+	if !RobotBelongsToCluster(desc, "prod") {
+		t.Error("suspended robot no longer belongs to its cluster")
+	}
+	if ns, name, ok := ParseRobotDescription(desc); !ok || ns != "team" || name != "app" {
+		t.Errorf("ParseRobotDescription(%q) = %q, %q, %v", desc, ns, name, ok)
+	}
+	if !robotOwnedBy("prod", &harbor.Robot{Name: "bridge-prod.team.sa", Description: desc}, "team", "app") {
+		t.Error("suspended robot no longer owned by its HarborAccess")
+	}
+	if RobotSuspended("created by hand suspended=true") {
+		t.Error("a description the bridge did not write counts as suspended")
+	}
+}

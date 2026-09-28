@@ -14,11 +14,11 @@ import (
 )
 
 // A HarborAccess whose tokenTTL an older CRD admitted but Go cannot parse
-// (e.g. "1d") is reported InvalidSpec by the reconciler, which then stops
-// converging its robot: a permission narrowed on such an object never
-// reaches Harbor. The data plane must therefore not hand out the robot
-// Secret that is still there from before, although the object otherwise
-// matches the token.
+// (e.g. "1d") is refused as InvalidSpec by the reconciler, which stops
+// converging its robot and suspends it, deleting its Secret (ADR-0030).
+// Until that has happened the robot Secret from before is still there; the
+// data plane must not hand it out, although the object otherwise matches
+// the token.
 func TestHandler_InvalidTokenTTL_NotServed(t *testing.T) {
 	for _, raw := range []string{`"1d"`, `"3 hours"`, `"PT10M"`} {
 		t.Run(raw, func(t *testing.T) {
