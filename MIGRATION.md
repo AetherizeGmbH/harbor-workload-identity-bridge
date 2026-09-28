@@ -1,23 +1,6 @@
 ## Chart value migrations
 
-### 0.11.3: a refused HarborAccess suspends its robot (ADR-0030)
-
-### Unreleased: plugin installer
-
-| Change | What to do |
-| --- | --- |
-| Patch mode reads `/etc/default/kubelet` as systemd does, so it also recognises an assignment with whitespace before the `=`, such as `KUBELET_EXTRA_ARGS = "--max-pods=42"`. Installers before this version did not, appended a second `KUBELET_EXTRA_ARGS` line with only the two `--image-credential-provider-*` flags, and kubelet used that line: it ran without the operator's args. The installer now merges the flags into the operator's line and removes the appended one; kubelet restarts once on such a node and runs with those args again | Nothing, unless kubelet should keep running without those args: then remove them from `/etc/default/kubelet` on the affected nodes (the ones with two `KUBELET_EXTRA_ARGS` lines) before the upgrade. |
-| In `auto` mode (the default), a changed `plugin.hostBinaryDir` or `plugin.hostConfigDir` moves kubelet to the new directories. Installers before this version merged into the files in the old directories instead, recorded `merge` mode in their state file, and ignored the new values for good; releases that share the directories now move together (ADR-0035) | Nothing for directory changes from now on. A node where an earlier installer already merged after such a change stays on the old directories, because the state file no longer shows them as this release's own (an operator could have set the same flags). To move such nodes, set the old `plugin.hostBinaryDir` and `plugin.hostConfigDir` again for one rollout, which records them as this release's patch-mode directories (one kubelet restart per node), then set the new values: kubelet moves once every release on the node has them. |
-| The chart and the installer refuse `plugin.install.binDir` and `plugin.install.configFile` with any `plugin.install.mode` but `merge` | They were silently ignored in `auto` (the default), `patch` and `none` mode: `auto` patched kubelet's flags or merged into the discovered config instead of the named files. If you set them, set `plugin.install.mode=merge` too, or clear them; otherwise `helm upgrade` fails at template time with `used only with plugin.install.mode=merge`. |
-
-### Unreleased: Linux node selector, plugin PriorityClass
-
-| Change | What to do |
-| --- | --- |
-| `bridge.nodeSelector` and `plugin.nodeSelector` default to `kubernetes.io/os: linux` | Nothing. Keys you set are merged with it. The upgrade re-rolls the bridge Deployment and the plugin DaemonSet once; kubelet is not restarted (the provider config does not change). Pods no longer land on Windows nodes, where they never started and stalled DaemonSet rollouts. `helm upgrade --reuse-values` keeps the previous empty default. |
-| New `plugin.priorityClassName` (default `system-node-critical`, `""` leaves the field out) | Nothing. On GKE, create the ResourceQuota described in docs/platforms.md (GKE) in the plugin namespace, or the DaemonSet creates no pods. |
-
-### Unreleased: the chart refuses values the bridge cannot work with
+### 0.11.5: the chart refuses values the bridge cannot work with
 
 Each of these values used to render, and the install then failed at
 runtime: the bridge crash-looped, created no robot, or ran reconcilers on
@@ -37,7 +20,22 @@ naming the value.
 | With `plugin.enabled` and `plugin.bridgeEndpoint` empty, `service.type` must be `NodePort` or `LoadBalancer` and `service.nodePort` a fixed port; such a `LoadBalancer` Service now gets `service.nodePort` too | Nothing with the defaults. The chart's plugin calls `https://127.0.0.1:<service.nodePort>`, rendered at install time: with `ClusterIP` there was no node port, with `LoadBalancer` the apiserver picked another one, and with `nodePort: null` the plugin dialled port 443. Set `plugin.bridgeEndpoint` to keep another Service type or a dynamic node port. A `LoadBalancer` Service with an explicit `plugin.bridgeEndpoint`, or without the chart's plugin (`plugin.enabled=false`), keeps the node port it has; without the plugin the NOTES print a placeholder for the endpoint when the Service has no node port the chart knows. A `LoadBalancer` Service that moves to `service.nodePort` needs that port free, or the upgrade fails: set another one. |
 | With `tls.enabled`, an explicit `plugin.bridgeEndpoint` whose host the chart's serving certificate does not name (anything but the bridge Service's names, `localhost` and `127.0.0.1`, e.g. a cluster IP or a load balancer address) now gets `HARBOR_BRIDGE_SERVER_NAME` in the provider config and in the NOTES entry, as `$(NODE_IP)` already did | Nothing. The plugin verified the certificate against that host, which it does not name, so every pull through the bridge failed. The changed provider config restarts kubelet once per node. |
 
-### Unreleased: HarborAccess tokenTTL syntax, required spec
+### 0.11.5: Linux node selector, plugin PriorityClass
+
+| Change | What to do |
+| --- | --- |
+| `bridge.nodeSelector` and `plugin.nodeSelector` default to `kubernetes.io/os: linux` | Nothing. Keys you set are merged with it. The upgrade re-rolls the bridge Deployment and the plugin DaemonSet once; kubelet is not restarted (the provider config does not change). Pods no longer land on Windows nodes, where they never started and stalled DaemonSet rollouts. `helm upgrade --reuse-values` keeps the previous empty default. |
+| New `plugin.priorityClassName` (default `system-node-critical`, `""` leaves the field out) | Nothing. On GKE, create the ResourceQuota described in docs/platforms.md (GKE) in the plugin namespace, or the DaemonSet creates no pods. |
+
+### 0.11.4: plugin installer
+
+| Change | What to do |
+| --- | --- |
+| Patch mode reads `/etc/default/kubelet` as systemd does, so it also recognises an assignment with whitespace before the `=`, such as `KUBELET_EXTRA_ARGS = "--max-pods=42"`. Installers before this version did not, appended a second `KUBELET_EXTRA_ARGS` line with only the two `--image-credential-provider-*` flags, and kubelet used that line: it ran without the operator's args. The installer now merges the flags into the operator's line and removes the appended one; kubelet restarts once on such a node and runs with those args again | Nothing, unless kubelet should keep running without those args: then remove them from `/etc/default/kubelet` on the affected nodes (the ones with two `KUBELET_EXTRA_ARGS` lines) before the upgrade. |
+| In `auto` mode (the default), a changed `plugin.hostBinaryDir` or `plugin.hostConfigDir` moves kubelet to the new directories. Installers before this version merged into the files in the old directories instead, recorded `merge` mode in their state file, and ignored the new values for good; releases that share the directories now move together (ADR-0035) | Nothing for directory changes from now on. A node where an earlier installer already merged after such a change stays on the old directories, because the state file no longer shows them as this release's own (an operator could have set the same flags). To move such nodes, set the old `plugin.hostBinaryDir` and `plugin.hostConfigDir` again for one rollout, which records them as this release's patch-mode directories (one kubelet restart per node), then set the new values: kubelet moves once every release on the node has them. |
+| The chart and the installer refuse `plugin.install.binDir` and `plugin.install.configFile` with any `plugin.install.mode` but `merge` | They were silently ignored in `auto` (the default), `patch` and `none` mode: `auto` patched kubelet's flags or merged into the discovered config instead of the named files. If you set them, set `plugin.install.mode=merge` too, or clear them; otherwise `helm upgrade` fails at template time with `used only with plugin.install.mode=merge`. |
+
+### 0.11.3: a refused HarborAccess suspends its robot (ADR-0030)
 
 | Change | What to do |
 | --- | --- |
