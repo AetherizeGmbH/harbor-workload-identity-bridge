@@ -248,6 +248,12 @@ NEXUS (preview, ADR-0036; README "Sonatype Nexus Repository (preview)"):
     Alert on the metric bridge_nexus_rate_limited.
   - Nexus Community Edition 3.77 and later needs its EULA accepted before use.
     That is your decision; the bridge never accepts it.
+{{- if .Release.IsUpgrade }}
+  - helm upgrade does not create CRDs. If this upgrade enabled Nexus, apply
+    the NexusAccess CRD of this chart version:
+      kubectl apply -f charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml
+    Until it exists, the new bridge pods exit at startup, naming it.
+{{- end }}
 {{- end }}
 
 Docs: https://github.com/AetherizeGmbH/harbor-workload-identity-bridge

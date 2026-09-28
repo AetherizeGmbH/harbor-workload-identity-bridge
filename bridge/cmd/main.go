@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -31,8 +32,10 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap/zapcore"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -158,9 +161,9 @@ func run() error {
 		return err
 	}
 	mgrOpts := managerOptions(cfg, leaderElection)
-	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
+	mgr, err := newManager(restCfg, cfg, mgrOpts)
 	if err != nil {
-		return fmt.Errorf("build manager: %w", err)
+		return err
 	}
 
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
@@ -387,6 +390,30 @@ func newHarborClient(cfg *controlplane.Config, log logr.Logger) (harbor.Client, 
 		return nil, fmt.Errorf("build harbor client: %w", err)
 	}
 	return c, nil
+}
+
+// nexusCRDFile is the chart file that holds the NexusAccess CRD.
+const nexusCRDFile = "charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml"
+
+// newManager builds the controller-runtime Manager. With the Nexus backend
+// the manager's cache needs the NexusAccess CRD at once; when the apiserver
+// does not know it, the error names the CRD and how to install it: Helm
+// installs the CRDs of crds/ only on `helm install`, never on `helm
+// upgrade`, so enabling Nexus on an existing release leaves it out
+// (ADR-0036 note 20).
+func newManager(restCfg *rest.Config, cfg *controlplane.Config, opts ctrl.Options) (ctrl.Manager, error) {
+	mgr, err := ctrl.NewManager(restCfg, opts)
+	if err == nil {
+		return mgr, nil
+	}
+	var noKind *meta.NoKindMatchError
+	if cfg.Nexus != nil && errors.As(err, &noKind) && noKind.GroupKind.Group == nexusv1alpha1.GroupVersion.Group {
+		return nil, fmt.Errorf("build manager: %s enables the Nexus backend, but the apiserver has no NexusAccess CRD "+
+			"(nexusaccesses.%s). helm upgrade never installs a chart's CRDs: apply %s of the chart you installed "+
+			"(kubectl apply -f), and the bridge starts: %w",
+			controlplane.EnvNexusURL, nexusv1alpha1.GroupVersion.Group, nexusCRDFile, err)
+	}
+	return nil, fmt.Errorf("build manager: %w", err)
 }
 
 // managerOptions builds the controller-runtime Manager's options.

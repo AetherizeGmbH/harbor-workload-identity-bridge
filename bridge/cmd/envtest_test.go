@@ -48,17 +48,28 @@ import (
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/dataplane"
 )
 
+// crdBases is config/crd/bases, resolved from this file's location.
+func crdBases() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", "config", "crd", "bases"))
+}
+
 // startEnvtest starts a kube-apiserver and etcd with the project's CRDs.
 // It skips when KUBEBUILDER_ASSETS is unset; `make envtest` sets it.
 func startEnvtest(t *testing.T) *rest.Config {
 	t.Helper()
+	return startEnvtestWithCRDs(t, crdBases())
+}
+
+// startEnvtestWithCRDs is startEnvtest with only the CRDs at paths (files
+// or directories).
+func startEnvtestWithCRDs(t *testing.T, paths ...string) *rest.Config {
+	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set; run via `make envtest` to install kube-apiserver+etcd binaries")
 	}
-	_, thisFile, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join(repoRoot, "config", "crd", "bases")},
+		CRDDirectoryPaths:     paths,
 		ErrorIfCRDPathMissing: true,
 	}
 	cfg, err := env.Start()
@@ -392,4 +403,37 @@ func eventually(t *testing.T, what string, cond func() bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting until %s", what)
+}
+
+// A bridge with the Nexus backend on a cluster without the NexusAccess CRD,
+// which `helm upgrade` does not install, fails to start with an error that
+// names the CRD and the file to apply. A Harbor-only bridge starts on the
+// same cluster.
+func TestEnvtest_MissingNexusCRDIsNamed(t *testing.T) {
+	restCfg := startEnvtestWithCRDs(t, filepath.Join(crdBases(), "harbor.aetherize.io_harboraccesses.yaml"))
+	t.Setenv(envMetricsAddr, "0")
+	t.Setenv(envHealthAddr, "0")
+
+	cfg := loadConfig(t, nexusEnv())
+	if err := addToScheme(clientgoscheme.Scheme, cfg); err != nil {
+		t.Fatal(err)
+	}
+	opts := managerOptions(cfg, false)
+	opts.Controller.SkipNameValidation = ptr.To(true)
+	_, err := newManager(restCfg, cfg, opts)
+	if err == nil {
+		t.Fatal("the manager was built with the Nexus backend and no NexusAccess CRD")
+	}
+	for _, want := range []string{"nexusaccesses.nexus.aetherize.io", nexusCRDFile, "helm upgrade never installs", `no matches for kind "NexusAccess"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+
+	harborOnly := loadConfig(t, harborOnlyEnv())
+	opts = managerOptions(harborOnly, false)
+	opts.Controller.SkipNameValidation = ptr.To(true)
+	if _, err := newManager(restCfg, harborOnly, opts); err != nil {
+		t.Errorf("Harbor-only manager without the NexusAccess CRD: %v", err)
+	}
 }

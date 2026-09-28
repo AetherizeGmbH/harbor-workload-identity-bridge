@@ -593,8 +593,10 @@ The bridge can also hand out credentials for docker repositories in
 Sonatype Nexus Repository 3, next to Harbor
 ([ADR-0036](docs/adr/0036-nexus-repository-backend.md), status Proposed:
 its decisions may still change). Harbor stays required. With
-`nexus.enabled=false`, the default, the chart renders nothing of it and
-the bridge behaves as before.
+`nexus.enabled=false`, the default, the chart's templates render nothing
+of it and the bridge behaves as before. `helm install` still creates the
+NexusAccess CRD from the chart's `crds/`, as it does every CRD there; it
+stays inert without the backend.
 
 What the bridge does in Nexus:
 
@@ -624,8 +626,19 @@ What the bridge does in Nexus:
    (see [Caveats](#caveats-adr-0036)). Turn anonymous access off, or
    accept that the `nx-anonymous` role widens what every bridge user can
    read.
-2. Create the credential Secret and add these values to the install from
-   the [Quickstart](#quickstart):
+2. On a release installed from an earlier chart version, apply the
+   NexusAccess CRD first. Helm creates the CRDs of `crds/` only on `helm
+   install`, never on `helm upgrade`, and a bridge with `nexus.enabled`
+   but without the CRD exits at startup, naming it. Use the file of the
+   chart version you upgrade to:
+
+   ```bash
+   kubectl apply -f charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml
+   ```
+
+   A fresh `helm install` needs no such step.
+3. Create the credential Secret and add these values to the install from
+   the [Quickstart](#quickstart) (or to the `helm upgrade` of the release):
 
    ```bash
    kubectl create secret generic nexus-admin -n harbor-bridge-system \
@@ -653,7 +666,7 @@ What the bridge does in Nexus:
        - nexus.example.com:8082
    ```
 
-3. Apply a NexusAccess (also in
+4. Apply a NexusAccess (also in
    `config/samples/nexus_v1alpha1_nexusaccess.yaml`):
 
    ```yaml

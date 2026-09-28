@@ -745,10 +745,10 @@ The chart (2026-09-28) implements decision h as follows.
 
 17. **Chart** (decision h). The values are the proposed ones, with
     `harbor.registryHosts` optional (point 6) and no selector of its own
-    (point 3). Without `nexus.enabled` the chart renders nothing of
-    Nexus, and `BRIDGE_HARBOR_REGISTRY_HOSTS` only when
+    (point 3). Without `nexus.enabled` the chart's templates render
+    nothing of Nexus, and `BRIDGE_HARBOR_REGISTRY_HOSTS` only when
     `harbor.registryHosts` is set, so a Harbor-only install renders as
-    before. The NexusAccess RBAC mirrors the HarborAccess rules (`get`,
+    before; the CRD is another matter (note 20). The NexusAccess RBAC mirrors the HarborAccess rules (`get`,
     `list`, `watch`, `patch`; `update`, `patch` on the status; `update` on
     the finalizers): the control plane writes a NexusAccess only through
     its status and by patching its finalizers. With `nexus.enabled` the
@@ -820,6 +820,20 @@ The implementation review (2026-09-28) changed the following.
     privilege, and is checked again every `NexusRepositoryRecheckInterval`.
     Once the repository exists, Nexus reports its built-in privilege under
     the name again (verified).
+20. **The CRD's lifecycle** (decision h). The NexusAccess CRD lives in the
+    chart's `crds/`, next to HarborAccess's. Helm creates the CRDs there
+    on `helm install` only, whatever the values, and never on `helm
+    upgrade`, nor deletes them on uninstall. So a fresh Harbor-only install
+    gets the CRD, inert without the backend, and enabling Nexus on an
+    existing release needs the CRD applied by hand (README, MIGRATION.md,
+    and the NOTES of an upgrade with `nexus.enabled` say so). Without it
+    the manager cannot build its NexusAccess cache and the bridge exits at
+    startup; the error names the CRD and the file to apply
+    (`bridge/cmd/main.go` `newManager`). Rendering the CRD as a template
+    gated by `nexus.enabled` would install it on upgrade, but `helm
+    uninstall` or turning the flag off would then delete it, which deletes
+    every NexusAccess object while no bridge with the backend is left to
+    revoke their users and release their finalizers.
 
 ## Verified at runtime
 
@@ -900,4 +914,7 @@ The last column says whether `TestLive_AgainstNexus` checks the row.
 - `oci` repositories are not supported until question 8 is answered.
 - The e2e covers only pre-3.77 releases unless an operator accepts the
   EULA; behaviour specific to later releases stays unverified.
-- A Harbor-only installation sees no change.
+- A Harbor-only installation renders and behaves as before; a fresh
+  `helm install` creates the NexusAccess CRD too, inert without the
+  backend. Enabling Nexus on an existing release needs that CRD applied by
+  hand, since `helm upgrade` creates no CRDs (note 20).

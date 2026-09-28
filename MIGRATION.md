@@ -2,6 +2,12 @@
 
 ### 0.11.3: a refused HarborAccess suspends its robot (ADR-0030)
 
+### Unreleased: Sonatype Nexus Repository backend (preview, ADR-0036)
+
+| Change | What to do |
+| --- | --- |
+| The chart ships a second CRD, `nexusaccesses.nexus.aetherize.io`, and the values `nexus.*` and `harbor.registryHosts`; `nexus.enabled` defaults to `false` | Nothing for a Harbor-only release: its templates render as before. `helm install` creates the CRD, which stays inert without the backend; `helm upgrade` does not create it. Before you enable Nexus on an existing release, apply the CRD of the chart version you upgrade to: `kubectl apply -f charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml`. Without it the new bridge pods exit at startup with an error that names the CRD, and the rollout stalls. Helm keeps the CRD on `helm uninstall`. |
+
 ### Unreleased: plugin installer
 
 | Change | What to do |

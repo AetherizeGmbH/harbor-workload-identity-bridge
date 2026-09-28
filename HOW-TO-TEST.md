@@ -465,6 +465,9 @@ curl -s http://127.0.0.1:8001/openid/v1/jwks | jq .keys[0].kid
 
 ```bash
 kubectl apply -f config/crd/bases/harbor.aetherize.io_harboraccesses.yaml
+# Only to run it with the Nexus backend (BRIDGE_NEXUS_URL): without this CRD
+# that bridge exits at startup, naming it.
+kubectl apply -f config/crd/bases/nexus.aetherize.io_nexusaccesses.yaml
 kubectl create namespace harbor-bridge-system
 
 # Drop Harbor admin creds where the bridge expects them: owner-only,
