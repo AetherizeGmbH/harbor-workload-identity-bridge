@@ -946,11 +946,12 @@ run "robot_check_cascade" {
     args = [<<-SH
       set -euo pipefail
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
-      # As in robot_check_update: a failed request or an answer that is
-      # not a list fails the Job, never reads as "no robot".
+      # As in robot_check_update: a failed request, or an answer that is
+      # not exactly one JSON list (an empty body included), fails the Job
+      # and never reads as "no robot".
       robots() {
         body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
-        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+        printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end'
       }
       gone=$(robots name%3Dbridge-dev.app-ns.runner)
       all=$(robots name%3D~bridge-dev.)

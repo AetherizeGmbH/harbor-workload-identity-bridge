@@ -838,7 +838,7 @@ run "robot_check_cascade" {
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
       robots() {
         body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
-        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+        printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end'
       }
       gone=$(robots name%3Dbridge-gke-e2e.app-ns.runner)
       all=$(robots name%3D~bridge-gke-e2e.)
