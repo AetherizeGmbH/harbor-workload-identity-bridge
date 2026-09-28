@@ -730,8 +730,9 @@ run "robot_check_update" {
 
       # The narrowed robot's grants as Harbor stores them: exactly pull,push
       # on beta-1 and pull on beta-2 — replaced, not merged with the old list.
+      # The answer must be exactly one JSON list holding that one robot.
       body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3Dbridge-dev.beta-ns.beta-runner")
-      grants=$(printf '%s' "$body" | jq -c 'if type == "array" and length == 1 then .[0].permissions
+      grants=$(printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" and (.[0] | length) == 1 then .[0][0].permissions
           | map({kind, namespace, actions: ([.access[] | "\(.resource):\(.action)"] | sort)}) | sort_by(.namespace)
         else error("want exactly one robot bridge-dev.beta-ns.beta-runner") end')
       echo "narrowed robot's grants: $grants"
