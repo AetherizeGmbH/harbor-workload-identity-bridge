@@ -226,9 +226,13 @@ parses whenever it is set.
 {{- if not $url -}}
 {{- fail "nexus.url is REQUIRED when nexus.enabled=true: the base URL of Nexus, e.g. https://nexus.example.com (ADR-0036)." -}}
 {{- end -}}
-{{- /* The value is never repeated: it may carry user:password@. */}}
-{{- if not (regexMatch "(?i)^https?://[^/?#@[:space:]]+(/[^?#@[:space:]]*)?$" $url) -}}
-{{- fail "nexus.url must be an http(s) base URL, a scheme, a host and an optional path, without user:password@, query or fragment: the bridge authenticates to Nexus with nexus.adminCredsSecret (the value is left out of this message because it could hold a credential)." -}}
+{{- /* The value is never repeated: it may carry user:password@. The
+       shared check refuses every "@" and a URL without an http(s) scheme
+       and a host, as for harbor.url; the bridge refuses a query or a
+       fragment in its base URL as well (config.go loadNexus). */}}
+{{- include "harbor-bridge.validateURL" (list "nexus.url" $url "a user:password@ part never takes effect (the bridge authenticates to Nexus only with nexus.adminCredsSecret) and only ends up in logs") -}}
+{{- if regexMatch "[?#[:space:]]" (trim $url) -}}
+{{- fail "nexus.url must be the base URL of Nexus, a scheme, a host and an optional path, without a query, a fragment or whitespace. The value is left out of this message: it could hold a credential." -}}
 {{- end -}}
 {{- $allowHTTP := dig "allowInsecureHTTP" false $nexus -}}
 {{- if not (kindIs "bool" $allowHTTP) -}}

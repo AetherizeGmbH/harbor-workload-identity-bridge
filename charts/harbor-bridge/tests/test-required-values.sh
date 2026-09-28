@@ -129,9 +129,13 @@ cases=(
 nexus_cases=(
   "nexus.url|--set|nexus.url=|nexus.url is REQUIRED"
   "nexus.url over plain http|--set|nexus.url=http://nexus.example.com|nexus.url uses plain http"
-  "nexus.url with credentials|--set|nexus.url=https://admin:s3cr3t-pw@nexus.example.com|nexus.url must be an http(s) base URL"
-  "nexus.url with a fragment|--set|nexus.url=https://nexus.example.com/#x|nexus.url must be an http(s) base URL"
-  "nexus.url without a scheme|--set|nexus.url=nexus.example.com|nexus.url must be an http(s) base URL"
+  "nexus.url with credentials|--set|nexus.url=https://admin:s3cr3t-pw@nexus.example.com|nexus.url must not contain \"@\""
+  "nexus.url with an @ after the host|--set|nexus.url=https://nexus.example.com/a@b|nexus.url must not contain \"@\""
+  "nexus.url with a query|--set|nexus.url=https://nexus.example.com/?x=1|nexus.url must be the base URL of Nexus"
+  "nexus.url with a space|--set|nexus.url=https://nexus.example.com/a b|nexus.url must be the base URL of Nexus"
+  "nexus.url over plain http in upper case|--set|nexus.url=HTTP://nexus.example.com|nexus.url uses plain http"
+  "nexus.url with a fragment|--set|nexus.url=https://nexus.example.com/#x|nexus.url must be the base URL of Nexus"
+  "nexus.url without a scheme|--set|nexus.url=nexus.example.com|nexus.url must be an http:// or https:// URL with a host"
   "nexus.allowInsecureHTTP not a boolean|--set-string|nexus.allowInsecureHTTP=yes|nexus.allowInsecureHTTP=\"yes\" must be true or false"
   "nexus.adminCredsSecret.name|--set|nexus.adminCredsSecret.name=|nexus.adminCredsSecret.name is REQUIRED"
   "nexus.adminCredsSecret missing|--set|nexus.adminCredsSecret=null|nexus.adminCredsSecret.name is REQUIRED"
@@ -709,7 +713,7 @@ renders() {
 # A credential in nexus.url is never repeated in the error.
 no_url_credential() {
   out=$(render -f "${NEXUS}" --set nexus.url=https://admin:s3cr3t-pw@nexus.example.com 2>&1 || true)
-  grep -qF 'nexus.url must be an http(s) base URL' <<<"${out}" && ! grep -qF 's3cr3t-pw' <<<"${out}"
+  grep -qF 'nexus.url must not contain "@"' <<<"${out}" && ! grep -qF 's3cr3t-pw' <<<"${out}"
 }
 check "nexus.url's credential is not repeated in the error" no_url_credential
 
