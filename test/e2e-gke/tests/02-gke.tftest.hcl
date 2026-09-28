@@ -530,6 +530,54 @@ run "pull_pod_granted" {
   }
 }
 
+# Revocation by CR edit (ADR-0023; details at robot_narrowed of the kind
+# harness): the narrowed multi-access robot keeps what stayed and is
+# refused what was removed.
+run "robot_narrowed" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "robot-narrowed"
+    namespace            = run.bridge_upgrade.namespace
+    service_account_name = "default"
+    image                = run.push.image_tags.seed
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = "robot-${run.bridge_upgrade.namespace}.multi-access"
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      H='${run.gke.harbor_hostname}'
+      openssl s_client -connect "$H:443" -servername "$H" </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+        > /usr/local/share/ca-certificates/harbor-e2e.crt
+      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
+      update-ca-certificates 2>/dev/null
+      crane auth login "$H" -u "$username" -p "$password"
+
+      refused() {
+        what=$1; shift
+        if out=$("$@" 2>&1); then echo "$what: SUCCEEDED, want an authorization failure"; exit 1; fi
+        if ! printf '%s' "$out" | grep -Eqi 'unauthorized|denied|forbidden|insufficient_scope'; then
+          echo "$what: failed, but not with an authorization error: $out"; exit 1
+        fi
+        echo "$what: refused"
+      }
+
+      crane copy "$H/beta-1/app:v1" "$H/beta-1/pushed-after-narrowing:v1"
+      crane digest "$H/beta-2/app:v1" >/dev/null
+      echo "kept: push to beta-1, pull from beta-2"
+      refused "push to beta-2 (push removed)" crane copy "$H/beta-2/app:v1" "$H/beta-2/pushed-after-narrowing:v1"
+      refused "pull from beta-3 (project removed)" crane digest "$H/beta-3/app:v1"
+    SH
+    ]
+    timeout_seconds = 180
+    fail_message    = "revocation by CR edit failed on GKE (ADR-0023): after multi-access was narrowed, its robot could still push to beta-2 or read beta-3, or lost a grant it kept (see pod.log)"
+  }
+}
+
 run "pull_pod_renamed" {
   command = apply
   module {
@@ -600,10 +648,20 @@ run "robot_check_update" {
       printf '%s' "$new" | jq -e 'length == 1' >/dev/null
       printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_update.harbor_accesses)} \
         'length == $want and any(.[]; endswith("bridge-gke-e2e.team-a.svc-renamed"))' >/dev/null
+
+      # The narrowed robot's grants as Harbor stores them.
+      body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3Dbridge-gke-e2e.beta-ns.beta-runner")
+      grants=$(printf '%s' "$body" | jq -c 'if type == "array" and length == 1 then .[0].permissions
+          | map({kind, namespace, actions: ([.access[] | "\(.resource):\(.action)"] | sort)}) | sort_by(.namespace)
+        else error("want exactly one robot bridge-gke-e2e.beta-ns.beta-runner") end')
+      echo "narrowed robot's grants: $grants"
+      printf '%s' "$grants" | jq -e '. == [
+        {kind: "project", namespace: "beta-1", actions: ["repository:pull", "repository:push"]},
+        {kind: "project", namespace: "beta-2", actions: ["repository:pull"]}]' >/dev/null
     SH
     ]
     timeout_seconds = 120
-    fail_message    = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted, the new one present, and the fuzzy name=~bridge-gke-e2e. query must list one robot per HarborAccess (or Harbor could not be asked; see pod.log)"
+    fail_message    = "Harbor state after harbor_access_update is wrong: the old robot must be deleted, the new one present, the fuzzy name=~bridge-gke-e2e. query must list one robot per HarborAccess, and the narrowed robot must hold exactly its new grants (or Harbor could not be asked; see pod.log)"
   }
 }
 

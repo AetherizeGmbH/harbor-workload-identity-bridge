@@ -12,6 +12,10 @@
 #                * test-access gains pull on project-gamma (grant change →
 #                  the robot's permissions must change in Harbor, without a
 #                  password rotation that would break kubelet's cache);
+#                * multi-access is narrowed: beta-3 dropped (a whole
+#                  project), beta-2 cut from pull,push to pull (one action).
+#                  Harbor must take the robot's permission list as
+#                  REPLACED, not merged: a grant-add passes either way;
 #                * collide-one moves from team-a/svc-b to the new SA
 #                  team-a/svc-renamed (identity change → a new robot, and
 #                  the old robot must be REVOKED in Harbor).
@@ -119,12 +123,16 @@ locals {
       generation  = 1
     },
     {
-      # One robot, several projects, pull,push.
-      name        = "multi-access"
-      namespace   = var.bridge_namespace
-      sa          = { namespace = "beta-ns", name = "beta-runner" }
-      permissions = [for p in ["beta-1", "beta-2", "beta-3"] : { project = p, action = "pull,push" }]
-      generation  = 1
+      # One robot, several projects, pull,push. Narrowed in "updated": a
+      # project and an action removed, on a robot that survives.
+      name      = "multi-access"
+      namespace = var.bridge_namespace
+      sa        = { namespace = "beta-ns", name = "beta-runner" }
+      permissions = local.updated ? tolist([
+        { project = "beta-1", action = "pull,push" },
+        { project = "beta-2", action = "pull" },
+      ]) : tolist([for p in ["beta-1", "beta-2", "beta-3"] : { project = p, action = "pull,push" }])
+      generation = local.updated ? 2 : 1
     },
     {
       # Exists from the start; only the kubelet-side matchImages entry is

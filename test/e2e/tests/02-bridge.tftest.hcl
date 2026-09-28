@@ -22,15 +22,19 @@
 #  11. bridge_upgrade       — helm upgrade widening matchImages; the installer
 #                             must restart kubelet (ADR-0021) …
 #  12. pull_pod_upgrade     — … or this pull of the new project fails
-#  13. harbor_access_update — scenario phase "updated": a permission grant
-#                             and a ServiceAccount change, applied in place
+#  13. harbor_access_update — scenario phase "updated": a permission grant,
+#                             grants removed from a robot that stays, and a
+#                             ServiceAccount change, applied in place
 #  14. pull_pod_granted     — the newly granted project pulls (the grant
 #                             reached Harbor; audit C1)
+#  14b. robot_narrowed      — the narrowed robot keeps what stayed and is
+#                             refused what was removed (ADR-0023)
 #  15. pull_pod_renamed     — the new ServiceAccount pulls
 #  16. pull_pod_revoked     — the OLD ServiceAccount must now be refused
 #  17. robot_check_update   — Harbor itself: old robot gone, new one present,
-#                             one robot per HarborAccess (audit H2 —
-#                             revocation, not just a data-plane 403)
+#                             one robot per HarborAccess, the narrowed
+#                             robot's stored grants (audit H2 — revocation,
+#                             not just a data-plane 403)
 #  18. token_rejection      — ADR-0028: the bridge refuses a token bound to no
 #                             pod and one living 2h, serves a pod-bound 1h one
 #  19. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
@@ -54,7 +58,8 @@
 #     ADR-0018's dot-joined scheme; each pulls its own project, and
 #     team-a/svc-b is refused on project-beta (pull_pod_cross_tenant).
 #   - app-ns/runner's HarborAccess lives in app-ns: cluster-wide CR pickup.
-#   - beta-ns/beta-runner: one robot, pull,push on beta-1/2/3.
+#   - beta-ns/beta-runner: one robot, pull,push on beta-1/2/3; narrowed in
+#     place to pull,push on beta-1 and pull on beta-2 (robot_narrowed).
 #
 # Image refs use `harbor.e2e:30843` so that:
 #   - go-containerregistry (crane) accepts the realm host in Harbor's
@@ -581,6 +586,61 @@ run "pull_pod_granted" {
   }
 }
 
+# Revocation by CR edit (ADR-0023): multi-access was narrowed in place —
+# beta-3 dropped, beta-2 cut to pull. With the same robot Secret (a spec
+# edit rotates no password): what stayed still works, push to beta-2 and
+# any access to beta-3 are refused by Harbor. crane asks Harbor for a fresh
+# token on every call, so this is Harbor's evaluation of the stored grants,
+# not a cached credential. A refusal counts only as an authorization error;
+# a TLS or DNS failure, or a missing tag, fails the check.
+run "robot_narrowed" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "robot-narrowed"
+    namespace            = run.bridge_upgrade.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = "robot-${run.bridge_upgrade.namespace}.multi-access"
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      H=harbor.e2e:30843
+      openssl s_client -connect "$H" -servername harbor.e2e </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+        > /usr/local/share/ca-certificates/harbor-e2e.crt
+      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
+      update-ca-certificates 2>/dev/null
+      crane auth login "$H" -u "$username" -p "$password"
+
+      # refused WHAT COMMAND...: COMMAND must fail with an authorization error.
+      refused() {
+        what=$1; shift
+        if out=$("$@" 2>&1); then echo "$what: SUCCEEDED, want an authorization failure"; exit 1; fi
+        if ! printf '%s' "$out" | grep -Eqi 'unauthorized|denied|forbidden|insufficient_scope'; then
+          echo "$what: failed, but not with an authorization error: $out"; exit 1
+        fi
+        echo "$what: refused"
+      }
+
+      # The grants that stayed, with the unchanged password.
+      crane copy "$H/beta-1/app:v1" "$H/beta-1/pushed-after-narrowing:v1"
+      crane digest "$H/beta-2/app:v1" >/dev/null
+      echo "kept: push to beta-1, pull from beta-2"
+      refused "push to beta-2 (push removed)" crane copy "$H/beta-2/app:v1" "$H/beta-2/pushed-after-narrowing:v1"
+      refused "pull from beta-3 (project removed)" crane digest "$H/beta-3/app:v1"
+    SH
+    ]
+    timeout_seconds  = 180
+    fail_message     = "revocation by CR edit failed (ADR-0023): after multi-access was narrowed, its robot could still push to beta-2 or read beta-3, or lost a grant it kept (see pod.log)"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
 # collide-one now names team-a/svc-renamed: the new identity pulls.
 run "pull_pod_renamed" {
   command = apply
@@ -626,8 +686,9 @@ run "pull_pod_revoked" {
 }
 
 # Ask Harbor directly (admin credentials from the seed namespace): the old
-# robot is gone, the new one exists, and the fuzzy query robot_check_teardown
-# relies on lists exactly one robot per HarborAccess of this phase. Every
+# robot is gone, the new one exists, the fuzzy query robot_check_teardown
+# relies on lists exactly one robot per HarborAccess of this phase, and the
+# narrowed robot stores exactly its new grants. Every
 # query fails the Job when Harbor cannot be asked or does not answer with a
 # robot list: an unreachable Harbor must never read as "no robot".
 run "robot_check_update" {
@@ -666,10 +727,21 @@ run "robot_check_update" {
       printf '%s' "$new" | jq -e 'length == 1' >/dev/null
       printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_update.harbor_accesses)} \
         'length == $want and any(.[]; endswith("bridge-dev.team-a.svc-renamed"))' >/dev/null
+
+      # The narrowed robot's grants as Harbor stores them: exactly pull,push
+      # on beta-1 and pull on beta-2 — replaced, not merged with the old list.
+      body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3Dbridge-dev.beta-ns.beta-runner")
+      grants=$(printf '%s' "$body" | jq -c 'if type == "array" and length == 1 then .[0].permissions
+          | map({kind, namespace, actions: ([.access[] | "\(.resource):\(.action)"] | sort)}) | sort_by(.namespace)
+        else error("want exactly one robot bridge-dev.beta-ns.beta-runner") end')
+      echo "narrowed robot's grants: $grants"
+      printf '%s' "$grants" | jq -e '. == [
+        {kind: "project", namespace: "beta-1", actions: ["repository:pull", "repository:push"]},
+        {kind: "project", namespace: "beta-2", actions: ["repository:pull"]}]' >/dev/null
     SH
     ]
     timeout_seconds  = 120
-    fail_message     = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted, the new one present, and the fuzzy name=~bridge-dev. query must list one robot per HarborAccess (or Harbor could not be asked; see pod.log)"
+    fail_message     = "Harbor state after harbor_access_update is wrong: the old robot must be deleted, the new one present, the fuzzy name=~bridge-dev. query must list one robot per HarborAccess, and the narrowed robot must hold exactly its new grants (or Harbor could not be asked; see pod.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
