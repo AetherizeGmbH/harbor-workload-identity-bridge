@@ -107,10 +107,14 @@ jobs:
           app="$(helm show chart harbor/harbor --version "$CHART" 2>/dev/null \
             | awk -F': *' '/^appVersion:/{print $2}' | tr -d '"\r')"
           [ -n "$app" ] || app="unknown"
+          # The Harbor harness only (the Makefile's E2E_HARBOR_TESTS); the
+          # Nexus harness (tests/03-nexus.tftest.hcl) is not part of the
+          # compatibility matrix.
           ( cd test/e2e \
             && tofu init \
             && TF_VAR_version_harbor="$CHART" TF_VAR_pause_after_pull=false \
-               tofu test -verbose ) 2>&1 | tee /tmp/tofu-test.log
+               tofu test -verbose \
+                 -filter=tests/01-plan.tftest.hcl -filter=tests/02-bridge.tftest.hcl ) 2>&1 | tee /tmp/tofu-test.log
           status_code=${PIPESTATUS[0]}
           if [ "$status_code" -eq 0 ]; then status=pass; else status=fail; fi
           mkdir -p compat-result
