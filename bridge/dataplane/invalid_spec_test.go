@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // A HarborAccess whose tokenTTL an older CRD admitted but Go cannot parse
@@ -33,7 +32,7 @@ func TestHandler_InvalidTokenTTL_NotServed(t *testing.T) {
 			reg := prometheus.NewRegistry()
 			var audit captured
 			h := &Handler{
-				K8sClient: fake.NewClientBuilder().WithScheme(handlerTestScheme).WithObjects(ha, newTestRobotSecret()).Build(),
+				K8sClient: newFakeClientBuilder().WithObjects(ha, newTestRobotSecret()).Build(),
 				Validator: &stubValidator{claims: newTestClaims()},
 				Config:    HandlerConfig{BridgeNamespace: hTestBridgeNS, ForceLocalValidation: true, Audience: hTestAudience},
 				Metrics:   NewMetrics(reg),

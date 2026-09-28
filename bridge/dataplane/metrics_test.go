@@ -109,6 +109,11 @@ func TestMetrics_OIDCFailureClassification(t *testing.T) {
 		// wrong_issuer bucket could never fire in production.
 		{errors.New(`oidc: id token issued by a different provider, expected "https://a" got "https://b"`), OIDCReasonWrongIssuer, "wrong_issuer"},
 		{errors.New("oidc: malformed jwt"), OIDCReasonMalformed, "malformed"},
+		// go-oidc/go-jose's message for an alg=none or HS256 probe names
+		// the signature too; it is a malformed token, not a bad signature.
+		{errors.New(`oidc: malformed jwt: unexpected signature algorithm "HS256"; expected ["RS256"]`), OIDCReasonMalformed, "unexpected_algorithm"},
+		// The sender chooses the quoted alg; it must not pick the bucket.
+		{errors.New(`oidc: malformed jwt: unexpected signature algorithm "expired"; expected ["RS256"]`), OIDCReasonMalformed, "alg_names_another_category"},
 		// ADR-0028: matched by sentinel, not by text; the message names
 		// an iat "issued" in the future, which must not read as an issuer.
 		{fmt.Errorf("%w: %w: issued in the future", ErrInvalidToken, ErrTokenLifetime), OIDCReasonExcessiveLifetime, "excessive_lifetime"},
@@ -153,6 +158,37 @@ func TestMetrics_SecretMissing_IncrementsBoth503Counters(t *testing.T) {
 	}
 }
 
+// Signing keys the bridge cannot fetch are an outage on its side: 503
+// (the plugin retries, then fails visibly), counted as keys_unavailable
+// and never as an unauthorized request.
+func TestHandler_UnavailableSigningKeys_503(t *testing.T) {
+	fx, _, reg := metricsFixture(t)
+	var audit captured
+	fx.Handler.Audit = audit.logger()
+	fx.Validator.err = fmt.Errorf("%w: failed to verify signature: failed to verify token signature: last JWKS fetch failed: fetch JWKS: 403 Forbidden", ErrSigningKeysUnavailable)
+	w := httptest.NewRecorder()
+	fx.Handler.ServeHTTP(w, bearerReq(t, "img"))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	for labels, want := range map[string]float64{ResultUnavailable: 1, ResultUnauthorized: 0} {
+		if got := counter(t, reg, "bridge_credential_issuances_total", map[string]string{"result": labels}); got != want {
+			t.Errorf("issuances{result=%s} = %v, want %v", labels, got, want)
+		}
+	}
+	for reason, want := range map[string]float64{OIDCReasonKeysUnavailable: 1, OIDCReasonBadSignature: 0} {
+		if got := counter(t, reg, "bridge_oidc_validation_failures_total", map[string]string{"reason": reason}); got != want {
+			t.Errorf("oidc_failures{reason=%s} = %v, want %v", reason, got, want)
+		}
+	}
+	out := audit.joined()
+	for _, want := range []string{`"credential unavailable"`, `"reason"="signing_keys_unavailable"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("audit line lacks %s:\n%s", want, out)
+		}
+	}
+}
+
 func TestMetrics_NoMetrics_HandlerStillWorks(t *testing.T) {
 	// Confirm the metrics-is-nil branch in the handler keeps it usable
 	// from tests that don't care about metrics.
@@ -165,28 +201,44 @@ func TestMetrics_NoMetrics_HandlerStillWorks(t *testing.T) {
 	}
 }
 
-func TestPromHandler_ServesExpositionFormat(t *testing.T) {
+// Every series exists as zero before the first request, so rate() on a
+// never-incremented series needs no special case in dashboards.
+func TestNewMetrics_SeriesExistBeforeTheFirstRequest(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	_ = NewMetrics(reg)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	PromHandler(reg).ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
 	}
-	body := w.Body.String()
-	// Time-series exist as zero before any request because NewMetrics
-	// touches every label value.
-	for _, want := range []string{
+	labels := map[string]map[string]bool{}
+	for _, mf := range mfs {
+		labels[mf.GetName()] = map[string]bool{}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				labels[mf.GetName()][lp.GetValue()] = true
+			}
+		}
+	}
+	for _, name := range []string{
 		"bridge_credential_issuances_total",
 		"bridge_oidc_validation_failures_total",
 		"bridge_harboraccess_lookup_failures_total",
 		"bridge_robot_secret_missing_total",
-		"bridge_credential_issuance_duration_seconds_bucket",
+		"bridge_credential_issuance_duration_seconds",
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("/metrics output missing %q", want)
+		if _, ok := labels[name]; !ok {
+			t.Errorf("series %s missing", name)
+		}
+	}
+	for name, values := range map[string][]string{
+		"bridge_credential_issuances_total": {ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited},
+		"bridge_oidc_validation_failures_total": {OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed,
+			OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonKeysUnavailable, OIDCReasonOther},
+	} {
+		for _, v := range values {
+			if !labels[name][v] {
+				t.Errorf("%s{%s} missing", name, v)
+			}
 		}
 	}
 }

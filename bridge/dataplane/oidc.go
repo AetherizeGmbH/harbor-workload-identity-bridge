@@ -17,11 +17,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // Validator verifies a Kubernetes service-account token's signature,
@@ -72,11 +75,19 @@ type Claims struct {
 	Node   string
 }
 
-// ErrInvalidToken wraps every Validate failure so callers can branch on
-// "invalid for any reason" without inspecting the underlying go-oidc
-// error category. Specific causes (expiry, signature, issuer mismatch)
-// are surfaced in the wrapped error message for log readability.
+// ErrInvalidToken wraps every Validate failure but
+// ErrSigningKeysUnavailable, so callers can branch on "invalid for any
+// reason" without inspecting the underlying go-oidc error category.
+// Specific causes (expiry, signature, issuer mismatch) are surfaced in
+// the wrapped error message for log readability.
 var ErrInvalidToken = errors.New("invalid token")
+
+// ErrSigningKeysUnavailable marks a token Validate could not judge: its
+// signing key is not among the keys the bridge holds, and the bridge
+// could not fetch the current key set (the JWKS endpoint failed, or the
+// request ended while the fetch ran). A server-side outage, not a bad
+// token; not wrapped in ErrInvalidToken.
+var ErrSigningKeysUnavailable = errors.New("token signing keys unavailable")
 
 // ErrTokenLifetime marks a token whose lifetime (exp - iat) exceeds the
 // maximum or cannot be determined (ADR-0028). Wrapped in ErrInvalidToken.
@@ -109,12 +120,16 @@ type Config struct {
 	// the expected iss claim of incoming tokens; only the *transport*
 	// is overridden. Use this when the bridge runs outside the cluster
 	// (local dev via `kubectl proxy`) or behind a network topology
-	// where the cluster-internal URLs do not resolve.
+	// where the cluster-internal URLs do not resolve. Every URL the keys
+	// come through (JWKSURL, or Issuer and the discovered jwks_uri) must
+	// be https, or http to a loopback host.
 	JWKSURL string
 
 	// HTTPClient is used for OIDC discovery and JWKS fetching. Pass a
 	// client with a custom transport for httptest, mTLS, or audit
-	// instrumentation. nil means http.DefaultClient.
+	// instrumentation. nil means NewOIDCHTTPClient("", ""): bounded
+	// timeouts, TLS 1.2 minimum, no redirects followed, the system trust
+	// roots and no bridge token.
 	HTTPClient *http.Client
 
 	// MaxTokenLifetime is the longest lifetime (exp - iat) an accepted
@@ -131,10 +146,11 @@ type Config struct {
 
 // NewValidator constructs a Validator that verifies tokens issued by
 // cfg.Issuer. When cfg.JWKSURL is empty, the constructor performs OIDC
-// discovery synchronously so a misconfigured issuer fails at bridge
-// startup, not on the first kubelet request. When cfg.JWKSURL is set,
-// discovery is skipped and the validator goes straight to the supplied
-// JWKS endpoint with cfg.Issuer as the expected iss claim.
+// discovery; when it is set, discovery is skipped and the validator goes
+// straight to the supplied JWKS endpoint with cfg.Issuer as the expected
+// iss claim. Either way it fetches the signing keys once before it
+// returns, so a misconfigured issuer, JWKS URL, CA or RBAC fails at
+// bridge startup, not on the first kubelet request.
 func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 	if cfg.Issuer == "" {
 		return nil, errors.New("oidc: issuer is required")
@@ -170,8 +186,22 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		if err != nil {
 			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
 		}
+		if err := requireTLSUnlessLoopback(u); err != nil {
+			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
+		}
 		allowIfAPIServer(u)
+		// No discovery document names the issuer's algorithms, so accept
+		// every one the key set verifies: an apiserver with an ECDSA
+		// signing key issues ES256/384/512 tokens. go-jose binds the
+		// algorithm to the key's type, so this admits no algorithm
+		// confusion; HS* and none are not in the list.
+		algs = algNames(jwtSigningAlgs)
 	} else {
+		// Discovery names the JWKS: whoever can rewrite the document can
+		// substitute the keys.
+		if err := requireTLSUnlessLoopback(issuerURL); err != nil {
+			return nil, fmt.Errorf("oidc: issuer %q (discovery): %w", cfg.Issuer, err)
+		}
 		provider, err := oidc.NewProvider(oidc.ClientContext(ctx, httpClient), cfg.Issuer)
 		if err != nil {
 			return nil, fmt.Errorf("oidc: discovery for issuer %q: %w", cfg.Issuer, err)
@@ -187,6 +217,9 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		if err != nil || meta.JWKSURI == "" {
 			return nil, fmt.Errorf("oidc: discovery for issuer %q names no usable jwks_uri (%q)", cfg.Issuer, meta.JWKSURI)
 		}
+		if err := requireTLSUnlessLoopback(u); err != nil {
+			return nil, fmt.Errorf("oidc: discovery for issuer %q names jwks_uri %q: %w", cfg.Issuer, meta.JWKSURI, err)
+		}
 		jwksURL = meta.JWKSURI
 		// The apiserver's discovery names its JWKS endpoint by its own
 		// advertised address, which is not one of the Service names.
@@ -196,19 +229,53 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 		algs = supportedAlgs(meta.Algs)
 	}
 
-	verifier := oidc.NewVerifier(cfg.Issuer, newCachedKeySet(jwksURL, httpClient), &oidc.Config{
+	keys := newCachedKeySet(jwksURL, httpClient)
+	if err := keys.prime(ctx); err != nil {
+		return nil, fmt.Errorf("oidc: fetch the token signing keys from %q: %w", jwksURL, err)
+	}
+	verifier := oidc.NewVerifier(cfg.Issuer, keys, &oidc.Config{
 		SkipClientIDCheck:    true,
 		SupportedSigningAlgs: algs,
 	})
 	return &goOIDCValidator{
 		verifier:               verifier,
+		keys:                   keys,
 		maxLifetime:            cfg.MaxTokenLifetime,
 		allowNonPodBoundTokens: cfg.AllowNonPodBoundTokens,
 	}, nil
 }
 
+// requireTLSUnlessLoopback refuses a URL the signing keys would be
+// fetched over without TLS. The keys decide every credential: anyone on
+// the path of a plain-http fetch could substitute their own and forge a
+// token for any ServiceAccount. Plain http stays allowed to a loopback
+// host, for local development through `kubectl proxy` (make run-local).
+func requireTLSUnlessLoopback(u *url.URL) error {
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+		return errors.New("plain http is allowed only to a loopback host (127.0.0.1, ::1, localhost); use https")
+	default:
+		return fmt.Errorf("scheme %q is not https", u.Scheme)
+	}
+}
+
+func algNames(algs []jose.SignatureAlgorithm) []string {
+	out := make([]string, len(algs))
+	for i, a := range algs {
+		out[i] = string(a)
+	}
+	return out
+}
+
 // supportedAlgs keeps the discovery-advertised algorithms the key set can
-// verify. Empty means the verifier's default, RS256.
+// verify. Empty (discovery advertises none of them) means the verifier's
+// default, RS256.
 func supportedAlgs(advertised []string) []string {
 	var out []string
 	for _, a := range advertised {
@@ -224,13 +291,18 @@ func supportedAlgs(advertised []string) []string {
 
 type goOIDCValidator struct {
 	verifier               *oidc.IDTokenVerifier
+	keys                   *cachedKeySet // the verifier's key set; tests steer its clock
 	maxLifetime            time.Duration
 	allowNonPodBoundTokens bool
 }
 
 func (v *goOIDCValidator) Validate(ctx context.Context, rawToken string) (*Claims, error) {
-	idToken, err := v.verifier.Verify(ctx, rawToken)
+	verifyCtx, outcome := withVerifyOutcome(ctx)
+	idToken, err := v.verifier.Verify(verifyCtx, rawToken)
 	if err != nil {
+		if outcome.keysUnavailable {
+			return nil, fmt.Errorf("%w: %w", ErrSigningKeysUnavailable, err)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	var raw rawClaims

@@ -16,7 +16,8 @@ import (
 	"time"
 )
 
-// oidcFetchTimeout bounds one discovery or JWKS request.
+// oidcFetchTimeout bounds one discovery or JWKS request. The key set
+// bounds its JWKS fetches tighter (jwksFetchTimeout).
 const oidcFetchTimeout = 30 * time.Second
 
 // NewOIDCHTTPClient builds the client for OIDC discovery and JWKS

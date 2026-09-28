@@ -591,14 +591,19 @@ their own RBAC.
   (also robots of an earlier `serviceAccountRef` and dash-named robots
   from 0.2.x) and its Secret before the finalizer is released. Changing
   `serviceAccountRef` deletes the previous identity's robot as soon as
-  the new one is in place. The janitor sweeps for anything left behind
+  the new one is in place; until then the new ServiceAccount gets `503`
+  (`reason=secret_for_previous_identity`), never the old robot's
+  password. The janitor sweeps for anything left behind
   every 5 minutes. While Harbor is unreachable, the finalizer holds and
   the HarborAccess reports `reason=DeletionBlocked`.
-- **Residual window.** kubelet can keep cached credentials of a revoked
-  identity for up to the CR's `tokenTTL`, but they stop working the moment
-  the robot is deleted in Harbor. They keep working only while the
-  deletion is blocked (Harbor unreachable) — keep `tokenTTL` short and
-  alert on `reason=DeletionBlocked`.
+- **Residual window.** The bridge stops issuing credentials for a
+  HarborAccess the moment it is marked for deletion (`credential denied`,
+  `reason=harboraccess_deleting`), even while the deletion is blocked.
+  kubelet can keep cached credentials of a revoked identity for up to the
+  CR's `tokenTTL`, but they stop working the moment the robot is deleted
+  in Harbor. They keep working only while the deletion is blocked (the
+  Harbor API unreachable, or refusing the bridge's admin credential) —
+  keep `tokenTTL` short and alert on `reason=DeletionBlocked`.
 
 ## Hardening the bridge
 
@@ -606,6 +611,7 @@ their own RBAC.
 | --- | --- | --- |
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
 | Harbor transport (`harbor.url`) | https required, no redirects followed | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http. Point `harbor.url` at the address Harbor's API answers on directly: the bridge refuses redirects, which would re-send the admin credentials to a target on the same host (in clear text if it is http://) |
+| OIDC transport (`bridge.oidcIssuer` for discovery, `bridge.oidcJWKSURL`, the discovered `jwks_uri`) | https required | Plain http is refused at startup except to a loopback host (`127.0.0.1`, `::1`, `localhost`, i.e. `kubectl proxy` in local development): the signing keys decide every credential, and anyone on a plain-http path could substitute them |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h, a Go duration (`30m`, `1h`; no days) | Use 1h or less unless you have a measured pull-rate problem |
 | `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
@@ -619,7 +625,7 @@ their own RBAC.
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
-| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once. An empty Harbor `robot_name_prefix` cannot be matched (an empty value selects `robot$`) |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once. An empty Harbor `robot_name_prefix` cannot be matched (an empty value selects `robot$`) The data plane then serves no robot Secret (`503`, `reason=secret_for_previous_identity`). |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
@@ -642,9 +648,19 @@ credential issued
   requested_image=harbor.example.com/production/myimg:v1   # asserted by the caller, max 512 chars
 
 credential denied
-  source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch
+  source=…  reason=invalid_token|no_matching_harboraccess|invalid_harboraccess_spec|secret_owner_mismatch|harboraccess_deleting
   category=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other   # invalid_token only
   (subject, pod, node, audiences once the token is valid) requested_image=…
+
+credential unavailable                   # valid token, nothing issued: 503 or 500
+  source=…  subject=…  pod=…  node=…
+  reason=secret_missing|secret_for_previous_identity|secret_unreadable|harboraccess_lookup_failed|robot_name_unknown
+  (harboraccess once matched, err for a 500)
+  robot=…  expected_robot=…              # secret_for_previous_identity only
+  requested_image=…
+
+credential unavailable                   # token not judged: signing keys unavailable, 503
+  source=…  reason=signing_keys_unavailable  err=…  requested_image=…
 ```
 
 The pod and node come from the `kubernetes.io` claim of the token. The
@@ -664,10 +680,19 @@ switches off the SDK's wire dumps, which the go-openapi runtime would
 otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
 bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
-Denials (token rejected, no matching CR, Secret owner mismatch) are the
-`credential denied` lines above, on the same fixed-info audit logger. A
-robot Secret that does not exist yet (`503`) and Kubernetes API errors
-(`500`) go to the regular log.
+Denials (token rejected, no matching CR, CR being deleted, Secret owner
+mismatch) are the `credential denied` lines above, on the same
+fixed-info audit logger. A request with a valid token that gets no
+credentials for another reason is a `credential unavailable` line: the
+robot Secret does not exist yet, or it still holds the robot of the
+previous `serviceAccountRef` (`503`, the plugin retries; the latter also
+on every pull while `harbor.robotNamePrefix` does not match Harbor's
+`robot_name_prefix`), or it is incomplete, the robot name cannot be
+derived, or the Kubernetes API failed (`500`, also on the regular log
+with the full error). So is a token the bridge could not judge because
+it could not fetch the signing keys (`503`, see below). Requests refused
+before the token is checked (rate limit, missing bearer, bad body) are
+counted in the metrics below but not logged one by one.
 
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never
@@ -682,17 +707,28 @@ than by offset, so a robot deleted by someone else during the walk
 cannot hide another one (`TestClient_List_ConcurrentDeleteHidesNoRobot`).
 
 OIDC discovery and JWKS fetches follow no redirects and are bounded
-(30s). The bridge's own ServiceAccount token, which the apiserver
-requires for them, is sent only over https to the in-cluster apiserver
-and to the jwks_uri its discovery names: anywhere else it could be
-replayed against the apiserver with the bridge's RBAC. The signing keys
-are fetched again at most every 30s, so forged tokens with unknown key
-IDs cannot make the bridge poll the apiserver once per request.
+(30s for discovery, 10s for a JWKS fetch). The bridge's own
+ServiceAccount token, which the apiserver requires for them, is sent
+only over https to the in-cluster apiserver and to the jwks_uri its
+discovery names: anywhere else it could be replayed against the
+apiserver with the bridge's RBAC. The signing keys are fetched again at
+most every 30s (counted from the end of the previous fetch), so forged
+tokens with unknown key IDs cannot make the bridge poll the apiserver
+once per request. A token signed by a key the bridge already holds never
+waits for a fetch: keys older than 10 minutes are refreshed in the
+background, and while the apiserver is slow or unreachable, or answers
+with no public key, the last keys fetched stay in use, including a key
+the issuer has since rotated out. The bridge fetches the keys once at
+startup and exits if it cannot, so a wrong `bridge.oidcJWKSURL`, CA or
+RBAC stops the rollout instead of denying every request. A token signed
+by a key the bridge does not hold, while it cannot fetch the current
+keys, is answered `503` and counted as `reason=keys_unavailable`, not as
+an invalid token.
 
 The bridge also exposes Prometheus metrics for SOC-style alerting:
 
 - `bridge_credential_issuances_total{result=ok|unauthorized|forbidden|unavailable|bad_request|server_error|rate_limited}`
-- `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|other}`
+- `bridge_oidc_validation_failures_total{reason=expired|bad_signature|wrong_issuer|malformed|excessive_lifetime|not_pod_bound|keys_unavailable|other}`
 - `bridge_harboraccess_lookup_failures_total`
 - `bridge_robot_secret_missing_total`
 - `bridge_credential_issuance_duration_seconds`

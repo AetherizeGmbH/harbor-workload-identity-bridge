@@ -285,6 +285,31 @@ func TestValidator_RejectsMalformedToken(t *testing.T) {
 	}
 }
 
+// The alg header is the sender's, and go-oidc quotes it in its error for
+// an algorithm it does not accept. It must not choose the failure
+// category: alg "expired" counted as an expired token.
+func TestValidator_SenderChosenAlgCountsAsMalformed(t *testing.T) {
+	fi := newFixtureIssuer(t)
+	v := newValidatorFor(t, fi)
+	payload, err := json.Marshal(fi.standardClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	for _, alg := range []string{"expired", "HS256", "none"} {
+		t.Run(alg, func(t *testing.T) {
+			token := enc([]byte(`{"alg":"`+alg+`","kid":"`+fi.kid+`"}`)) + "." + enc(payload) + "." + enc([]byte("sig"))
+			_, err := v.Validate(context.Background(), token)
+			if !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("err = %v, want ErrInvalidToken", err)
+			}
+			if c := classifyOIDCError(err); c != OIDCReasonMalformed {
+				t.Fatalf("category = %q for %q, want %q", c, err, OIDCReasonMalformed)
+			}
+		})
+	}
+}
+
 func TestNewValidator_FailsOnUnreachableIssuer(t *testing.T) {
 	// Constructor must fail fast on a bad issuer URL so misconfiguration
 	// blocks the bridge from starting.
@@ -299,6 +324,144 @@ func TestNewValidator_FailsOnUnreachableIssuer(t *testing.T) {
 	if !strings.Contains(err.Error(), "discovery") {
 		t.Errorf("error should come from discovery: %v", err)
 	}
+}
+
+// A JWKS URL, CA or RBAC that does not work must stop the bridge at
+// startup, like a failed discovery, not deny every request later.
+func TestNewValidator_FailsWhenTheSigningKeysCannotBeFetched(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer failing.Close()
+	// Any JSON answer used to pass: a JWKS URL naming the discovery
+	// document or /version started, and then every token was a bad
+	// signature.
+	fi := newFixtureIssuer(t)
+	version := httptest.NewServer(serveBody([]byte(`{"major":"1","minor":"33"}`)))
+	defer version.Close()
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"unreachable JWKS URL", Config{Issuer: "https://kubernetes.default.svc", JWKSURL: "http://127.0.0.1:1/keys"}},
+		{"JWKS URL refuses the bridge", Config{Issuer: "https://kubernetes.default.svc", JWKSURL: failing.URL + "/openid/v1/jwks"}},
+		{"JWKS URL names the discovery document", Config{Issuer: fi.URL(), JWKSURL: fi.URL() + "/.well-known/openid-configuration"}},
+		{"JWKS URL names another JSON endpoint", Config{Issuer: "https://kubernetes.default.svc", JWKSURL: version.URL + "/version"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.MaxTokenLifetime = time.Hour
+			_, err := NewValidator(context.Background(), tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "token signing keys") {
+				t.Fatalf("err = %v, want the signing-key fetch failure", err)
+			}
+		})
+	}
+	t.Run("discovered jwks_uri fails", func(t *testing.T) {
+		mux := http.NewServeMux()
+		var srv *httptest.Server
+		mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": srv.URL, "jwks_uri": srv.URL + "/keys"})
+		})
+		mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+		srv = httptest.NewServer(mux)
+		defer srv.Close()
+		_, err := NewValidator(context.Background(), Config{Issuer: srv.URL, MaxTokenLifetime: time.Hour})
+		if err == nil || !strings.Contains(err.Error(), "token signing keys") {
+			t.Fatalf("err = %v, want the signing-key fetch failure", err)
+		}
+	})
+}
+
+// A token whose key the bridge does not hold, while the JWKS cannot be
+// fetched, is unavailable (503), not invalid: it may be signed by a key
+// the issuer just rotated in. A key the bridge holds that does not verify
+// the signature stays a bad signature.
+func TestValidator_UnavailableSigningKeysAreNotInvalidTokens(t *testing.T) {
+	fi := newFixtureIssuer(t)
+	srv := newJWKSServer(t, serveBody(jwksBody(t, fi.key, fi.kid)))
+	clock := newFakeClock()
+	tr := &failingTransport{}
+	v, err := NewValidator(context.Background(), Config{
+		Issuer: fi.URL(), JWKSURL: srv.URL, MaxTokenLifetime: time.Hour,
+		HTTPClient: &http.Client{Timeout: time.Second, Transport: tr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gv, ok := v.(*goOIDCValidator)
+	if !ok {
+		t.Fatalf("validator is %T", v)
+	}
+	gv.keys.now = clock.now
+	rotated := forgedToken(t, fi, "rotated-in")
+	unavailable := func(t *testing.T, ctx context.Context, token string) {
+		t.Helper()
+		_, err := v.Validate(ctx, token)
+		if !errors.Is(err, ErrSigningKeysUnavailable) || errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("err = %v, want ErrSigningKeysUnavailable and not ErrInvalidToken", err)
+		}
+		if c := classifyOIDCError(err); c != OIDCReasonKeysUnavailable {
+			t.Fatalf("category = %q, want %q", c, OIDCReasonKeysUnavailable)
+		}
+	}
+	invalid := func(t *testing.T, token string) {
+		t.Helper()
+		_, err := v.Validate(context.Background(), token)
+		if !errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrSigningKeysUnavailable) {
+			t.Fatalf("err = %v, want ErrInvalidToken", err)
+		}
+		if c := classifyOIDCError(err); c != OIDCReasonBadSignature {
+			t.Fatalf("category = %q, want %q", c, OIDCReasonBadSignature)
+		}
+	}
+
+	srv.set(serveStatus(http.StatusForbidden))
+	clock.advance(jwksMinRefresh + time.Second)
+	t.Run("unknown key, the refresh fails", func(t *testing.T) { unavailable(t, context.Background(), rotated) })
+	t.Run("unknown key, rate-limited after the failure", func(t *testing.T) { unavailable(t, context.Background(), rotated) })
+	t.Run("known key, wrong signature", func(t *testing.T) {
+		invalid(t, fi.signTokenWithOtherKey(t, fi.standardClaims()))
+	})
+	t.Run("known key still verifies", func(t *testing.T) {
+		if _, err := v.Validate(context.Background(), fi.signToken(t, fi.standardClaims())); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// The categories are matched on the error text, and these fetch
+	// errors name "expired" and "malformed". A forged token for a held key
+	// used to carry them and count as expired or malformed.
+	for _, fetchErr := range []struct{ name, text string }{
+		{"expired TLS certificate", "tls: failed to verify certificate: x509: certificate has expired or is not yet valid"},
+		{"malformed response", "net/http: HTTP/1.x transport connection broken: malformed HTTP response"},
+	} {
+		tr.fail(errors.New(fetchErr.text))
+		clock.advance(jwksMinRefresh + time.Second)
+		t.Run("known key, wrong signature, refresh failed: "+fetchErr.name, func(t *testing.T) {
+			invalid(t, fi.signTokenWithOtherKey(t, fi.standardClaims()))
+		})
+		t.Run("unknown key, rate-limited after the failure: "+fetchErr.name, func(t *testing.T) {
+			unavailable(t, context.Background(), rotated)
+		})
+	}
+	tr.fail(nil)
+
+	srv.set(srv.hang)
+	clock.advance(jwksMinRefresh + time.Second)
+	t.Run("unknown key, the request ends during the refresh", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		unavailable(t, ctx, rotated)
+	})
+
+	srv.set(serveBody(jwksBody(t, fi.key, fi.kid)))
+	eventually(t, "the hanging fetch to end", func() bool {
+		gv.keys.mu.Lock()
+		defer gv.keys.mu.Unlock()
+		return gv.keys.inflight == nil
+	})
+	clock.advance(jwksMinRefresh + time.Second)
+	t.Run("unknown key against a current key set", func(t *testing.T) { invalid(t, rotated) })
 }
 
 func TestNewValidator_RequiresPositiveMaxTokenLifetime(t *testing.T) {

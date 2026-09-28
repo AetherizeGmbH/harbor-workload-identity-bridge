@@ -5,11 +5,9 @@ package dataplane
 
 import (
 	"errors"
-	"net/http"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Label values for bridge_credential_issuances_total{result}. One increment
@@ -25,7 +23,8 @@ const (
 )
 
 // Label values for bridge_oidc_validation_failures_total{reason}, also
-// the audit line's category for invalid_token. go-oidc/v3 returns error
+// the audit line's category for invalid_token (keys_unavailable is a
+// "credential unavailable" line instead). go-oidc/v3 returns error
 // strings; we substring-match into these stable buckets because go-oidc
 // does not expose typed error categories. The validator's own checks
 // (ADR-0028) return sentinel errors and are matched with errors.Is. If
@@ -38,7 +37,10 @@ const (
 	OIDCReasonMalformed         = "malformed"
 	OIDCReasonExcessiveLifetime = "excessive_lifetime"
 	OIDCReasonNotPodBound       = "not_pod_bound"
-	OIDCReasonOther             = "other"
+	// OIDCReasonKeysUnavailable is not a bad token: the bridge could not
+	// fetch the signing keys to judge it (ErrSigningKeysUnavailable).
+	OIDCReasonKeysUnavailable = "keys_unavailable"
+	OIDCReasonOther           = "other"
 )
 
 // Metrics is the set of Prometheus collectors exported by the data plane.
@@ -54,9 +56,10 @@ type Metrics struct {
 }
 
 // NewMetrics constructs the metric collectors and registers them on reg.
-// Pass controller-runtime's metrics.Registry from main.go to combine these
-// with the reconciler's built-in metrics on a single /metrics endpoint.
-// Pass prometheus.NewRegistry() in tests for isolation.
+// Pass controller-runtime's metrics.Registry from main.go: the manager's
+// metrics server serves it with the reconciler's metrics, on its own port
+// and never on the credential listener (ADR-0025). Pass
+// prometheus.NewRegistry() in tests for isolation.
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		Issuances: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -94,19 +97,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited} {
 		m.Issuances.WithLabelValues(r)
 	}
-	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonOther} {
+	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonKeysUnavailable, OIDCReasonOther} {
 		m.OIDCValidationFailures.WithLabelValues(r)
 	}
 	return m
-}
-
-// PromHandler returns an http.Handler that serves the Prometheus exposition
-// format for gatherer g. Pass controller-runtime's metrics.Registry to
-// expose both data-plane and reconciler metrics under one /metrics path.
-func PromHandler(g prometheus.Gatherer) http.Handler {
-	return promhttp.HandlerFor(g, promhttp.HandlerOpts{
-		ErrorHandling: promhttp.ContinueOnError,
-	})
 }
 
 // classifyOIDCError buckets a Validate error into one of the OIDCReason*
@@ -123,9 +117,17 @@ func classifyOIDCError(err error) string {
 		return OIDCReasonExcessiveLifetime
 	case errors.Is(err, ErrTokenNotPodBound):
 		return OIDCReasonNotPodBound
+	case errors.Is(err, ErrSigningKeysUnavailable):
+		return OIDCReasonKeysUnavailable
 	}
 	s := strings.ToLower(err.Error())
 	switch {
+	// First: go-oidc's "oidc: malformed jwt: ..." for a token go-jose
+	// cannot parse quotes the token's alg header, which the sender
+	// chooses (alg "expired" must not count as an expired token), and for
+	// an alg=none or HS256 probe it names the signature too.
+	case strings.Contains(s, "malformed"):
+		return OIDCReasonMalformed
 	case strings.Contains(s, "expired"):
 		return OIDCReasonExpired
 	case strings.Contains(s, "signature"):
@@ -134,8 +136,7 @@ func classifyOIDCError(err error) string {
 	// provider, expected %q got %q" — it never contains "issuer".
 	case strings.Contains(s, "different provider"), strings.Contains(s, "issuer"):
 		return OIDCReasonWrongIssuer
-	case strings.Contains(s, "malformed"),
-		strings.Contains(s, "parse"),
+	case strings.Contains(s, "parse"),
 		strings.Contains(s, "invalid json"):
 		return OIDCReasonMalformed
 	default:

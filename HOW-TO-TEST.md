@@ -536,6 +536,7 @@ the bridge used to emit the kubelet-invalid `"ServiceAccount"`.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `dial tcp: lookup kubernetes.default.svc.cluster.local: no such host` at bridge startup | `BRIDGE_OIDC_JWKS_URL` not set | Start `make proxy` and set `BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks`. |
+| `oidc: fetch the token signing keys from … connection refused` at bridge startup | `make proxy` is not running | Start it; the bridge fetches the keys before it serves. |
 | Reconciler logs `create robot: NOT_FOUND: project "X" not found` and the CR is `Ready=False` | Harbor project from `spec.permissions[].project` doesn't exist | Create the project in Harbor; the next reconcile recovers. |
 | Bridge returns `401 invalid token` from `/v1/credentials` | SA token's `iss` claim ≠ `BRIDGE_OIDC_ISSUER` | Re-print the issuer with `kubectl get --raw /.well-known/openid-configuration` and align both env var + `trustPolicy.issuer`. |
 | `401 invalid token`, audit line `category=not_pod_bound` or `category=excessive_lifetime` | Token minted without `--bound-object-kind=Pod`, or with a `--duration` above `BRIDGE_TOKEN_MAX_LIFETIME` | Mint it as in Phase 3. `BRIDGE_REQUIRE_POD_BOUND_TOKEN=false` accepts unbound tokens, but weakens the bridge; keep it to local development. |

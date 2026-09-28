@@ -233,12 +233,17 @@ func run() error {
 			BridgeNamespace:      cfg.Namespace,
 			ForceLocalValidation: cfg.ForceLocalValidation,
 			Audience:             cfg.Audience,
+			RobotUsername:        robotUsername(cfg),
 		},
 		Metrics: metrics,
 		Limiter: dataplane.NewSourceLimiter(perSource, burst),
 		// Fixed at info: BRIDGE_LOG_LEVEL must not be able to silence the
 		// record of who received credentials.
 		Audit: newLogger("info").WithName("audit"),
+	}
+
+	if err := dataplane.IndexHarborAccessBySubject(startupCtx, mgr.GetFieldIndexer()); err != nil {
+		return fmt.Errorf("index HarborAccess by subject: %w", err)
 	}
 
 	mux := http.NewServeMux()
@@ -288,6 +293,20 @@ func validatorConfig(cfg *controlplane.Config) dataplane.Config {
 		vc.JWKSURL = cfg.OIDCJWKSURL.String()
 	}
 	return vc
+}
+
+// robotUsername maps a ServiceAccount to the username the control plane
+// stores in its robot Secret: the Harbor robot prefix plus the robot name
+// (ADR-0018), as Harbor reports it. The data plane serves a Secret only to
+// the identity it was minted for.
+func robotUsername(cfg *controlplane.Config) func(saNamespace, saName string) (string, error) {
+	return func(saNamespace, saName string) (string, error) {
+		name, err := harbor.RobotName(cfg.ClusterName, saNamespace, saName)
+		if err != nil {
+			return "", err
+		}
+		return cfg.HarborRobotPrefix + name, nil
+	}
 }
 
 // logWeakTokenValidation warns about token-validation settings that either

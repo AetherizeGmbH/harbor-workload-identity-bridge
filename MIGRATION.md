@@ -45,6 +45,15 @@ default.
 | The installer takes a lock on each node (`/run/harbor-bridge-installer.lock`, and `<provider config>.lock` next to the provider config) and records a per-install `entryHash` in its state file next to `appliedHash`, which keeps its meaning | Nothing. The first pass adds `entryHash` to the state file of the previous version without a kubelet restart; a rollback of a single install finds its own `appliedHash` and does not restart kubelet either. |
 | A second bridge installed by hand with `plugin.enabled=false` (the workaround so far) | Optional: switch it to the chart's DaemonSet with the same provider name. The installer adopts an existing bridge entry of that name, but replaces the hand-copied binary only if it is byte for byte the plugin of the chart's `plugin.image` (it has no record yet): copy that version onto the nodes first, or the installer refuses the file as another program's. |
 
+### Unreleased: data-plane fixes
+
+| Change | What to do |
+| --- | --- |
+| A request with a valid token that gets `503` or `500` is logged as a `credential unavailable` audit line (`reason=secret_missing`, `secret_unreadable` or `harboraccess_lookup_failed`, with source, subject, pod and node). The regular log's `robot Secret not yet available` line is gone | Match `credential unavailable` instead of `robot Secret not yet available` in log queries. |
+| The bridge fetches the token signing keys at startup and exits when it cannot, also with `bridge.oidcJWKSURL` set. A token whose key the bridge does not hold while the JWKS cannot be fetched gets `503` and `bridge_oidc_validation_failures_total{reason="keys_unavailable"}` (was `401` and `bad_signature`); an unexpected signature algorithm counts as `malformed` (was `bad_signature`) | A bridge that now exits at startup could never validate a token: fix the JWKS URL, the CA (`bridge.oidcCAFile`) or the RBAC its error names. Alert on `keys_unavailable` as an outage, not as forged tokens. |
+| A plain-http `bridge.oidcJWKSURL`, a plain-http `bridge.oidcIssuer` used for discovery, or a plain-http `jwks_uri` in the discovery document fails at startup unless the host is `127.0.0.1`, `::1` or `localhost` | Use https (the chart's defaults and `https://kubernetes.default.svc/openid/v1/jwks` already do). `make run-local` through `kubectl proxy` on `127.0.0.1` keeps working. |
+| The data plane serves a robot Secret only when its username is the robot of the HarborAccess's current `serviceAccountRef` (`harbor.robotNamePrefix` plus `bridge-<clusterName>.<namespace>.<name>`); otherwise `503`, `reason=secret_for_previous_identity` | Nothing, if `harbor.robotNamePrefix` matches Harbor's `robot_name_prefix`. If it does not, every pull now fails with `503` (the reconciler already reported `Ready=False`): set it to Harbor's prefix. |
+
 ### 0.10.0: token lifetime cap and pod binding (ADR-0028)
 
 | Change | What to do |
