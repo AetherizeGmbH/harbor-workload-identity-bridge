@@ -1,3 +1,9 @@
+## [0.10.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.10.1...v0.10.2) (2026-09-28)
+
+### Bug Fixes
+
+* **harbor:** no redirects, no URL credentials, fail closed on prefix and name mismatches ([#134](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/134)) ([0b7b7a6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/0b7b7a63b7162964f457c8af45bdbf7bad3d8b2d))
+
 ## [0.10.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.10.0...v0.10.1) (2026-09-27)
 
 ### Bug Fixes
