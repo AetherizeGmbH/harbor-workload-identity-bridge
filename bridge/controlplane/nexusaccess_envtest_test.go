@@ -514,3 +514,101 @@ func TestEnvtest_NexusLifecycle(t *testing.T) {
 			apierrors.IsNotFound(k8s.Get(ctx, v2SecretKey, s))
 	})
 }
+
+// TestEnvtest_NexusRepositoryNotFoundStillRotates runs ADR-0036 decision c
+// against a real apiserver: a NexusAccess in RepositoryNotFound rotates
+// once rotation-not-before plus the margin has passed, keeps the
+// grants-incomplete mark on the new Secret, and deletes the previous user
+// after the grace, while the repository stays missing. The leaked-token
+// bound in the Consequences rests on it.
+func TestEnvtest_NexusRepositoryNotFoundStillRotates(t *testing.T) {
+	cfg, k8s := nexusEnvtest(t)
+	ctx := context.Background()
+	nx := nexustest.New(t)
+	nx.AddRepository("docker", testRepo)
+	clock := newStepClock()
+	bridge := testReconcilerConfig()
+	bridge.Nexus = &NexusConfig{}
+	mgr := newEnvtestManager(t, cfg, bridge)
+	backoff := &NexusBackoff{Window: time.Minute, Clock: clock}
+	rec := &NexusReconciler{Client: mgr.GetClient(), Scheme: testScheme, Nexus: backoff.Wrap(nx.Client(t)), Backoff: backoff, Config: bridge, Clock: clock}
+	if err := rec.SetupWithManager(mgr); err != nil {
+		t.Fatal(err)
+	}
+	runManager(t, mgr)
+
+	nxa := newNexusAccess()
+	nxa.Finalizers = nil
+	nxa.Spec.Repositories = append(nxa.Spec.Repositories, nexusv1alpha1.RepositoryGrant{Name: "absent", Access: nexusv1alpha1.AccessPull})
+	if err := k8s.Create(ctx, nxa); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(nxa)
+	secretKey := types.NamespacedName{Namespace: testNS, Name: nexussecret.Name(testNXANamespace, testNXAName)}
+	// state returns the Ready reason, the Secret, and the user whose
+	// password Nexus accepts ("" when none).
+	state := func() (string, *corev1.Secret, string) {
+		got, s := &nexusv1alpha1.NexusAccess{}, &corev1.Secret{}
+		if k8s.Get(ctx, key, got) != nil || k8s.Get(ctx, secretKey, s) != nil {
+			return "", nil, ""
+		}
+		user := string(s.Data["username"])
+		if !nx.Authenticate(user, string(s.Data["password"])) {
+			user = ""
+		}
+		return nexusReason(got), s, user
+	}
+	markedAbsent := func(s *corev1.Secret) bool {
+		missing, incomplete := nexussecret.GrantsIncomplete(s)
+		return incomplete && slices.Equal(missing, []string{"absent"})
+	}
+	touch := func() {
+		t.Helper()
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			got := &nexusv1alpha1.NexusAccess{}
+			if err := k8s.Get(ctx, key, got); err != nil {
+				return err
+			}
+			if got.Annotations == nil {
+				got.Annotations = map[string]string{}
+			}
+			got.Annotations["test/touch"] = clock.Now().Format(time.RFC3339Nano)
+			return k8s.Update(ctx, got)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var first string
+	eventually(t, "RepositoryNotFound with a user and the Secret marked", func() bool {
+		reason, s, user := state()
+		first = user
+		return reason == ReasonRepositoryNotFound && user != "" && markedAbsent(s)
+	})
+
+	clock.Advance(PasswordRotationInterval + RotationSafetyMargin)
+	touch()
+	var second string
+	eventually(t, "rotated while RepositoryNotFound, the mark kept, the previous user retiring", func() bool {
+		reason, s, user := state()
+		if user == "" || user == first {
+			return false
+		}
+		second = user
+		id, _, retiring := nexussecret.Retiring(s)
+		_, firstExists := nx.User(first)
+		return reason == ReasonRepositoryNotFound && markedAbsent(s) && retiring && id == first && firstExists
+	})
+
+	clock.Advance(NexusUserRetireGrace)
+	touch()
+	eventually(t, "the previous user deleted after its grace while RepositoryNotFound", func() bool {
+		reason, s, user := state()
+		if s == nil {
+			return false
+		}
+		_, firstExists := nx.User(first)
+		_, _, retiring := nexussecret.Retiring(s)
+		return reason == ReasonRepositoryNotFound && markedAbsent(s) && user == second && !firstExists && !retiring
+	})
+}

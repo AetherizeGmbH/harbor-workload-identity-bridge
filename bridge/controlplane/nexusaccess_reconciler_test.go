@@ -608,6 +608,165 @@ func TestNexusReconcile_ScheduledRotationReplacesTheUser(t *testing.T) {
 	}
 }
 
+// ADR-0036 decision c: the scheduled rotation and the deletion of the
+// previous user do not depend on the grants, and the leaked-token bound in
+// the Consequences rests on that. A NexusAccess in RepositoryNotFound
+// rotates once rotation-not-before plus the margin has passed, keeps the
+// grants-incomplete mark on the new Secret, records the previous user as
+// retiring, and deletes it after the grace, while the repository stays
+// missing.
+func TestNexusReconcile_RepositoryNotFoundStillRotatesAndRetires(t *testing.T) {
+	nxa := newNexusAccess()
+	nxa.Spec.Repositories = append(nxa.Spec.Repositories, nexusv1alpha1.RepositoryGrant{Name: "absent", Access: nexusv1alpha1.AccessPull})
+	h := newNexusHarness(t, nil, nxa)
+	h.mustReconcile()
+	first, ok := h.storedAuthenticates()
+	if !ok {
+		t.Fatal("no user while a repository is missing")
+	}
+	firstPassword := string(h.secret().Data["password"])
+	assertNexusCondition(t, h.object(), nexusv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRepositoryNotFound)
+	markedAbsent := func(s *corev1.Secret) bool {
+		missing, incomplete := nexussecret.GrantsIncomplete(s)
+		return incomplete && slices.Equal(missing, []string{"absent"})
+	}
+
+	h.clock.Advance(PasswordRotationInterval + RotationSafetyMargin)
+	res := h.mustReconcile()
+	second, ok := h.storedAuthenticates()
+	if !ok || second == first {
+		t.Fatalf("after the promise: user %q (authenticates %v), want a new generation while RepositoryNotFound", second, ok)
+	}
+	s := h.secret()
+	if !markedAbsent(s) {
+		t.Errorf("the rotated Secret lost the grants-incomplete mark: %v", s.Annotations)
+	}
+	if id, after, retiring := nexussecret.Retiring(s); !retiring || id != first || !after.Equal(h.clock.Now().Add(NexusUserRetireGrace)) {
+		t.Errorf("retiring = %q until %s (%v), want %q until now+grace", id, after, retiring, first)
+	}
+	if !h.nx.Authenticate(first, firstPassword) {
+		t.Error("the previous user is gone before its grace passed")
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > NexusUserRetireGrace {
+		t.Errorf("RequeueAfter = %s, want at most the grace", res.RequeueAfter)
+	}
+	got := h.object()
+	assertNexusCondition(t, got, nexusv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRepositoryNotFound)
+	assertNexusCondition(t, got, nexusv1alpha1.ConditionUserProvisioned, metav1.ConditionTrue, ReasonReconcileSucceeded)
+	if got.Status.User.UserID != second || !got.Status.User.LastRotated.Time.Equal(h.clock.Now()) {
+		t.Errorf("status user = %+v", got.Status.User)
+	}
+
+	h.clock.Advance(NexusUserRetireGrace)
+	h.mustReconcile()
+	if _, ok := h.nx.User(first); ok {
+		t.Error("the previous user survived its grace while RepositoryNotFound")
+	}
+	s = h.secret()
+	if _, _, retiring := nexussecret.Retiring(s); retiring {
+		t.Error("the retiring record survived the retirement")
+	}
+	if !markedAbsent(s) {
+		t.Errorf("the grants-incomplete mark went while the repository is missing: %v", s.Annotations)
+	}
+	if ids := h.userIDs(); !slices.Equal(ids, []string{second}) {
+		t.Errorf("users = %v, want only %q", ids, second)
+	}
+	assertNexusCondition(t, h.object(), nexusv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRepositoryNotFound)
+}
+
+// A role deleted between its write and the user create leaves the new user
+// with a hidden reference that takes effect once a role of that id is
+// created (ADR-0036 Context 5, decision b). The user comes back without the
+// role (errRoleNotHeld): the pass stores no password and is not Ready; the
+// next pass creates the role and a user of a new generation, and deletes
+// the user whose password was never stored.
+func TestNexusReconcile_UserCreatedWithoutItsRoleIsNotProvisioned(t *testing.T) {
+	nxa := newNexusAccess()
+	nxa.Finalizers = nil
+	h := newNexusHarness(t, nil, nxa)
+	var once sync.Once
+	h.nx.SetHook(func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && r.URL.Path == "/service/rest/v1/security/users" {
+			once.Do(func() { h.nx.RemoveRole(testIdentity) })
+		}
+		return false
+	})
+	if _, err := h.reconcile(); err == nil || !strings.Contains(err.Error(), errRoleNotHeld.Error()) {
+		t.Fatalf("Reconcile = %v, want %v", err, errRoleNotHeld)
+	}
+	s := h.secret()
+	if s == nil || len(s.Data) != 0 || nexussecret.PendingUserID(s) == "" {
+		t.Fatalf("Secret after a user without its role = %+v, want only the pending record", s)
+	}
+	orphan := nexussecret.PendingUserID(s)
+	if _, ok := h.nx.User(orphan); !ok {
+		t.Fatalf("the user %q the pass created is not in Nexus", orphan)
+	}
+	got := h.object()
+	if c := meta.FindStatusCondition(got.Status.Conditions, nexusv1alpha1.ConditionReady); c == nil || c.Status == metav1.ConditionTrue {
+		t.Errorf("Ready = %+v, want not True", c)
+	}
+	if got.Status.ObservedGeneration != 0 {
+		t.Errorf("observedGeneration = %d, want 0", got.Status.ObservedGeneration)
+	}
+
+	h.mustReconcile()
+	userID, ok := h.storedAuthenticates()
+	if !ok || userID == orphan {
+		t.Fatalf("second pass: user %q (authenticates %v), want a new generation", userID, ok)
+	}
+	if u, _ := h.nx.User(userID); !slices.Equal(u.Roles, []string{testIdentity}) {
+		t.Errorf("user roles = %v", u.Roles)
+	}
+	if _, ok := h.nx.User(orphan); ok {
+		t.Errorf("the user %q whose password was never stored survived", orphan)
+	}
+	assertNexusCondition(t, h.object(), nexusv1alpha1.ConditionReady, metav1.ConditionTrue, ReasonReconcileSucceeded)
+}
+
+// A spec edit that removes a repository and names a missing one marks the
+// Secret grants-incomplete before the role write (ADR-0036 decision d):
+// when that write fails, the data plane already refuses, instead of
+// serving credentials whose role still grants the removed repository.
+func TestNexusReconcile_MarkPrecedesAFailedRoleWrite(t *testing.T) {
+	h := newNexusHarness(t, nil, newNexusAccess())
+	h.nx.AddRepository("docker", "b")
+	h.mustReconcile()
+	h.nx.SetHook(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/service/rest/v1/security/roles/") {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return true
+		}
+		return false
+	})
+	h.edit(func(n *nexusv1alpha1.NexusAccess) {
+		n.Spec.Repositories = []nexusv1alpha1.RepositoryGrant{
+			{Name: "b", Access: nexusv1alpha1.AccessPull},
+			{Name: "absent", Access: nexusv1alpha1.AccessPull},
+		}
+	})
+	if _, err := h.reconcile(); err == nil {
+		t.Fatal("Reconcile succeeded although the role write failed")
+	}
+	role, _ := h.nx.Role(testIdentity)
+	if !slices.Equal(role.Privileges, []string{"nx-repository-view-docker-" + testRepo + "-read"}) {
+		t.Fatalf("privileges = %v, want the old grant (the write failed)", role.Privileges)
+	}
+	if missing, incomplete := nexussecret.GrantsIncomplete(h.secret()); !incomplete || !slices.Equal(missing, []string{"absent"}) {
+		t.Errorf("grants-incomplete = %v, %v: the Secret must be marked before the role write", missing, incomplete)
+	}
+	assertNexusCondition(t, h.object(), nexusv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonNexusError)
+
+	h.nx.SetHook(nil)
+	h.mustReconcile()
+	role, _ = h.nx.Role(testIdentity)
+	if !slices.Equal(role.Privileges, []string{"nx-repository-view-docker-b-read"}) {
+		t.Errorf("privileges once Nexus writes again = %v, want only b's", role.Privileges)
+	}
+	assertNexusCondition(t, h.object(), nexusv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonRepositoryNotFound)
+}
+
 // A deleted Secret is an emergency rotation: the previous user goes at
 // once, not after a grace.
 func TestNexusReconcile_DeletedSecretRevokesThePreviousUserAtOnce(t *testing.T) {
