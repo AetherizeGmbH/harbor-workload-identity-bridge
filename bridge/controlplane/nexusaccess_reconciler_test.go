@@ -414,8 +414,8 @@ func TestNexusReconcile_MissingRepositoryHoldsBackNoRemoval(t *testing.T) {
 	if got.Status.ObservedGeneration != gen {
 		t.Errorf("observedGeneration = %d, want %d (not advanced)", got.Status.ObservedGeneration, gen)
 	}
-	if res.RequeueAfter <= 0 {
-		t.Error("RepositoryNotFound is not re-checked")
+	if res.RequeueAfter <= 0 || res.RequeueAfter > NexusRepositoryRecheckInterval {
+		t.Errorf("RequeueAfter = %s, want a re-check within %s", res.RequeueAfter, NexusRepositoryRecheckInterval)
 	}
 
 	h.nx.AddRepository("docker", "c")

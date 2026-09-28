@@ -681,6 +681,11 @@ here.
 10. **`PasswordRejected`** is reported for a 400 to a user create whose
     message mentions the password; Nexus's validator message is not
     documented.
+11. **Re-check of a missing repository** (decision d). Nexus sends no
+    event when a repository is created, so an object in
+    `RepositoryNotFound` is reconciled again after at most
+    `NexusRepositoryRecheckInterval` (5 minutes) instead of the hourly
+    resync.
 
 ## Verified at runtime
 

@@ -58,6 +58,14 @@ const (
 // Secret. It extends the lifetime of a leaked bearer token by as much.
 const NexusUserRetireGrace = 5 * time.Minute
 
+// NexusRepositoryRecheckInterval bounds how long a NexusAccess waits in
+// RepositoryNotFound before the reconciler checks the repositories again.
+// Nexus sends no event when a repository is created, and ResyncInterval
+// would keep an object without credentials for up to an hour after the
+// repository appeared. Each check costs a few calls, and, because the
+// generation stays unobserved, a listing of the cluster's users and roles.
+const NexusRepositoryRecheckInterval = 5 * time.Minute
+
 // NexusReconciler reconciles NexusAccess objects into one Nexus role and
 // one Nexus local user per ServiceAccount identity (ADR-0033). Like the
 // Harbor reconciler it is level-triggered: every pass reads the role, the
@@ -406,6 +414,7 @@ func (r *NexusReconciler) reconcileNormal(ctx context.Context, nxa *nexusv1alpha
 	})
 	requeue := r.requeueAfter(nxa, secret, now)
 	if len(missing) > 0 {
+		requeue = min(requeue, NexusRepositoryRecheckInterval)
 		if err := r.setNotReady(ctx, nxa, ReasonRepositoryNotFound, fmt.Sprintf(
 			"Nexus has no %s repository %s; the role grants the others, and the bridge issues no credentials for this NexusAccess until every repository exists or leaves spec.repositories",
 			nexusv1alpha1.FormatDocker, quoteList(missing))); err != nil {
