@@ -7,9 +7,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -50,6 +53,77 @@ func renderedProvider(rendered []byte, name string) (map[string]any, error) {
 		}
 	}
 	return nil, fmt.Errorf("rendered credential-provider config has no provider named %q", name)
+}
+
+// credentialProviderAPIVersions are the provider apiVersions kubelet
+// accepts (pkg/credentialprovider/plugin/config.go, apiVersions);
+// tokenAttributes needs the first.
+var credentialProviderAPIVersions = []string{
+	"credentialprovider.kubelet.k8s.io/v1",
+	"credentialprovider.kubelet.k8s.io/v1beta1",
+	"credentialprovider.kubelet.k8s.io/v1alpha1",
+}
+
+// validateEntry refuses this install's rendered provider entry when kubelet
+// would reject it at startup for a reason that does not depend on kubelet's
+// version (ADR-0033): kubelet validates every provider
+// (pkg/credentialprovider/plugin/config.go) and exits when one fails, and
+// the chart fills matchImages, defaultCacheDuration and the audience from
+// values it does not check. Checked before anything is written, like every
+// refusal. Standard library only (ADR-0021): matchImages entries parse as
+// kubelet's ParseSchemelessURL does (url.Parse of "https://" + entry), and
+// defaultCacheDuration as metav1.Duration does (a string for
+// time.ParseDuration). A feature gate kubelet has off (tokenAttributes) is
+// not checked; the rollback after a restart that does not verify covers it.
+func validateEntry(entry map[string]any) error {
+	var problems []string
+	apiVersion, _ := entry["apiVersion"].(string)
+	if !slices.Contains(credentialProviderAPIVersions, apiVersion) {
+		problems = append(problems, fmt.Sprintf("apiVersion %v is not one of %s", entry["apiVersion"], strings.Join(credentialProviderAPIVersions, ", ")))
+	}
+	images, _ := entry["matchImages"].([]any)
+	if len(images) == 0 {
+		problems = append(problems, "matchImages is empty")
+	}
+	for _, img := range images {
+		s, ok := img.(string)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("matchImages entry %v is not a string", img))
+			continue
+		}
+		if _, err := url.Parse("https://" + s); err != nil {
+			problems = append(problems, fmt.Sprintf("matchImages entry %q is not a valid image host pattern: %v", s, err))
+		}
+	}
+	switch d, ok := entry["defaultCacheDuration"].(string); {
+	case !ok:
+		problems = append(problems, fmt.Sprintf("defaultCacheDuration %v is not a duration string such as \"1h\"", entry["defaultCacheDuration"]))
+	default:
+		if dur, err := time.ParseDuration(d); err != nil {
+			problems = append(problems, fmt.Sprintf("defaultCacheDuration %q is not a Go duration (units h, m, s, ms, us, ns): %v", d, err))
+		} else if dur < 0 {
+			problems = append(problems, fmt.Sprintf("defaultCacheDuration %q is negative", d))
+		}
+	}
+	if raw, present := entry["tokenAttributes"]; present {
+		ta, _ := raw.(map[string]any)
+		if apiVersion != credentialProviderAPIVersions[0] {
+			problems = append(problems, fmt.Sprintf("tokenAttributes needs apiVersion %s", credentialProviderAPIVersions[0]))
+		}
+		if aud, _ := ta["serviceAccountTokenAudience"].(string); aud == "" {
+			problems = append(problems, "tokenAttributes.serviceAccountTokenAudience is empty")
+		}
+		if _, ok := ta["requireServiceAccount"].(bool); !ok {
+			problems = append(problems, "tokenAttributes.requireServiceAccount is not true or false")
+		}
+		if ct, _ := ta["cacheType"].(string); ct != "ServiceAccount" && ct != "Token" {
+			problems = append(problems, fmt.Sprintf("tokenAttributes.cacheType %v is not ServiceAccount or Token", ta["cacheType"]))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("kubelet would refuse the rendered provider entry %v and not start: %s; fix the chart values (plugin.matchImages, plugin.defaultCacheDuration, plugin.audience)", entry["name"], strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // mergeProvider inserts entry into the CredentialProviderConfig in

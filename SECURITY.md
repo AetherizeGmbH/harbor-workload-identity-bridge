@@ -418,9 +418,12 @@ container:
   the kubelet flags) actually changed, tracked by a content hash in
   `/var/lib/harbor-bridge/installer-state.json` (one state file per
   install, ADR-0029). It then waits until the
-  unit is stably active (and, in patch mode, until the running kubelet
-  carries the flags) before it records success; otherwise the pod fails
-  loudly. Running containers survive the restart (containerd owns them).
+  unit is stably active, one kubelet process up for the whole settle
+  period (and, in patch mode, until the running kubelet carries the
+  flags), before it records success. Otherwise it restores the files it
+  replaced, restarts kubelet onto them, records the content as rejected so
+  that no retry restarts kubelet onto it again, and fails the pod
+  (ADR-0033). Running containers survive the restart (containerd owns them).
   Binary drops and CA/mTLS rotation never restart kubelet.
 - opens every host file relative to its directory and accepts only a
   regular file: a symlink, FIFO or device in place of a file it reads

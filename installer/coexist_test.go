@@ -1787,7 +1787,7 @@ func TestEntryRecord_RoundTripsEveryEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.cfg.beginRecord(binDir, raw, ""); err != nil {
+	if _, err := env.cfg.beginRecord(binDir, raw, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !env.cfg.readRecord(binDir + "/" + filesFor(defaultProviderName).Record).holds(raw) {

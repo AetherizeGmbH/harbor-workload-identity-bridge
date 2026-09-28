@@ -600,8 +600,19 @@ func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
 		t.Fatalf("got %v, want a verification failure", err)
 	}
-	if st, _ := loadState(env.statePath()); st != nil {
-		t.Fatal("success state recorded for an unverified restart")
+	assertNoVerifiedRestart(t, env)
+}
+
+// assertNoVerifiedRestart fails unless env's state file records no verified
+// kubelet restart; it may record rejected content (ADR-0033).
+func assertNoVerifiedRestart(t *testing.T, env *testEnv) {
+	t.Helper()
+	st, err := loadState(env.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != nil && (st.Mode != "" || st.AppliedHash != "" || st.EntryHash != "") {
+		t.Fatalf("success state recorded for a restart that did not verify: %+v", st)
 	}
 }
 
@@ -631,9 +642,7 @@ func TestRun_RestartVerification_AutoRestartedKubeletIsCaught(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
 		t.Fatalf("got %v, want a verification failure", err)
 	}
-	if st, _ := loadState(env.statePath()); st != nil {
-		t.Fatal("success state recorded for a crash-looping kubelet")
-	}
+	assertNoVerifiedRestart(t, env)
 }
 
 // TestRun_PatchVerification_UnitIgnoresEnvFile: if the kubelet unit does not
@@ -654,9 +663,7 @@ func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
 	if err := run(env.cfg); err == nil {
 		t.Fatal("restart failure swallowed")
 	}
-	if st, _ := loadState(env.statePath()); st != nil {
-		t.Fatal("success state recorded although the restart failed")
-	}
+	assertNoVerifiedRestart(t, env)
 }
 
 // TestRun_UnwritableStateDir_NoRestart: a state dir that cannot be written
@@ -677,6 +684,9 @@ func TestRun_UnwritableStateDir_NoRestart(t *testing.T) {
 	if env.restarts != 0 {
 		t.Fatalf("kubelet restarted (%d) although the result could not be recorded", env.restarts)
 	}
+	// Kubelet was not restarted onto the new files, so they are gone again
+	// (they did not exist before): the node is as the pass found it.
+	assertAbsent(t, env, defaultKubeletPath, env.cfg.ownConfigPath())
 }
 
 // TestRun_MergeRefusalLeavesNoHalfInstall: an unknown node config schema is

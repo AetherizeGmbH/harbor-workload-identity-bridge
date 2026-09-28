@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 )
 
 // state records what the installer last successfully applied AND
@@ -45,6 +46,28 @@ type state struct {
 	// by an older installer after a rollback (it drops fields it does not
 	// know).
 	EntryHash string `json:"entryHash,omitempty"`
+	// Rejected records the content of the last pass whose kubelet restart
+	// did not verify (ADR-0033): a later pass with exactly this content
+	// refuses instead of restarting kubelet onto it again. A verified
+	// restart writes a record without it. The other fields keep describing
+	// the last verified restart.
+	Rejected *rejection `json:"rejected,omitempty"`
+}
+
+// rejection is content kubelet did not come up healthy with after this
+// installer restarted it (state.Rejected).
+type rejection struct {
+	Mode       string `json:"mode"`
+	BinDir     string `json:"binDir"`
+	ConfigFile string `json:"configFile"`
+	// Unit is the kubelet unit the pass restarted: a pass that restarted
+	// the wrong unit did not test the content.
+	Unit        string `json:"unit"`
+	EntryHash   string `json:"entryHash"`
+	AppliedHash string `json:"appliedHash"`
+	// Reason is the error the pass failed with, At when (RFC 3339, UTC).
+	Reason string `json:"reason"`
+	At     string `json:"at"`
 }
 
 const stateSchemaVersion = 1
@@ -94,6 +117,33 @@ func saveState(path string, s *state) error {
 	}
 	if _, err := writeFileAtomic(path, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write installer state: %w", err)
+	}
+	return nil
+}
+
+// rejection returns the record (state.Rejected) that marks t, restarted
+// through unit, as content kubelet rejected at at, with the error reason.
+// Every field of t counts: a changed entry, a changed shared file or
+// /etc/default/kubelet, other paths or another unit are new content, which
+// a pass may try again.
+func (t target) rejection(unit, reason string, at time.Time) *rejection {
+	return &rejection{
+		Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, Unit: unit,
+		EntryHash: t.entryHash, AppliedHash: t.fileHash,
+		Reason: reason, At: at.UTC().Format(time.RFC3339),
+	}
+}
+
+// rejects returns the rejection recorded for t restarted through unit, or
+// nil when the state records none for exactly that content.
+func (s *state) rejects(t target, unit string) *rejection {
+	if s == nil || s.Rejected == nil {
+		return nil
+	}
+	r := s.Rejected
+	if r.Mode == t.mode && r.BinDir == t.binDir && r.ConfigFile == t.configFile && r.Unit == unit &&
+		r.EntryHash == t.entryHash && r.AppliedHash == t.fileHash {
+		return r
 	}
 	return nil
 }

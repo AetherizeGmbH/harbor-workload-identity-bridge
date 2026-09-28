@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const configFileName = "credential-provider-config.yaml"
@@ -44,6 +45,9 @@ func run(cfg *config) error {
 	// the chart and the installer disagree on the name.
 	entry, err := renderedProvider(rendered, cfg.ProviderName)
 	if err != nil {
+		return err
+	}
+	if err := validateEntry(entry); err != nil {
 		return err
 	}
 
@@ -147,7 +151,7 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 		return err
 	}
 	defer unlock()
-	desired, err := ownConfig(cfg, dir, rendered, entry)
+	desired, _, err := ownConfig(cfg, dir, rendered, entry)
 	if err != nil {
 		return err
 	}
@@ -155,7 +159,7 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
+	if _, err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
 	changed, err := writeFileIn(dir, configFileName, desired, 0o644)
@@ -183,14 +187,16 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 
 	// Compute everything that can be refused BEFORE touching the host,
 	// so a refusal never leaves a half-install behind.
-	desiredConfig, err := ownConfig(cfg, dir, rendered, entry)
+	desiredConfig, priorConfig, err := ownConfig(cfg, dir, rendered, entry)
 	if err != nil {
 		return err
 	}
-	existingEnv, err := readHostFile(cfg.hostPath(defaultKubeletPath))
+	envPath := cfg.hostPath(defaultKubeletPath)
+	existingEnv, err := readHostFile(envPath)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", defaultKubeletPath, err)
 	}
+	priorEnv := priorContent{existed: err == nil, data: existingEnv}
 	desiredEnv, err := mergeExtraArgs(existingEnv, cfg.HostBinDir, configPath)
 	if err != nil {
 		return err
@@ -199,8 +205,17 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
+	t := target{
+		mode: modePatch, binDir: cfg.HostBinDir, configFile: configPath,
+		entryHash: contentHash(entryJSON, desiredEnv),
+		fileHash:  contentHash(desiredConfig, desiredEnv),
+	}
+	if err := cfg.refuseRejected(t); err != nil {
+		return err
+	}
 
-	if err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath); err != nil {
+	begun, err := installFiles(cfg, cfg.HostBinDir, entryJSON, configPath)
+	if err != nil {
 		return err
 	}
 	configChanged, err := writeFileIn(dir, configFileName, desiredConfig, 0o644)
@@ -210,10 +225,16 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	if err := cfg.commitRecord(cfg.HostBinDir, entryJSON, configPath); err != nil {
 		return err
 	}
-	envChanged, err := writeFileAtomic(cfg.hostPath(defaultKubeletPath), desiredEnv, 0o644)
+	envChanged, err := writeFileAtomic(envPath, desiredEnv, 0o644)
 	if err != nil {
 		return err
 	}
+	// What kubelet reads at startup, as this pass found it (ADR-0033). The
+	// record first: while the config is restored it holds both entries.
+	var rb rollback
+	rb.step(func() error { return cfg.writeRecord(cfg.HostBinDir, *begun) })
+	rb.file(configPath, func() error { return restoreIn(dir, configFileName, priorConfig, 0o644) })
+	rb.file(defaultKubeletPath, func() error { return restoreHostFile(envPath, priorEnv, 0o644) })
 
 	want := kubeletWiring{BinDir: cfg.HostBinDir, ConfigFile: configPath}
 	verify := func() error {
@@ -229,12 +250,7 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 		}
 		return nil
 	}
-	t := target{
-		mode: modePatch, binDir: cfg.HostBinDir, configFile: configPath,
-		entryHash: contentHash(entryJSON, desiredEnv),
-		fileHash:  contentHash(desiredConfig, desiredEnv),
-	}
-	return finishWithRestart(cfg, t, configChanged || envChanged, verify)
+	return finishWithRestart(cfg, t, configChanged || envChanged, verify, &rb)
 }
 
 // lockPatchConfigs takes the config locks that a patch-mode pass holds
@@ -400,18 +416,18 @@ func configDocs(path string) ([][]byte, error) {
 
 // ownConfig reads the chart-owned provider config of patch and none mode
 // from dir, plugin.hostConfigDir (openConfigDir), and returns the content it
-// must have after this install (chartOwnedConfig). The caller holds the
-// config lock.
-func ownConfig(cfg *config, dir *os.Root, rendered []byte, entry map[string]any) ([]byte, error) {
+// must have after this install (chartOwnedConfig) and the content it has
+// now. The caller holds the config lock.
+func ownConfig(cfg *config, dir *os.Root, rendered []byte, entry map[string]any) ([]byte, priorContent, error) {
 	path := cfg.ownConfigPath()
-	existing, err := readFileIn(dir, configFileName)
+	prior, err := readPrior(dir, configFileName)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return rendered, nil
 	case err != nil:
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, priorContent{}, fmt.Errorf("read %s: %w", path, err)
+	case !prior.existed:
+		return rendered, prior, nil
 	}
-	return chartOwnedConfig(path, existing, rendered, entry, cfg.siblingIn(cfg.HostBinDir)), nil
+	return chartOwnedConfig(path, prior.data, rendered, entry, cfg.siblingIn(cfg.HostBinDir)), prior, nil
 }
 
 // chartOwnedConfig returns the content a chart-owned provider config at
@@ -544,8 +560,17 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	if err != nil {
 		return err
 	}
+	t := target{
+		mode: modeMerge, binDir: wiring.BinDir, configFile: wiring.ConfigFile,
+		entryHash: contentHash(entryJSON),
+		fileHash:  contentHash(merged),
+	}
+	if err := cfg.refuseRejected(t); err != nil {
+		return err
+	}
 
-	if err := installFiles(cfg, wiring.BinDir, entryJSON, claim); err != nil {
+	begun, err := installFiles(cfg, wiring.BinDir, entryJSON, claim)
+	if err != nil {
 		return err
 	}
 	written, err := writeFileIn(dir, name, merged, 0o644)
@@ -558,13 +583,13 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	if mergeChanged {
 		logf("merged provider %q into %s", cfg.ProviderName, wiring.ConfigFile)
 	}
-
-	t := target{
-		mode: modeMerge, binDir: wiring.BinDir, configFile: wiring.ConfigFile,
-		entryHash: contentHash(entryJSON),
-		fileHash:  contentHash(merged),
-	}
-	return finishWithRestart(cfg, t, mergeChanged || written, nil)
+	// Kubelet's config as this pass found it (ADR-0033); the record first.
+	var rb rollback
+	rb.step(func() error { return cfg.writeRecord(wiring.BinDir, *begun) })
+	rb.file(wiring.ConfigFile, func() error {
+		return restoreIn(dir, name, priorContent{existed: true, data: existing}, 0o644)
+	})
+	return finishWithRestart(cfg, t, mergeChanged || written, nil, &rb)
 }
 
 // checkKubeletCanStart refuses the merged config of a merge pass into a
@@ -608,10 +633,12 @@ func (c *config) checkKubeletCanStart(merged []byte, wiring kubeletWiring) error
 // not record a successful restart for exactly this content (covers the
 // crash window between write and restart). The state is persisted only
 // after the restart is VERIFIED (unit stably active and, when verify is
-// set, the running kubelet wired as intended).
-func finishWithRestart(cfg *config, t target, changedNow bool, verify func() error) error {
+// set, the running kubelet wired as intended). A restart that fails or
+// does not verify is rolled back (rb) and its content recorded as rejected
+// (rejectRestart, ADR-0033).
+func finishWithRestart(cfg *config, t target, changedNow bool, verify func() error, rb *rollback) error {
 	stateDir := cfg.hostPath(cfg.StateDir)
-	statePath := filepath.Join(stateDir, cfg.files().State)
+	statePath := cfg.statePath()
 	st, err := loadState(statePath)
 	if err != nil {
 		return err
@@ -635,22 +662,135 @@ func finishWithRestart(cfg *config, t target, changedNow bool, verify func() err
 	}
 	// Prove the state can be recorded BEFORE restarting: otherwise a
 	// persistently unwritable state dir would restart kubelet on every
-	// single re-roll.
+	// single re-roll. Kubelet keeps running what it read at its last
+	// start; the files go back to that too, so the node is as the pass
+	// found it.
 	if err := ensureWritableDir(stateDir); err != nil {
-		return fmt.Errorf("state dir %s: %w", cfg.StateDir, err)
+		err = fmt.Errorf("state dir %s: %w", cfg.StateDir, err)
+		if changedNow {
+			if rerr := rb.restore(); rerr != nil {
+				return fmt.Errorf("%w; restoring %s failed: %w", err, rb.describe(), rerr)
+			}
+			logf("restored %s: kubelet was not restarted onto this pass's content", rb.describe())
+		}
+		return err
 	}
 	logf("restarting kubelet unit %q (config or flags changed)", cfg.KubeletUnit)
-	if err := cfg.kubelet.restart(cfg.KubeletUnit); err != nil {
-		return err
+	err = cfg.kubelet.restart(cfg.KubeletUnit)
+	if err == nil {
+		err = waitKubeletHealthy(cfg.kubelet, cfg.KubeletUnit, cfg.verify, verify)
 	}
-	if err := waitKubeletHealthy(cfg.kubelet, cfg.KubeletUnit, cfg.verify, verify); err != nil {
-		return err
+	if err != nil {
+		return cfg.rejectRestart(statePath, st, t, changedNow, rb, err)
 	}
 	if err := saveState(statePath, t.state()); err != nil {
 		return err
 	}
 	logf("install complete (mode %s); kubelet verified healthy", t.mode)
 	return nil
+}
+
+// rejectRestart handles a kubelet restart onto t that failed or did not
+// verify (cause), ADR-0033. When this pass changed files, it restores them
+// as the pass found them (rb), restarts kubelet onto them and verifies that
+// it stays up. A pass that changed nothing (the crash window: an earlier
+// pass wrote the files and did not verify its restart) has nothing of its
+// own to restore. Either way it records t as rejected in the state file
+// (st, the record it loaded), so that no later pass restarts kubelet onto
+// the same content again (refuseRejected), and returns the error the pass
+// fails with.
+func (c *config) rejectRestart(statePath string, st *state, t target, changedNow bool, rb *rollback, cause error) error {
+	var msg string
+	if !changedNow {
+		msg = fmt.Sprintf("%v; this pass did not change %s: an earlier pass wrote them and did not verify its kubelet restart, so this pass has no earlier content to restore. The .bak copies next to them hold what that pass replaced; check `journalctl -u %s` on the node", cause, rb.describe(), c.KubeletUnit)
+	} else {
+		rerr := rb.restore()
+		if rerr != nil {
+			logf("restoring %s failed: %v", rb.describe(), rerr)
+		}
+		logf("restarting kubelet unit %q onto the restored %s", c.KubeletUnit, rb.describe())
+		kerr := c.kubelet.restart(c.KubeletUnit)
+		if kerr == nil {
+			kerr = waitKubeletHealthy(c.kubelet, c.KubeletUnit, c.verify, nil)
+		}
+		switch {
+		case rerr == nil && kerr == nil:
+			msg = fmt.Sprintf("%v; restored the previous %s and restarted kubelet, which runs on them again", cause, rb.describe())
+		case kerr == nil:
+			msg = fmt.Sprintf("%v; restoring the previous %s failed (%v); kubelet runs again after one more restart", cause, rb.describe(), rerr)
+		case rerr == nil:
+			msg = fmt.Sprintf("%v; restored the previous %s, but the kubelet restart onto them did not verify either: %v. Check `journalctl -u %s` on the node", cause, rb.describe(), kerr, c.KubeletUnit)
+		default:
+			msg = fmt.Sprintf("%v; restoring the previous %s failed (%v), and the kubelet restart after it did not verify either: %v. Check `journalctl -u %s` on the node", cause, rb.describe(), rerr, kerr, c.KubeletUnit)
+		}
+	}
+	rec := &state{}
+	if st != nil {
+		kept := *st
+		rec = &kept
+	}
+	rec.Rejected = t.rejection(c.KubeletUnit, msg, time.Now())
+	stateFile := filepath.Join(c.StateDir, c.files().State)
+	if err := saveState(statePath, rec); err != nil {
+		return fmt.Errorf("%s. Recording the rejected content in %s failed too (%w), so the next pass restarts kubelet onto it again", msg, stateFile, err)
+	}
+	return fmt.Errorf("%s. The content is recorded as rejected in %s; later passes with the same content restart nothing (ADR-0033)", msg, stateFile)
+}
+
+// refuseRejected refuses a pass whose content t an earlier pass restarted
+// kubelet onto without a verified result (state.Rejected, ADR-0033). It
+// runs before the pass writes anything, so the refusal changes nothing on
+// the node and restarts nothing.
+func (c *config) refuseRejected(t target) error {
+	st, err := loadState(c.statePath())
+	if err != nil {
+		return err
+	}
+	r := st.rejects(t, c.KubeletUnit)
+	if r == nil {
+		return nil
+	}
+	return fmt.Errorf("refusing to restart kubelet onto content it already rejected: the pass at %s that restarted kubelet unit %q onto exactly this content failed: %s. This pass changes nothing on the node. Fix the cause and roll out new content (a changed plugin.* value renders a new provider entry), or fix the node and delete %s on it to try the same content again (ADR-0033)",
+		r.At, r.Unit, r.Reason, filepath.Join(c.StateDir, c.files().State))
+}
+
+// statePath is the host path of this install's state file.
+func (c *config) statePath() string {
+	return filepath.Join(c.hostPath(c.StateDir), c.files().State)
+}
+
+// rollback restores what a pass changed that decides how kubelet starts:
+// the provider config kubelet reads, /etc/default/kubelet in patch mode,
+// and the install's record (ADR-0033). Its steps run in the order they were
+// added, every one even when an earlier one failed.
+type rollback struct {
+	files []string // node paths of the files it restores, for messages
+	steps []func() error
+}
+
+// step adds a restore step that is not one of the files the messages name.
+func (r *rollback) step(restore func() error) {
+	r.steps = append(r.steps, restore)
+}
+
+// file adds the restore step of the node file nodePath.
+func (r *rollback) file(nodePath string, restore func() error) {
+	r.files = append(r.files, nodePath)
+	r.steps = append(r.steps, restore)
+}
+
+func (r *rollback) restore() error {
+	var errs []error
+	for _, restore := range r.steps {
+		if err := restore(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *rollback) describe() string {
+	return strings.Join(r.files, " and ")
 }
 
 // recordFileMode is the mode of an install's record (entryRecord): read
@@ -670,16 +810,16 @@ const recordFileMode = 0o600
 // entry, an unreadable config) runs before this, so a refused pass changes
 // no config, binary, record, CA, mTLS or state file; only the lock files
 // it took (lock.go) and their directories may be new.
-func installFiles(cfg *config, binDir string, entryJSON []byte, chartOwned string) error {
+func installFiles(cfg *config, binDir string, entryJSON []byte, chartOwned string) (*entryRecord, error) {
 	if err := checkBinaryOwnership(cfg, binDir); err != nil {
-		return err
+		return nil, err
 	}
 	// CA (+ optional mTLS client pair) always live under HostConfigDir:
 	// the provider entry references them by absolute path, so they are
 	// independent of which config file kubelet reads. Their rotation
 	// never restarts kubelet — the plugin reads them on every exec.
 	if err := syncAuxFiles(cfg); err != nil {
-		return err
+		return nil, err
 	}
 	return installPluginBinary(cfg, binDir, entryJSON, chartOwned)
 }
@@ -692,21 +832,22 @@ func installFiles(cfg *config, binDir string, entryJSON []byte, chartOwned strin
 // leaves a binary that the next pass still recognises as its own
 // (checkBinaryOwnership), whatever version it then installs. The caller
 // reduces the record to entryJSON once the config holds it
-// (commitRecord).
-func installPluginBinary(cfg *config, binDir string, entryJSON []byte, chartOwned string) error {
+// (commitRecord). It returns the record beginRecord wrote.
+func installPluginBinary(cfg *config, binDir string, entryJSON []byte, chartOwned string) (*entryRecord, error) {
 	files := cfg.files()
-	if err := cfg.beginRecord(binDir, entryJSON, chartOwned); err != nil {
-		return err
+	begun, err := cfg.beginRecord(binDir, entryJSON, chartOwned)
+	if err != nil {
+		return nil, err
 	}
 	dst := filepath.Join(binDir, files.Binary)
 	changed, err := copyFile(cfg.SourcePlugin, cfg.hostPath(dst), 0o755)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if changed {
 		logf("installed plugin binary → %s", dst)
 	}
-	return nil
+	return begun, nil
 }
 
 // checkBinaryOwnership refuses to replace a file at <binDir>/<name> (a

@@ -299,6 +299,75 @@ func replaceFile(root *os.Root, name string, data []byte, perm os.FileMode) erro
 	if err := root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("rename %s → %s: %w", tmpName, name, err)
 	}
+	return syncDir(root)
+}
+
+// priorContent is a node file as a pass found it before its own write,
+// which a rollback restores (ADR-0033).
+type priorContent struct {
+	existed bool
+	data    []byte
+}
+
+// readPrior reads the file name in root as priorContent. A missing file did
+// not exist; anything but a regular file is an error (openRegular).
+func readPrior(root *os.Root, name string) (priorContent, error) {
+	data, err := readFileIn(root, name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return priorContent{}, nil
+	case err != nil:
+		return priorContent{}, err
+	}
+	return priorContent{existed: true, data: data}, nil
+}
+
+// restoreIn puts the file name in root back as p describes it: the same
+// content, written like any other (writeFileIn, so its .bak then holds the
+// content being replaced), or no file when it did not exist.
+func restoreIn(root *os.Root, name string, p priorContent, perm os.FileMode) error {
+	if p.existed {
+		_, err := writeFileIn(root, name, p.data, perm)
+		return err
+	}
+	return removeRegularIn(root, name)
+}
+
+// restoreHostFile is restoreIn for the host path path.
+func restoreHostFile(path string, p priorContent, perm os.FileMode) error {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open %s: %w", filepath.Dir(path), err)
+	}
+	defer func() { _ = root.Close() }()
+	return restoreIn(root, filepath.Base(path), p, perm)
+}
+
+// removeRegularIn removes the file name in root, when there is one, and
+// syncs the directory: kubelet must not find the file again after a power
+// loss. Anything but a regular file is left alone and is an error. Remove
+// unlinks the name itself, so a symlink swapped in after the check is
+// removed, never followed.
+func removeRegularIn(root *os.Root, name string) error {
+	path := filepath.Join(root.Name(), name)
+	lfi, err := root.Lstat(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case !lfi.Mode().IsRegular():
+		return fmt.Errorf("refusing to remove %s: not a regular file (%s)", path, lfi.Mode().Type())
+	}
+	if err := root.Remove(name); err != nil {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return syncDir(root)
+}
+
+// syncDir fsyncs the directory root, making renames and removals in it
+// durable.
+func syncDir(root *os.Root) error {
 	d, err := root.Open(".")
 	if err != nil {
 		return fmt.Errorf("open %s for sync: %w", root.Name(), err)
