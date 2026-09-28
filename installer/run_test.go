@@ -581,6 +581,18 @@ func TestLoadConfig_Validation(t *testing.T) {
 	})); err == nil {
 		t.Fatal("merge overrides must be set together")
 	}
+	// The overrides skip discovery: they belong to merge mode only. In auto
+	// mode they were silently ignored (the installer patched kubelet's
+	// flags or merged into the discovered config instead).
+	for _, mode := range []string{modeAuto, modePatch, modeNone} {
+		_, err := loadConfig(env(withBase(map[string]string{"INSTALL_MODE": mode, "INSTALL_MERGE_BIN_DIR": "/cloud/bin", "INSTALL_MERGE_CONFIG_FILE": "/cloud/c.yaml"})))
+		if err == nil || !strings.Contains(err.Error(), "used only with INSTALL_MODE=merge") {
+			t.Errorf("mode %s with merge overrides: got %v, want a refusal", mode, err)
+		}
+	}
+	if _, err := loadConfig(env(withBase(map[string]string{"INSTALL_MERGE_BIN_DIR": "/cloud/bin", "INSTALL_MERGE_CONFIG_FILE": "/cloud/c.yaml"}))); err == nil {
+		t.Error("the default mode (auto) with merge overrides accepted")
+	}
 	// Merge mode does not require HOST_BIN_DIR (target dir is discovered).
 	if _, err := loadConfig(env(map[string]string{"INSTALL_MODE": "merge", "HOST_CONFIG_DIR": "/c"})); err != nil {
 		t.Fatalf("merge without HOST_BIN_DIR must validate: %v", err)

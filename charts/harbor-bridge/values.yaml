@@ -374,8 +374,10 @@ plugin:
     # running containers. CA/mTLS rotation and plugin binary updates
     # never restart kubelet.
     mode: auto
-    # Merge-mode target overrides. Leave empty to use the paths
-    # discovered from kubelet's --image-credential-provider-* flags.
+    # Merge-mode target overrides, only with mode: merge (the chart refuses
+    # them with any other mode; auto discovers the paths itself). Leave
+    # empty to use the paths discovered from kubelet's
+    # --image-credential-provider-* flags.
     binDir: ""
     configFile: ""
     # Systemd unit the installer restarts.

@@ -31,6 +31,8 @@ cases=(
   "plugin.install.mode enum|--set|plugin.install.mode=yolo|is invalid. Must be one of"
   "plugin.install null|--set|plugin.install=null|is invalid. Must be one of"
   "plugin.install.binDir without configFile|--set|plugin.install.binDir=/x|must be set together"
+  "plugin.install.binDir/configFile in mode auto|--set|plugin.install.binDir=/cloud/bin,plugin.install.configFile=/cloud/c.yaml|are used only with plugin.install.mode=merge, not \"auto\""
+  "plugin.install.binDir/configFile in mode patch|--set|plugin.install.mode=patch,plugin.install.binDir=/cloud/bin,plugin.install.configFile=/cloud/c.yaml|are used only with plugin.install.mode=merge, not \"patch\""
   "plugin.install.kubeletUnit injection|--set|plugin.install.kubeletUnit=kubelet;reboot|not a valid systemd unit name"
   "relative plugin.hostBinaryDir|--set|plugin.hostBinaryDir=etc/kubernetes|must be an absolute, clean node path"
   "dot-dot plugin.hostConfigDir|--set|plugin.hostConfigDir=/etc/../tmp|must be an absolute, clean node path"
@@ -53,10 +55,10 @@ cases=(
   "plugin.hostBinaryDir equal to plugin.hostConfigDir|--set|plugin.hostBinaryDir=/etc/kubernetes/credential-provider-config|plugin.hostBinaryDir=\"/etc/kubernetes/credential-provider-config\" and plugin.hostConfigDir=\"/etc/kubernetes/credential-provider-config\" must not be the same directory or inside one another"
   "plugin.hostBinaryDir inside plugin.hostConfigDir|--set|plugin.hostBinaryDir=/etc/kubernetes/credential-provider-config/bin|must not be the same directory or inside one another"
   "plugin.hostConfigDir inside plugin.hostBinaryDir|--set|plugin.hostConfigDir=/etc/kubernetes/credential-provider/config|must not be the same directory or inside one another"
-  "plugin.install.binDir inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/kubernetes/credential-provider-config/bin,plugin.install.configFile=/etc/cp.yaml|plugin.install.binDir=\"/etc/kubernetes/credential-provider-config/bin\" and plugin.hostConfigDir"
+  "plugin.install.binDir inside plugin.hostConfigDir|--set|plugin.install.mode=merge,plugin.install.binDir=/etc/kubernetes/credential-provider-config/bin,plugin.install.configFile=/etc/cp.yaml|plugin.install.binDir=\"/etc/kubernetes/credential-provider-config/bin\" and plugin.hostConfigDir"
   "plugin.install.stateDir equal to plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config|plugin.install.stateDir=\"/etc/kubernetes/credential-provider-config\" must not be plugin.hostConfigDir"
   "plugin.install.stateDir inside plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config/state|must not be plugin.hostConfigDir"
-  "plugin.install.configFile inside plugin.hostConfigDir|--set|plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml|plugin.install.configFile=\"/etc/kubernetes/credential-provider-config/credential-provider-config.yaml\" must not be inside plugin.hostConfigDir"
+  "plugin.install.configFile inside plugin.hostConfigDir|--set|plugin.install.mode=merge,plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml|plugin.install.configFile=\"/etc/kubernetes/credential-provider-config/credential-provider-config.yaml\" must not be inside plugin.hostConfigDir"
 )
 
 failed=0
@@ -183,7 +185,7 @@ fi
 # directory, and the state dir may be a parent of plugin.hostConfigDir. A
 # merge config whose name merely extends plugin.hostConfigDir is not in it.
 if render -f "${COMPLETE}" --set plugin.install.stateDir=/etc/kubernetes > /dev/null 2>&1 \
-   && render -f "${COMPLETE}" --set plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config.yaml > /dev/null 2>&1; then
+   && render -f "${COMPLETE}" --set plugin.install.mode=merge,plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config.yaml > /dev/null 2>&1; then
   echo "PASS  plugin directories compared per path segment"
 else
   echo "FAIL  plugin directories compared per path segment"

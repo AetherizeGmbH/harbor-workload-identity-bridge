@@ -7,6 +7,7 @@
 | Change | What to do |
 | --- | --- |
 | Patch mode reads `/etc/default/kubelet` as systemd does, so it also recognises an assignment with whitespace before the `=`, such as `KUBELET_EXTRA_ARGS = "--max-pods=42"`. Installers before this version did not, appended a second `KUBELET_EXTRA_ARGS` line with only the two `--image-credential-provider-*` flags, and kubelet used that line: it ran without the operator's args. The installer now merges the flags into the operator's line and removes the appended one; kubelet restarts once on such a node and runs with those args again | Nothing, unless kubelet should keep running without those args: then remove them from `/etc/default/kubelet` on the affected nodes (the ones with two `KUBELET_EXTRA_ARGS` lines) before the upgrade. |
+| The chart and the installer refuse `plugin.install.binDir` and `plugin.install.configFile` with any `plugin.install.mode` but `merge` | They were silently ignored in `auto` (the default), `patch` and `none` mode: `auto` patched kubelet's flags or merged into the discovered config instead of the named files. If you set them, set `plugin.install.mode=merge` too, or clear them; otherwise `helm upgrade` fails at template time with `used only with plugin.install.mode=merge`. |
 
 ### Unreleased: HarborAccess tokenTTL syntax, required spec
 
