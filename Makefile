@@ -49,7 +49,8 @@ generate: $(CONTROLLER_GEN) ## Generate deepcopy methods for API types
 .PHONY: manifests
 manifests: $(CONTROLLER_GEN) ## Generate CRD manifests under config/crd/bases (and the chart's copy)
 	$(CONTROLLER_GEN) crd paths=./bridge/api/... output:crd:dir=config/crd/bases
-	cp config/crd/bases/harbor.aetherize.io_harboraccesses.yaml $(PROJECT_DIR)/charts/harbor-bridge/crds/
+	cp config/crd/bases/harbor.aetherize.io_harboraccesses.yaml config/crd/bases/nexus.aetherize.io_nexusaccesses.yaml \
+		$(PROJECT_DIR)/charts/harbor-bridge/crds/
 
 .PHONY: tidy
 tidy: ## Resolve module dependencies
