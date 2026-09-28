@@ -834,6 +834,23 @@ The implementation review (2026-09-28) changed the following.
     uninstall` or turning the flag off would then delete it, which deletes
     every NexusAccess object while no bridge with the backend is left to
     revoke their users and release their finalizers.
+21. **A path prefix selects requests, it does not confine credentials**
+    (decision f). The data plane matches a path prefix on `/` boundaries
+    and refuses `host/nexus-old/app` for the entry `host/nexus`, but every
+    response carries `cacheKeyType: Registry` (ADR-0016) and the plugin
+    keys the credentials by the bare host (`plugin/main.go`
+    `writeOKResponse`). Kubelet looks up its cache by image, then by
+    registry host, so once it holds credentials for an image of a
+    host[:port], it uses them for every image of that host[:port] its
+    `matchImages` covers until the cache duration ends, without asking
+    the bridge. Backends stay apart, since two may not
+    share a host[:port]; a service behind the same host[:port] outside the
+    prefix does not. README and values.yaml say so. Answering a request
+    that matched only through path-prefixed entries with `cacheKeyType:
+    Image` would confine the credentials to the image, at the price
+    ADR-0016 rejected `Image` for: one plugin run and bridge request per
+    image and node instead of per registry host. That is left to the
+    maintainer.
 
 ## Verified at runtime
 

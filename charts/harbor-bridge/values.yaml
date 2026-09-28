@@ -141,10 +141,15 @@ nexus:
   # objects, as host[:port][/path-prefix] entries (no scheme, no globs):
   # the addresses kubelet pulls Nexus's docker repositories from (a
   # connector's host:port, or a host and path prefix in front of Nexus).
-  # REQUIRED when enabled. A path prefix matches on '/' boundaries
-  # (host/nexus serves host/nexus/app, not host/nexus-old/app). No
-  # host[:port] may also be Harbor's (harbor.registryHosts, default the
-  # host of harbor.url): kubelet caches credentials per registry host.
+  # REQUIRED when enabled. A path prefix matches on '/' boundaries: the
+  # bridge answers for host/nexus/app, and refuses host/nexus-old/app. It
+  # selects only which requests the bridge answers, not where credentials
+  # go: kubelet caches what the bridge issued per registry host
+  # (cacheKeyType Registry, ADR-0016) and uses it for every image of that
+  # host[:port] plugin.matchImages covers, until the cache duration ends.
+  # Do not rely on a path prefix to keep Nexus credentials from another
+  # service behind the same host[:port]. No host[:port] may also be
+  # Harbor's (harbor.registryHosts, default the host of harbor.url).
   # With the chart-managed plugin every entry must be covered by
   # plugin.matchImages under kubelet's rules (same port; globs only in
   # the host; the path compared as a raw prefix, so host or host/nex

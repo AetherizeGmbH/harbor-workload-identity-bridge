@@ -693,10 +693,21 @@ With two backends the bridge routes every credential request by the
 image's registry host: `harbor.registryHosts` (default: the host[:port]
 of `harbor.url`) to Harbor, `nexus.registryHosts` to Nexus, and it
 refuses an image that matches neither. An entry is `host[:port]` with an
-optional path prefix, matched on `/` boundaries (`host/nexus` serves
-`host/nexus/app`, not `host/nexus-old/app`); no globs. The two lists must
-not share a host[:port]: kubelet caches credentials per registry host, so
-one backend's credentials would reach the other's images.
+optional path prefix, matched on `/` boundaries (the bridge answers for
+`host/nexus/app` and refuses `host/nexus-old/app`); no globs. The two
+lists must not share a host[:port]: kubelet caches credentials per
+registry host, so one backend's credentials would reach the other's
+images.
+
+A path prefix selects only which requests the bridge answers. Once it has
+issued credentials for an image of a host[:port], kubelet uses them, from
+its cache and without asking the bridge, for every image of that
+host[:port] that `plugin.matchImages` covers until the cache duration ends
+(`cacheKeyType: Registry`,
+[ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md)). A
+prefix therefore does not keep Nexus credentials away from another
+service behind the same host[:port]; give that service its own host or
+port.
 
 With the chart-managed plugin the chart fails at template time unless,
 for each registry host of both backends, one `plugin.matchImages` entry
