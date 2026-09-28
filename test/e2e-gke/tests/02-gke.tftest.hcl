@@ -478,17 +478,27 @@ run "robot_check_update" {
     env_from_secret      = run.seed_image.admin_secret_name
     command              = ["sh", "-c"]
     args = [<<-SH
-      set -eu
+      set -euo pipefail
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
-      count() { curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D$1" | jq 'length'; }
-      old=$(count bridge-gke-e2e.team-a.svc-b); new=$(count bridge-gke-e2e.team-a.svc-renamed)
-      echo "old robot: $old, new robot: $new"
-      test "$old" = 0
-      test "$new" = 1
+      # robots QUERY: the names of the robots Harbor lists for QUERY, as a
+      # JSON array. A failed request or an answer that is not a list ends
+      # the Job (details at robot_check_update of the kind harness).
+      robots() {
+        body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
+        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+      }
+      old=$(robots name%3Dbridge-gke-e2e.team-a.svc-b)
+      new=$(robots name%3Dbridge-gke-e2e.team-a.svc-renamed)
+      all=$(robots name%3D~bridge-gke-e2e.)
+      echo "old robot: $old; new robot: $new; robots of cluster gke-e2e: $all"
+      printf '%s' "$old" | jq -e 'length == 0' >/dev/null
+      printf '%s' "$new" | jq -e 'length == 1' >/dev/null
+      printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_update.harbor_accesses)} \
+        'length == $want and any(.[]; endswith("bridge-gke-e2e.team-a.svc-renamed"))' >/dev/null
     SH
     ]
     timeout_seconds = 120
-    fail_message    = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted and the new one present"
+    fail_message    = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted, the new one present, and the fuzzy name=~bridge-gke-e2e. query must list one robot per HarborAccess (or Harbor could not be asked; see pod.log)"
   }
 }
 
@@ -661,15 +671,24 @@ run "robot_check_teardown" {
     args = [<<-SH
       set -eu
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      # Only an empty LIST passes (details at robot_check_teardown of the
+      # kind harness): a failed request is retried and fails the Job if
+      # Harbor never answers; an answer that is not a list fails it at once.
+      state="Harbor was never asked"
       for i in $(seq 1 30); do
-        left=$(curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-gke-e2e." | jq -r '.[].name')
-        if [ -z "$left" ]; then echo "no robots of cluster gke-e2e left in Harbor"; exit 0; fi
+        if body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-gke-e2e."); then
+          left=$(printf '%s' "$body" | jq -r 'if type == "array" then .[].name else error("Harbor did not answer with a robot list") end')
+          if [ -z "$left" ]; then echo "no robots of cluster gke-e2e left in Harbor"; exit 0; fi
+          state="robots left behind: $left"
+        else
+          state="the Harbor query failed (curl exit $?)"
+        fi
         sleep 3
       done
-      echo "robots left behind:"; echo "$left"; exit 1
+      echo "$state"; exit 1
     SH
     ]
-    timeout_seconds = 120
-    fail_message    = "finalizer cleanup incomplete: robots of cluster gke-e2e are still in Harbor after every HarborAccess was deleted"
+    timeout_seconds = 150
+    fail_message    = "finalizer cleanup incomplete: robots of cluster gke-e2e are still in Harbor after every HarborAccess was deleted, or Harbor could not be asked (see pod.log)"
   }
 }

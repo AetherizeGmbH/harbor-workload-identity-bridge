@@ -22,8 +22,9 @@
 #                             reached Harbor; audit C1)
 #  15. pull_pod_renamed     — the new ServiceAccount pulls
 #  16. pull_pod_revoked     — the OLD ServiceAccount must now be refused
-#  17. robot_check_update   — Harbor itself: old robot gone, new one present
-#                             (audit H2 — revocation, not just a data-plane 403)
+#  17. robot_check_update   — Harbor itself: old robot gone, new one present,
+#                             one robot per HarborAccess (audit H2 —
+#                             revocation, not just a data-plane 403)
 #  18. token_rejection      — ADR-0028: the bridge refuses a token bound to no
 #                             pod and one living 2h, serves a pod-bound 1h one
 #  19. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
@@ -31,6 +32,7 @@
 #                             tenant namespace deleted WHILE the bridge runs;
 #                             tofu waits for each finalizer
 #  21. robot_check_teardown — Harbor itself: not one robot of this cluster left
+#                             (a Harbor that cannot be asked fails it)
 #
 # Teardown order. tofu test destroys the states in reverse order of the
 # LAST run that touched each. Stages 13 and 20 re-use the harbor_access
@@ -490,7 +492,10 @@ run "pull_pod_revoked" {
 }
 
 # Ask Harbor directly (admin credentials from the seed namespace): the old
-# robot is gone, the new one exists.
+# robot is gone, the new one exists, and the fuzzy query robot_check_teardown
+# relies on lists exactly one robot per HarborAccess of this phase. Every
+# query fails the Job when Harbor cannot be asked or does not answer with a
+# robot list: an unreachable Harbor must never read as "no robot".
 run "robot_check_update" {
   command = apply
   module {
@@ -506,17 +511,29 @@ run "robot_check_update" {
     env_from_secret      = run.seed_image.admin_secret_name
     command              = ["sh", "-c"]
     args = [<<-SH
-      set -eu
+      set -euo pipefail
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
-      count() { curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D$1" | jq 'length'; }
-      old=$(count bridge-dev.team-a.svc-b); new=$(count bridge-dev.team-a.svc-renamed)
-      echo "old robot: $old, new robot: $new"
-      test "$old" = 0
-      test "$new" = 1
+      # robots QUERY: the names of the robots Harbor lists for QUERY, as a
+      # JSON array. A failed request or an answer that is not a list fails
+      # the function, and set -e then ends the Job at the assignment.
+      # busybox sh does not apply set -e inside a command substitution,
+      # hence the explicit return.
+      robots() {
+        body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
+        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+      }
+      old=$(robots name%3Dbridge-dev.team-a.svc-b)
+      new=$(robots name%3Dbridge-dev.team-a.svc-renamed)
+      all=$(robots name%3D~bridge-dev.)
+      echo "old robot: $old; new robot: $new; robots of cluster dev: $all"
+      printf '%s' "$old" | jq -e 'length == 0' >/dev/null
+      printf '%s' "$new" | jq -e 'length == 1' >/dev/null
+      printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_update.harbor_accesses)} \
+        'length == $want and any(.[]; endswith("bridge-dev.team-a.svc-renamed"))' >/dev/null
     SH
     ]
     timeout_seconds  = 120
-    fail_message     = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted and the new one present"
+    fail_message     = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted, the new one present, and the fuzzy name=~bridge-dev. query must list one robot per HarborAccess (or Harbor could not be asked; see pod.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
@@ -713,17 +730,26 @@ run "robot_check_teardown" {
       set -eu
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
       # Poll briefly: the finalizer deletes the robot before the CR goes
-      # away, but give Harbor's list a moment to reflect the delete.
+      # away, but give Harbor's list a moment to reflect the delete. Only
+      # an empty LIST passes: a failed request is retried and, if Harbor
+      # never answers, fails the Job; an answer that is not a list fails it
+      # at once. robot_check_update proved this query lists the robots.
+      state="Harbor was never asked"
       for i in $(seq 1 30); do
-        left=$(curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev." | jq -r '.[].name')
-        if [ -z "$left" ]; then echo "no robots of cluster dev left in Harbor"; exit 0; fi
+        if body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev."); then
+          left=$(printf '%s' "$body" | jq -r 'if type == "array" then .[].name else error("Harbor did not answer with a robot list") end')
+          if [ -z "$left" ]; then echo "no robots of cluster dev left in Harbor"; exit 0; fi
+          state="robots left behind: $left"
+        else
+          state="the Harbor query failed (curl exit $?)"
+        fi
         sleep 3
       done
-      echo "robots left behind:"; echo "$left"; exit 1
+      echo "$state"; exit 1
     SH
     ]
-    timeout_seconds  = 120
-    fail_message     = "finalizer cleanup incomplete: robots of cluster dev are still in Harbor after every HarborAccess was deleted"
+    timeout_seconds  = 150
+    fail_message     = "finalizer cleanup incomplete: robots of cluster dev are still in Harbor after every HarborAccess was deleted, or Harbor could not be asked (see pod.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
