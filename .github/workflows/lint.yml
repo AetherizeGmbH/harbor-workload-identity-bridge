@@ -100,6 +100,22 @@ jobs:
         with:
           dockerfile: ${{ matrix.dockerfile }}
 
+  tracked-ignored:
+    # An ignore rule does not untrack a file that is already committed:
+    # test/e2e/diag-last/ stayed in the tree for months after .gitignore
+    # listed it. Fail when a tracked file matches an ignore rule.
+    name: no tracked ignored files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: |
+          files=$(git ls-files --cached --ignored --exclude-standard)
+          if [ -n "$files" ]; then
+            echo "::error::tracked files match .gitignore; git rm them or narrow the ignore rule"
+            echo "$files"
+            exit 1
+          fi
+
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
