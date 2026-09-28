@@ -790,9 +790,10 @@ The e2e harness (2026-09-28) implements decision i as follows.
     - "Nexus is down" is Nexus scaled to zero on its PVC. A NetworkPolicy
       or an emptied Service would leave the client's idle keep-alive
       connections to Nexus open.
-    - Not asserted: an image that matches no backend (decision f refuses
-      it once two backends are configured; the shared interface contract
-      of this change routes it to Harbor).
+    - Routing also asserts the refusal of an image of neither backend
+      (`no_backend`, note 12): the Nexus connectors' host on a port no
+      registry host names, asked of the bridge directly, since kubelet
+      calls the plugin only for images `matchImages` covers.
 
 ## Verified at runtime
 

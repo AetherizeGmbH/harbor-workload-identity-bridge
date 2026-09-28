@@ -26,8 +26,9 @@
 #                             ungranted one fails in Nexus
 #  15. pull_harbor_routing  — the same ServiceAccount pulls from Harbor
 #  16. nexus_routing        — the bridge answers that ServiceAccount's token
-#                             with the Nexus user for a Nexus image and the
-#                             Harbor robot for a Harbor image
+#                             with the Nexus user for a Nexus image, the
+#                             Harbor robot for a Harbor image, and refuses
+#                             an image of neither (no_backend)
 #  17. nexus_edit_baseline* — editor's credentials read both of its
 #                             repositories; the bridge serves it
 #  18. nexus_push           — the pull,push user pushes to its repository only
@@ -203,8 +204,8 @@ run "seed_nexus" {
 
 # Both backends: Harbor's host and every Nexus connector in matchImages
 # (kubelet: exact port), and each backend's registry hosts named, so the
-# data plane routes by host whatever it does with an image that matches
-# neither.
+# data plane routes by host (and refuses an image of neither,
+# nexus_routing).
 run "bridge_install" {
   module {
     source = "./modules/harbor-bridge-install"
@@ -367,9 +368,11 @@ run "pull_harbor_routing" {
 }
 
 # Routing at the data plane (ADR-0033 decision f): one pod-bound token of
-# nx-pull/puller, two images. The answers must carry the Nexus user of the
-# identity for the Nexus image and the Harbor robot for the Harbor image.
-# Only the shape of the answers is checked; no password is printed.
+# nx-pull/puller, three images. The answers must carry the Nexus user of
+# the identity for the Nexus image and the Harbor robot for the Harbor
+# image, and refuse an image of neither backend (no_backend): the Nexus
+# connectors' host on a port no registry host names. Only the shape of the
+# answers is checked; no password is printed.
 run "nexus_routing" {
   command = apply
   module {
@@ -409,15 +412,21 @@ run "nexus_routing" {
         || { rm -f /tmp/bridge.json; fail "Harbor image: HTTP 200, but not with the Harbor robot of $identity"; }
       harbor_user=$(jq -r .username /tmp/bridge.json); rm -f /tmp/bridge.json
 
-      echo "routing: Nexus image → $nexus_user, Harbor image → $harbor_user"
+      c=$(bridge_ask "$tok" "${split(":", run.nexus.registry_hosts["nx-app"])[0]}:30899/routing-check:none")
+      if [ "$c" = 200 ]; then rm -f /tmp/bridge.json; fail "image of no backend: the bridge issued credentials"; fi
+      [ "$c" = 403 ] || fail "image of no backend: HTTP $c, want 403: $(cat /tmp/bridge.json)"
+      rm -f /tmp/bridge.json
+
+      echo "routing: Nexus image → $nexus_user, Harbor image → $harbor_user, image of no backend refused"
     SH
     ]
     expect_bridge_log = [
       ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"${run.nexus.registry_hosts["nx-app"]}/routing-check:nexus\""],
       ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"harbor.e2e:30843/your-project/routing-check:harbor\"", "\"harboraccess\":\"${run.bridge_install.namespace}/puller\""],
+      ["\"logger\":\"audit\"", "\"msg\":\"credential denied\"", "\"access_kind\":\"none\"", "\"reason\":\"no_backend\"", "\"requested_image\":\"${split(":", run.nexus.registry_hosts["nx-app"])[0]}:30899/routing-check:none\""],
     ]
     timeout_seconds  = 180
-    fail_message     = "data-plane routing: a Nexus image did not get the identity's Nexus user, or a Harbor image not its Harbor robot"
+    fail_message     = "data-plane routing: a Nexus image did not get the identity's Nexus user, a Harbor image not its Harbor robot, or an image of no backend got credentials"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }

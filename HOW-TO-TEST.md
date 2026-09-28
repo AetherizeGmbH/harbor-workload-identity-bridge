@@ -344,7 +344,7 @@ needs nothing more.
 | `pull_nexus`, `pull_nexus_extra` | kubelet pulls the granted repositories through the plugin and the bridge's Nexus route |
 | `pull_nexus_ungranted` | A repository the NexusAccess does not name fails with an authorization error from Nexus |
 | `pull_harbor_routing` | The same ServiceAccount pulls from Harbor |
-| `nexus_routing` | One pod-bound token, two images: the bridge answers with the identity's Nexus user for the Nexus image and its Harbor robot for the Harbor image; both decisions in the audit log |
+| `nexus_routing` | One pod-bound token, three images: the bridge answers with the identity's Nexus user for the Nexus image and its Harbor robot for the Harbor image, and refuses an image of neither backend with 403 (`no_backend`); all three decisions in the audit log |
 | `nexus_edit_baseline*` | editor's credentials read exactly its repositories (a token from one connector works on another); the bridge serves editor |
 | `nexus_push` | The pull,push user pushes to nx-push and is refused on nx-app |
 | `nexus_state_initial` | Nexus: one role (`bridge-dev.<ns>.<sa>`) and one user (`<role>_<16 hex>`) per identity, with the ADR-0033 markers and exactly the privileges of the spec |
@@ -369,8 +369,7 @@ and envtest tests.
 
 Not covered: Nexus 3.77 and later (EULA, see above), and with them the
 failed-login rate limiter of 3.93+ (`NexusRateLimited`), the role update of
-3.91+ and the `oci` format; an image that matches neither backend (the data
-plane's choice between refusing and the Harbor route is left to it).
+3.91+ and the `oci` format.
 
 While paused, Nexus's REST API is reachable through a port-forward:
 
