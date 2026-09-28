@@ -102,11 +102,15 @@ bridge even where the issuers happen to agree.
 Several bridges on one cluster each serve only the HarborAccess objects
 their `bridge.harborAccessSelector` matches. A bridge revokes its robot
 for an object that stops matching, then releases its own finalizers
-(the per-instance one, and the shared one if it served the object before
-it had a selector). An object the bridge refuses (another audience, for
-example) gets no finalizer from it. Bridges that share a Harbor must use different `clusterName`
-values (the robot ownership prefix). On the nodes, each bridge's release
-has its own kubelet provider entry and plugin binary
+(the per-instance one, and the shared one if the object's status names a
+robot of its `clusterName`, i.e. it served the object before it had a
+selector). An object the bridge refuses (another audience, for example)
+gets no finalizer from it, and no Harbor lookup; one an older bridge
+finalized while refusing it loses the finalizer once no robot of it is
+left ([ADR-0032](docs/adr/0032-finalizer-ownership.md)). Bridges that
+share a Harbor must use different `clusterName` values (the robot
+ownership prefix). On the nodes, each bridge's release has its own
+kubelet provider entry and plugin binary
 (`plugin.providerName`, [ADR-0029](docs/adr/0029-configurable-plugin-provider-name.md)).
 Keep their `plugin.matchImages` disjoint: kubelet runs every matching
 provider for a pull, so with overlapping patterns each bridge receives a

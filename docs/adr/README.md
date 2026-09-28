@@ -27,11 +27,12 @@
 | 0023 | [Level-triggered robot lifecycle, rotation-safe credential caching, and complete revocation](0023-level-triggered-robot-lifecycle.md) | Accepted (amends 0003, 0012, 0013, 0014; a disabled robot marked as suspended is the bridge's to resume, amended by 0030) |
 | 0024 | [The chart can leave the plugin to the platform; supported node platforms](0024-plugin-optional-and-platform-support.md) | Accepted (extends 0021) |
 | 0025 | [Data plane serves on every replica; metrics leave the credential listener](0025-data-plane-serving.md) | Accepted (amends 0002, 0008) |
-| 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023; "no robot" for a refused object that had one amended by 0030) |
+| 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023; "no robot" for a refused object that had one amended by 0030; finalizer placement and release amended by 0032) |
 | 0027 | [The plugin DaemonSet can run in its own namespace](0027-optional-plugin-namespace.md) | Accepted (extends 0021, 0024) |
 | 0028 | [Token lifetime cap and pod binding](0028-token-lifetime-cap-and-pod-binding.md) | Accepted (extends 0006, 0010) |
 | 0029 | [Configurable plugin provider name](0029-configurable-plugin-provider-name.md) | Accepted (refines 0021, 0026) |
-| 0030 | [A refused HarborAccess suspends its robot](0030-refused-harboraccess-suspends-its-robot.md) | Accepted (supersedes part of 0009 §6, amends 0023, 0026) |
+| 0030 | [A refused HarborAccess suspends its robot](0030-refused-harboraccess-suspends-its-robot.md) | Accepted (supersedes part of 0009 §6, amends 0023, 0026; Harbor lookup limited by 0032) |
 | 0031 | [Robot names Harbor refuses, and what keeps truncated names apart](0031-robot-name-validity-and-truncation.md) | Accepted (amends 0018) |
+| 0032 | [A bridge sets its finalizer right before the robot and releases only what it set](0032-finalizer-ownership.md) | Accepted (amends 0026, 0030) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.
