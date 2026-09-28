@@ -8,6 +8,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,11 +61,18 @@ func (f *fakeKubelet) restart(unit string) error {
 	args := append([]string(nil), f.baseArgs...)
 	if !f.ignoreEnvFile {
 		if raw, err := os.ReadFile(f.env.cfg.hostPath(defaultKubeletPath)); err == nil {
-			for _, line := range strings.Split(string(raw), "\n") {
-				if v, ok := strings.CutPrefix(line, "KUBELET_EXTRA_ARGS="); ok {
-					args = append(args, strings.Fields(strings.Trim(v, `"`))...)
+			// As systemd reads the EnvironmentFile: the last assignment wins.
+			assignments, err := parseEnvFile(string(raw))
+			if err != nil {
+				f.t.Fatalf("systemd would not read %s as the test expects: %v", defaultKubeletPath, err)
+			}
+			var extra []string
+			for _, a := range assignments {
+				if a.key == extraArgsKey {
+					extra = splitArgs(a.value)
 				}
 			}
+			args = append(args, extra...)
 		}
 	}
 	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args, exe: f.exe})
@@ -212,6 +221,24 @@ func TestRun_PatchPreservesOperatorArgs(t *testing.T) {
 	}
 	if !strings.Contains(got, flagConfigFile+"=") {
 		t.Fatalf("our flag missing:\n%s", got)
+	}
+}
+
+// TestRun_PatchKeepsOperatorArgsWrittenWithSpaces: systemd reads
+// "KUBELET_EXTRA_ARGS = ..." as KUBELET_EXTRA_ARGS. The installer used to
+// append a second assignment after it, and kubelet lost --max-pods.
+func TestRun_PatchKeepsOperatorArgsWrittenWithSpaces(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	writeHostFile(t, env, defaultKubeletPath, "KUBELET_EXTRA_ARGS = \"--max-pods=42\"\n")
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(env.cfg.ProcRoot, strconv.Itoa(fakeKubeletPID), "cmdline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argv := splitCmdline(raw); !slices.Contains(argv, "--max-pods=42") || flagValue(argv, flagBinDir) == "" {
+		t.Fatalf("kubelet runs with %q, want the operator's --max-pods=42 and the credential-provider flags", argv)
 	}
 }
 
