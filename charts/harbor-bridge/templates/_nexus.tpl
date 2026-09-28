@@ -136,7 +136,9 @@ kubelet.labelMatches renders "true" when the matchImages host label
 filepath.Match. A label with '[' or '\' (a character class or an escape)
 never matches here: the chart does not evaluate those, so it may only
 report an entry as not covered that kubelet would cover, never the
-reverse.
+reverse. validateRequiredValues refuses such entries before, except a
+bracketed IPv6 address without a port, which kubelet also reads as a
+character class and which therefore covers nothing.
 */}}
 {{- define "harbor-bridge.kubelet.labelMatches" -}}
 {{- $glob := index . 0 -}}
@@ -152,7 +154,9 @@ JSON) routes to its backend. It mirrors kubelet's URLsMatch
 (pkg/credentialprovider/keyring.go), which the credential-provider
 plugin's matchImages uses:
   - the entry is parsed as the URL https://<entry>, so a '?' or '#' ends
-    it (a '?' is no glob there) and a user@ part is dropped;
+    it (a '?' is no glob there) and a user@ part is dropped
+    (validateRequiredValues refuses such entries before; the helper
+    stays right without that);
   - the port must be equal (none equals none);
   - the host must have as many '.'-separated labels, each matched by the
     entry's label (kubelet.labelMatches);

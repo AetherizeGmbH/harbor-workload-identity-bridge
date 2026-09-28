@@ -714,11 +714,12 @@ for each registry host of both backends, one `plugin.matchImages` entry
 covers it by kubelet's rules: the same port, globs only in the host (a
 `*` matches within one label, as in `*.example.com`), and the path
 compared as a raw string prefix of the image's path. So `host` and
-`host/nex` cover `host/nexus`; `host/nexus/` (it misses the image named
-`nexus` itself) and `host/*` (a literal `*`) do not. The chart does not
-evaluate `[...]` classes or `\` escapes in `matchImages` and never counts
-such an entry as covering. A glob such as `*.harbor.example.com` keeps
-kubelet calling the plugin for every such host, but once Nexus is
+`host/nex` cover `host/nexus`; `host/nexus/` does not (it misses the
+image named `nexus` itself). The chart refuses a `matchImages` entry
+with a path glob such as `host/*`, a `?`, a character class or an escape
+before it checks coverage, and a bracketed IPv6 address without a port
+covers nothing, as for kubelet. A glob such as `*.harbor.example.com`
+keeps kubelet calling the plugin for every such host, but once Nexus is
 enabled the bridge serves only the Harbor hosts in
 `harbor.registryHosts`: list each one.
 

@@ -772,7 +772,12 @@ The chart (2026-09-28) implements decision h as follows.
     `host/nexus` the bridge routes to Nexus. The chart does not evaluate
     `[...]` classes or `\` escapes in a matchImages host and never counts
     such an entry as covering: it may report a gap kubelet would not
-    have, never miss one. It does not check the reverse, a matchImages
+    have, never miss one. Since main's #142 the chart refuses a
+    matchImages entry that is not `host[:port][/path]` (a path glob, a
+    `?`, a character class or an escape) before it checks coverage;
+    the rule still keeps a bracketed IPv6 address without a port, which
+    kubelet reads as a character class, from covering anything. It does
+    not check the reverse, a matchImages
     entry that no backend serves (the bridge refuses such images as
     `no_backend`): an entry with a path prefix could never pass it,
     because kubelet's `host/nexus` also matches `host/nexus-old/app`.
