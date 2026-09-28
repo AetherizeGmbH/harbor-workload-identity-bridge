@@ -80,11 +80,19 @@ also have `secrets get` cross-namespace, which is non-standard.
 
 ### Token forgery / replay across clusters
 
-The bridge enforces the SA token's `iss` claim against the cluster's
-own issuer (`BRIDGE_OIDC_ISSUER`). A token from cluster B's API server
-cannot be replayed against cluster A's bridge because the issuer
-strings disagree. The kubelet always projects tokens with the cluster's
-own issuer; this can't be tricked.
+The bridge verifies every SA token's signature against the signing keys
+of its own cluster's apiserver (the JWKS it fetches at startup and
+refreshes, `bridge/dataplane/oidc.go`). Each cluster signs its tokens
+with its own ServiceAccount key, so a token from cluster B's API server
+fails signature verification at cluster A's bridge. Clusters that share
+a signing key (for example cloned control-plane key material) are not
+separated by this check.
+
+The bridge also enforces the `iss` claim against the configured issuer
+(`BRIDGE_OIDC_ISSUER`). That check separates only clusters whose issuers
+differ: the chart default and the kubeadm/kind default,
+`https://kubernetes.default.svc.cluster.local`, are the same string on
+every such cluster.
 
 The audience (`aud`) claim must carry the one audience the bridge
 serves (`plugin.audience`, [ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)),
@@ -97,7 +105,9 @@ ServiceAccount, including tokens leaked to third-party webhooks,
 redeemable for Harbor credentials. The convention is
 `harbor-bridge-<clusterName>`, one audience per cluster, so a token
 minted for one cluster's bridge is refused by every other cluster's
-bridge even where the issuers happen to agree.
+bridge on its audience too, even where the issuers happen to agree. The
+chart requires `plugin.audience` but cannot tell whether it is unique
+per cluster; that is up to you.
 
 Several bridges on one cluster each serve only the HarborAccess objects
 their `bridge.harborAccessSelector` matches. A bridge revokes its robot
@@ -182,15 +192,31 @@ defense-in-depth. See [ADR-0018](docs/adr/0018-dot-delimited-naming.md) and
 
 ### Stale credentials after `HarborAccess` deletion
 
-A `HarborAccess` is cleaned up via finalizer:
+A `HarborAccess` is cleaned up via its finalizer
+([ADR-0023](docs/adr/0023-level-triggered-robot-lifecycle.md)):
 
-1. The Harbor robot is deleted (best-effort; missing robots are fine).
+1. Every robot the HarborAccess owns is deleted in Harbor: its current
+   robot, robots of an earlier `serviceAccountRef` and dash-named robots
+   from 0.2.x. A robot that is already gone is fine.
 2. The robot Secret is deleted.
 3. The finalizer is removed and the CR finishes deletion.
 
-There is no path where the CR is gone but the robot persists. If the
-bridge crashes between steps, the janitor catches the orphan robot
-within one sweep interval (default 5 minutes). If
+Deletion waits for Harbor: when listing or deleting a robot fails, the
+finalizer stays, the HarborAccess reports `Ready=False`,
+`reason=DeletionBlocked`, and the next reconcile retries. A bridge that
+crashes between the steps resumes on the next reconcile, because the
+finalizer is still there. The data plane stops issuing credentials for
+the HarborAccess as soon as it is marked for deletion.
+
+The CR can be gone while a robot survives only when someone removes the
+finalizer by hand, the escape hatch for a Harbor that is gone for good
+(README, "Uninstalling"). The robot's password then stays valid until
+the janitor's next successful sweep (every 5 minutes, and only while
+Harbor is reachable); delete the robot in Harbor yourself to close that
+window. With a selector, the janitor, not the finalizer, revokes the
+robot of a CR that stops matching and then releases its finalizers
+([ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md),
+[ADR-0032](docs/adr/0032-finalizer-ownership.md)). If
 `harbor.robotNamePrefix` does not match Harbor's `robot_name_prefix`,
 the bridge cannot recognise its robots by name, so it refuses to act:
 a listing with a name the configured prefix does not account for fails,
@@ -331,17 +357,24 @@ after revocation*).
 Kubelet caches credentials per `cacheKeyType` returned by the plugin.
 The bridge emits `Registry` ([ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md)),
 so kubelet keys its cache by `(SA, registry-host)` for the
-`cacheDuration` driven by `spec.tokenTTL` (default 1h, max 24h).
+`cacheDuration` driven by `spec.tokenTTL` (default 1h, max 24h) and
+capped at the next scheduled rotation.
 
 Consequences:
 
 - After you delete a `HarborAccess`, kubelets on each node may still
   serve cached credentials for that SA until the entry expires.
-- The bridge's 24h password rotation (`harbor.RefreshSecret`) means
-  cached credentials *also* become invalid at Harbor within 24h
-  regardless of `tokenTTL`. A cached entry that hasn't expired in
-  the kubelet cache still fails the registry handshake once the
-  underlying robot password rotates.
+- The scheduled 24h rotation never outlives a cache entry: the bridge
+  caps every `cacheDuration` at the Secret's `rotation-not-before`
+  instant and rotates only after it (see *Credential lifetime,
+  rotation, and revocation*). A forced rotation does break cached
+  entries: when the robot Secret is deleted or incomplete, holds another
+  robot's credentials, or the robot was re-created in Harbor. Kubelets
+  that cached the old password then fail their pulls until the entry
+  expires (at most `tokenTTL`).
+- Rotation is not how a revoked identity loses access: that happens when
+  its robot is deleted (or, for a refused HarborAccess, disabled) in
+  Harbor.
 
 Mitigations:
 
@@ -649,7 +682,7 @@ their own RBAC.
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
-| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once. An empty Harbor `robot_name_prefix` cannot be matched (an empty value selects `robot$`) The data plane then serves no robot Secret (`503`, `reason=secret_for_previous_identity`). |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once, and the data plane serves no robot Secret (`503`, `reason=secret_for_previous_identity`). An empty Harbor `robot_name_prefix` cannot be matched: an empty value selects `robot$` (open decision, README) |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
@@ -664,7 +697,7 @@ credential issued
   client_cert=CN=harbor-bridge-plugin    # with mTLS; the CN is <fullname>-plugin
   subject=system:serviceaccount:flux-system:source-controller
   pod=source-controller-7d9f  pod_uid=3f2c…  node=node-a   # bound-token claims
-  audience=harbor.example.com
+  audience=harbor-bridge-prod-eu-west
   harboraccess=harbor-bridge-system/flux-access
   generation=3
   robot=robot$bridge-prod-eu-west.flux-system.source-controller

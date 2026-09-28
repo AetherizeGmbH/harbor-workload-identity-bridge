@@ -81,7 +81,7 @@ type HandlerConfig struct {
 	// ForceLocalValidation gates whether the data plane performs full
 	// local OIDC validation. Always effectively true today; the false
 	// path is reserved for after upstream Harbor implements OIDC trust
-	// policies (goharbor/harbor#17520). See PHASES.md.
+	// policies (goharbor/harbor#17520). See ADR-0009.
 	ForceLocalValidation bool
 
 	// Audience is the only token audience served (ADR-0026). Empty
@@ -201,7 +201,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if !h.Config.ForceLocalValidation {
-		// Plumbed but not implemented (PHASES.md / ADR-0009). The
+		// Plumbed but not implemented (ADR-0009). The
 		// alternative path is "Harbor validates OIDC itself" — only
 		// available once goharbor/harbor#17520 lands.
 		http.Error(w, "alternative validation path not yet implemented; set forceLocalValidation=true",
@@ -672,9 +672,9 @@ func (h *Handler) writeResponse(w http.ResponseWriter, creds *robotCreds, ttl ti
 }
 
 // auditIssuance writes the per-request audit log line. Required by
-// SECURITY.md (Phase 6 doc) and PHASES.md: one structured line per
-// credential issuance, including subject, matched HarborAccess, robot
-// name, TTL, and image. logr's WithValues keeps the line greppable by
+// SECURITY.md ("Audit log shape") and the threat model's logged security
+// events: one structured line per credential issuance, including subject,
+// matched HarborAccess, robot name, TTL, and image. logr's WithValues keeps the line greppable by
 // any single field.
 func auditIssuance(
 	logger logr.Logger,

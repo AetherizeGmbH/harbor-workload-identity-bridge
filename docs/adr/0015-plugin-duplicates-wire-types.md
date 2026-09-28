@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended:** the enum-mismatch reasoning is corrected by
+[ADR-0016](0016-credential-provider-cache-key-type.md); since #111 the
+plugin validates `cacheKeyType`; the JSON keys are pinned by the golden
+files in `bridge/dataplane/testdata`, which both sides' tests read (#128).
 
 ## Context
 

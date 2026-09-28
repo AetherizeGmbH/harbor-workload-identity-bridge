@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended by [ADR-0025](0025-data-plane-serving.md):** every
+replica serves the data plane while the reconciler and the janitor stay
+leader-only, and `/metrics` has a port of its own. Both planes share the
+robot Secret contract through `bridge/internal/robotsecret`, which imports
+neither, so the import rule below still holds
+([ADR-0023](0023-level-triggered-robot-lifecycle.md)).
 
 ## Context
 

@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended:** the Secret is named `robot-<haNs>.<haName>`
+(dot-delimited, [ADR-0018](0018-dot-delimited-naming.md)) and hash-truncated
+to the 253-character limit by `robotsecret.Name` in
+`bridge/internal/robotsecret`; the `secretNameFor` TODO below is done. The
+chart grants the bridge's ServiceAccount access to Secrets in its namespace,
+but RBAC is additive, so the chart cannot keep other subjects from reading
+them: restricting them is the operator's job (SECURITY.md, "Bridge namespace
+RBAC").
 
 ## Context
 

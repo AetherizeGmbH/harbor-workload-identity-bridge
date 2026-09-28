@@ -206,8 +206,9 @@ func (c *bridgeClient) do(body []byte, token string) ([]byte, int, error) {
 }
 
 // loadCAPEM accepts either an inline PEM blob (begins with the standard
-// armor line) or a filesystem path. The dual-mode is documented in
-// docs/PHASES.md so chart authors can pick whichever fits their deployment.
+// armor line) or a filesystem path. The dual mode is documented in
+// docs/install-external-plugin.md (HARBOR_BRIDGE_CA_BUNDLE), so whoever
+// writes the provider entry can pick whichever fits their deployment.
 func loadCAPEM(s string) ([]byte, error) {
 	if strings.HasPrefix(s, "-----BEGIN") {
 		return []byte(s), nil

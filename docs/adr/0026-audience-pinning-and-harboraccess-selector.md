@@ -5,6 +5,15 @@
 Accepted. Extends ADR-0010 (identity), ADR-0017 (audience RBAC) and
 ADR-0023 (lifecycle).
 
+It also extends [ADR-0006](0006-oidc-validation-and-audience.md) (audience
+binding). **Amended by
+[ADR-0030](0030-refused-harboraccess-suspends-its-robot.md)** (a refused
+object that already had a robot has it disabled, not left alone) **and
+[ADR-0032](0032-finalizer-ownership.md)** (a bridge sets its finalizer right
+before the robot and releases only finalizers it set; see its known limits).
+**Refined by [ADR-0029](0029-configurable-plugin-provider-name.md):**
+several chart-managed plugins per node, one `plugin.providerName` each.
+
 ## Context
 
 - The bridge accepted whatever audience a HarborAccess named in

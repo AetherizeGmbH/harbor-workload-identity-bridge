@@ -6,6 +6,12 @@ Accepted. Supersedes [ADR-0005](0005-docker-token-via-service-token.md). Renders
 
 **Empirically validated 2026-05-31** against kind + Harbor 2.x. The full credential-issuance path was driven from a real Kubernetes SA token through the bridge to a successful `crane pull` of an Alpine image from Harbor (4MB OCI tarball with config blob + layer + manifest). `crane` exercises the same `401 → Bearer realm → POST /service/token → JWT → /v2/ pull` handshake containerd uses, so the architectural claim in this ADR — that the bridge can hand off raw robot Basic Auth credentials and let the registry client complete the handshake itself — is no longer hypothesis. See [HOW-TO-TEST.md](../../HOW-TO-TEST.md) for the reproducible procedure and the captured audit-log + metrics output.
 
+It also reverses [ADR-0003](0003-persistent-robots-per-harboraccess.md)'s
+statements that the data plane mints docker tokens and that the robot
+password never leaves the bridge. **Amended by
+[ADR-0023](0023-level-triggered-robot-lifecycle.md):** kubelet may cache the
+credentials for `tokenTTL`, capped at the next scheduled rotation.
+
 ## Context
 
 [ADR-0005](0005-docker-token-via-service-token.md) committed to the bridge minting Docker registry v2 bearer JWTs via Harbor's `/service/token` endpoint using the robot's password, then returning the JWT as the credential's `Password`. The rationale was security: the robot password never leaves the bridge process, only short-lived JWTs do.

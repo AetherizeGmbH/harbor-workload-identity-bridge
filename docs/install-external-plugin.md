@@ -72,6 +72,10 @@ providers:
           -----BEGIN CERTIFICATE-----
           ...ca.crt of the bridge TLS Secret...
           -----END CERTIFICATE-----
+      # Only when the endpoint's host is not in the bridge certificate
+      # (a node IP, a load balancer): the name to verify it against.
+      # - name: HARBOR_BRIDGE_SERVER_NAME
+      #   value: harbor-bridge.harbor-bridge-system.svc   # <fullname>.<namespace>.svc
     tokenAttributes:
       serviceAccountTokenAudience: harbor-bridge-prod   # = plugin.audience
       requireServiceAccount: true
@@ -87,9 +91,21 @@ kubectl -n harbor-bridge-system get secret harbor-bridge-tls -o jsonpath='{.data
 Notes:
 
 - `HARBOR_BRIDGE_ENDPOINT` is not templated here. The chart's installer
-  replaces a literal `$(NODE_IP)`; without the installer, write a concrete URL.
+  replaces a literal `$(NODE_IP)`; kubelet passes the value to the plugin
+  unchanged, so without the installer write a concrete URL.
   If your dataplane does not route loopback NodePorts, use a node IP or an
-  internal load balancer in front of the bridge Service.
+  internal load balancer in front of the bridge Service, and set
+  `HARBOR_BRIDGE_SERVER_NAME` (commented out above). The certificate the
+  chart requests from cert-manager names only the bridge Service
+  (`<fullname>`, `<fullname>.<namespace>`, `<fullname>.<namespace>.svc`,
+  `<fullname>.<namespace>.svc.cluster.local`), `localhost` and `127.0.0.1`,
+  so a node IP or a load-balancer address fails TLS verification unless the
+  plugin verifies the certificate against one of those names:
+  `<fullname>.<namespace>.svc`, where `<fullname>` is the release name or
+  `fullnameOverride`. With `tls.enabled=false` use a name your own
+  certificate carries. A node IP means a different entry per node (on Talos
+  a per-node machine-config patch); a load balancer or a stable DNS name
+  avoids that.
 - The CA rotates when cert-manager reissues it. With the inline form you must
   roll the new CA out yourself; prefer a long-lived CA issuer.
 - With `bridge.mTLS.enabled=true` the plugin must also get

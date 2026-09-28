@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended:** `GetByID` is gone (#88,
+[ADR-0023](0023-level-triggered-robot-lifecycle.md)). `GetByName` is a
+filtered listing (`GET /robots?q=name=<name>`), and `UpdatePermissions`
+became `Update`, a `PUT /robots/{id}` that writes the whole robot,
+description and disabled flag included (ADR-0023,
+[ADR-0030](0030-refused-harboraccess-suspends-its-robot.md)). The call set
+is five endpoints.
 
 ## Context
 

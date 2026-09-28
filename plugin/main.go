@@ -10,7 +10,8 @@
 // Bridge API: POST /v1/credentials, Authorization: Bearer <SA-token>.
 // See bridge/dataplane/handler.go for the bridge side of the contract.
 //
-// Behaviour summary (full table in docs/PHASES.md, Phase 4):
+// Behaviour summary (the original table is in docs/PHASES.md, Phase 4, a
+// historical build log; bridge_client.go is authoritative):
 //   - 200          → translate response, emit CredentialProviderResponse on stdout
 //   - 401 / 403    → empty auth map, cacheKeyType=Image, cacheDuration=0
 //   - 503          → retry once after 1s; second 503 exits non-zero

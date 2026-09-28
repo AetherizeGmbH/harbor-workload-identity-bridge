@@ -2,7 +2,27 @@
 
 ## Status
 
-Accepted
+Accepted. **Extended by later ADRs; two statements below do not match the
+chart:**
+
+- The chart's default issuer is
+  `https://kubernetes.default.svc.cluster.local` (`bridge.oidcIssuer`), the
+  issuer kubeadm and kind write into their tokens. It must equal the
+  cluster's issuer byte for byte.
+- The chart binds no issuer-discovery role. The bridge reads OIDC discovery
+  and the JWKS with its own ServiceAccount token under Kubernetes' default
+  `system:service-account-issuer-discovery` ClusterRoleBinding, which grants
+  the role to every ServiceAccount; a cluster that removed that binding must
+  grant the role to the bridge itself.
+- [ADR-0026](0026-audience-pinning-and-harboraccess-selector.md) pins one
+  served audience per bridge (`plugin.audience`): a HarborAccess must name
+  exactly that audience or is refused as `AudienceMismatch`.
+- [ADR-0028](0028-token-lifetime-cap-and-pod-binding.md) caps the token
+  lifetime and requires pod-bound tokens.
+- The docker-token reasoning is obsolete since
+  [ADR-0013](0013-return-robot-basic-auth-credentials.md), and
+  [ADR-0016](0016-credential-provider-cache-key-type.md) corrects what
+  `cacheType` does.
 
 ## Context
 

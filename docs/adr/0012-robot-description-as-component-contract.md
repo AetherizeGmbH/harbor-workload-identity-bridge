@@ -2,7 +2,16 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended:** the helpers live in
+[bridge/controlplane/contract.go](../../bridge/controlplane/contract.go)
+(`labels.go` was renamed).
+[ADR-0023](0023-level-triggered-robot-lifecycle.md) changed which robots the
+janitor considers, and
+[ADR-0030](0030-refused-harboraccess-suspends-its-robot.md) added the token
+`suspended=true` for a robot the bridge disabled, following the additive
+evolution rule. Since [ADR-0018](0018-dot-delimited-naming.md) the ownership
+prefix has no prefix-collision class; the cluster tag remains defense in
+depth.
 
 ## Context
 

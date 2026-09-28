@@ -10,8 +10,9 @@
 //
 // into a single process driven by controller-runtime's Manager. See
 // docs/adr/0002-bridge-control-plane-data-plane-split.md for the split
-// rationale and docs/PHASES.md for the 9-step wiring sequence this file
-// realises (Slice 3D).
+// rationale and docs/adr/0025-data-plane-serving.md for how the data plane
+// runs on every replica. The numbered steps below follow the original
+// wiring plan in docs/PHASES.md (Slice 3D), a historical build log.
 package main
 
 import (

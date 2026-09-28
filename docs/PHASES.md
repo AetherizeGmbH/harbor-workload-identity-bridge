@@ -1,10 +1,37 @@
 # Project phases
 
-Source of truth for what is done, what is next, and what is intentionally out of scope. Each phase ends with a working, tested deliverable. Cross-phase work is rejected — push to a later phase.
+> **Historical build log, not a reference.** This file records how
+> Phases 1–6 were planned and built (May–June 2026) and is no longer kept
+> current. Where it disagrees with the code, the [ADRs](adr/),
+> [SECURITY.md](../SECURITY.md) or [MIGRATION.md](../MIGRATION.md), those
+> win. Later phases (Harbor compatibility matrix, node installer,
+> lifecycle hardening, the 2026-09 security review) are summarised in the
+> README's "Status and roadmap"; releases are in
+> [CHANGELOG.md](../CHANGELOG.md). *Superseded* notes below mark
+> statements the code no longer matches; they are not exhaustive.
+>
+> Current sources for what the conventions section froze on 2026-06-05:
+>
+> - environment variables: the `Env*` constants in
+>   [bridge/controlplane/config.go](../bridge/controlplane/config.go), the
+>   `env*` constants in [bridge/cmd/main.go](../bridge/cmd/main.go), and
+>   the chart's `bridge-deployment.yaml`;
+> - names, finalizers and rotation constants:
+>   [bridge/controlplane/contract.go](../bridge/controlplane/contract.go),
+>   `Config.Finalizer` in `config.go`,
+>   [bridge/internal/robotsecret](../bridge/internal/robotsecret/),
+>   [bridge/controlplane/harbor/naming.go](../bridge/controlplane/harbor/naming.go),
+>   ADR-0018 and ADR-0031;
+> - HarborAccess status reasons: the `Reason*` constants in
+>   [bridge/controlplane/reconciler.go](../bridge/controlplane/reconciler.go);
+> - data plane API, status codes, audit log and metrics:
+>   [bridge/dataplane/handler.go](../bridge/dataplane/handler.go),
+>   [metrics.go](../bridge/dataplane/metrics.go) and SECURITY.md, "Audit
+>   log shape".
 
-This document is written to survive context compaction. The detail sections below carry the load-bearing constraints, conventions, and constants — read them before resuming work in a phase.
+While Phases 1–6 were built, this file was the source of truth for what was done, what was next, and what was intentionally out of scope. Each phase ended with a working, tested deliverable.
 
-## Current status (as of 2026-06-05)
+## Status when this log was frozen (2026-06-05)
 
 - Phase 1: COMPLETE
 - Phase 2 Slice A (CRD bump + control-plane foundations): COMPLETE
@@ -16,7 +43,7 @@ This document is written to survive context compaction. The detail sections belo
 - Phase 3 Slice D (server + metrics + cmd/main.go): COMPLETE
 - Phase 4 (plugin binary): COMPLETE
 - Phase 5 (Helm chart): COMPLETE
-- Phase 6 (kubelet-driven e2e + docs + v0.1.0): **E2E PASSES.** `make e2e` against a fresh kind v1.35 cluster runs the full pull chain end-to-end and the `pull_pod` assertion succeeds. Only the `v0.1.0` tag itself remains.
+- Phase 6 (kubelet-driven e2e + docs + v0.1.0): **E2E PASSES.** `make e2e` against a fresh kind v1.35 cluster runs the full pull chain end-to-end and the `pull_pod` assertion succeeds. Only the `v0.1.0` tag itself remains. *Superseded:* `v0.1.0` and many later releases are tagged; see CHANGELOG.md.
 
 ## Architecture snapshot (post-ADR-0013)
 
@@ -36,9 +63,9 @@ The bridge is one Go binary with two logically separated packages ([ADR-0002](ad
 
 **`bridge/controlplane/harbor`** — SDK wrapper around `github.com/goharbor/go-client`. Used by the reconciler for `Create`/`Delete`/`List`/`GetByName`/`RefreshSecret`/`UpdatePermissions`. Robot name truncation logic. Unaffected by the ADR-0013 pivot.
 
-## Conventions and constants reference
+## Conventions and constants reference (frozen 2026-06-05)
 
-Read these before touching code in any phase.
+Frozen with the rest of this log: use the current sources listed at the top.
 
 ### Env vars (bridge runtime)
 
@@ -52,12 +79,14 @@ Read these before touching code in any phase.
 | `BRIDGE_FORCE_LOCAL_VALIDATION` | no | Default `true`. The `false` path returns 501 — reserved for post-Harbor-OIDC-migration. |
 | `BRIDGE_LOG_LEVEL` | no | One of `debug`, `info`, `warn`, `error`. Default `info`. |
 
+*Superseded:* the bridge reads many more variables, among them the required `BRIDGE_AUDIENCE` (ADR-0026) and `BRIDGE_OIDC_JWKS_URL`, `BRIDGE_OIDC_CA_FILE`, `BRIDGE_OIDC_TOKEN_FILE`, `BRIDGE_HARBOR_ROBOT_PREFIX`, `BRIDGE_HARBOR_CA_FILE`, `BRIDGE_HARBOR_ALLOW_INSECURE_HTTP`, `BRIDGE_HARBORACCESS_SELECTOR`, `BRIDGE_INSTANCE`, `BRIDGE_TOKEN_MAX_LIFETIME` and `BRIDGE_REQUIRE_POD_BOUND_TOKEN` (`config.go`), plus the listener, TLS, leader-election, rate-limit and shutdown settings in `main.go`. The `BRIDGE_OIDC_ISSUER` example is not the chart default, `https://kubernetes.default.svc.cluster.local`.
+
 ### Names and limits
 
 - **Harbor robot username**: regex `^[a-z0-9]+(?:[._-][a-z0-9]+)*$`, postgres column `varchar(255)`. We use soft cap **240** in [bridge/controlplane/harbor/naming.go](../bridge/controlplane/harbor/naming.go). Overflows are deterministically hash-truncated.
 - **Robot name format**: `bridge-<cluster>.<saNs>.<saName>` (dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)).
-- **Secret name format**: `robot-<haNs>.<haName>` (bridge namespace; dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)). Hash-truncated to the 253-char k8s limit when it would overflow (`controlplane.robotSecretNameFor`, mirrored in `dataplane.robotSecretName`).
-- **Finalizer**: `harbor.aetherize.io/robot` ([controlplane/labels.go](../bridge/controlplane/labels.go)).
+- **Secret name format**: `robot-<haNs>.<haName>` (bridge namespace; dot-delimited, [ADR-0018](adr/0018-dot-delimited-naming.md)). Hash-truncated to the 253-char k8s limit when it would overflow (`controlplane.robotSecretNameFor`, mirrored in `dataplane.robotSecretName`). *Superseded:* both planes call `robotsecret.Name` in `bridge/internal/robotsecret`.
+- **Finalizer**: `harbor.aetherize.io/robot` ([controlplane/labels.go](../bridge/controlplane/labels.go)). *Superseded:* `FinalizerName` is in [contract.go](../bridge/controlplane/contract.go); with `BRIDGE_HARBORACCESS_SELECTOR` the bridge uses `harbor.aetherize.io/robot-<instance>` (`Config.Finalizer`, ADR-0026, ADR-0032).
 - **Managed-by label value**: `harbor-workload-identity-bridge`.
 
 ### Robot description (cross-component contract — ADR-0012)
@@ -76,6 +105,7 @@ Evolution rule: additive only. Never reorder or remove existing tokens. The `man
 - `InvalidSpec` — a missing spec, a name longer than 63 characters, a project name Harbor does not accept (such as `*`), a `tokenTTL` that is not a Go duration, or `RobotName` returned `ErrClusterNameTooLong` or `ErrInvalidRobotName` (an identity Harbor cannot name). A refusal, see `IssuerMismatch`.
 - `HarborError` — transient Harbor failure; reconciler returns the error so controller-runtime retries with backoff.
 - `EnforcedByBridge` — TrustPolicyApplied reason; status of bridge enforcement until #17520 lands.
+- *Superseded, missing above:* `AudienceMismatch` (the CR names another audience than `BRIDGE_AUDIENCE`, ADR-0026; a refusal like `IssuerMismatch`), `RobotDisabled` (an administrator disabled the robot in Harbor) and `DeletionBlocked` (a Harbor error holds the finalizer, ADR-0023).
 
 The split between `refuse` / `markNotReadyWithRequeue` (resolved by a change to the CR, the bridge or something outside the CR; re-checked on the resync interval, no error) and `markTransientError` (returns the error, so controller-runtime retries with backoff) is load-bearing for retry semantics.
 
@@ -113,6 +143,8 @@ Status code map (post-pivot):
 - `503` — robot Secret not yet present in bridge namespace; plugin should retry with backoff
 
 Note that 502 is no longer used post-pivot (no /service/token call from the bridge means no upstream-failure path).
+
+*Superseded:* the token's `aud` must carry the bridge's one served audience, `plugin.audience` (`BRIDGE_AUDIENCE`, ADR-0026), not the registry hostname. `403` also answers an invalid HarborAccess spec, a HarborAccess being deleted and a Secret owner mismatch; `429` answers beyond the per-source rate limit; `503` also answers while the signing keys cannot be fetched and while the Secret still holds the previous identity's robot. The full map is in `handler.go` and SECURITY.md, "Audit log shape".
 
 ### KEP-4412 plugin-side cache type
 
@@ -287,9 +319,9 @@ Originally-planned section (kept for archaeology):
 
 - [charts/harbor-bridge/Chart.yaml](../charts/harbor-bridge/Chart.yaml) (`harbor-workload-identity-bridge` v0.1.0, kubeVersion `>=1.34.0-0` for KEP-4412 beta).
 - [charts/harbor-bridge/values.yaml](../charts/harbor-bridge/values.yaml) — 7 REQUIRED fields gated at template time (`clusterName`, `harbor.url`, `harbor.adminCredsSecret.name`, `plugin.matchImages`, `plugin.audience`, `tls.issuerRef.name` when `tls.enabled`, `bridge.mTLS.clientIssuerRef.name` when mTLS enabled); everything else defaulted with comments explaining each knob.
-- [charts/harbor-bridge/templates/_helpers.tpl](../charts/harbor-bridge/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide, leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
+- [charts/harbor-bridge/templates/_helpers.tpl](../charts/harbor-bridge/templates/_helpers.tpl) — `validateRequiredValues` (`fail` with action-oriented messages), component-scoped names (`harbor-bridge` for the bridge, `harbor-bridge-plugin` for the daemon), `clusterScopedName` for ClusterRole/Binding so two installs in different namespaces don't collide (*superseded:* only the bridge's own ClusterRole/Binding; the audience RBAC and the trust-manager Bundle are named after the release only, an open decision in the README), leader-election auto-derivation from replica count, and image-tag fallback to `.Chart.AppVersion`.
 - Bridge templates: `bridge-serviceaccount.yaml`, `bridge-rbac.yaml` (ClusterRole for HarborAccess cluster-wide, Role for Secrets + Lease in release namespace — tightened from the over-broad kubebuilder markers), `bridge-deployment.yaml` (2 replicas with pod-anti-affinity, distroless `nonroot` security context, projected admin-creds and TLS volumes, TLS-cert-checksum annotation for cert-rotation reload), `bridge-service.yaml` (NodePort 31443 per ADR-0008), `bridge-certificate.yaml` (cert-manager Certificate with optional client-cert when mTLS enabled), `bridge-servicemonitor.yaml` (optional, only when `metrics.serviceMonitor.enabled`).
-- Plugin templates: `plugin-serviceaccount.yaml` (`automountServiceAccountToken: false` — plugin pods don't talk to the K8s API), `plugin-configmap.yaml` (kubelet `CredentialProviderConfig` with `cacheType: ServiceAccount`, `defaultCacheDuration`, `matchImages` from values, `HARBOR_BRIDGE_*` env including CA path), `plugin-daemonset.yaml` (privileged init container that copies binary + config + CA + optional mTLS client cert into `/etc/kubernetes/credential-provider*` hostPaths, then a `registry.k8s.io/pause:3.10` main container so the DaemonSet stays "running" and `kubectl logs` surfaces the install output; `priorityClassName: system-node-critical`, `tolerations: [{operator: Exists}]` so the plugin lands on control-plane nodes).
+- Plugin templates: `plugin-serviceaccount.yaml` (`automountServiceAccountToken: false` — plugin pods don't talk to the K8s API), `plugin-configmap.yaml` (kubelet `CredentialProviderConfig` with `cacheType: ServiceAccount`, `defaultCacheDuration`, `matchImages` from values, `HARBOR_BRIDGE_*` env including CA path), `plugin-daemonset.yaml` (privileged init container that copies binary + config + CA + optional mTLS client cert into `/etc/kubernetes/credential-provider*` hostPaths, then a `registry.k8s.io/pause:3.10` main container so the DaemonSet stays "running" and `kubectl logs` surfaces the install output (*superseded:* the long-running container is `installer --sync`, which refreshes the CA and mTLS files, ADR-0021); `priorityClassName: system-node-critical`, `tolerations: [{operator: Exists}]` so the plugin lands on control-plane nodes).
 - [charts/harbor-bridge/crds/harbor.aetherize.io_harboraccesses.yaml](../charts/harbor-bridge/crds/harbor.aetherize.io_harboraccesses.yaml) — CRD copied from `config/crd/bases`. Helm's `crds/` directory installs it but does not upgrade it; CRD changes are an explicit operator step.
 - [charts/harbor-bridge/templates/NOTES.txt](../charts/harbor-bridge/templates/NOTES.txt) — prints `clusterName`, the unique prefix, the audience the operator must set on every CR, and the kubelet flags the chart cannot set (`--image-credential-provider-{bin-dir,config}` must already be on the node).
 
@@ -306,7 +338,7 @@ Originally-planned section (kept for archaeology):
 
 - `tls.issuerRef` points at any cert-manager Issuer/ClusterIssuer the operator has. The Certificate writes `ca.crt` into the bridge-tls Secret; the plugin DaemonSet mounts that Secret and copies the CA onto each node, so kubelet's plugin process can verify the bridge's TLS cert.
 - mTLS adds a second Certificate (`<release>-plugin-mtls-client`) and threads `HARBOR_BRIDGE_CLIENT_CERT` / `_KEY` into the kubelet config. Bridge's `BRIDGE_TLS_CLIENT_CA_FILE` is enabled at the same time, rejecting plugin connections without a client cert.
-- The plugin DaemonSet **cannot** set kubelet's `--image-credential-provider-*` flags. The chart's NOTES.txt prints the required values; operators set them at node provisioning.
+- The plugin DaemonSet **cannot** set kubelet's `--image-credential-provider-*` flags. The chart's NOTES.txt prints the required values; operators set them at node provisioning. *Superseded:* the installer wires kubelet in `auto`, `merge` and `patch` mode; only `none` leaves the flags to the operator (ADR-0021).
 
 ### Originally-planned section (kept for archaeology)
 
@@ -388,7 +420,7 @@ The first attempt at containerd cert trust used `skip_verify = true` in `hosts.t
 
 1. **`SECURITY.md` polish.** ✅ Done. Documents the elevated privilege the install DaemonSet requires (`hostPID: true`, kubelet restart, the audience-scoped `system:nodes` ClusterRoleBinding from ADR-0017).
 2. **`docs/ARCHITECTURE.md`.** Optional for v0.1.0.
-3. **`v0.1.0` tag.** Annotated, push, release notes summarising Phases 1–6 + the three-bug postmortem.
+3. **`v0.1.0` tag.** Annotated, push, release notes summarising Phases 1–6 + the three-bug postmortem. ✅ Done; releases are cut by semantic-release since.
 
 ### Originally-planned section (kept for archaeology)
 
@@ -435,11 +467,11 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 
 ## Known issues and future hardening (post-v0.1.0)
 
-- **Secret-name truncation**: `secretNameFor` in [reconciler.go](../bridge/controlplane/reconciler.go) does not hash-truncate. CRs with very long combined namespace+name could overflow Kubernetes' 253-char limit. Mirror the hash-truncate from `harbor/naming.go` when this becomes a real issue.
-- **Reconciler doesn't gate on CR Ready state in data plane**: a CR in `Ready=False` (e.g. issuer mismatch) will surface to the data plane only via "Secret missing → 503" loop. The plugin retries indefinitely. Optional hardening: data plane checks the CR's Ready condition and returns 403 if not Ready, with the reason in the body.
+- ~~**Secret-name truncation**: `secretNameFor` in [reconciler.go](../bridge/controlplane/reconciler.go) does not hash-truncate. CRs with very long combined namespace+name could overflow Kubernetes' 253-char limit. Mirror the hash-truncate from `harbor/naming.go` when this becomes a real issue.~~ Resolved: `robotsecret.Name` hash-truncates, and the CRD limits HarborAccess names to 63 characters.
+- ~~**Reconciler doesn't gate on CR Ready state in data plane**: a CR in `Ready=False` (e.g. issuer mismatch) will surface to the data plane only via "Secret missing → 503" loop. The plugin retries indefinitely. Optional hardening: data plane checks the CR's Ready condition and returns 403 if not Ready, with the reason in the body.~~ Resolved differently: the data plane matches only a HarborAccess that names its audience (ADR-0026), refuses an invalid spec and a HarborAccess being deleted with `403`, and a refused HarborAccess loses its Secret and has its robot disabled (ADR-0030).
 - **Permission-edit blip**: between a `spec.permissions` edit and the next reconcile, the data plane could mint credentials for permissions the in-Harbor robot doesn't yet have. Harbor's `/service/token` will issue a JWT that doesn't include the not-yet-granted scope; containerd's pull fails with 403 until reconcile catches up. Operator-perceptible blip; acceptable.
 - **Janitor at scale**: lists all Harbor robots on each sweep. O(robots) per 5min. Fine for hundreds, marginal for thousands; consider Harbor query-param filter if it becomes a problem.
-- **CRD validation tests**: the CRD CEL/pattern markers are not round-tripped through a real apiserver. Add envtest-based validation tests in Phase 6 polish.
+- **CRD validation tests**: the CRD CEL/pattern markers are not round-tripped through a real apiserver. Add envtest-based validation tests in Phase 6 polish. *Resolved in part:* envtest round-trips the project-name pattern, the `tokenTTL` pattern and the required `spec` (`bridge/controlplane/envtest_test.go`, `envtest_crd_test.go`).
 - ~~**`controlplane.Config.LoadAdminCreds` reload**: credentials load once at startup. If admin creds rotate, the bridge needs a restart. cert-manager pattern (pod restarts on Secret change) covers this — chart concern.~~ Resolved: nothing restarted the pods on a Secret change (the chart cannot hash a Secret it does not own). The Harbor client now reads the credentials from `BRIDGE_HARBOR_ADMIN_DIR` on every call (`controlplane.AdminCredsReader`, both keys from one `..data` version of the volume).
 
 ## Open questions
@@ -447,6 +479,6 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 | Topic | Resolution path |
 | --- | --- |
 | Does containerd's auth flow accept our Basic Auth credentials end-to-end? | **Resolved 2026-06-05.** The `pull_pod` stage of [test/e2e/tests/02-bridge.tftest.hcl](../test/e2e/tests/02-bridge.tftest.hcl) runs the full chain — kubelet → plugin → bridge → robot creds → containerd → Harbor — under real kubelet on `kindest/node:v1.35.0`. Pass = green. |
-| Should the data plane gate on CR `Ready=True` before returning credentials? | Phase 6 polish. Trade-off: stronger guarantee vs more code in the hot path. |
+| Should the data plane gate on CR `Ready=True` before returning credentials? | Phase 6 polish. Trade-off: stronger guarantee vs more code in the hot path. *Resolved differently*, see "Known issues" above. |
 | Should `forceLocalValidation: false` ever default `true`? | Reassess when Harbor #17520 lands. Air-gapped clusters keep `true` indefinitely. |
-| Should the chart split metrics onto a separate port? | Phase 5 design call. Currently planned: same port, same TLS. |
+| Should the chart split metrics onto a separate port? | Phase 5 design call. Currently planned: same port, same TLS. *Resolved:* `/metrics` is plain HTTP on its own port behind a ClusterIP Service, never on the NodePort (ADR-0025). |

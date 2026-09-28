@@ -4,6 +4,13 @@
 
 Accepted. Amends ADR-0002 (process composition) and ADR-0008 (NodePort transport).
 
+**Amended in 0.11.2 (#136):** the credential listener binds only after the
+HarborAccess and Secret caches the handler reads have synced, and a replica
+whose caches do not sync within two minutes exits, so a ready replica has
+synced caches. Before, decision 2 did not hold as written: a replica was
+ready once its listener was bound, and its first request could wait for the
+caches. The credential listener serves only `POST /v1/credentials`.
+
 ## Context
 
 - The data-plane HTTPS server was added to the controller-runtime manager as a

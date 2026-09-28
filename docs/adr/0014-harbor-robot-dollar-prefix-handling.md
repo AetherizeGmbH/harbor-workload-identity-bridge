@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended by
+[ADR-0023](0023-level-triggered-robot-lifecycle.md):** the Harbor client
+strips the configured robot prefix (`harbor.robotNamePrefix`, default
+`robot$`) on every read path, so `Robot.Name` is the internal name and
+`Robot.WireName` the on-wire one: option 1 below, not option 3. Since 0.10.2
+(#134) a robot name the configured prefix does not account for fails closed
+(`ErrRobotPrefixMismatch`).
 
 ## Context
 
