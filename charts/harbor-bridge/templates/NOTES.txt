@@ -92,10 +92,31 @@ NEXT STEPS
              value: {{ include "harbor-bridge.plugin.bridgeEndpoint" . | quote }}
            - name: HARBOR_BRIDGE_CA_BUNDLE
              value: {{ include "harbor-bridge.plugin.hostFile" (list . "ca.crt") | quote }}
+{{- if .Values.plugin.bridgeEndpoint }}
+{{- if .Values.tls.enabled }}
+           - name: HARBOR_BRIDGE_SERVER_NAME
+             value: "{{ include "harbor-bridge.bridge.fullname" . }}.{{ .Release.Namespace }}.svc"
+{{- else }}
+           # - name: HARBOR_BRIDGE_SERVER_NAME   # a name your certificate carries,
+           #   value: "<name>"                   # unless it names the endpoint's host
+{{- end }}
+{{- end }}
          tokenAttributes:
            serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
            requireServiceAccount: true
            cacheType: ServiceAccount
+
+{{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
+
+     Replace $(NODE_IP) with a concrete address: only the chart's installer
+     substitutes it, and kubelet passes the value to the plugin unchanged.
+{{- end }}
+{{- if and .Values.plugin.bridgeEndpoint .Values.tls.enabled }}
+
+     HARBOR_BRIDGE_SERVER_NAME makes the plugin verify the bridge certificate
+     against the bridge Service's name, because the certificate does not name a
+     node IP or a load balancer.
+{{- end }}
 
      Talos: see docs/install-external-plugin.md in the repository.
 {{- end }}

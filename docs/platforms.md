@@ -25,7 +25,11 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   own loopback (`https://127.0.0.1:31443`). On dataplanes that do not route
   loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`. The
   chart then has the plugin verify the bridge certificate against the bridge
-  Service's DNS name, because the node IP is not in the certificate.
+  Service's DNS name, because the node IP is not in the certificate. Both the
+  `$(NODE_IP)` substitution and that server name
+  (`HARBOR_BRIDGE_SERVER_NAME`) come with the chart's plugin DaemonSet: with
+  `plugin.enabled: false`, write a concrete endpoint and set the server name
+  yourself ([install-external-plugin.md](install-external-plugin.md)).
 - The bridge and plugin images must come from a registry outside
   `plugin.matchImages` (the chart refuses otherwise; ADR-0021).
 - In auto/merge mode kubelet's `--image-credential-provider-config` must name a
