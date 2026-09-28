@@ -515,6 +515,56 @@ else
   failed=$((failed+1))
 fi
 
+# NOTES, uninstall step: a selective bridge's objects carry its per-instance
+# finalizer, and objects from before the selector the shared one as well.
+if out=$(notes -f "${COMPLETE}" --set bridge.harborAccessSelector.a=b 2>&1) \
+   && grep -qF 'the "harbor.aetherize.io/robot-harbor-bridge" finalizer by hand' <<<"${out}" \
+   && grep -qF '(and "harbor.aetherize.io/robot", on objects that still carry it from' <<<"${out}" \
+   && out=$(notes -f "${COMPLETE}" 2>&1) \
+   && grep -qF 'the "harbor.aetherize.io/robot" finalizer by hand and delete' <<<"${out}"; then
+  echo "PASS  NOTES name the finalizers to remove by hand"
+else
+  echo "FAIL  NOTES name the finalizers to remove by hand"
+  grep -m 3 -F 'finalizer' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# NOTES, provider entry for an external plugin (plugin.enabled=false): the
+# server name when the endpoint is not the loopback default (the chart's
+# certificate names only the Service and 127.0.0.1), the client pair with
+# mTLS, and a warning that nothing replaces $(NODE_IP).
+if out=$(notes -f "${COMPLETE}" --set plugin.enabled=false --set bridge.mTLS.enabled=true \
+     --set bridge.mTLS.clientIssuerRef.name=ca --set 'plugin.bridgeEndpoint=https://$(NODE_IP):31443' 2>&1) \
+   && grep -qF 'value: "harbor-bridge.harbor-bridge-system.svc"' <<<"$(grep -A1 'name: HARBOR_BRIDGE_SERVER_NAME' <<<"${out}")" \
+   && grep -qF -- '- name: HARBOR_BRIDGE_CLIENT_CERT' <<<"${out}" \
+   && grep -qF -- '- name: HARBOR_BRIDGE_CLIENT_KEY' <<<"${out}" \
+   && grep -qF 'HARBOR_BRIDGE_ENDPOINT contains $(NODE_IP), which only the chart' <<<"${out}" \
+   && out=$(notes -f "${COMPLETE}" --set plugin.enabled=false 2>&1) \
+   && ! grep -qE 'HARBOR_BRIDGE_(SERVER_NAME|CLIENT_CERT)|contains \$\(NODE_IP\)' <<<"${out}" \
+   && grep -qF 'value: "https://127.0.0.1:31443"' <<<"${out}"; then
+  echo "PASS  NOTES provider entry for an external plugin"
+else
+  echo "FAIL  NOTES provider entry for an external plugin"
+  grep -m 5 -E 'HARBOR_BRIDGE|NODE_IP|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# NOTES, mTLS: list only the certificates the chart requests, each in its
+# namespace (split mode: the client certificate is in plugin.namespace).
+if out=$(notes -f "${CHART_DIR}/tests/values-plugin-namespace.yaml" 2>&1) \
+   && grep -qxF '  kubectl -n harbor-bridge-system get certificate harbor-bridge-tls' <<<"${out}" \
+   && grep -qxF '  kubectl -n harbor-bridge-plugin get certificate harbor-bridge-plugin-mtls-client' <<<"${out}" \
+   && out=$(notes -f "${COMPLETE}" --set plugin.enabled=false,tls.enabled=false,tls.existingSecret=bridge-tls \
+     --set bridge.mTLS.enabled=true,bridge.mTLS.clientIssuerRef.name=ca 2>&1) \
+   && grep -qF 'certificate that chains to the CA in ca.crt of Secret bridge-tls' <<<"${out}" \
+   && ! grep -qF 'get certificate' <<<"${out}"; then
+  echo "PASS  NOTES list the certificates the chart requests"
+else
+  echo "FAIL  NOTES list the certificates the chart requests"
+  grep -m 5 -E 'certificate|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
 # ADR-0028: the token policy reaches the bridge's environment.
 if out=$(render -f "${COMPLETE}" --set bridge.tokenValidation.maxLifetime=90m \
      --set bridge.tokenValidation.requirePodBinding=false 2>&1) \

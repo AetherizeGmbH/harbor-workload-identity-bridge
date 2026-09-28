@@ -401,7 +401,8 @@ every `plugin.install.mode` except `none`
 container:
 
 - runs as root (`runAsUser: 0`) and `privileged: true`.
-- runs with `hostPID: true` and mounts the host's `/` read-write at
+- runs in the host PID namespace (`hostPID: true`, a pod setting that the
+  sync container shares, below) and mounts the host's `/` read-write at
   `/host`. The broad mount is required because `merge` mode writes
   into whatever paths the node's kubelet flags point at — those are
   discovered at runtime from `/proc/<kubelet>/cmdline` and cannot be
@@ -590,8 +591,20 @@ Operator choices:
   `seccompProfile: RuntimeDefault`, read-only root filesystem, and a
   single hostPath mount: `plugin.hostConfigDir`, which also holds the CA
   and mTLS files of every other release that uses the same directory
-  (see above). It never sees the host root, never uses nsenter, never
-  touches kubelet.
+  (see above). It never sees the host root, never uses nsenter, and never
+  restarts or reconfigures kubelet. Outside `none` mode it shares the
+  pod's host PID namespace (`hostPID` is set per pod, and the install
+  container needs it). Residual: a compromised sync container can list
+  the node's processes and read their command lines, including other
+  pods' arguments; as root it can signal other root processes, kubelet
+  and containerd included unless an enforcing AppArmor or SELinux profile
+  confines it (the default container profiles still let it signal other
+  containers under the same profile); and it can read the environment and
+  root filesystem (`/proc/<pid>/environ`, `/proc/<pid>/root`) of other
+  containers that run as root without capabilities, such as their mounted
+  ServiceAccount tokens. Processes holding capabilities it lacks, kubelet
+  and containerd among them, stay closed to those reads, so this is not a
+  host-root compromise. `plugin.install.mode: none` has no `hostPID`.
 - The DaemonSet pods get no ServiceAccount token (they never call the
   Kubernetes API).
 - `plugin.enabled: false` removes the DaemonSet entirely, for nodes

@@ -306,8 +306,9 @@ the leftover `robot$bridge-<clusterName>.*` robots in Harbor. The
 finalizer is `harbor.aetherize.io/robot`, or, for a bridge with
 `bridge.harborAccessSelector`, `harbor.aetherize.io/robot-<instance>`
 (`bridge.instance`, default the release name; ADR-0026); the chart's
-NOTES print the right one. Helm keeps the CRD (`crds/`); delete it
-yourself when you are done.
+NOTES print the right one. An object that existed before the selector
+was set may carry both: then remove both. Helm keeps the CRD (`crds/`); delete
+it yourself when you are done.
 
 Changing `bridge.harborAccessSelector` or `bridge.instance` later: a bridge
 that gains a selector releases the shared finalizer from the objects it
@@ -577,9 +578,14 @@ does **not** cover (the public GHCR images satisfy this by default).
 The chart fails at template time if an exact `matchImages` entry equals
 the images' registry host; air-gapped mirrors that accept the bootstrap
 ordering can override with `plugin.allowSelfMatchImages=true`. A bridge
-outage only affects *new* pulls of matched images — kubelet's
-credential cache (`plugin.defaultCacheDuration`) covers running
-workloads and recent pulls.
+outage only affects *new* pulls of matched images: running containers
+need no registry credentials, and kubelet's credential cache (per
+ServiceAccount and registry, for each HarborAccess's `spec.tokenTTL`,
+shortened to the robot's next scheduled password rotation) serves new
+pulls by the same ServiceAccount on that node until it expires.
+`plugin.defaultCacheDuration` does not set it: kubelet uses that value
+only for a plugin response without a cache duration, and the plugin
+always sends one.
 
 ## Architecture and decisions
 

@@ -111,6 +111,14 @@ NEXT STEPS
            - name: HARBOR_BRIDGE_SERVER_NAME
              value: {{ . | quote }}
 {{- end }}
+{{- if .Values.bridge.mTLS.enabled }}
+           # mTLS: a client certificate from the CA in ca.crt of Secret
+           # {{ include "harbor-bridge.tlsSecretName" . }}. The chart issues none with plugin.enabled=false.
+           - name: HARBOR_BRIDGE_CLIENT_CERT
+             value: "<path to the client certificate on the node>"
+           - name: HARBOR_BRIDGE_CLIENT_KEY
+             value: "<path to its private key on the node>"
+{{- end }}
          tokenAttributes:
            serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
            requireServiceAccount: true
@@ -123,6 +131,12 @@ NEXT STEPS
      endpoint https://127.0.0.1:<node port> does not apply. Write an https URL
      of the bridge that every node reaches (e.g. with the Service's cluster IP
      and port {{ .Values.service.port }}), or set plugin.bridgeEndpoint.
+{{- end }}
+{{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
+
+     HARBOR_BRIDGE_ENDPOINT contains $(NODE_IP), which only the chart's
+     installer replaces: write each node's address (or another address of
+     the bridge every node reaches) instead.
 {{- end }}
 
 {{- if contains "$(NODE_IP)" (include "harbor-bridge.plugin.bridgeEndpoint" .) }}
@@ -153,7 +167,9 @@ NEXT STEPS
      Each carries a finalizer that revokes its Harbor robot; without the
      bridge running, those deletions (and the deletion of their namespaces)
      wait forever. If that already happened, reinstall the bridge — or remove
-     the "{{ include "harbor-bridge.finalizer" . }}" finalizer by hand and delete the leftover
+     the "{{ include "harbor-bridge.finalizer" . }}" finalizer by hand{{ if .Values.bridge.harborAccessSelector }}
+     (and "harbor.aetherize.io/robot", on objects that still carry it from
+     before the selector){{ end }} and delete the leftover
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
 {{- if .Values.plugin.enabled }}
      `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
@@ -169,10 +185,20 @@ restart.{{ if .Values.plugin.enabled }} The installer copies ca.crt to the nodes
 
 {{- if .Values.bridge.mTLS.enabled }}
 
-mTLS enabled — the bridge rejects plugin connections without a client cert
-issued by {{ .Values.bridge.mTLS.clientIssuerRef.name }}. Verify cert-manager issued both certs:
-
-  kubectl -n {{ .Release.Namespace }} get certificate
+mTLS enabled — the bridge rejects plugin connections without a client
+certificate that chains to the CA in ca.crt of Secret {{ include "harbor-bridge.tlsSecretName" . }}
+{{- if .Values.plugin.enabled }}
+(bridge.mTLS.clientIssuerRef must issue from that CA)
+{{- end }}.
+{{- if or .Values.tls.enabled .Values.plugin.enabled }}
+Verify cert-manager issued {{ if and .Values.tls.enabled .Values.plugin.enabled }}both certificates{{ else }}the certificate{{ end }}:
+{{ if .Values.tls.enabled }}
+  kubectl -n {{ .Release.Namespace }} get certificate {{ include "harbor-bridge.tlsSecretName" . }}
+{{- end }}
+{{- if .Values.plugin.enabled }}
+  kubectl -n {{ include "harbor-bridge.plugin.namespace" . }} get certificate {{ include "harbor-bridge.mTLSClientSecretName" . }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{- if eq (include "harbor-bridge.requirePodBinding" .) "false" }}

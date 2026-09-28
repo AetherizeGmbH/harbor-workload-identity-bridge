@@ -21,8 +21,11 @@ Everything except none mode needs hostPID (kubelet discovery via
 /proc + nsenter for the restart), a privileged install container, and
 the host root mounted at /host (merge-mode target paths are unknown at
 render time). none mode drops all of that and keeps two narrow
-hostPath mounts. The long-running sync container never gets more than
-the one host directory it writes (hostConfigDir), in every mode.
+hostPath mounts. The long-running sync container never mounts more than
+the one host directory it writes (hostConfigDir), in every mode. hostPID,
+though, is a pod setting: outside none mode the sync container shares the
+host PID namespace as well (SECURITY.md, "Privilege of the install
+DaemonSet").
 
 Not rendered when plugin.enabled=false (plugin provisioned out of band,
 e.g. a Talos system extension — issue #46).
@@ -128,7 +131,8 @@ spec:
             {{- include "harbor-bridge.plugin.sourceMounts" . | nindent 12 }}
           securityContext:
             # Copies CA/mTLS files as root into a root-owned host dir —
-            # no capabilities, no nsenter, no /proc, never privileged.
+            # no capabilities, no nsenter, never privileged. Outside none
+            # mode it shares the pod's host PID namespace (SECURITY.md).
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
