@@ -556,9 +556,10 @@ workloads and recent pulls.
 
 ## Architecture and decisions
 
-- [`docs/PHASES.md`](docs/PHASES.md) — what is done, what is next, what
-  is intentionally out of scope. Written to survive context compaction;
-  read this first when resuming work.
+- [`docs/PHASES.md`](docs/PHASES.md) — historical build log of Phases
+  1–6 (May–June 2026), kept for the reasoning behind early choices. It
+  is not maintained: for current behaviour read the ADRs below,
+  [SECURITY.md](SECURITY.md) and [MIGRATION.md](MIGRATION.md).
 - [`HOW-TO-TEST.md`](HOW-TO-TEST.md) — reproducible end-to-end procedure
   with local bridge, kubectl proxy, and a manual plugin-driver round-trip.
 - [`docs/adr/`](docs/adr/) — every load-bearing design decision has an
