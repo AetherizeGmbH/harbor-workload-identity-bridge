@@ -7,8 +7,9 @@ Two paths, pick by what you're doing.
   bridge chart, seeds private images, asserts the kubelet
   credential-provider chain by pulling them, and then checks the
   HarborAccess lifecycle (grant change, identity change, deletion)
-  against Harbor and that the bridge refuses ServiceAccount tokens not
-  bound to a pod or living longer than an hour. ~15 minutes
+  against Harbor, that the bridge refuses ServiceAccount tokens not
+  bound to a pod or living longer than an hour, and that with mTLS on
+  it refuses a connection without the plugin's client certificate. ~15 minutes
   start-to-finish. Use this for every change you'd otherwise want
   smoke-tested.
 
@@ -84,21 +85,29 @@ out):
 | 4 | `containerd_trust` | Extract Harbor's TLS cert from each node, install as `/etc/containerd/certs.d/harbor.e2e:30843/ca.crt` |
 | 5 | `coredns_rewrite` | CoreDNS hosts-plugin entry so `harbor.e2e` resolves to a kind node IP cluster-wide |
 | 6 | `seed_image` | Create the projects, crane-copy the test image into each, verify, and wait for the Job to finish |
-| 7 | `bridge_install` | The chart — CRDs, bridge Deployment (2 replicas), plugin DaemonSet, audience RBAC |
+| 7 | `bridge_install` | The chart — CRDs, bridge Deployment (2 replicas), plugin DaemonSet, audience RBAC. Waits until every bridge replica is updated, Ready and available (helm's own wait accepts one of two) |
 | 8 | `harbor_access` | HarborAccess scenario, phase `initial`: baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR, the upgrade CR, and `token-check`, whose ServiceAccount may create tokens for itself only |
-| 9 | `pull_pod*` | Pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot) |
+| 8b | `bridge_replicas` | [ADR-0025](docs/adr/0025-data-plane-serving.md) (audit H1): a Job resolves a harness-only headless Service to every bridge pod, Ready or not, and asks each pod at its own address for credentials with a kubelet-projected token. Each must answer `200` with the robot of `token-ns/token-check`, and there must be as many pods as replicas |
+| 9 | `pull_pod*` | Pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot). Two must get an authorization failure, because Harbor, not the bridge, keeps tenants apart: `_cross_tenant` (`team-a/svc-b` on `project-beta`) and `_before_grant` (`test-pull/image-puller` on `project-gamma`, which stage 14 pulls after the grant) |
 | 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and read another — verifies the `pull,push` action |
 | 11 | `bridge_upgrade` | `helm upgrade` adding a `matchImages` entry — the installer must restart kubelet |
 | 12 | `pull_pod_upgrade` | Pulls the newly matched project |
-| 13 | `harbor_access_update` | Scenario phase `updated`: a grant added to `test-access`, `collide-one` moved to a new ServiceAccount; waits for the new generation to be applied |
-| 14 | `pull_pod_granted` | The newly granted project pulls (grant reached Harbor, no rotation broke kubelet's cache) |
+| 12b | `pull_pod_warm_*` | The upgrade restarted kubelet, which emptied its credential cache. Pulls as `test-pull/image-puller` and `team-a/svc-b`, both on the first worker, cache their credentials there again for stages 14 and 16 |
+| 13 | `harbor_access_update` | Scenario phase `updated`: a grant added to `test-access`, `multi-access` narrowed (`beta-3` dropped, `beta-2` cut to `pull`), `collide-one` moved to a new ServiceAccount; waits for the new generation to be applied |
+| 14 | `pull_pod_granted` | On the warmed node, with kubelet's cached credential: the newly granted project pulls (the grant reached Harbor, and no rotation broke the cached password) |
+| 14b | `robot_narrowed` | With the unchanged `multi-access` robot Secret: push to `beta-1` and pull from `beta-2` still work, push to `beta-2` and pull from `beta-3` get an authorization error from Harbor |
 | 15 | `pull_pod_renamed` | The new ServiceAccount pulls |
-| 16 | `pull_pod_revoked` | The old ServiceAccount must get an authorization failure |
-| 17 | `robot_check_update` | Asks Harbor: the old robot is gone, the new one exists |
+| 16 | `pull_pod_revoked` | On the warmed node, where kubelet still caches the old robot's credential: the old ServiceAccount must get an authorization failure, so the robot was revoked in Harbor, not only refused by the bridge |
+| 17 | `robot_check_update` | Asks Harbor: the old robot is gone, the new one exists, the cluster's robots are exactly one per HarborAccess (the query stage 21 relies on), and the narrowed robot stores exactly its new grants |
 | 18 | `token_rejection` | [ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md): a Job running as `token-ns/token-check` mints three tokens through the TokenRequest API and sends each to the bridge's Service. Bound to its own pod for 1h: `200` with the robot's credentials. Bound to no pod: `401`. Bound to the pod for 2h: `401`. The Job first checks the claims the apiserver issued, and the bridge's audit log must show each decision with its category (`not_pod_bound`, `excessive_lifetime`) |
+| 18b | `bridge_mtls` | `helm upgrade` turning `bridge.mTLS` on. cert-manager issues the plugin's client certificate from the harness's CA, which has signed the serving certificate since stage 7; the new client pair in the credential-provider config makes the installer restart kubelet |
+| 18c | `mtls_check` | Every bridge replica, at its own address: with the plugin's client certificate the bridge answers (`401` for the missing token), without one the TLS handshake is refused |
+| 18d | `pull_pod_mtls` | kubelet → plugin → bridge pulls over mTLS; the bridge's audit line for the pull names the plugin's client certificate |
 | 19 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |
+| 19b | `harbor_access_cascade` | Scenario phase `ns-cascade`: only the namespace `app-ns` is deleted, the way `kubectl delete namespace` does it. Its HarborAccess goes with it while the namespace is Terminating, and the namespace is gone only after the bridge released the finalizer |
+| 19c | `robot_check_cascade` | Asks Harbor: the robot of `app-ns/runner` is gone, every other robot of the cluster is still there |
 | 20 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
-| 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left |
+| 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left. A failed query is retried and never counts as an empty list; an answer that is not exactly one JSON list, an empty body included, fails the stage |
 
 The harness installs one release. Several releases on one node (ADR-0029)
 are covered by the installer's unit tests (`installer/coexist_test.go`: two
@@ -202,10 +211,11 @@ cleanly. No orphan kind clusters.
 | [`test/e2e/modules/harbor`](test/e2e/modules/harbor) | Harbor chart + node IP / cert-extract helpers |
 | [`test/e2e/modules/containerd-registry-trust`](test/e2e/modules/containerd-registry-trust) | Pulls Harbor's cert off the wire, installs into containerd |
 | [`test/e2e/modules/coredns-cm`](test/e2e/modules/coredns-cm) | Patches CoreDNS `Corefile` for synthetic hostnames |
-| [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install |
+| [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install, with a cert-manager CA (a selfSigned bootstrap issuer signs its root) issuing the bridge's certificates, optionally mTLS; waits for every bridge replica, adds a headless Service over the bridge pods |
 | [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests (keyed by object identity) with optional `wait` |
 | [`test/e2e/modules/test-sleep`](test/e2e/modules/test-sleep) | The pause mechanism |
-| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log |
+| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log, and can mount a projected token for the bridge audience or Secrets |
+| [`test/e2e/scripts/kubeconfig.sh`](test/e2e/scripts/kubeconfig.sh) | Sourced by every harness script that runs kubectl: a private kubeconfig file, so no credential (on GKE the operator's access token) is ever on a command line |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
 | [`test/e2e/tests/03-nexus.tftest.hcl`](test/e2e/tests/03-nexus.tftest.hcl) | The Nexus harness (§1c) |
 | [`test/e2e/nexus/Dockerfile`](test/e2e/nexus/Dockerfile) | Nexus 3.76.1 (pinned by digest), relabelled for the host's platform |
@@ -222,7 +232,9 @@ A failing Job stage writes diagnostics before the cluster is destroyed, to
 `test/e2e/.diag/<job>/` (CI uploads the directory as an artifact): pod and Job
 descriptions, namespace events, the pod log, the bridge logs, all HarborAccess
 and NexusAccess objects, the names (never the contents) of the bridge Secrets,
-the installer log of the node, and that node's kubelet journal. A failing
+the installer log of the node, and that node's kubelet journal. A bridge install
+whose replicas do not all become Ready writes the Deployment, the bridge pods'
+descriptions and their logs to `test/e2e/.diag/bridge-rollout/`. A failing
 host-side check (`kubectl-check`, Nexus harness) writes its own log, the bridge
 logs, the objects, events and pods there.
 
@@ -289,7 +301,8 @@ test-only privileged DaemonSet. The first run should record the runtime
 findings flagged in [ADR-0022](docs/adr/0022-gke-e2e-harness.md)
 (discovered GKE provider-config path/format, containerd `config_path`,
 loopback-NodePort behaviour under Dataplane V2 — escape hatch:
-`bridge_endpoint` variable on the install module).
+`TF_VAR_bridge_endpoint='https://$(NODE_IP):31443'`, which every install
+run of the harness passes to the install module).
 
 ---
 

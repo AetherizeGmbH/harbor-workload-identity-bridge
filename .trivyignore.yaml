@@ -12,10 +12,13 @@ misconfigurations:
   # nsenter into PID 1. That genuinely requires the host PID namespace and
   # a privileged container. See
   # charts/harbor-bridge/templates/plugin-daemonset.yaml and ADR-0021. The
-  # bridge Deployment and the long-running sync container are fully locked
-  # down (non-privileged, no capabilities, read-only root FS, seccomp
-  # RuntimeDefault); these apply only to the install init container,
-  # observed here via the rendered golden chart fixtures Trivy scans.
+  # bridge Deployment and the long-running sync container are locked down
+  # (non-privileged, no capabilities, read-only root FS, seccomp
+  # RuntimeDefault); these apply to the install init container, observed
+  # here via the rendered golden chart fixtures Trivy scans. KSV-0010 is
+  # the exception: hostPID is a pod setting, so the sync container shares
+  # the host PID namespace too (accepted residual, SECURITY.md "Privilege
+  # of the install DaemonSet").
   - id: KSV-0010 # pod hostPID: true — host PID namespace for the install handoff
     paths:
       - "charts/harbor-bridge/tests/golden/*.yaml"

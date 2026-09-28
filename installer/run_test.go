@@ -8,6 +8,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,16 +26,55 @@ type testEnv struct {
 // fakeKubelet stands in for systemd + kubelet. A restart re-reads
 // /etc/default/kubelet the way the real unit does (EnvironmentFile), so
 // patch-mode verification sees the flags only if the installer wrote
-// them; states scripts what `systemctl is-active` reports.
+// them; states scripts the ActiveState that `systemctl show` reports.
 type fakeKubelet struct {
 	t          *testing.T
 	env        *testEnv
 	baseArgs   []string
 	restartErr error
-	// states is consumed one per state() call; the last value repeats.
+	// states is consumed one per status() call; the last value repeats. An
+	// active unit reports the main PID of the kubelet the last restart
+	// started, any other state none.
 	states []string
-	// ignoreEnvFile models a unit that does not source /etc/default/kubelet.
+	// statusFn, when set, answers status() instead of states.
+	statusFn func() unitStatus
+	// pid is the main PID of the kubelet the last restart started.
+	pid int
+	// envFiles are the unit's EnvironmentFile= settings in order, each
+	// with "-" before it as in kubeadm's units unless requiredEnvFiles
+	// names it; nil is kubeadm's Debian unit (kubeadmEnvFiles).
+	envFiles         []string
+	requiredEnvFiles map[string]bool
+	// envAssignments is the unit's Environment= property.
+	envAssignments string
+	// ignoreEnvFile models a unit that reads its environment files but
+	// does not pass $KUBELET_EXTRA_ARGS on to kubelet.
 	ignoreEnvFile bool
+	// exe is the node path of the binary a restart starts kubelet from
+	// (/proc/<pid>/exe); "" leaves the fake process without an exe link.
+	exe string
+}
+
+// kubeadmEnvFiles are the environment files of kubeadm's Debian kubelet
+// unit (10-kubeadm.conf), which kind nodes use too.
+var kubeadmEnvFiles = []string{"/var/lib/kubelet/kubeadm-flags.env", defaultKubeletPath}
+
+func (f *fakeKubelet) unitEnvFiles() []string {
+	if f.envFiles == nil {
+		return kubeadmEnvFiles
+	}
+	return f.envFiles
+}
+
+func (f *fakeKubelet) environment(unit string) (unitEnvironment, error) {
+	if unit != "kubelet" {
+		f.t.Fatalf("unexpected unit %q", unit)
+	}
+	var refs []envFileRef
+	for _, path := range f.unitEnvFiles() {
+		refs = append(refs, envFileRef{Path: path, Optional: !f.requiredEnvFiles[path]})
+	}
+	return unitEnvironment{Files: refs, Assignments: f.envAssignments}, nil
 }
 
 const fakeKubeletPID = 321
@@ -46,35 +87,72 @@ func (f *fakeKubelet) restart(unit string) error {
 	if f.restartErr != nil {
 		return f.restartErr
 	}
+	f.pid = fakeKubeletPID + f.env.restarts
 	args := append([]string(nil), f.baseArgs...)
 	if !f.ignoreEnvFile {
-		if raw, err := os.ReadFile(f.env.cfg.hostPath(defaultKubeletPath)); err == nil {
-			for _, line := range strings.Split(string(raw), "\n") {
-				if v, ok := strings.CutPrefix(line, "KUBELET_EXTRA_ARGS="); ok {
-					args = append(args, strings.Fields(strings.Trim(v, `"`))...)
+		// As systemd reads the unit's environment files: in order,
+		// wildcard expressions expanded, files it cannot load skipped, the
+		// last assignment wins.
+		unit, err := f.environment(unit)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		var extra []string
+		for _, ref := range unit.Files {
+			files, err := f.env.cfg.expandEnvFile(ref.Path)
+			if err != nil {
+				f.t.Fatalf("expand %s: %v", ref.Path, err)
+			}
+			for _, file := range files {
+				raw, err := os.ReadFile(f.env.cfg.hostPath(file))
+				if err != nil {
+					continue
+				}
+				assignments, err := parseEnvFile(string(raw))
+				switch {
+				case errors.Is(err, errUnloadableEnvFile) && ref.Optional:
+					continue
+				case err != nil:
+					f.t.Fatalf("systemd would not read %s as the test expects: %v", file, err)
+				}
+				for _, a := range assignments {
+					if a.key == extraArgsKey {
+						extra = splitArgs(a.value)
+					}
 				}
 			}
 		}
+		args = append(args, extra...)
 	}
-	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args})
+	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args, exe: f.exe})
 	return nil
 }
 
-func (f *fakeKubelet) state(string) (string, error) {
-	if len(f.states) == 0 {
-		return "active", nil
+func (f *fakeKubelet) status(string) (unitStatus, error) {
+	if f.statusFn != nil {
+		return f.statusFn(), nil
 	}
-	st := f.states[0]
-	if len(f.states) > 1 {
-		f.states = f.states[1:]
+	st := "active"
+	if len(f.states) > 0 {
+		st = f.states[0]
+		if len(f.states) > 1 {
+			f.states = f.states[1:]
+		}
 	}
-	return st, nil
+	if st != "active" {
+		return unitStatus{ActiveState: st, NRestarts: -1}, nil
+	}
+	pid := f.pid
+	if pid == 0 {
+		pid = fakeKubeletPID
+	}
+	return unitStatus{ActiveState: st, MainPID: pid, NRestarts: -1}, nil
 }
 
 // newTestEnv builds a fake node. kubeletCmdline is the command line of the
 // running kubelet; nil means no kubelet process at all, which only none
 // mode and merge mode with explicit targets get by with (patch mode reads
-// kubelet's wiring before it writes, checkRewire).
+// kubelet's wiring before it writes, blockingInstalls).
 func newTestEnv(t *testing.T, mode string, kubeletCmdline []string) *testEnv {
 	t.Helper()
 	root := t.TempDir()
@@ -192,6 +270,50 @@ func TestRun_PatchPreservesOperatorArgs(t *testing.T) {
 	}
 	if !strings.Contains(got, flagConfigFile+"=") {
 		t.Fatalf("our flag missing:\n%s", got)
+	}
+}
+
+// TestRun_PatchKeepsOperatorArgsWrittenWithSpaces: systemd reads
+// "KUBELET_EXTRA_ARGS = ..." as KUBELET_EXTRA_ARGS. The installer used to
+// append a second assignment after it, and kubelet lost --max-pods.
+func TestRun_PatchKeepsOperatorArgsWrittenWithSpaces(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	writeHostFile(t, env, defaultKubeletPath, "KUBELET_EXTRA_ARGS = \"--max-pods=42\"\n")
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(env.cfg.ProcRoot, strconv.Itoa(fakeKubeletPID), "cmdline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argv := splitCmdline(raw); !slices.Contains(argv, "--max-pods=42") || flagValue(argv, flagBinDir) == "" {
+		t.Fatalf("kubelet runs with %q, want the operator's --max-pods=42 and the credential-provider flags", argv)
+	}
+}
+
+// TestRun_PatchRepairsTheLineAnEarlierInstallerAppended: on a node where an
+// installer before this version appended its own KUBELET_EXTRA_ARGS after
+// the operator's spaced assignment, the pass merges the two (one restart),
+// and kubelet runs with the operator's args again.
+func TestRun_PatchRepairsTheLineAnEarlierInstallerAppended(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	writeHostFile(t, env, defaultKubeletPath, damagedBy94)
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(env.cfg.ProcRoot, strconv.Itoa(fakeKubeletPID), "cmdline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := splitCmdline(raw)
+	if !slices.Contains(argv, "--max-pods=42") || flagValue(argv, flagBinDir) != env.cfg.HostBinDir {
+		t.Fatalf("kubelet runs with %q, want the operator's --max-pods=42 and this install's flags", argv)
+	}
+	if got := extraArgsAssignments(t, []byte(env.hostFile(t, defaultKubeletPath))); len(got) != 1 {
+		t.Fatalf("KUBELET_EXTRA_ARGS assignments = %q, want one", got)
+	}
+	if err := run(env.cfg); err != nil || env.restarts != 1 {
+		t.Fatalf("re-run: %v, restarts = %d, want 1", err, env.restarts)
 	}
 }
 
@@ -371,6 +493,43 @@ func TestRun_NodeIPSubstitution(t *testing.T) {
 	if !strings.Contains(got, "https://192.0.2.9:31443") {
 		t.Fatalf("NODE_IP not substituted:\n%s", got)
 	}
+	// An IPv6 node gets a URL the plugin accepts.
+	env.cfg.NodeIP = "2001:db8::9"
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	got = env.hostFile(t, "/etc/kubernetes/credential-provider-config/"+configFileName)
+	if !strings.Contains(got, "https://[2001:db8::9]:31443") {
+		t.Fatalf("IPv6 NODE_IP not bracketed:\n%s", got)
+	}
+}
+
+// TestRun_RefusesABridgeEndpointThePluginRejects: the plugin refuses an
+// endpoint that is no https URL with a host on every exec, and kubelet only
+// logs that. The installer refuses it before it writes anything.
+func TestRun_RefusesABridgeEndpointThePluginRejects(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plain http":    "http://127.0.0.1:31443",
+		"no host":       "https://",
+		"bad port":      "https://127.0.0.1:port",
+		"unbracketed 6": "https://fd00::5:31443",
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"})
+			doc := strings.Replace(renderedConfig, "https://127.0.0.1:31443", endpoint, 1)
+			if err := os.WriteFile(env.cfg.SourceConfig, []byte(doc), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := run(env.cfg)
+			if err == nil || !strings.Contains(err.Error(), bridgeEndpointEnv) {
+				t.Fatalf("got %v, want a refusal naming %s", err, bridgeEndpointEnv)
+			}
+			if env.restarts != 0 {
+				t.Fatal("kubelet restarted")
+			}
+			assertAbsent(t, env, defaultKubeletPath, env.cfg.ownConfigPath(), binDir+"/harbor-bridge-plugin")
+		})
+	}
 }
 
 func TestLoadConfig_Validation(t *testing.T) {
@@ -459,6 +618,18 @@ func TestLoadConfig_Validation(t *testing.T) {
 	})); err == nil {
 		t.Fatal("merge overrides must be set together")
 	}
+	// The overrides skip discovery: they belong to merge mode only. In auto
+	// mode they were silently ignored (the installer patched kubelet's
+	// flags or merged into the discovered config instead).
+	for _, mode := range []string{modeAuto, modePatch, modeNone} {
+		_, err := loadConfig(env(withBase(map[string]string{"INSTALL_MODE": mode, "INSTALL_MERGE_BIN_DIR": "/cloud/bin", "INSTALL_MERGE_CONFIG_FILE": "/cloud/c.yaml"})))
+		if err == nil || !strings.Contains(err.Error(), "used only with INSTALL_MODE=merge") {
+			t.Errorf("mode %s with merge overrides: got %v, want a refusal", mode, err)
+		}
+	}
+	if _, err := loadConfig(env(withBase(map[string]string{"INSTALL_MERGE_BIN_DIR": "/cloud/bin", "INSTALL_MERGE_CONFIG_FILE": "/cloud/c.yaml"}))); err == nil {
+		t.Error("the default mode (auto) with merge overrides accepted")
+	}
 	// Merge mode does not require HOST_BIN_DIR (target dir is discovered).
 	if _, err := loadConfig(env(map[string]string{"INSTALL_MODE": "merge", "HOST_CONFIG_DIR": "/c"})); err != nil {
 		t.Fatalf("merge without HOST_BIN_DIR must validate: %v", err)
@@ -467,7 +638,7 @@ func TestLoadConfig_Validation(t *testing.T) {
 
 func TestStateRoundtripAndCorruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "installer-state.json")
-	want := target{mode: modePatch, binDir: "/b", configFile: "/c", entryHash: "e", fileHash: "f"}
+	want := target{mode: modePatch, binDir: "/b", configFile: "/c", envFile: "/etc/sysconfig/kubelet", entryHash: "e", fileHash: "f"}
 	if err := saveState(path, want.state()); err != nil {
 		t.Fatal(err)
 	}
@@ -499,10 +670,30 @@ func TestStateRoundtripAndCorruption(t *testing.T) {
 	if !got.matches(otherFile) {
 		t.Fatal("another install's change to the shared file must not count")
 	}
+	otherEnvFile := want
+	otherEnvFile.envFile = defaultKubeletPath
+	if got.matches(otherEnvFile) {
+		t.Fatal("matches must compare the environment file (ADR-0034)")
+	}
+
+	// A patch-mode record written before ADR-0034 has no envFile: patch
+	// mode then always edited /etc/default/kubelet.
+	for _, pre := range []*state{
+		{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f", EntryHash: "e"},
+		{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f"},
+	} {
+		deb, rpm := otherEnvFile, want
+		if pre.EntryHash != "" && (!pre.matches(deb) || pre.matches(rpm)) {
+			t.Fatalf("record %+v: matches /etc/default/kubelet %v, /etc/sysconfig/kubelet %v", pre, pre.matches(deb), pre.matches(rpm))
+		}
+		if pre.EntryHash == "" && (!pre.matchesLegacy(deb) || pre.matchesLegacy(rpm)) {
+			t.Fatalf("legacy record %+v: matches /etc/default/kubelet %v, /etc/sysconfig/kubelet %v", pre, pre.matchesLegacy(deb), pre.matchesLegacy(rpm))
+		}
+	}
 
 	// A record without entryHash is from an installer before ADR-0029 (or
 	// an older one after a rollback): it matches only the whole-file hash.
-	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f"}
+	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", EnvFile: "/etc/sysconfig/kubelet", AppliedHash: "f"}
 	if err := saveState(path, legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -583,8 +774,19 @@ func TestRun_RestartVerification_FailsOnCrashLoop(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
 		t.Fatalf("got %v, want a verification failure", err)
 	}
-	if st, _ := loadState(env.statePath()); st != nil {
-		t.Fatal("success state recorded for an unverified restart")
+	assertNoVerifiedRestart(t, env)
+}
+
+// assertNoVerifiedRestart fails unless env's state file records no verified
+// kubelet restart; it may record rejected content (ADR-0033).
+func assertNoVerifiedRestart(t *testing.T, env *testEnv) {
+	t.Helper()
+	st, err := loadState(env.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != nil && (st.Mode != "" || st.AppliedHash != "" || st.EntryHash != "") {
+		t.Fatalf("success state recorded for a restart that did not verify: %+v", st)
 	}
 }
 
@@ -598,6 +800,25 @@ func TestRun_RestartVerification_FlapAfterActiveIsCaught(t *testing.T) {
 	}
 }
 
+// TestRun_RestartVerification_AutoRestartedKubeletIsCaught: a unit with
+// Restart=always never reports "failed" for a kubelet that exits at
+// startup; after RestartSec it reports "active" for the next kubelet. That
+// is not a verified restart, and no success may be recorded.
+func TestRun_RestartVerification_AutoRestartedKubeletIsCaught(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	env.cfg.verify = verifyTiming{timeout: 300 * time.Millisecond, interval: 10 * time.Millisecond, settle: 50 * time.Millisecond}
+	loop := &crashLoopUnit{start: time.Now(), up: 20 * time.Millisecond, down: 20 * time.Millisecond}
+	env.kubelet.statusFn = func() unitStatus {
+		st, _ := loop.status("kubelet")
+		return st
+	}
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
+		t.Fatalf("got %v, want a verification failure", err)
+	}
+	assertNoVerifiedRestart(t, env)
+}
+
 // TestRun_PatchVerification_UnitIgnoresEnvFile: if the kubelet unit does not
 // source /etc/default/kubelet, the flags never reach kubelet. Before, the
 // install "succeeded" and the plugin was silently never invoked.
@@ -605,7 +826,7 @@ func TestRun_PatchVerification_UnitIgnoresEnvFile(t *testing.T) {
 	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.ignoreEnvFile = true
 	err := run(env.cfg)
-	if err == nil || !strings.Contains(err.Error(), "does the kubelet unit source") {
+	if err == nil || !strings.Contains(err.Error(), "does the kubelet unit pass") {
 		t.Fatalf("got %v, want an explanation that the flags did not reach kubelet", err)
 	}
 }
@@ -616,9 +837,7 @@ func TestRun_RestartError_IsReturnedAndNotRecorded(t *testing.T) {
 	if err := run(env.cfg); err == nil {
 		t.Fatal("restart failure swallowed")
 	}
-	if st, _ := loadState(env.statePath()); st != nil {
-		t.Fatal("success state recorded although the restart failed")
-	}
+	assertNoVerifiedRestart(t, env)
 }
 
 // TestRun_UnwritableStateDir_NoRestart: a state dir that cannot be written
@@ -639,6 +858,9 @@ func TestRun_UnwritableStateDir_NoRestart(t *testing.T) {
 	if env.restarts != 0 {
 		t.Fatalf("kubelet restarted (%d) although the result could not be recorded", env.restarts)
 	}
+	// Kubelet was not restarted onto the new files, so they are gone again
+	// (they did not exist before): the node is as the pass found it.
+	assertAbsent(t, env, defaultKubeletPath, env.cfg.ownConfigPath())
 }
 
 // TestRun_MergeRefusalLeavesNoHalfInstall: an unknown node config schema is

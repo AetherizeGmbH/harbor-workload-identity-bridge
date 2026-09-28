@@ -6,10 +6,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -50,6 +55,108 @@ func renderedProvider(rendered []byte, name string) (map[string]any, error) {
 		}
 	}
 	return nil, fmt.Errorf("rendered credential-provider config has no provider named %q", name)
+}
+
+// credentialProviderAPIVersions are the provider apiVersions kubelet
+// accepts (pkg/credentialprovider/plugin/config.go, apiVersions);
+// tokenAttributes needs the first.
+var credentialProviderAPIVersions = []string{
+	"credentialprovider.kubelet.k8s.io/v1",
+	"credentialprovider.kubelet.k8s.io/v1beta1",
+	"credentialprovider.kubelet.k8s.io/v1alpha1",
+}
+
+// validateEntry refuses this install's rendered provider entry when kubelet
+// would reject it at startup for a reason that does not depend on kubelet's
+// version (ADR-0033): kubelet validates every provider
+// (pkg/credentialprovider/plugin/config.go) and exits when one fails, and
+// the chart fills matchImages, defaultCacheDuration and the audience from
+// values it does not check. Checked before anything is written, like every
+// refusal. Standard library only (ADR-0021): matchImages entries parse as
+// kubelet's ParseSchemelessURL does (url.Parse of "https://" + entry), and
+// defaultCacheDuration as metav1.Duration does (a string for
+// time.ParseDuration). A feature gate kubelet has off (tokenAttributes) is
+// not checked; the rollback after a restart that does not verify covers it.
+func validateEntry(entry map[string]any) error {
+	var problems []string
+	apiVersion, _ := entry["apiVersion"].(string)
+	if !slices.Contains(credentialProviderAPIVersions, apiVersion) {
+		problems = append(problems, fmt.Sprintf("apiVersion %v is not one of %s", entry["apiVersion"], strings.Join(credentialProviderAPIVersions, ", ")))
+	}
+	images, _ := entry["matchImages"].([]any)
+	if len(images) == 0 {
+		problems = append(problems, "matchImages is empty")
+	}
+	for _, img := range images {
+		s, ok := img.(string)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("matchImages entry %v is not a string", img))
+			continue
+		}
+		if _, err := url.Parse("https://" + s); err != nil {
+			problems = append(problems, fmt.Sprintf("matchImages entry %q is not a valid image host pattern: %v", s, err))
+		}
+	}
+	switch d, ok := entry["defaultCacheDuration"].(string); {
+	case !ok:
+		problems = append(problems, fmt.Sprintf("defaultCacheDuration %v is not a duration string such as \"1h\"", entry["defaultCacheDuration"]))
+	default:
+		if dur, err := time.ParseDuration(d); err != nil {
+			problems = append(problems, fmt.Sprintf("defaultCacheDuration %q is not a Go duration (units h, m, s, ms, us, ns): %v", d, err))
+		} else if dur < 0 {
+			problems = append(problems, fmt.Sprintf("defaultCacheDuration %q is negative", d))
+		}
+	}
+	if problem := bridgeEndpointProblem(entry); problem != "" {
+		problems = append(problems, problem)
+	}
+	if raw, present := entry["tokenAttributes"]; present {
+		ta, _ := raw.(map[string]any)
+		if apiVersion != credentialProviderAPIVersions[0] {
+			problems = append(problems, fmt.Sprintf("tokenAttributes needs apiVersion %s", credentialProviderAPIVersions[0]))
+		}
+		if aud, _ := ta["serviceAccountTokenAudience"].(string); aud == "" {
+			problems = append(problems, "tokenAttributes.serviceAccountTokenAudience is empty")
+		}
+		if _, ok := ta["requireServiceAccount"].(bool); !ok {
+			problems = append(problems, "tokenAttributes.requireServiceAccount is not true or false")
+		}
+		if ct, _ := ta["cacheType"].(string); ct != "ServiceAccount" && ct != "Token" {
+			problems = append(problems, fmt.Sprintf("tokenAttributes.cacheType %v is not ServiceAccount or Token", ta["cacheType"]))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("kubelet would refuse the rendered provider entry %v and not start, or the plugin would fail on every pull: %s; fix the chart values (plugin.matchImages, plugin.defaultCacheDuration, plugin.audience, plugin.bridgeEndpoint)", entry["name"], strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// bridgeEndpointProblem describes what is wrong with the entry's
+// HARBOR_BRIDGE_ENDPOINT, the checks the plugin runs on every exec
+// (plugin/main.go loadConfig): an https URL with a host. The plugin
+// refuses anything else and returns no credentials for any pull, which
+// kubelet only logs; the installer refuses it before it writes the entry
+// and restarts kubelet onto it.
+func bridgeEndpointProblem(entry map[string]any) string {
+	env, _ := entry["env"].([]any)
+	for _, e := range env {
+		m, _ := e.(map[string]any)
+		if m["name"] != bridgeEndpointEnv {
+			continue
+		}
+		value, _ := m["value"].(string)
+		u, err := url.Parse(value)
+		switch {
+		case err != nil:
+			return fmt.Sprintf("%s %q is not a valid URL: %v", bridgeEndpointEnv, value, err)
+		case u.Scheme != "https":
+			return fmt.Sprintf("%s %q does not use https", bridgeEndpointEnv, value)
+		case u.Host == "":
+			return fmt.Sprintf("%s %q has no host", bridgeEndpointEnv, value)
+		}
+		return ""
+	}
+	return fmt.Sprintf("%s is not set", bridgeEndpointEnv)
 }
 
 // mergeProvider inserts entry into the CredentialProviderConfig in
@@ -113,11 +220,49 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 	if reflect.DeepEqual(orig, cfg) {
 		return existing, false, nil
 	}
-	out, err = marshalMatching(cfg, isJSON(existing))
+	asJSON := isJSON(existing)
+	out, err = marshalMatching(cfg, asJSON)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal merged credential-provider config: %w", err)
 	}
+	if err := checkRoundTrip(out, cfg, asJSON); err != nil {
+		return nil, false, fmt.Errorf("merged credential-provider config: %w; refusing to write it", err)
+	}
 	return out, true, nil
+}
+
+// errNoRoundTrip marks a config the installer would write that does not
+// read back as the document it meant to write (checkRoundTrip).
+var errNoRoundTrip = errors.New("does not read back as the document it was written from")
+
+// checkRoundTrip refuses out, the config the installer is about to write
+// for the document want, unless reading it back gives want again: with
+// sigs.k8s.io/yaml, as the installer reads every config on its next pass
+// and kubelet's decoder reads YAML (YAML to JSON), and for JSON output also
+// with encoding/json, as kubelet's decoder reads a file that starts with
+// "{". encoding/json writes some characters raw that YAML reads
+// differently: U+0085 (NEL) is a line break to YAML (found by
+// FuzzMergeProvider), so the next pass could not parse the file, or would
+// read and later write back a changed value of another provider.
+func checkRoundTrip(out []byte, want map[string]any, asJSON bool) error {
+	back := map[string]any{}
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		return fmt.Errorf("%w: parsing it again fails: %w", errNoRoundTrip, err)
+	}
+	if !reflect.DeepEqual(back, want) {
+		return fmt.Errorf("%w (YAML)", errNoRoundTrip)
+	}
+	if !asJSON {
+		return nil
+	}
+	back = map[string]any{}
+	if err := json.Unmarshal(out, &back); err != nil {
+		return fmt.Errorf("%w: parsing it again as JSON fails: %w", errNoRoundTrip, err)
+	}
+	if !reflect.DeepEqual(back, want) {
+		return fmt.Errorf("%w (JSON)", errNoRoundTrip)
+	}
+	return nil
 }
 
 // isBridgeProvider reports whether a provider entry belongs to a
@@ -194,6 +339,9 @@ func composeOwnConfig(existing, rendered []byte, entry map[string]any, sibling f
 	out, err = yaml.Marshal(doc)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal credential-provider config: %w", err)
+	}
+	if err := checkRoundTrip(out, doc, false); err != nil {
+		return nil, nil, err
 	}
 	return out, dropped, nil
 }
@@ -306,13 +454,32 @@ func isJSON(doc []byte) bool {
 
 // substituteNodeIP replaces the literal $(NODE_IP) placeholder the
 // chart may render into the provider config (plugin.bridgeEndpoint)
-// with the node's actual IP from the downward API.
+// with the node's actual IP from the downward API (status.hostIP, the
+// node's primary address). The placeholder is a URL host: an IPv6 address
+// goes in brackets ("https://[fd00::5]:31443"), which a bare IPv6 address
+// in a URL needs, also when the operator already wrote "[$(NODE_IP)]" to
+// work around its absence; an IPv4 address in brackets is no valid host
+// and is refused. NODE_IP must be an IP address without a zone.
 func substituteNodeIP(rendered []byte, nodeIP string) ([]byte, error) {
-	if !bytes.Contains(rendered, []byte("$(NODE_IP)")) {
+	const placeholder = "$(NODE_IP)"
+	if !bytes.Contains(rendered, []byte(placeholder)) {
 		return rendered, nil
 	}
 	if nodeIP == "" {
 		return nil, fmt.Errorf("rendered config references $(NODE_IP) but NODE_IP is not set")
 	}
-	return bytes.ReplaceAll(rendered, []byte("$(NODE_IP)"), []byte(nodeIP)), nil
+	addr, err := netip.ParseAddr(nodeIP)
+	if err != nil || addr.Zone() != "" {
+		return nil, fmt.Errorf("rendered config references $(NODE_IP), but NODE_IP %q is not an IP address", nodeIP)
+	}
+	bracketed := []byte("[" + placeholder + "]")
+	if addr.Is4() {
+		if bytes.Contains(rendered, bracketed) {
+			return nil, fmt.Errorf("plugin.bridgeEndpoint puts $(NODE_IP) in brackets, which is no valid URL host for this node's IPv4 address %s; write it without brackets (the installer brackets IPv6 addresses itself)", nodeIP)
+		}
+		return bytes.ReplaceAll(rendered, []byte(placeholder), []byte(addr.String())), nil
+	}
+	host := []byte("[" + addr.String() + "]")
+	out := bytes.ReplaceAll(rendered, bracketed, host)
+	return bytes.ReplaceAll(out, []byte(placeholder), host), nil
 }

@@ -12,13 +12,28 @@
 #                * test-access gains pull on project-gamma (grant change →
 #                  the robot's permissions must change in Harbor, without a
 #                  password rotation that would break kubelet's cache);
+#                * multi-access is narrowed: beta-3 dropped (a whole
+#                  project), beta-2 cut from pull,push to pull (one action).
+#                  Harbor must take the robot's permission list as
+#                  REPLACED, not merged: a grant-add passes either way;
 #                * collide-one moves from team-a/svc-b to the new SA
 #                  team-a/svc-renamed (identity change → a new robot, and
 #                  the old robot must be REVOKED in Harbor).
-#   none     — everything deleted. Namespaces go too, so app-ns exercises
-#              namespace termination blocked on a HarborAccess finalizer.
-#              Runs while the bridge is still installed: every finalizer
-#              must be released and every robot removed from Harbor.
+#   ns-cascade — as "updated", but without the Namespace app-ns: tofu
+#              deletes only that namespace, and its HarborAccess
+#              (tenant-access) and ServiceAccount go the way a user's
+#              `kubectl delete namespace` takes them — the namespace
+#              controller deletes the CR while the namespace is
+#              Terminating, and the namespace stays until the bridge has
+#              released the finalizer. kubernetes_manifest waits until the
+#              namespace is gone, so this phase passes only then. The next
+#              phase finds the SA and the CR gone and drops them from state.
+#   none     — everything deleted. Runs while the bridge is still installed:
+#              every finalizer must be released and every robot removed
+#              from Harbor. tofu deletes the CRs and SAs first, waiting for
+#              each finalizer, and the namespaces only after that (k8s-yaml
+#              orders tenants before namespaces), so this phase never has a
+#              namespace wait on a finalizer — ns-cascade does.
 #
 # The wait on each CR is status.observedGeneration equal to the generation
 # the phase produces. The bridge sets it only after a fully successful
@@ -42,8 +57,8 @@ variable "kubeconfig" {
 variable "phase" {
   type = string
   validation {
-    condition     = contains(["initial", "updated", "none"], var.phase)
-    error_message = "phase must be initial, updated, or none."
+    condition     = contains(["initial", "updated", "ns-cascade", "none"], var.phase)
+    error_message = "phase must be initial, updated, ns-cascade, or none."
   }
 }
 
@@ -61,7 +76,12 @@ variable "audience" {
 }
 
 locals {
-  updated = var.phase == "updated"
+  # ns-cascade renders the "updated" objects: a phase is the whole desired
+  # state, so anything else would undo the edits.
+  updated = contains(["updated", "ns-cascade"], var.phase)
+
+  # The namespace ns-cascade deletes on its own, with its tenant objects.
+  cascade_namespace = "app-ns"
 
   namespaces = ["test-pull", "team-a", "team", "app-ns", "beta-ns", "upgrade-ns", "token-ns"]
 
@@ -119,12 +139,16 @@ locals {
       generation  = 1
     },
     {
-      # One robot, several projects, pull,push.
-      name        = "multi-access"
-      namespace   = var.bridge_namespace
-      sa          = { namespace = "beta-ns", name = "beta-runner" }
-      permissions = [for p in ["beta-1", "beta-2", "beta-3"] : { project = p, action = "pull,push" }]
-      generation  = 1
+      # One robot, several projects, pull,push. Narrowed in "updated": a
+      # project and an action removed, on a robot that survives.
+      name      = "multi-access"
+      namespace = var.bridge_namespace
+      sa        = { namespace = "beta-ns", name = "beta-runner" }
+      permissions = local.updated ? tolist([
+        { project = "beta-1", action = "pull,push" },
+        { project = "beta-2", action = "pull" },
+      ]) : tolist([for p in ["beta-1", "beta-2", "beta-3"] : { project = p, action = "pull,push" }])
+      generation = local.updated ? 2 : 1
     },
     {
       # Exists from the start; only the kubelet-side matchImages entry is
@@ -208,7 +232,14 @@ locals {
   )
   # A filter, not a conditional: the two branches of `cond ? [] : [...]`
   # are tuples of different types.
-  manifests = [for m in local.all_manifests : m if var.phase != "none"]
+  manifests = [
+    for m in local.all_manifests : m
+    if var.phase != "none" && !(
+      var.phase == "ns-cascade"
+      && yamldecode(m.yaml).kind == "Namespace"
+      && yamldecode(m.yaml).metadata.name == local.cascade_namespace
+    )
+  ]
 }
 
 module "manifests" {
@@ -218,6 +249,9 @@ module "manifests" {
 }
 
 output "harbor_accesses" {
-  value       = var.phase == "none" ? [] : [for ha in local.harbor_accesses : "${ha.namespace}/${ha.name}"]
+  value = var.phase == "none" ? [] : [
+    for ha in local.harbor_accesses : "${ha.namespace}/${ha.name}"
+    if !(var.phase == "ns-cascade" && ha.namespace == local.cascade_namespace)
+  ]
   description = "HarborAccess objects present in this phase."
 }

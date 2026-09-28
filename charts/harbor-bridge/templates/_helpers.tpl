@@ -112,6 +112,8 @@ errors surface during `helm install` with the message text intact.
 {{/*
 harborAccessSelector renders bridge.harborAccessSelector as a label
 selector string (sorted k=v pairs); the bridge validates the syntax.
+validateRequiredValues admits only string values: %s would render a
+boolean or number as %!s(bool=true).
 */}}
 {{- define "harbor-bridge.harborAccessSelector" -}}
 {{- $pairs := list -}}
@@ -161,14 +163,58 @@ nexus.aetherize.io/user
 {{- if gt (len .Values.clusterName) 63 -}}
 {{- fail (printf "clusterName=%q exceeds 63 chars" .Values.clusterName) -}}
 {{- end -}}
+{{- if contains "--" .Values.clusterName -}}
+{{- fail (printf "clusterName=%q must not contain consecutive hyphens: it begins every Harbor robot name (bridge-<clusterName>.<namespace>.<serviceaccount>), and Harbor accepts only single separators, so the bridge could create no robot." .Values.clusterName) -}}
+{{- end -}}
 {{- if not .Values.harbor.url -}}
 {{- fail "harbor.url is REQUIRED. The bridge needs the Harbor base URL to manage robots." -}}
 {{- end -}}
-{{- if and (hasPrefix "http://" .Values.harbor.url) (not .Values.harbor.allowInsecureHTTP) -}}
+{{- include "harbor-bridge.validateURL" (list "harbor.url" .Values.harbor.url "a user:password@ part never takes effect (the bridge authenticates to Harbor only with harbor.adminCredsSecret) and only ends up in logs") -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "a user:password@ part never takes effect (a token's iss claim never carries one, so no token would match) and only ends up in logs") -}}
+{{- with .Values.bridge.oidcJWKSURL -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcJWKSURL" . "a user:password@ part here would be stored in plain text in the bridge Deployment and the Helm release. For a JWKS endpoint that needs credentials, leave bridge.oidcJWKSURL empty and set BRIDGE_OIDC_JWKS_URL through bridge.extraEnv from a Secret (valueFrom.secretKeyRef)") -}}
+{{- include "harbor-bridge.requireTLSUnlessLoopback" (list "bridge.oidcJWKSURL" . "the token signing keys") -}}
+{{- end -}}
+{{- /* The bridge fetches from the issuer only for OIDC discovery, when no
+       JWKS URL is set (bridge.oidcJWKSURL, or BRIDGE_OIDC_JWKS_URL in
+       bridge.extraEnv). Otherwise the issuer is only compared with each
+       token's iss claim, and plain http is harmless. */}}
+{{- $jwksFromEnv := false -}}
+{{- range .Values.bridge.extraEnv -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "BRIDGE_OIDC_JWKS_URL") -}}
+{{- $jwksFromEnv = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or .Values.bridge.oidcJWKSURL $jwksFromEnv) -}}
+{{- include "harbor-bridge.requireTLSUnlessLoopback" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "the discovery document that names the token signing keys (no JWKS URL is set)") -}}
+{{- end -}}
+{{- if and (hasPrefix "http://" (lower (trim .Values.harbor.url))) (not .Values.harbor.allowInsecureHTTP) -}}
 {{- fail "harbor.url uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (harbor.caSecret for a private CA), or set harbor.allowInsecureHTTP=true." -}}
 {{- end -}}
 {{- if not .Values.harbor.adminCredsSecret.name -}}
 {{- fail "harbor.adminCredsSecret.name is REQUIRED. Pre-create a Secret in the release namespace holding Harbor admin {username,password}." -}}
+{{- end -}}
+{{- range $k, $v := .Values.bridge.harborAccessSelector -}}
+{{- if not (kindIs "string" $v) -}}
+{{- fail (printf "bridge.harborAccessSelector.%s must be a string, but it was read as the %s %v: values files and --set read unquoted label values such as true or 1 as booleans or numbers, which do not render as the value you wrote. Quote the value in the values file or pass it with --set-string." $k (kindOf $v) $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $leaderElection := .Values.bridge.leaderElection -}}
+{{- if not (or (kindIs "invalid" $leaderElection) (kindIs "bool" $leaderElection)) -}}
+{{- fail (printf "bridge.leaderElection must be true, false or null (null: on when bridge.replicas > 1), but it was read as the %s %v." (kindOf $leaderElection) $leaderElection) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $leaderElection) (not $leaderElection) (gt (int .Values.bridge.replicas) 1) -}}
+{{- fail (printf "bridge.leaderElection=false with bridge.replicas=%v: every replica would run the reconciler and the janitor, which only the leader may run (ADR-0025). They race on robot creation and password rotation and can leave a robot Secret with a password Harbor has already replaced. Leave bridge.leaderElection unset (on when bridge.replicas > 1) or set it to true." .Values.bridge.replicas) -}}
+{{- end -}}
+{{- $burst := .Values.bridge.rateLimit.burst -}}
+{{- $burstOK := false -}}
+{{- if or (kindIs "float64" $burst) (kindIs "int64" $burst) (kindIs "int" $burst) -}}
+{{- $burstOK = and (eq (float64 (int64 $burst)) (float64 $burst)) (ge (int64 $burst) 1) -}}
+{{- else if kindIs "string" $burst -}}
+{{- $burstOK = regexMatch "^[1-9][0-9]*$" $burst -}}
+{{- end -}}
+{{- if not $burstOK -}}
+{{- fail (printf "bridge.rateLimit.burst=%v must be a positive whole number of requests; the bridge refuses to start otherwise." $burst) -}}
 {{- end -}}
 {{- if .Values.bridge.harborAccessSelector -}}
 {{- $instance := include "harbor-bridge.instance" . -}}
@@ -201,6 +247,22 @@ nexus.aetherize.io/user
 {{- if not (kindIs "bool" $requirePodBinding) -}}
 {{- fail (printf "bridge.tokenValidation.requirePodBinding=%q must be true or false (ADR-0028)." (toString $requirePodBinding)) -}}
 {{- end -}}
+{{- $cacheDuration := toString .Values.plugin.defaultCacheDuration -}}
+{{- if not (regexMatch "^(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+)$" $cacheDuration) -}}
+{{- fail (printf "plugin.defaultCacheDuration=%q must be a Go duration of at least 0, such as 1h or 90m (units h, m, s, ms, us, ns; there is no d): kubelet does not start with any other value in its credential-provider config." $cacheDuration) -}}
+{{- end -}}
+{{- /* The chart's plugin calls the loopback NodePort by default (ADR-0008),
+       fixed at render time: it needs a node port, and one known now. Without
+       the chart's plugin the NOTES print a placeholder instead. */}}
+{{- if and .Values.plugin.enabled (not .Values.plugin.bridgeEndpoint) -}}
+{{- if not (has .Values.service.type (list "NodePort" "LoadBalancer")) -}}
+{{- fail (printf "service.type=%s gives the bridge no node port, but with plugin.bridgeEndpoint empty the plugin calls https://127.0.0.1:<service.nodePort> (ADR-0008). Use service.type=NodePort, or set plugin.bridgeEndpoint to an https URL of the bridge every node can reach." (toString .Values.service.type)) -}}
+{{- end -}}
+{{- $nodePort := toString .Values.service.nodePort -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $nodePort)) (gt (atoi $nodePort) 65535) -}}
+{{- fail (printf "service.nodePort=%s must be a fixed port while plugin.bridgeEndpoint is empty: the plugin's endpoint https://127.0.0.1:<service.nodePort> is rendered at install time and cannot follow a port the apiserver picks. Set a port in the cluster's node port range (30000-32767 by default), or set plugin.bridgeEndpoint." (ternary "null" $nodePort (kindIs "invalid" .Values.service.nodePort))) -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.plugin.audience -}}
 {{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
 {{- end -}}
@@ -231,12 +293,32 @@ nexus.aetherize.io/user
 {{- if not .Values.plugin.matchImages -}}
 {{- fail "plugin.matchImages is REQUIRED when plugin.enabled=true. Without match patterns kubelet never invokes the plugin." -}}
 {{- end -}}
+{{- /* host[:port][/path] as kubelet matches it: globs only in the host's
+       labels, a numeric port, a literal path prefix. Kubelet does not start
+       with an entry it cannot parse as the host of an https URL (a port
+       glob, a space, a bad %-escape); an entry with a scheme or a path glob
+       parses but never matches an image. */}}
+{{- range .Values.plugin.matchImages -}}
+{{- if not (regexMatch "^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9_*-]+(\\.[A-Za-z0-9_*-]+)*)(:[0-9]+)?(/[A-Za-z0-9._/:@-]*)?$" (toString .)) -}}
+{{- fail (printf "plugin.matchImages entry %q is not host[:port][/path] as kubelet matches it: a registry host (the glob * only in its labels, e.g. *.harbor.example.com), an optional numeric port and an optional literal path prefix, with no scheme, spaces or %%. Kubelet does not start with an entry it cannot parse, such as a port glob (harbor.example.com:*), and an entry with a scheme or a path glob never matches an image." (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- $priorityClassName := .Values.plugin.priorityClassName -}}
+{{- if not (or (kindIs "invalid" $priorityClassName) (kindIs "string" $priorityClassName)) -}}
+{{- fail (printf "plugin.priorityClassName must be a string (a PriorityClass name, or \"\" to leave it out), but it was read as the %s %v." (kindOf $priorityClassName) $priorityClassName) -}}
+{{- end -}}
 {{- $install := .Values.plugin.install | default dict -}}
 {{- if not (has $install.mode (list "auto" "merge" "patch" "none")) -}}
 {{- fail (printf "plugin.install.mode=%q is invalid. Must be one of: auto, merge, patch, none (ADR-0021)." (toString $install.mode)) -}}
 {{- end -}}
 {{- if ne (empty $install.binDir) (empty $install.configFile) -}}
 {{- fail "plugin.install.binDir and plugin.install.configFile must be set together (both name merge-mode targets)." -}}
+{{- end -}}
+{{- /* Auto mode discovers kubelet's paths to choose a mode and would
+       ignore the overrides; patch and none mode have no use for them.
+       The installer checks the same (loadConfig). */}}
+{{- if and $install.binDir (ne (toString $install.mode) "merge") -}}
+{{- fail (printf "plugin.install.binDir and plugin.install.configFile name merge-mode targets and are used only with plugin.install.mode=merge, not %q: in auto mode the installer discovers kubelet's paths and would ignore them. Set plugin.install.mode=merge, or clear them." (toString $install.mode)) -}}
 {{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9:_.@-]*$" (toString $install.kubeletUnit)) -}}
 {{- fail (printf "plugin.install.kubeletUnit=%q is not a valid systemd unit name." (toString $install.kubeletUnit)) -}}
@@ -276,6 +358,56 @@ nexus.aetherize.io/user
 {{- end -}}
 {{- end -}}
 {{- include "harbor-bridge.nexus.validate" . -}}
+{{- end -}}
+
+{{/*
+validateURL checks a URL setting of the bridge at template time: an http or
+https scheme and a host (bridge/controlplane/config.go requireURL), and no
+"@" at all. The third element says why the setting takes no user:password@
+part. The bridge refuses one in harbor.url and bridge.oidcIssuer, where it
+never takes effect. It accepts one in bridge.oidcJWKSURL and sends it as
+Basic auth, but the chart refuses it there too: the value would be stored
+in plain text in the Deployment and the Helm release, and a Secret can
+carry it instead (bridge.extraEnv). An "@" after the host part usually
+means a "/", "?" or "#" inside a password ended the host early. Messages
+never repeat the value: it may hold a credential.
+Usage: include "harbor-bridge.validateURL" (list "<setting>" <value> "<why it takes no user:password@ part>")
+*/}}
+{{- define "harbor-bridge.validateURL" -}}
+{{- $name := index . 0 -}}
+{{- $url := index . 1 | toString | trim -}}
+{{- $why := index . 2 -}}
+{{- $omitted := "The value is left out of this message: it could hold a credential." -}}
+{{- if contains "@" $url -}}
+{{- fail (printf "%s must not contain \"@\": %s. An \"@\" after the host part usually means a \"/\", \"?\" or \"#\" inside a password ended the host early. Write an \"@\" that belongs to the path, query or fragment as %%40. %s" $name $why $omitted) -}}
+{{- end -}}
+{{- if not (regexMatch "^(?i:https?)://[^/?#]+([/?#].*)?$" $url) -}}
+{{- fail (printf "%s must be an http:// or https:// URL with a host; the bridge refuses to start otherwise. %s" $name $omitted) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+requireTLSUnlessLoopback refuses a URL, already checked by validateURL, that
+the bridge fetches the token signing keys (or the discovery document naming
+them) from over plain http, unless its host is a loopback address: the
+bridge refuses it at startup (0.11.1, bridge/dataplane/oidc.go
+requireTLSUnlessLoopback). The keys decide every credential, and anyone on
+the path of a plain-http fetch could substitute them and forge a token for
+any ServiceAccount. The chart knows a loopback
+host as localhost, a dotted 127.x.x.x address or [::1]; it refuses other
+spellings of a loopback address that the bridge would accept.
+Usage: include "harbor-bridge.requireTLSUnlessLoopback" (list "<setting>" <value> "<what the bridge fetches from it>")
+*/}}
+{{- define "harbor-bridge.requireTLSUnlessLoopback" -}}
+{{- $name := index . 0 -}}
+{{- $url := index . 1 | toString | trim -}}
+{{- if regexMatch "^(?i:http)://" $url -}}
+{{- $host := lower (regexReplaceAll "^[^:]+://(\\[[^\\]]*\\]|[^/?#:]*).*$" $url "${1}") -}}
+{{- $octet := "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])" -}}
+{{- if not (or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127(\\.%s){3}$" $octet) $host)) -}}
+{{- fail (printf "%s uses plain http: the bridge fetches %s from it, and anyone on the network path could substitute the keys and forge a token for any ServiceAccount, so the bridge refuses to start. Use https; plain http is allowed only to 127.0.0.1, ::1 or localhost. The value is left out of this message: it could hold a credential." $name (index . 2)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -321,6 +453,20 @@ Derived values that don't fit cleanly inline.
 {{- else -}}
 {{- $tag := .Values.plugin.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.plugin.image.repository $tag -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+rateLimitBurst renders bridge.rateLimit.burst as the integer the bridge
+parses (strconv.Atoi): a values file reads numbers as float64, and a
+float64 of 1000000 or more would otherwise render as 1e+06.
+validateRequiredValues admits only positive whole numbers.
+*/}}
+{{- define "harbor-bridge.rateLimitBurst" -}}
+{{- if kindIs "string" .Values.bridge.rateLimit.burst -}}
+{{- .Values.bridge.rateLimit.burst -}}
+{{- else -}}
+{{- int64 .Values.bridge.rateLimit.burst -}}
 {{- end -}}
 {{- end -}}
 
@@ -462,6 +608,71 @@ installer substitutes a literal $(NODE_IP) with the node's IP).
 {{- .Values.plugin.bridgeEndpoint -}}
 {{- else -}}
 https://127.0.0.1:{{ .Values.service.nodePort }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+service.nodePort is "true" when the bridge Service names service.nodePort:
+always for type NodePort, and for type LoadBalancer only when the chart's
+plugin calls the default endpoint, the one case that needs that port.
+Otherwise a LoadBalancer Service keeps the node port the apiserver picked:
+pinning it would move an existing Service to service.nodePort on upgrade,
+and fail when another Service (e.g. another release's default NodePort)
+holds that port.
+*/}}
+{{- define "harbor-bridge.service.nodePort" -}}
+{{- if .Values.service.nodePort -}}
+{{- if or (eq .Values.service.type "NodePort") (and (eq .Values.service.type "LoadBalancer") .Values.plugin.enabled (not .Values.plugin.bridgeEndpoint)) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+bridge.certDNSNames are the DNS names of the chart-issued serving
+certificate (bridge-certificate.yaml), space-separated. Its one IP address
+is 127.0.0.1.
+*/}}
+{{- define "harbor-bridge.bridge.certDNSNames" -}}
+{{- $fullname := include "harbor-bridge.bridge.fullname" . -}}
+{{- $fullname }} {{ $fullname }}.{{ .Release.Namespace }} {{ $fullname }}.{{ .Release.Namespace }}.svc {{ $fullname }}.{{ .Release.Namespace }}.svc.cluster.local localhost
+{{- end -}}
+
+{{/*
+plugin.serverName is the name the plugin verifies the bridge certificate
+against (HARBOR_BRIDGE_SERVER_NAME) when the endpoint's host is not in the
+certificate, or "" when no such name is needed: the bridge Service's name,
+for an endpoint with $(NODE_IP) (the chart's certificate names no node IP), and,
+with the chart-issued certificate (tls.enabled), for an explicit endpoint
+whose host is not one of its names. The default endpoint (127.0.0.1) and an
+explicit one on a host the certificate names get none, so their rendered
+config stays the same. An operator-provided certificate (tls.enabled=false)
+names what the operator chose: the chart adds no server name for an
+explicit endpoint then.
+*/}}
+{{- define "harbor-bridge.plugin.serverName" -}}
+{{- $endpoint := include "harbor-bridge.plugin.bridgeEndpoint" . -}}
+{{- $svc := printf "%s.%s.svc" (include "harbor-bridge.bridge.fullname" .) .Release.Namespace -}}
+{{- if contains "$(NODE_IP)" $endpoint -}}
+{{- $svc -}}
+{{- else if and .Values.tls.enabled .Values.plugin.bridgeEndpoint -}}
+{{- $host := lower (regexReplaceAll "^[^:/?#]+://(?:[^/?#@]*@)?(\\[[^\\]]*\\]|[^/?#:]*).*$" $endpoint "${1}") -}}
+{{- if not (has $host (append (splitList " " (include "harbor-bridge.bridge.certDNSNames" .)) "127.0.0.1")) -}}
+{{- $svc -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+priorityClassName is plugin.priorityClassName. A missing key renders the
+default: `helm upgrade --reuse-values` renders with the previous chart's
+values, which predate the key. "" omits the field.
+*/}}
+{{- define "harbor-bridge.plugin.priorityClassName" -}}
+{{- if kindIs "invalid" .Values.plugin.priorityClassName -}}
+system-node-critical
+{{- else -}}
+{{- .Values.plugin.priorityClassName -}}
 {{- end -}}
 {{- end -}}
 

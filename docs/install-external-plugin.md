@@ -61,7 +61,7 @@ providers:
     apiVersion: credentialprovider.kubelet.k8s.io/v1
     matchImages:
       - harbor.example.com          # bare host: matchImages globs only the domain
-    defaultCacheDuration: 1h
+    defaultCacheDuration: 1h         # required, but unused: the plugin sends a cache duration in every response
     env:
       - name: HARBOR_BRIDGE_ENDPOINT
         value: https://127.0.0.1:31443   # the bridge NodePort on the node itself

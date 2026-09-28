@@ -4,6 +4,9 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -277,6 +280,38 @@ func TestSubstituteNodeIP(t *testing.T) {
 	}
 	if string(out) != `value: "https://10.0.0.7:31443"` {
 		t.Fatalf("unexpected substitution result: %s", out)
+	}
+}
+
+// TestSubstituteNodeIP_URLHost: $(NODE_IP) is a URL host. An IPv6 hostIP
+// (IPv6 single-stack or IPv6-primary dual-stack nodes) used to go in bare,
+// "https://fd00:10:244::5:31443", which the plugin rejects on every exec.
+func TestSubstituteNodeIP_URLHost(t *testing.T) {
+	for name, tc := range map[string]struct{ in, ip, want string }{
+		"ipv4":                {"https://$(NODE_IP):31443", "10.0.0.7", "https://10.0.0.7:31443"},
+		"ipv6":                {"https://$(NODE_IP):31443", "fd00:10:244::5", "https://[fd00:10:244::5]:31443"},
+		"ipv6 bracketed":      {"https://[$(NODE_IP)]:31443", "fd00:10:244::5", "https://[fd00:10:244::5]:31443"},
+		"ipv6 canonical form": {"https://$(NODE_IP):31443", "FD00:0:0::5", "https://[fd00::5]:31443"},
+		"ipv4-mapped ipv6":    {"https://$(NODE_IP):31443", "::ffff:10.0.0.7", "https://[::ffff:10.0.0.7]:31443"},
+	} {
+		out, err := substituteNodeIP([]byte(tc.in), tc.ip)
+		if err != nil || string(out) != tc.want {
+			t.Errorf("%s: got %q, %v; want %q", name, out, err, tc.want)
+			continue
+		}
+		if u, err := url.Parse(string(out)); err != nil || u.Hostname() == "" {
+			t.Errorf("%s: %q does not parse as a URL with a host: %v", name, out, err)
+		}
+	}
+	for name, tc := range map[string]struct{ in, ip string }{
+		"ipv4 bracketed": {"https://[$(NODE_IP)]:31443", "10.0.0.7"},
+		"not an address": {"https://$(NODE_IP):31443", "node-1"},
+		"injection":      {"https://$(NODE_IP):31443", "10.0.0.7\"\n  - name: x"},
+		"zone":           {"https://$(NODE_IP):31443", "fe80::1%eth0"},
+	} {
+		if out, err := substituteNodeIP([]byte(tc.in), tc.ip); err == nil {
+			t.Errorf("%s: accepted as %q", name, out)
+		}
 	}
 }
 
@@ -581,5 +616,49 @@ func TestKubeletStartProblems(t *testing.T) {
 	}
 	if _, err := kubeletStartProblems([]byte("providers: 3\n"), defaultProviderName, hasBinary); err == nil {
 		t.Fatal("providers that are not a list were accepted")
+	}
+}
+
+// TestMergeProvider_RefusesOutputThatDoesNotReadBack: encoding/json writes
+// U+0085 (NEL) and DEL raw, and YAML reads them as a line break or refuses
+// them. A cloud config whose values carry such characters (escaped in the
+// file) came back in a form the installer's next pass could not parse, or
+// read with a changed value that a later merge would have written back.
+func TestMergeProvider_RefusesOutputThatDoesNotReadBack(t *testing.T) {
+	entry := mustEntry(t, renderedConfig, defaultProviderName)
+	for name, arg := range map[string]string{
+		"NEL": `a\u0085b`,
+		"DEL": `a\u007fb`,
+	} {
+		doc := strings.Replace(eksConfig, `"args": ["get-credentials"]`, `"args": ["get-credentials", "`+arg+`"]`, 1)
+		if doc == eksConfig {
+			t.Fatal("fixture changed")
+		}
+		out, _, err := mergeProvider([]byte(doc), entry)
+		if err == nil || !errors.Is(err, errNoRoundTrip) {
+			t.Errorf("%s: got %v and\n%s\nwant a refusal", name, err, out)
+		}
+	}
+	// Escaped characters that JSON and YAML read alike still merge.
+	doc := strings.Replace(eksConfig, `"args": ["get-credentials"]`, `"args": ["get-credentials", "tab\there \u00e9 \u2028"]`, 1)
+	if _, _, err := mergeProvider([]byte(doc), entry); err != nil {
+		t.Fatalf("a config with escaped but unambiguous characters: %v", err)
+	}
+}
+
+func TestCheckRoundTrip(t *testing.T) {
+	want := map[string]any{"a": "x\u0085y"}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRoundTrip(raw, want, true); !errors.Is(err, errNoRoundTrip) {
+		t.Fatalf("raw NEL in JSON: got %v", err)
+	}
+	if err := checkRoundTrip([]byte(`{"a": "x\u0085y"}`), want, true); err != nil {
+		t.Fatalf("escaped NEL in JSON: %v", err)
+	}
+	if err := checkRoundTrip([]byte("a: other\n"), want, false); !errors.Is(err, errNoRoundTrip) {
+		t.Fatalf("different YAML: got %v", err)
 	}
 }

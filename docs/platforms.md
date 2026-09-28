@@ -5,8 +5,8 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 
 | Platform | Chart settings | What happens on each node | Verified |
 |---|---|---|---|
-| kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`, kubelet restarted and verified | yes (CI e2e) |
-| GKE Standard | defaults | kubelet already runs GKE's `auth-provider-gcp` → **merge** into that config (YAML), binary into its bin dir | harness ready (`make e2e-gke`), never run |
+| kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in the environment file the kubelet unit reads (`/etc/default/kubelet` with Debian packages and on kind, `/etc/sysconfig/kubelet` with RPM packages; ADR-0034), kubelet restarted and verified | kind: yes (CI e2e); RPM packages: unit-tested, not run |
+| GKE Standard | defaults, plus a ResourceQuota for `system-node-critical` in the plugin namespace ([GKE](#managed-clouds-what-to-expect)) | kubelet already runs GKE's `auth-provider-gcp` → **merge** into that config (YAML), binary into its bin dir | harness ready (`make e2e-gke`), never run |
 | EKS (AL2023) | defaults | kubelet already runs `ecr-credential-provider` → **merge** into `/etc/eks/image-credential-provider/config.json` (stays JSON) | merge unit-tested, not run |
 | AKS | defaults | kubelet already runs `acr-credential-provider` → **merge** into its config | merge unit-tested, not run |
 | Talos | `plugin.enabled: false` | nothing — the plugin comes from a system extension, the entry from the machine config | documented ([install-external-plugin.md](install-external-plugin.md)) |
@@ -17,13 +17,30 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 
 ## Requirements on every platform
 
+- Linux nodes, amd64 or arm64: the images carry no other variant, and the
+  installer needs a systemd kubelet. The bridge Deployment and the plugin
+  DaemonSet select `kubernetes.io/os: linux` by default (`bridge.nodeSelector`,
+  `plugin.nodeSelector`), so Windows nodes get no plugin, and workloads on
+  them get no credentials from the bridge. Keep nodes of other architectures
+  (s390x, ppc64le) out yourself: the pods never start there, and plugin pods
+  that never become ready stall every rollout of the DaemonSet
+  (`maxUnavailable: 10%`). For the plugin, select the amd64/arm64 nodes with
+  `plugin.nodeSelector` (`kubernetes.io/arch: amd64`, or `arm64`, if the
+  cluster has only one of the two, otherwise a label you give the amd64 and
+  arm64 nodes); the chart has no `plugin.affinity`. A taint on the other nodes does not keep the plugin off
+  by itself: the default `plugin.tolerations` (`operator: Exists`) tolerates
+  every taint, so replace it with tolerations that do not match that taint.
+  For the bridge, a taint works as it is (`bridge.tolerations` is empty), or
+  set a node affinity on `kubernetes.io/arch` (`In [amd64, arm64]`) in
+  `bridge.affinity`.
 - Kubernetes **1.34+** (KEP-4412: kubelet passes a ServiceAccount token to the
   credential provider; beta and on by default from 1.34).
 - `ServiceAccountNodeAudienceRestriction` (on by default since 1.32) — the chart
   creates the RBAC that lets kubelets request tokens for `plugin.audience`.
 - Each node must reach the bridge. Default: the bridge NodePort on the node's
   own loopback (`https://127.0.0.1:31443`). On dataplanes that do not route
-  loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`. The
+  loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`
+  (the installer puts an IPv6 node address in brackets). The
   chart then has the plugin verify the bridge certificate against the bridge
   Service's DNS name, because the node IP is not in the certificate. Both the
   `$(NODE_IP)` substitution and that server name
@@ -48,17 +65,62 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 
 **Restarts.** In auto/merge/patch mode the installer restarts kubelet once per
 node when (and only when) the effective credential-provider config changes,
-then waits until kubelet is stably active before it records success. Running
-containers are not affected. A node whose kubelet does not come back fails the
-DaemonSet pod on that node (visible in `kubectl logs ds/…-plugin -c install`);
-it does not continue silently.
+then waits until kubelet is stably active (one kubelet process up for the
+whole settle period, 15 s) before it records success. Running containers are
+not affected. Before it writes anything it checks its own provider entry the
+way kubelet does (`matchImages`, `defaultCacheDuration`, the audience) and
+refuses one kubelet would exit on. When kubelet still does not come back, or in
+patch mode does not pick up the flags, the installer restores the config (and
+the kubelet environment file) it replaced, restarts kubelet onto them and fails the
+DaemonSet pod on that node; with kubelet running again,
+`kubectl logs ds/…-plugin -c install` shows why. Until then kubelet is down for
+about the verification timeout (90 s), and the node is `NotReady` for that
+time. The installer records the content as rejected in its state file and does
+not restart kubelet onto the same content again on the pod's retries: roll out
+corrected values, or fix the node and delete the state file there to retry
+(ADR-0033). A changed kubelet (an upgraded binary, or another command line or
+`--config` file) gets one more try with the same content by itself: an upgrade
+to 1.34, where the `KubeletServiceAccountTokenForCredentialProviders` gate is
+on by default, can make kubelet accept what it rejected. If kubelet does not
+come back on the restored files either, the node stays `NotReady` and
+`kubectl logs` cannot reach it: run `journalctl -u kubelet` on the node; the
+`.bak` copy next to each restored file holds the content kubelet rejected.
 
 **Node replacement and reboots.** New or reimaged nodes run the DaemonSet and
 converge the same way. If a platform resets the provider config at boot (GKE COS
 keeps `/etc` stateless), the next DaemonSet pod start merges again and restarts
 kubelet once.
 
-**GKE.** The e2e harness (`test/e2e-gke`, ADR-0022) creates a zonal spot cluster
+**GKE.** The plugin pods run with the PriorityClass `system-node-critical`
+(`plugin.priorityClassName`), which makes kubelet treat them as critical pods.
+GKE admits such pods outside `kube-system` only in a namespace with a
+ResourceQuota scoped to that class; without one the DaemonSet creates no pods
+(`FailedCreate`: "insufficient quota to match these scopes"). Create one in the
+plugin namespace (`plugin.namespace`, or the release namespace) before the
+install:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: harbor-bridge-critical-pods
+  namespace: <plugin namespace>
+spec:
+  hard:
+    pods: "1000"  # at least the number of nodes
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values: [system-node-critical]
+```
+
+`plugin.priorityClassName: ""` avoids the quota, but the pods then lose the
+critical-pod treatment (a custom PriorityClass cannot reach it either). The
+GKE harness creates this quota before the install (`critical_pods_quota`);
+it has not been run yet.
+
+The e2e harness (`test/e2e-gke`, ADR-0022) creates a zonal spot cluster
 with Dataplane V2, Workload Identity (pods cannot read the node's credentials),
 legacy metadata endpoints off, and the control plane reachable only from the
 operator's IP. It is billed and has never been run. First-run findings go into

@@ -104,10 +104,11 @@ resource "kubernetes_config_map_v1_data" "coredns" {
 # `reload` plugin watches with TTL. Just nudge the deployment so the
 # new Corefile is in effect when other modules depend on us.
 #
-# kubectl is driven ONLY by var.kubeconfig: --kubeconfig=/dev/null keeps
-# the operator's ~/.kube/config (and its current context, which may be a
-# production cluster) out of the picture entirely, and the connection
-# material is written to a private temp dir that is removed on exit.
+# kubectl is driven ONLY by var.kubeconfig: a kubeconfig file written to a
+# private temp dir that is removed on exit (test/e2e/scripts/kubeconfig.sh)
+# keeps the operator's ~/.kube/config (and its current context, which may
+# be a production cluster) out of the picture entirely, and keeps every
+# credential off the command line.
 resource "null_resource" "coredns_reload" {
   triggers = {
     corefile_sha = sha256(kubernetes_config_map_v1_data.coredns.data.Corefile)
@@ -118,25 +119,18 @@ resource "null_resource" "coredns_reload" {
       set -euo pipefail
       d="$(mktemp -d)"
       trap 'rm -rf "$d"' EXIT
-      chmod 700 "$d"
-      printf '%s' "$K8S_CA" > "$d/ca.crt"
-      args=(--kubeconfig=/dev/null --server="$K8S_HOST" --certificate-authority="$d/ca.crt")
-      if [ -n "$K8S_TOKEN" ]; then
-        args+=(--token="$K8S_TOKEN")
-      else
-        printf '%s' "$K8S_CERT" > "$d/tls.crt"
-        printf '%s' "$K8S_KEY" > "$d/tls.key"
-        args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
-      fi
-      kubectl "$${args[@]}" -n kube-system rollout restart deployment/coredns
-      kubectl "$${args[@]}" -n kube-system rollout status deployment/coredns --timeout=60s
+      source "$KUBECONFIG_LIB"
+      harness_kubeconfig "$d"
+      k -n kube-system rollout restart deployment/coredns
+      k -n kube-system rollout status deployment/coredns --timeout=60s
     BASH
     environment = {
-      K8S_HOST  = var.kubeconfig.host
-      K8S_CA    = var.kubeconfig.cluster_ca_certificate
-      K8S_CERT  = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
-      K8S_KEY   = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
-      K8S_TOKEN = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+      K8S_HOST       = var.kubeconfig.host
+      K8S_CA         = var.kubeconfig.cluster_ca_certificate
+      K8S_CERT       = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+      K8S_KEY        = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+      K8S_TOKEN      = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+      KUBECONFIG_LIB = abspath("${path.module}/../../scripts/kubeconfig.sh")
     }
   }
   depends_on = [kubernetes_config_map_v1_data.coredns]
