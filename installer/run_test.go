@@ -24,14 +24,20 @@ type testEnv struct {
 // fakeKubelet stands in for systemd + kubelet. A restart re-reads
 // /etc/default/kubelet the way the real unit does (EnvironmentFile), so
 // patch-mode verification sees the flags only if the installer wrote
-// them; states scripts what `systemctl is-active` reports.
+// them; states scripts the ActiveState that `systemctl show` reports.
 type fakeKubelet struct {
 	t          *testing.T
 	env        *testEnv
 	baseArgs   []string
 	restartErr error
-	// states is consumed one per state() call; the last value repeats.
+	// states is consumed one per status() call; the last value repeats. An
+	// active unit reports the main PID of the kubelet the last restart
+	// started, any other state none.
 	states []string
+	// statusFn, when set, answers status() instead of states.
+	statusFn func() unitStatus
+	// pid is the main PID of the kubelet the last restart started.
+	pid int
 	// ignoreEnvFile models a unit that does not source /etc/default/kubelet.
 	ignoreEnvFile bool
 }
@@ -46,6 +52,7 @@ func (f *fakeKubelet) restart(unit string) error {
 	if f.restartErr != nil {
 		return f.restartErr
 	}
+	f.pid = fakeKubeletPID + f.env.restarts
 	args := append([]string(nil), f.baseArgs...)
 	if !f.ignoreEnvFile {
 		if raw, err := os.ReadFile(f.env.cfg.hostPath(defaultKubeletPath)); err == nil {
@@ -60,15 +67,25 @@ func (f *fakeKubelet) restart(unit string) error {
 	return nil
 }
 
-func (f *fakeKubelet) state(string) (string, error) {
-	if len(f.states) == 0 {
-		return "active", nil
+func (f *fakeKubelet) status(string) (unitStatus, error) {
+	if f.statusFn != nil {
+		return f.statusFn(), nil
 	}
-	st := f.states[0]
-	if len(f.states) > 1 {
-		f.states = f.states[1:]
+	st := "active"
+	if len(f.states) > 0 {
+		st = f.states[0]
+		if len(f.states) > 1 {
+			f.states = f.states[1:]
+		}
 	}
-	return st, nil
+	if st != "active" {
+		return unitStatus{ActiveState: st, NRestarts: -1}, nil
+	}
+	pid := f.pid
+	if pid == 0 {
+		pid = fakeKubeletPID
+	}
+	return unitStatus{ActiveState: st, MainPID: pid, NRestarts: -1}, nil
 }
 
 // newTestEnv builds a fake node. kubeletCmdline is the command line of the
@@ -595,6 +612,27 @@ func TestRun_RestartVerification_FlapAfterActiveIsCaught(t *testing.T) {
 	env.kubelet.states = []string{"active", "failed"}
 	if err := run(env.cfg); err == nil {
 		t.Fatal("a kubelet that fails right after reporting active passed verification")
+	}
+}
+
+// TestRun_RestartVerification_AutoRestartedKubeletIsCaught: a unit with
+// Restart=always never reports "failed" for a kubelet that exits at
+// startup; after RestartSec it reports "active" for the next kubelet. That
+// is not a verified restart, and no success may be recorded.
+func TestRun_RestartVerification_AutoRestartedKubeletIsCaught(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	env.cfg.verify = verifyTiming{timeout: 300 * time.Millisecond, interval: 10 * time.Millisecond, settle: 50 * time.Millisecond}
+	loop := &crashLoopUnit{start: time.Now(), up: 20 * time.Millisecond, down: 20 * time.Millisecond}
+	env.kubelet.statusFn = func() unitStatus {
+		st, _ := loop.status("kubelet")
+		return st
+	}
+	err := run(env.cfg)
+	if err == nil || !strings.Contains(err.Error(), "did not become stably active") {
+		t.Fatalf("got %v, want a verification failure", err)
+	}
+	if st, _ := loadState(env.statePath()); st != nil {
+		t.Fatal("success state recorded for a crash-looping kubelet")
 	}
 }
 
