@@ -514,13 +514,15 @@ run "robot_check_update" {
       set -euo pipefail
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
       # robots QUERY: the names of the robots Harbor lists for QUERY, as a
-      # JSON array. A failed request or an answer that is not a list fails
-      # the function, and set -e then ends the Job at the assignment.
+      # JSON array. A failed request, or an answer that is not exactly one
+      # JSON list, fails the function, and set -e then ends the Job at the
+      # assignment. jq -s reads the whole answer: an empty body (curl -f
+      # accepts any 2xx or 3xx) is no value at all, not an empty list.
       # busybox sh does not apply set -e inside a command substitution,
       # hence the explicit return.
       robots() {
         body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
-        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+        printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end'
       }
       old=$(robots name%3Dbridge-dev.team-a.svc-b)
       new=$(robots name%3Dbridge-dev.team-a.svc-renamed)
@@ -732,12 +734,14 @@ run "robot_check_teardown" {
       # Poll briefly: the finalizer deletes the robot before the CR goes
       # away, but give Harbor's list a moment to reflect the delete. Only
       # an empty LIST passes: a failed request is retried and, if Harbor
-      # never answers, fails the Job; an answer that is not a list fails it
-      # at once. robot_check_update proved this query lists the robots.
+      # never answers, fails the Job; an answer that is not exactly one
+      # JSON list (an empty body included, which curl -f accepts on any
+      # 2xx or 3xx) fails it at once. robot_check_update proved this query
+      # lists the robots.
       state="Harbor was never asked"
       for i in $(seq 1 30); do
         if body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev."); then
-          left=$(printf '%s' "$body" | jq -r 'if type == "array" then .[].name else error("Harbor did not answer with a robot list") end')
+          left=$(printf '%s' "$body" | jq -rs 'if length == 1 and (.[0] | type) == "array" then .[0][].name else error("Harbor did not answer with one robot list") end')
           if [ -z "$left" ]; then echo "no robots of cluster dev left in Harbor"; exit 0; fi
           state="robots left behind: $left"
         else

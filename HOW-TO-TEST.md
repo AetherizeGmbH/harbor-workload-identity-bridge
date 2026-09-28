@@ -91,7 +91,7 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 18 | `token_rejection` | [ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md): a Job running as `token-ns/token-check` mints three tokens through the TokenRequest API and sends each to the bridge's Service. Bound to its own pod for 1h: `200` with the robot's credentials. Bound to no pod: `401`. Bound to the pod for 2h: `401`. The Job first checks the claims the apiserver issued, and the bridge's audit log must show each decision with its category (`not_pod_bound`, `excessive_lifetime`) |
 | 19 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |
 | 20 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
-| 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left. A failed query is retried and never counts as an empty list |
+| 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left. A failed query is retried and never counts as an empty list; an answer that is not exactly one JSON list, an empty body included, fails the stage |
 
 The harness installs one release. Several releases on one node (ADR-0029)
 are covered by the installer's unit tests (`installer/coexist_test.go`: two

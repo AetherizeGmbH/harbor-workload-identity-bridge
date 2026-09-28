@@ -481,11 +481,12 @@ run "robot_check_update" {
       set -euo pipefail
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
       # robots QUERY: the names of the robots Harbor lists for QUERY, as a
-      # JSON array. A failed request or an answer that is not a list ends
-      # the Job (details at robot_check_update of the kind harness).
+      # JSON array. A failed request, or an answer that is not exactly one
+      # JSON list (an empty body included), ends the Job (details at
+      # robot_check_update of the kind harness).
       robots() {
         body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
-        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+        printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end'
       }
       old=$(robots name%3Dbridge-gke-e2e.team-a.svc-b)
       new=$(robots name%3Dbridge-gke-e2e.team-a.svc-renamed)
@@ -673,11 +674,12 @@ run "robot_check_teardown" {
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
       # Only an empty LIST passes (details at robot_check_teardown of the
       # kind harness): a failed request is retried and fails the Job if
-      # Harbor never answers; an answer that is not a list fails it at once.
+      # Harbor never answers; an answer that is not exactly one JSON list
+      # (an empty body included) fails it at once.
       state="Harbor was never asked"
       for i in $(seq 1 30); do
         if body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-gke-e2e."); then
-          left=$(printf '%s' "$body" | jq -r 'if type == "array" then .[].name else error("Harbor did not answer with a robot list") end')
+          left=$(printf '%s' "$body" | jq -rs 'if length == 1 and (.[0] | type) == "array" then .[0][].name else error("Harbor did not answer with one robot list") end')
           if [ -z "$left" ]; then echo "no robots of cluster gke-e2e left in Harbor"; exit 0; fi
           state="robots left behind: $left"
         else
