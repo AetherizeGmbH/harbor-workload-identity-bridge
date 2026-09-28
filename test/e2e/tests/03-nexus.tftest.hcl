@@ -368,13 +368,15 @@ run "pull_nexus_ungranted_issued" {
       IMAGE = "${run.nexus.registry_hosts["nx-other"]}/app:v1"
     }
     script = <<-SH
+      # Kubelet asks the credential provider for the image without its tag,
+      # so the audit line carries IMAGE minus ":v1".
       # No grep -q in a pipeline: set -o pipefail would count an early exit
       # of it as a failure of the greps before.
       issued() {
         logs=$(k -n "$BRIDGE_NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=-1 --since=15m) || return 1
         hit=$(printf '%s\n' "$logs" | grep -F '"logger":"audit"' | grep -F '"msg":"credential issued"' \
           | grep -F '"access_kind":"nexus"' | grep -F '"nexusaccess":"nx-pull/puller"' \
-          | grep -F "\"requested_image\":\"$IMAGE\"" || true)
+          | grep -F "\"requested_image\":\"$${IMAGE%:*}\"" || true)
         [ -n "$hit" ]
       }
       retry 60 issued || fail "no 'credential issued' audit line of nx-pull/puller for $IMAGE"
