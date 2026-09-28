@@ -355,9 +355,11 @@ needs nothing more.
 | `nexus_access` | Scenario phase `initial`: `puller` (nx-app, nx-extra, plus a HarborAccess on your-project), `pusher` (pull,push nx-push), `editor` (nx-app, nx-extra), `mover` (nx-app); each Ready at generation 1 |
 | `nexus_record` | Records each checked object's Nexus user id (status and Secret agree) |
 | `pull_nexus`, `pull_nexus_extra` | kubelet pulls the granted repositories through the plugin and the bridge's Nexus route |
-| `pull_nexus_ungranted` | A repository the NexusAccess does not name fails with an authorization error from Nexus |
+| `pull_nexus_ungranted` | A repository the NexusAccess does not name fails with an authorization error |
+| `pull_nexus_ungranted_issued` | The bridge's audit log shows it issued puller's Nexus user for that image, so Nexus refused the pull (a pull without credentials fails the same way) |
 | `pull_harbor_routing` | The same ServiceAccount pulls from Harbor |
 | `nexus_routing` | One pod-bound token, three images: the bridge answers with the identity's Nexus user for the Nexus image and its Harbor robot for the Harbor image, and refuses an image of neither backend with 403 (`no_backend`); all three decisions in the audit log |
+| `robot_check_initial` | Harbor lists exactly puller's robot under the fuzzy `name=~bridge-dev.` query `robot_check_teardown` relies on |
 | `nexus_edit_baseline*` | editor's credentials read exactly its repositories (a token from one connector works on another); the bridge serves editor |
 | `nexus_push` | The pull,push user pushes to nx-push and is refused on nx-app |
 | `nexus_state_initial` | Nexus: one role (`bridge-dev.<ns>.<sa>`) and one user (`<role>_<16 hex>`) per identity, with the ADR-0036 markers and exactly the privileges of the spec |
@@ -365,14 +367,14 @@ needs nothing more.
 | `nexus_update_state` | No spec edit created a user; editor is `Ready=False RepositoryNotFound`, its `observedGeneration` stays 1 and its Secret carries `grants-incomplete`; mover has a user of the new identity |
 | `pull_nexus_revoked`, `pull_nexus_kept` | The removed repository fails, even with kubelet's cached password; the kept one pulls |
 | `nexus_edit_revoked` | editor's existing password and bearer token lose nx-extra at once and keep nx-app (decision d) |
-| `nexus_edit_refused` | The bridge answers editor's token with 403 while its grants are incomplete |
+| `nexus_edit_refused` | The bridge answers editor's token with 403 while its grants are incomplete (audit `reason=grants_incomplete`, `missing_repositories=nx-missing`) |
 | `nexus_state_updated` | Nexus: the roles shrank; mover's old identity has neither role nor user |
 | `nexus_rotation_forced` | editor's Secret deleted: a user of a new generation, the previous user's bearer token and password refused at once, the `grants-incomplete` mark kept (a RepositoryNotFound object still rotates) |
 | `nexus_rotation_scheduled` | puller's `rotation-not-before` backdated: a new user at once, the previous one kept for the 5-minute grace and then deleted, which ends its bearer token (decision c) |
 | `nexus_outage` | Nexus scaled to zero: a deleted NexusAccess reports `DeletionBlocked` and keeps its finalizer; Nexus back: the bridge releases it on its own |
 | `nexus_outage_state` | Nothing of that object's identity is left in Nexus |
 | `nexus_access_teardown` | Scenario phase `none` while the bridge runs |
-| `nexus_teardown_check`, `robot_check_teardown` | No user or role of cluster `dev` in Nexus, no robot in Harbor; the bridge's own Nexus user and role are intact |
+| `nexus_teardown_check`, `robot_check_teardown` | No user or role of cluster `dev` in Nexus, no robot in Harbor (a Harbor query that fails or does not answer with a list fails the check); the bridge's own Nexus user and role are intact |
 
 The rotation stages run after every kubelet pull of their identities:
 they retire users whose credentials kubelet may still cache. They take

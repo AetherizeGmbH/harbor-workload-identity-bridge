@@ -23,12 +23,15 @@
 #  12. nexus_access         — scenario phase "initial"
 #  13. nexus_record         — records each checked object's Nexus user id
 #  14. pull_nexus*          — kubelet pulls: granted repositories pull, an
-#                             ungranted one fails in Nexus
+#                             ungranted one fails in Nexus although the
+#                             bridge issued the user (its audit line)
 #  15. pull_harbor_routing  — the same ServiceAccount pulls from Harbor
 #  16. nexus_routing        — the bridge answers that ServiceAccount's token
 #                             with the Nexus user for a Nexus image, the
 #                             Harbor robot for a Harbor image, and refuses
-#                             an image of neither (no_backend)
+#                             an image of neither (no_backend);
+#      robot_check_initial  — Harbor lists that robot under the query
+#                             robot_check_teardown relies on
 #  17. nexus_edit_baseline* — editor's credentials read both of its
 #                             repositories; the bridge serves it
 #  18. nexus_push           — the pull,push user pushes to its repository only
@@ -325,7 +328,10 @@ run "pull_nexus_extra" {
 }
 
 # The bridge serves puller's user for any Nexus connector; Nexus itself
-# must refuse the repository puller's role does not grant.
+# must refuse the repository puller's role does not grant. The pull fails
+# with an authorization error either way (anonymous access is off), so
+# pull_nexus_ungranted_issued proves from the bridge's audit log that it
+# issued puller's user for this image: the refusal came from Nexus.
 run "pull_nexus_ungranted" {
   command = apply
   module {
@@ -343,6 +349,37 @@ run "pull_nexus_ungranted" {
     expect_pull_failure  = true
     fail_message         = "nx-pull/puller pulled nx-other, which its NexusAccess does not grant"
     node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# expect_bridge_log cannot be combined with expect_pull_failure; this check
+# reads the bridge's audit line for pull_nexus_ungranted's image instead.
+run "pull_nexus_ungranted_issued" {
+  command = apply
+  module {
+    source = "./modules/kubectl-check"
+  }
+  variables {
+    kubeconfig_path = run.cluster.kubeconfig_path
+    name            = "pull-nexus-ungranted-issued"
+    timeout_seconds = 120
+    fail_message    = "no audit line shows that the bridge issued nx-pull/puller's Nexus user for nx-other: pull_nexus_ungranted may have failed without credentials, not in Nexus (see check.log)"
+    environment = {
+      IMAGE = "${run.nexus.registry_hosts["nx-other"]}/app:v1"
+    }
+    script = <<-SH
+      # No grep -q in a pipeline: set -o pipefail would count an early exit
+      # of it as a failure of the greps before.
+      issued() {
+        logs=$(k -n "$BRIDGE_NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=-1 --since=15m) || return 1
+        hit=$(printf '%s\n' "$logs" | grep -F '"logger":"audit"' | grep -F '"msg":"credential issued"' \
+          | grep -F '"access_kind":"nexus"' | grep -F '"nexusaccess":"nx-pull/puller"' \
+          | grep -F "\"requested_image\":\"$IMAGE\"" || true)
+        [ -n "$hit" ]
+      }
+      retry 60 issued || fail "no 'credential issued' audit line of nx-pull/puller for $IMAGE"
+      echo "the bridge issued nx-pull/puller's Nexus user for $IMAGE; Nexus refused the pull"
+    SH
   }
 }
 
@@ -427,6 +464,41 @@ run "nexus_routing" {
     ]
     timeout_seconds  = 180
     fail_message     = "data-plane routing: a Nexus image did not get the identity's Nexus user, a Harbor image not its Harbor robot, or an image of no backend got credentials"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# Harbor holds puller's robot, and the fuzzy query robot_check_teardown
+# uses lists exactly that one robot of cluster "dev". Without this, the
+# empty list that stage accepts could come from a query that lists nothing.
+run "robot_check_initial" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "robot-check-initial"
+    namespace            = run.seed_image.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = run.seed_image.admin_secret_name
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -euo pipefail
+      api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      # A failed request, or an answer that is not exactly one JSON list (an
+      # empty body included, which curl -f accepts on any 2xx or 3xx), fails
+      # the Job.
+      body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev.")
+      all=$(printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end')
+      echo "robots of cluster dev: $all"
+      printf '%s' "$all" | jq -e 'length == 1 and (.[0] | endswith("bridge-dev.nx-pull.puller"))' >/dev/null
+    SH
+    ]
+    timeout_seconds  = 120
+    fail_message     = "Harbor does not list exactly puller's robot under the fuzzy name=~bridge-dev. query robot_check_teardown relies on (or Harbor could not be asked; see pod.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
@@ -759,7 +831,7 @@ run "nexus_edit_refused" {
     SH
     ]
     expect_bridge_log = [
-      ["\"logger\":\"audit\"", "\"msg\":\"credential denied\"", "\"requested_image\":\"${run.nexus.registry_hosts["nx-app"]}/edit-check:refused\""],
+      ["\"logger\":\"audit\"", "\"msg\":\"credential denied\"", "\"access_kind\":\"nexus\"", "\"reason\":\"grants_incomplete\"", "\"nexusaccess\":\"nx-edit/editor\"", "\"missing_repositories\":\"nx-missing\"", "\"requested_image\":\"${run.nexus.registry_hosts["nx-app"]}/edit-check:refused\""],
     ]
     timeout_seconds  = 120
     fail_message     = "ADR-0036 decision f: the bridge did not refuse a NexusAccess whose Secret is marked grants-incomplete"
@@ -1111,16 +1183,29 @@ run "robot_check_teardown" {
     args = [<<-SH
       set -eu
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      # Poll briefly: the finalizer deletes the robot before the CR goes
+      # away, but give Harbor's list a moment to reflect the delete. Only
+      # an empty LIST passes: a failed request is retried and, if Harbor
+      # never answers, fails the Job; an answer that is not exactly one
+      # JSON list (an empty body included, which curl -f accepts on any
+      # 2xx or 3xx) fails it at once. robot_check_initial proved this query
+      # lists the robots.
+      state="Harbor was never asked"
       for i in $(seq 1 30); do
-        left=$(curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev." | jq -r '.[].name')
-        if [ -z "$left" ]; then echo "no robots of cluster dev left in Harbor"; exit 0; fi
+        if body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-dev."); then
+          left=$(printf '%s' "$body" | jq -rs 'if length == 1 and (.[0] | type) == "array" then .[0][].name else error("Harbor did not answer with one robot list") end')
+          if [ -z "$left" ]; then echo "no robots of cluster dev left in Harbor"; exit 0; fi
+          state="robots left behind: $left"
+        else
+          state="the Harbor query failed (curl exit $?)"
+        fi
         sleep 3
       done
-      echo "robots left behind:"; echo "$left"; exit 1
+      echo "$state"; exit 1
     SH
     ]
-    timeout_seconds  = 120
-    fail_message     = "finalizer cleanup incomplete: robots of cluster dev are still in Harbor after every HarborAccess was deleted"
+    timeout_seconds  = 150
+    fail_message     = "finalizer cleanup incomplete: robots of cluster dev are still in Harbor after every HarborAccess was deleted, or Harbor could not be asked (see pod.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
