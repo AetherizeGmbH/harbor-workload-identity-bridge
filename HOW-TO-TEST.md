@@ -77,8 +77,9 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 4 | `containerd_trust` | Extract Harbor's TLS cert from each node, install as `/etc/containerd/certs.d/harbor.e2e:30843/ca.crt` |
 | 5 | `coredns_rewrite` | CoreDNS hosts-plugin entry so `harbor.e2e` resolves to a kind node IP cluster-wide |
 | 6 | `seed_image` | Create the projects, crane-copy the test image into each, verify, and wait for the Job to finish |
-| 7 | `bridge_install` | The chart — CRDs, bridge Deployment (2 replicas), plugin DaemonSet, audience RBAC |
+| 7 | `bridge_install` | The chart — CRDs, bridge Deployment (2 replicas), plugin DaemonSet, audience RBAC. Waits until every bridge replica is updated, Ready and available (helm's own wait accepts one of two) |
 | 8 | `harbor_access` | HarborAccess scenario, phase `initial`: baseline, two collision-prone SAs, a tenant-namespace CR, a multi-project `pull,push` CR, the upgrade CR, and `token-check`, whose ServiceAccount may create tokens for itself only |
+| 8b | `bridge_replicas` | [ADR-0025](docs/adr/0025-data-plane-serving.md) (audit H1): a Job resolves a harness-only headless Service to every bridge pod, Ready or not, and asks each pod at its own address for credentials with a kubelet-projected token. Each must answer `200` with the robot of `token-ns/token-check`, and there must be as many pods as replicas |
 | 9 | `pull_pod*` | Pull assertions: `pull_pod` (baseline), `_alpha`/`_beta` (ADR-0018 collision pair), `_gamma` (cluster-wide CR), `_multi` (multi-project robot) |
 | 10 | `robot_push_test` | Uses the multi-project robot's creds to push a tag to one project and read another — verifies the `pull,push` action |
 | 11 | `bridge_upgrade` | `helm upgrade` adding a `matchImages` entry — the installer must restart kubelet |
@@ -195,10 +196,10 @@ cleanly. No orphan kind clusters.
 | [`test/e2e/modules/harbor`](test/e2e/modules/harbor) | Harbor chart + node IP / cert-extract helpers |
 | [`test/e2e/modules/containerd-registry-trust`](test/e2e/modules/containerd-registry-trust) | Pulls Harbor's cert off the wire, installs into containerd |
 | [`test/e2e/modules/coredns-cm`](test/e2e/modules/coredns-cm) | Patches CoreDNS `Corefile` for synthetic hostnames |
-| [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install |
+| [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install; waits for every bridge replica, adds a headless Service over the bridge pods |
 | [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests (keyed by object identity) with optional `wait` |
 | [`test/e2e/modules/test-sleep`](test/e2e/modules/test-sleep) | The pause mechanism |
-| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log |
+| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log, and can mount a projected token for the bridge audience |
 | [`test/e2e/scripts/kubeconfig.sh`](test/e2e/scripts/kubeconfig.sh) | Sourced by every harness script that runs kubectl: a private kubeconfig file, so no credential (on GKE the operator's access token) is ever on a command line |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
 
@@ -208,7 +209,9 @@ A failing Job stage writes diagnostics before the cluster is destroyed, to
 `test/e2e/.diag/<job>/` (CI uploads the directory as an artifact): pod and Job
 descriptions, namespace events, the pod log, the bridge logs, all HarborAccess
 objects, the names (never the contents) of the bridge Secrets, the installer
-log of the node, and that node's kubelet journal.
+log of the node, and that node's kubelet journal. A bridge install whose
+replicas do not all become Ready writes the Deployment, the bridge pods'
+descriptions and their logs to `test/e2e/.diag/bridge-rollout/`.
 
 While a run is still up (or paused):
 

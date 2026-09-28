@@ -9,8 +9,11 @@
 #   5. coredns_rewrite      — harbor.e2e resolvable cluster-wide
 #   6. seed_image           — create the scenario projects, push the test
 #                             image into each, and WAIT until that finished
-#   7. bridge_install       — our chart (2 bridge replicas, like the default)
+#   7. bridge_install       — our chart (2 bridge replicas, like the default);
+#                             waits until every replica is Ready
 #   8. harbor_access        — scenario phase "initial" (modules/harbor-access-scenario)
+#  8b. bridge_replicas      — every bridge replica, asked at its own address,
+#                             issues credentials (audit H1)
 #   9. pull_pod*            — one Job per scenario; success = end-to-end works
 #  10. robot_push_test      — the minted pull,push robot really can push
 #  11. bridge_upgrade       — helm upgrade widening matchImages; the installer
@@ -212,6 +215,81 @@ run "harbor_access" {
     phase            = "initial"
     bridge_namespace = run.bridge_install.namespace
     audience         = "harbor-bridge"
+  }
+}
+
+# ── ADR-0025 / audit H1: EVERY bridge replica serves credentials. The
+# install already waited until each replica was Ready; kubelet's pulls go
+# through the chart's Service to whichever replica it picks, and kubelet
+# retries a failed pull, so a replica that does not serve would hide behind
+# the others. This Job runs as token-ns/token-check with a kubelet-projected
+# token (pod-bound, 1h, bridge audience — what the plugin sends), resolves
+# the harness's headless Service to every bridge pod, Ready or not, and
+# asks each pod at its own address for credentials: every one must answer
+# 200 with that ServiceAccount's robot, and there must be exactly as many
+# pods as replicas. curl still verifies the serving certificate against the
+# Service name (--resolve pins only the address).
+run "bridge_replicas" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig               = run.cluster.kubeconfig
+    name                     = "bridge-replicas"
+    namespace                = "token-ns"
+    service_account_name     = "token-check"
+    image                    = "e2e-seed:e2e"
+    image_pull_policy        = "IfNotPresent"
+    projected_token_audience = "harbor-bridge"
+    command                  = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_install.credentials_url}'
+      pods='${run.bridge_install.bridge_pods_host}'
+      want=${run.bridge_install.bridge_replicas}
+      robot=bridge-dev.token-ns.token-check
+      host=$${url#https://}; host=$${host%%/*}
+      name=$${host%:*}; port=$${host##*:}
+
+      # The serving certificate off the wire, as in token_rejection.
+      openssl s_client -connect "$host" -servername "$name" </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
+      test -s /tmp/bridge-ca.crt
+
+      # Every bridge pod's address. Poll: a pod of an earlier rollout can
+      # still be terminating, and the DNS answer can trail the endpoints.
+      n=0; ips=""
+      for i in $(seq 1 20); do
+        ips=$(getent ahosts "$pods" | awk '$2 == "STREAM" {print $1}' | sort -u)
+        n=$(printf '%s\n' "$ips" | grep -c . || true)
+        [ "$n" = "$want" ] && break
+        sleep 3
+      done
+      if [ "$n" != "$want" ]; then
+        echo "$pods resolves to $n bridge pods ($(echo $ips)), want $want"; exit 1
+      fi
+
+      tok=$(cat /var/run/secrets/tokens/token)
+      for ip in $ips; do
+        code=$(curl -sS -m 10 -o /tmp/response -w '%%{http_code}' --cacert /tmp/bridge-ca.crt \
+          --resolve "$name:$port:$ip" -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+          --data "{\"image\":\"replica-check/$ip\"}" "$url") || code="no answer (curl exit $?)"
+        if [ "$code" != 200 ]; then
+          echo "bridge pod $ip: $code, want 200: $(cat /tmp/response 2>/dev/null)"; exit 1
+        fi
+        if ! jq -e --arg robot "$robot" '(.username | endswith($robot))
+            and (.password | type == "string" and length > 0)' /tmp/response >/dev/null; then
+          rm -f /tmp/response; echo "bridge pod $ip: HTTP 200, but not with the credentials of $robot"; exit 1
+        fi
+        rm -f /tmp/response
+        echo "bridge pod $ip: 200 with the credentials of $robot"
+      done
+    SH
+    ]
+    timeout_seconds  = 180
+    fail_message     = "audit H1 / ADR-0025: not every bridge replica serves credentials at its own address (see pod.log and bridge.log)"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 

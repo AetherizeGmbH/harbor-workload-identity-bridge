@@ -116,6 +116,12 @@ variable "env_field_refs" {
   description = "Optional env vars from the downward API, name → fieldPath (e.g. POD_UID = \"metadata.uid\"), for checks that need their own pod's identity."
 }
 
+variable "projected_token_audience" {
+  type        = string
+  default     = ""
+  description = "When set, kubelet projects a token of the pod's ServiceAccount for this audience to /var/run/secrets/tokens/token: bound to the pod, valid for 1h — a token the bridge accepts (ADR-0028), for checks that call the bridge the way the plugin does."
+}
+
 variable "expect_bridge_log" {
   type        = list(list(string))
   default     = []
@@ -179,6 +185,29 @@ resource "kubernetes_job_v1" "this" {
               value_from {
                 field_ref {
                   field_path = env.value
+                }
+              }
+            }
+          }
+          dynamic "volume_mount" {
+            for_each = var.projected_token_audience != "" ? [1] : []
+            content {
+              name       = "projected-token"
+              mount_path = "/var/run/secrets/tokens"
+              read_only  = true
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.projected_token_audience != "" ? [var.projected_token_audience] : []
+          content {
+            name = "projected-token"
+            projected {
+              sources {
+                service_account_token {
+                  audience           = volume.value
+                  expiration_seconds = 3600
+                  path               = "token"
                 }
               }
             }

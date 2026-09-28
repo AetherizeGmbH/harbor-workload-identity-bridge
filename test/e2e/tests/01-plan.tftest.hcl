@@ -95,8 +95,26 @@ run "defaults" {
     error_message = "plugin.install.mode should default to auto (ADR-0021)"
   }
   assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).bridge.replicas == 2
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.replicas == 2 && output.bridge_replicas == 2
     error_message = "bridge.replicas should default to 2 like the chart, so the e2e exercises a non-leader replica serving credentials (ADR-0025)"
+  }
+  # The headless Service the bridge_replicas stage resolves to reach every
+  # replica: all pods, Ready or not, selected with the chart's labels.
+  assert {
+    condition = (
+      kubernetes_service_v1.bridge_pods.spec[0].cluster_ip == "None"
+      && kubernetes_service_v1.bridge_pods.spec[0].publish_not_ready_addresses == true
+      && kubernetes_service_v1.bridge_pods.spec[0].selector == tomap({
+        "app.kubernetes.io/name"      = "harbor-bridge"
+        "app.kubernetes.io/instance"  = "harbor-bridge"
+        "app.kubernetes.io/component" = "bridge"
+      })
+    )
+    error_message = "the bridge_pods Service must be headless, publish not-ready pods and select the chart's bridge pods"
+  }
+  assert {
+    condition     = output.bridge_pods_host == "harbor-bridge-pods.harbor-bridge-system.svc"
+    error_message = "bridge_pods_host should name the headless Service in the release namespace"
   }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.oidcIssuer == "https://kubernetes.default.svc.cluster.local" && yamldecode(helm_release.bridge.values[0]).bridge.oidcJWKSURL == ""

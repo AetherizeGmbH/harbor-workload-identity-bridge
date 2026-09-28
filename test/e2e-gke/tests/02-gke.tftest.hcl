@@ -200,6 +200,68 @@ run "harbor_access" {
   }
 }
 
+# Audit H1 / ADR-0025: every bridge replica, asked at its own address,
+# issues credentials (details at bridge_replicas of the kind harness).
+run "bridge_replicas" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig               = run.gke.kubeconfig
+    name                     = "bridge-replicas"
+    namespace                = "token-ns"
+    service_account_name     = "token-check"
+    image                    = run.push.image_tags.seed
+    image_pull_policy        = "IfNotPresent"
+    projected_token_audience = "harbor-bridge"
+    command                  = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_install.credentials_url}'
+      pods='${run.bridge_install.bridge_pods_host}'
+      want=${run.bridge_install.bridge_replicas}
+      robot=bridge-gke-e2e.token-ns.token-check
+      host=$${url#https://}; host=$${host%%/*}
+      name=$${host%:*}; port=$${host##*:}
+
+      openssl s_client -connect "$host" -servername "$name" </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
+      test -s /tmp/bridge-ca.crt
+
+      n=0; ips=""
+      for i in $(seq 1 20); do
+        ips=$(getent ahosts "$pods" | awk '$2 == "STREAM" {print $1}' | sort -u)
+        n=$(printf '%s\n' "$ips" | grep -c . || true)
+        [ "$n" = "$want" ] && break
+        sleep 3
+      done
+      if [ "$n" != "$want" ]; then
+        echo "$pods resolves to $n bridge pods ($(echo $ips)), want $want"; exit 1
+      fi
+
+      tok=$(cat /var/run/secrets/tokens/token)
+      for ip in $ips; do
+        code=$(curl -sS -m 10 -o /tmp/response -w '%%{http_code}' --cacert /tmp/bridge-ca.crt \
+          --resolve "$name:$port:$ip" -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+          --data "{\"image\":\"replica-check/$ip\"}" "$url") || code="no answer (curl exit $?)"
+        if [ "$code" != 200 ]; then
+          echo "bridge pod $ip: $code, want 200: $(cat /tmp/response 2>/dev/null)"; exit 1
+        fi
+        if ! jq -e --arg robot "$robot" '(.username | endswith($robot))
+            and (.password | type == "string" and length > 0)' /tmp/response >/dev/null; then
+          rm -f /tmp/response; echo "bridge pod $ip: HTTP 200, but not with the credentials of $robot"; exit 1
+        fi
+        rm -f /tmp/response
+        echo "bridge pod $ip: 200 with the credentials of $robot"
+      done
+    SH
+    ]
+    timeout_seconds = 180
+    fail_message    = "audit H1 / ADR-0025: not every bridge replica serves credentials at its own address (see pod.log and bridge.log)"
+  }
+}
+
 run "pull_pod" {
   command = apply
   module {

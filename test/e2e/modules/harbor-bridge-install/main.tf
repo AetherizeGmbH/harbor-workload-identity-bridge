@@ -126,7 +126,7 @@ variable "token_command" {
 variable "bridge_replicas" {
   type        = number
   default     = 2
-  description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (audit H1)."
+  description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (audit H1). The install waits until every replica is Ready (null_resource.bridge_rollout), and the bridge_replicas stage asks each one for credentials directly."
 }
 
 variable "issuer_name" {
@@ -274,8 +274,102 @@ resource "helm_release" "bridge" {
   ]
 }
 
+# helm's wait is not enough: it counts a Deployment as ready once
+# replicas - maxUnavailable pods are (1 of 2 with the chart's
+# maxUnavailable: 1), and the Service then routes everything to the one
+# ready pod. A replica that never becomes Ready, such as a follower whose
+# data plane waits for the leadership it never gets (audit H1), passed the
+# install and every pull. Wait for the whole rollout and require every
+# replica updated, Ready and available, after each install or upgrade
+# that changed the release. On failure the pods, their events and the
+# bridge logs land in .diag/bridge-rollout/ (this provisioner's own output
+# is suppressed: its environment is sensitive).
+resource "null_resource" "bridge_rollout" {
+  depends_on = [helm_release.bridge]
+
+  lifecycle {
+    replace_triggered_by = [helm_release.bridge]
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-BASH
+      set -uo pipefail
+      d="$(mktemp -d)"
+      trap 'rm -rf "$d"' EXIT
+      source "$KUBECONFIG_LIB" && harness_kubeconfig "$d" || exit 1
+      fail() {
+        rm -rf "$DIAG"; mkdir -p "$DIAG"
+        echo "$1" > "$DIAG/FAILED"
+        k -n "$NS" get deployment "$DEPLOYMENT" -o yaml > "$DIAG/deployment.yaml" 2>&1
+        k -n "$NS" describe pods -l app.kubernetes.io/component=bridge > "$DIAG/pods.describe.txt" 2>&1
+        k -n "$NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=1000 --prefix > "$DIAG/bridge.log" 2>&1
+        echo "FAILED: $1 (diagnostics: $DIAG)" >&2
+        exit 1
+      }
+      k -n "$NS" rollout status "deployment/$DEPLOYMENT" --timeout=300s >/dev/null 2>&1 \
+        || fail "the bridge Deployment did not finish its rollout within 300s"
+      got="$(k -n "$NS" get deployment "$DEPLOYMENT" -o jsonpath='{.spec.replicas} {.status.updatedReplicas} {.status.readyReplicas} {.status.availableReplicas}')" \
+        || fail "could not read the bridge Deployment"
+      read -r spec updated ready available <<< "$got"
+      for n in "$spec" "$${updated:-0}" "$${ready:-0}" "$${available:-0}"; do
+        [ "$n" = "$REPLICAS" ] || fail "bridge Deployment: $${spec:-?} replicas, $${updated:-0} updated, $${ready:-0} Ready, $${available:-0} available; want $REPLICAS of each"
+      done
+    BASH
+    environment = {
+      K8S_HOST       = var.kubeconfig.host
+      K8S_CA         = var.kubeconfig.cluster_ca_certificate
+      K8S_CERT       = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+      K8S_KEY        = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+      K8S_TOKEN      = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+      KUBECONFIG_LIB = abspath("${path.module}/../../scripts/kubeconfig.sh")
+      NS             = helm_release.bridge.namespace
+      DEPLOYMENT     = helm_release.bridge.name
+      REPLICAS       = tostring(var.bridge_replicas)
+      DIAG           = abspath("${path.cwd}/.diag/bridge-rollout")
+    }
+  }
+}
+
+# Harness-only, not part of the chart: a headless Service over the bridge
+# pods, Ready or not, so that DNS answers with one address per replica. The
+# bridge_replicas stage asks each replica for credentials at its own
+# address; the chart's Service would pick one, and hide a replica that
+# does not serve.
+resource "kubernetes_service_v1" "bridge_pods" {
+  metadata {
+    name      = "${helm_release.bridge.name}-pods"
+    namespace = helm_release.bridge.namespace
+  }
+  spec {
+    cluster_ip                  = "None"
+    publish_not_ready_addresses = true
+    # The chart's bridge selector labels (harbor-bridge.bridge.selectorLabels).
+    selector = {
+      "app.kubernetes.io/name"      = "harbor-bridge"
+      "app.kubernetes.io/instance"  = helm_release.bridge.name
+      "app.kubernetes.io/component" = "bridge"
+    }
+    port {
+      name        = "https"
+      port        = 8443
+      target_port = "https"
+    }
+  }
+}
+
 output "namespace" {
   value = kubernetes_namespace_v1.this.metadata[0].name
+}
+
+output "bridge_replicas" {
+  value       = var.bridge_replicas
+  description = "Bridge replicas the install waited for."
+}
+
+output "bridge_pods_host" {
+  value       = "${kubernetes_service_v1.bridge_pods.metadata[0].name}.${kubernetes_service_v1.bridge_pods.metadata[0].namespace}.svc"
+  description = "Headless Service name that resolves to every bridge pod's address, Ready or not (for checks that must reach each replica)."
 }
 
 # The credential endpoint through the bridge's Service, for in-cluster
