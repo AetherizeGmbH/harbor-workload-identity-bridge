@@ -34,6 +34,6 @@
 | 0030 | [A refused HarborAccess suspends its robot](0030-refused-harboraccess-suspends-its-robot.md) | Accepted (supersedes part of 0009 §6, amends 0023, 0026; Harbor lookup limited by 0032) |
 | 0031 | [Robot names Harbor refuses, and what keeps truncated names apart](0031-robot-name-validity-and-truncation.md) | Accepted (amends 0018) |
 | 0032 | [A bridge sets its finalizer right before the robot and releases only what it set](0032-finalizer-ownership.md) | Accepted (amends 0026, 0030) |
-| 0033 | [Sonatype Nexus Repository as a second registry backend](0033-nexus-repository-backend.md) | Proposed |
+| 0036 | [Sonatype Nexus Repository as a second registry backend](0036-nexus-repository-backend.md) | Proposed |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

@@ -20,7 +20,7 @@ import (
 // *APIError, which matches the sentinel of its status class through
 // errors.Is. Nexus does not report "already exists" through one status: a
 // duplicate role is 400, a duplicate user 500 (DuplicateUserException,
-// verified on Nexus 3.76.1, ADR-0033). Callers therefore never infer
+// verified on Nexus 3.76.1, ADR-0036). Callers therefore never infer
 // existence from a create error; they read the object again.
 var (
 	// ErrBadRequest: 400. Nexus uses it for validation errors, an unknown
@@ -50,7 +50,7 @@ var (
 	// Auth, or on the SHA-256 of an API-key token; the client IP is only
 	// audited (AuthRateLimiterServiceImpl and
 	// NexusBasicHttpAuthenticationFilter, nexus-public release-3.96.3;
-	// not verifiable on 3.76.1, ADR-0033). The failure that takes the
+	// not verifiable on 3.76.1, ADR-0036). The failure that takes the
 	// count past nexus.auth.ratelimit.max-attempts (default 3) is
 	// answered with 429 and a Retry-After (RetryAfter) of 30 s, doubling
 	// with every further failure up to

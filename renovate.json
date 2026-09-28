@@ -112,7 +112,7 @@
       "groupSlug": "go-toolchain"
     },
     {
-      "description": "The Nexus e2e (test/e2e/nexus/Dockerfile, ADR-0033 decision i) pins Sonatype Nexus Repository to 3.76.1, the last Community Edition release without the EULA gate. 3.77 and later refuse service until an operator accepts the EULA, a legal act this project never performs on anyone's behalf, so a bump past 3.76 is a maintainer decision (ADR-0033 question 4), not a dependency update.",
+      "description": "The Nexus e2e (test/e2e/nexus/Dockerfile, ADR-0036 decision i) pins Sonatype Nexus Repository to 3.76.1, the last Community Edition release without the EULA gate. 3.77 and later refuse service until an operator accepts the EULA, a legal act this project never performs on anyone's behalf, so a bump past 3.76 is a maintainer decision (ADR-0036 question 4), not a dependency update.",
       "matchPackageNames": ["sonatype/nexus3"],
       "allowedVersions": "<3.77"
     },

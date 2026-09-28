@@ -60,7 +60,7 @@ type Metrics struct {
 }
 
 // NexusMetrics are the data plane's collectors of the Nexus backend
-// (ADR-0033). main registers them only with the backend, so a Harbor-only
+// (ADR-0036). main registers them only with the backend, so a Harbor-only
 // bridge exports exactly the series it did before. The metrics above
 // count every request, the Nexus ones included; these count the requests
 // whose image routed to Nexus, from the routing on.

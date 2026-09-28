@@ -58,7 +58,7 @@ type Request struct {
 	// alone it is used only for audit logging: credential decisions are
 	// made from the SA token's aud/sub claims (no per-image cache key, no
 	// per-image permission decision). With the Nexus backend its registry
-	// host selects the backend (ADR-0033 decision f); which repositories
+	// host selects the backend (ADR-0036 decision f); which repositories
 	// the credentials reach is still the backend's decision, never the
 	// image's.
 	Image string `json:"image"`
@@ -98,7 +98,7 @@ type HandlerConfig struct {
 	// not served. Required; nil serves nothing.
 	RobotUsername func(saNamespace, saName string) (string, error)
 
-	// Nexus enables the Nexus backend (ADR-0033). The handler then routes
+	// Nexus enables the Nexus backend (ADR-0036). The handler then routes
 	// every request by its image's registry host: to NexusAccess objects
 	// for Nexus.RegistryHosts, to HarborAccess objects for
 	// HarborRegistryHosts, and refuses an image that belongs to neither
@@ -252,7 +252,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Select the backend by the image's registry host (ADR-0033 decision
+	// Select the backend by the image's registry host (ADR-0036 decision
 	// f). Cheap and before the token check, so every audit line below
 	// names it; an image of no backend is refused only once the token is
 	// valid, so that the refusal is attributed. With Harbor alone every
@@ -628,7 +628,7 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 		return nil, fmt.Errorf("%w: Secret %s/%s is not managed by the bridge", errSecretOwnerMismatch, h.Config.BridgeNamespace, name)
 	}
 	// A Secret of another access kind (a nexususer Secret) is never a
-	// robot's, whatever its name and other labels (ADR-0033 decision e).
+	// robot's, whatever its name and other labels (ADR-0036 decision e).
 	// No robot Secret carries the label.
 	if kind, ok := secret.Labels[nexussecret.LabelAccessKind]; ok {
 		return nil, fmt.Errorf("%w: Secret %s/%s is of access kind %q, not a robot Secret", errSecretOwnerMismatch, h.Config.BridgeNamespace, name, kind)

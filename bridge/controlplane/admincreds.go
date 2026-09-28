@@ -106,7 +106,7 @@ func NewAdminCredsReader(cfg *Config, log logr.Logger) *AdminCredsReader {
 }
 
 // NewNexusAdminCredsReader returns a reader for n.AdminDir, the Nexus
-// admin credentials (ADR-0033), with the same behaviour.
+// admin credentials (ADR-0036), with the same behaviour.
 func NewNexusAdminCredsReader(n *NexusConfig, log logr.Logger) *AdminCredsReader {
 	return &AdminCredsReader{dir: func() string { return n.AdminDir }, backend: "Nexus", log: log}
 }

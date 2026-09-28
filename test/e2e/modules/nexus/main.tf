@@ -1,4 +1,4 @@
-# Sonatype Nexus Repository in the kind cluster (ADR-0033 decision i).
+# Sonatype Nexus Repository in the kind cluster (ADR-0036 decision i).
 #
 #   - One Deployment (image nexus-e2e:3.76.1, built from test/e2e/nexus and
 #     kind-loaded) on a PersistentVolumeClaim, so the nexus_outage stage

@@ -14,7 +14,7 @@ import (
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
-// TestName_ContractPinned pins the Secret name (ADR-0033 decision e). The
+// TestName_ContractPinned pins the Secret name (ADR-0036 decision e). The
 // data plane reads the Secret at exactly this name.
 func TestName_ContractPinned(t *testing.T) {
 	if got, want := Name("team-a", "web"), "nexususer-team-a.web"; got != want {
@@ -30,7 +30,7 @@ func TestName_DotDelimiterIsInjective(t *testing.T) {
 	}
 }
 
-// TestName_DisjointFromRobotSecrets is ADR-0033 Context 9: a prefix like
+// TestName_DisjointFromRobotSecrets is ADR-0036 Context 9: a prefix like
 // "robot-nexus." would make the Secret of NexusAccess team/app equal the
 // robot Secret of a HarborAccess named "team.app" in namespace "nexus".
 // Neither prefix is a prefix of the other.

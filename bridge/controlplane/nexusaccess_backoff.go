@@ -16,7 +16,7 @@ import (
 )
 
 // NexusBackoff stops every Nexus call made with the admin credential for
-// Window after Nexus answered one with 429 (ADR-0033 decision j).
+// Window after Nexus answered one with 429 (ADR-0036 decision j).
 //
 // From Nexus 3.94 on a username past the failed-login limit is refused
 // with 429 before its password is checked, and every request during the
@@ -99,7 +99,7 @@ func (b *NexusBackoff) Wrap(c nexus.Client) nexus.Client {
 }
 
 // RateLimitedGauge returns a gauge that reports 1 while calls are stopped,
-// for alerting (ADR-0033 decision j).
+// for alerting (ADR-0036 decision j).
 func (b *NexusBackoff) RateLimitedGauge() prometheus.GaugeFunc {
 	return prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "bridge_nexus_rate_limited",

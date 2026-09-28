@@ -144,7 +144,7 @@ rules:
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/finalizers]
     verbs: [update]
-  # NexusAccess objects (ADR-0033): the same access as HarborAccess. The
+  # NexusAccess objects (ADR-0036): the same access as HarborAccess. The
   # reconciler, the janitor and the data plane read them cluster-wide.
   - apiGroups: [nexus.aetherize.io]
     resources: [nexusaccesses]
@@ -610,10 +610,10 @@ spec:
             - name: BRIDGE_HARBOR_ROBOT_PREFIX
               value: "robot$"
             # Registry hosts whose images the data plane serves from
-            # HarborAccess objects once Nexus is enabled (ADR-0033).
+            # HarborAccess objects once Nexus is enabled (ADR-0036).
             - name: BRIDGE_HARBOR_REGISTRY_HOSTS
               value: "harbor.example.com"
-            # Sonatype Nexus Repository backend (ADR-0033). The bridge
+            # Sonatype Nexus Repository backend (ADR-0036). The bridge
             # reads the admin credentials on every Nexus call.
             - name: BRIDGE_NEXUS_URL
               value: "https://nexus.example.com"

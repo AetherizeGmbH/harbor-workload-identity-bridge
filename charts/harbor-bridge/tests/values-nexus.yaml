@@ -1,4 +1,4 @@
-# values-complete plus the Sonatype Nexus Repository backend (ADR-0033):
+# values-complete plus the Sonatype Nexus Repository backend (ADR-0036):
 # the Nexus env, the admin credential and CA mounts (both with non-default
 # keys), the NexusAccess RBAC and explicit registry hosts for both
 # backends. plugin.matchImages covers every registry host under kubelet's

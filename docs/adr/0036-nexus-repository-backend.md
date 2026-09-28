@@ -1,4 +1,4 @@
-# 33. Sonatype Nexus Repository as a second registry backend
+# 36. Sonatype Nexus Repository as a second registry backend
 
 ## Status
 

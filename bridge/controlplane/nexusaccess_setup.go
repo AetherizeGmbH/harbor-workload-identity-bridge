@@ -16,7 +16,7 @@ import (
 )
 
 // SetupNexus adds the Nexus backend's control plane to mgr when cfg.Nexus
-// is set, and does nothing otherwise (ADR-0033): a Nexus client that reads
+// is set, and does nothing otherwise (ADR-0036): a Nexus client that reads
 // the admin credentials on every call, the rate-limit backoff with its
 // gauge registered on reg (nil registers nothing), the NexusAccess
 // reconciler and the Nexus janitor, both leader-only.

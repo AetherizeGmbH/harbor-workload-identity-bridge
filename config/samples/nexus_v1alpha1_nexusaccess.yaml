@@ -1,6 +1,6 @@
 # Sample NexusAccess granting the flux-system source-controller ServiceAccount
 # pull access to the "docker-hosted" Nexus repository and pull and push access
-# to "ci-images" (ADR-0033).
+# to "ci-images" (ADR-0036).
 #
 # The issuer and the audience must equal the bridge's bridge.oidcIssuer and
 # plugin.audience, as for a HarborAccess.

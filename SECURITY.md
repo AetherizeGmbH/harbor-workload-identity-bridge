@@ -720,7 +720,7 @@ credential unavailable                   # token not judged: signing keys unavai
   source=…  reason=signing_keys_unavailable  err=…  requested_image=…
 ```
 
-With the Nexus backend (`BRIDGE_NEXUS_URL`, ADR-0033) the data plane
+With the Nexus backend (`BRIDGE_NEXUS_URL`, ADR-0036) the data plane
 routes each request by the registry host of its image, and every line
 above carries `access_kind=harbor|nexus|none` after the caller's
 attribution. `none` is an image that belongs to neither backend's
@@ -750,9 +750,9 @@ credential unavailable
 ```
 
 The Nexus user id is also the account Nexus's failed-login rate limiter
-keys on (ADR-0033 decision j): whoever reads the audit log can target it
+keys on (ADR-0036 decision j): whoever reads the audit log can target it
 until the next rotation, as can readers of `status.user.userId`
-(ADR-0033 question 9). Restrict access to the bridge's logs accordingly.
+(ADR-0036 question 9). Restrict access to the bridge's logs accordingly.
 
 The pod and node come from the `kubernetes.io` claim of the token. The
 bridge requires the pod claim to be present (ADR-0028); which pod and node
@@ -834,7 +834,7 @@ With the Nexus backend also (a Harbor-only bridge does not export them):
 - `bridge_nexus_user_secret_missing_total`: the NexusAccess's user Secret
   was absent or held no complete password yet (`503`)
 - `bridge_nexus_rate_limited`: `1` while the control plane holds back
-  every Nexus call after a `429` (ADR-0033 decision j). Only the leader
+  every Nexus call after a `429` (ADR-0036 decision j). Only the leader
   calls Nexus; the other replicas report `0`, so alert on the maximum
   across replicas
 

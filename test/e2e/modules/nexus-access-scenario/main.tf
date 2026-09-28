@@ -17,7 +17,7 @@
 #                 Nexus without rotating the password);
 #               editor loses nx-extra (repository A) and names the missing
 #                 nx-missing (repository C): RepositoryNotFound, A revoked
-#                 at once (ADR-0033 decision d). Its generation is never
+#                 at once (ADR-0036 decision d). Its generation is never
 #                 observed, so the phase does not wait for it;
 #               mover moves to nx-move/new-sa (identity change: the old
 #                 identity's user and role go).

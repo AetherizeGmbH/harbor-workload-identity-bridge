@@ -3,7 +3,7 @@
 
 // Package nexus is a hand-written client for the part of the Sonatype
 // Nexus Repository REST API (/service/rest) the bridge needs to give each
-// workload identity one Nexus role and one local user (ADR-0033): local
+// workload identity one Nexus role and one local user (ADR-0036): local
 // users, roles, the repository-view privileges Nexus creates with every
 // repository, and the status endpoints. It also holds the injective
 // identity-to-name mapping and the password generator.
@@ -15,7 +15,7 @@
 // SDK: about a dozen endpoints do not justify a generated client, and
 // hand-written requests leave no debug dump to switch off.
 //
-// The package is not wired into the bridge yet; ADR-0033 describes the
+// The package is not wired into the bridge yet; ADR-0036 describes the
 // control plane that will use it.
 package nexus
 
@@ -95,7 +95,7 @@ type CredentialSource func() (username, password string, err error)
 
 // Client is the surface the control plane needs against Nexus. Like
 // harbor.Client it is cluster-agnostic: the ownership rules (OwnsName and
-// the markers of ADR-0033) are the caller's, enforced before every write.
+// the markers of ADR-0036) are the caller's, enforced before every write.
 type Client interface {
 	// GetUser returns the local user with exactly this id. Nexus can only
 	// search by a case-insensitive id prefix, so the client lists and

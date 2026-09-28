@@ -33,7 +33,7 @@ const CacheSyncTimeout = 2 * time.Minute
 // namespace only (ADR-0011); without the override the cache would watch
 // them cluster-wide and need cluster-scoped Secret RBAC.
 //
-// With the Nexus backend (ADR-0033) NexusAccess is cached the same way as
+// With the Nexus backend (ADR-0036) NexusAccess is cached the same way as
 // HarborAccess, limited by the same selector.
 func (c *Config) CacheOptions() cache.Options {
 	opts := cache.Options{

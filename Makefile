@@ -112,7 +112,7 @@ e2e_harbor_var := $(if $(HARBOR_CHART_VERSION),TF_VAR_version_harbor=$(HARBOR_CH
 
 # Test files of each harness (tofu test runs every file of tests/ unless
 # filtered). 01-plan (mocked providers, seconds) runs first in both; the
-# Nexus harness (03, ADR-0033) builds its own kind cluster with Harbor AND
+# Nexus harness (03, ADR-0036) builds its own kind cluster with Harbor AND
 # Nexus and is not part of `make e2e` or CI (.github/workflows/e2e.yml
 # and harbor-compat.yml pass the same filters as E2E_HARBOR_TESTS).
 E2E_HARBOR_TESTS := -filter=tests/01-plan.tftest.hcl -filter=tests/02-bridge.tftest.hcl
@@ -127,7 +127,7 @@ e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-slee
 	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose $(E2E_HARBOR_TESTS)
 
 .PHONY: e2e-nexus
-e2e-nexus: ## Run the Nexus e2e harness (ADR-0033) — kind cluster with Harbor and Nexus 3.76.1, NexusAccess lifecycle, rotation (waits out the 5-minute retire grace), Nexus outage. Never accepts a Nexus EULA.
+e2e-nexus: ## Run the Nexus e2e harness (ADR-0036) — kind cluster with Harbor and Nexus 3.76.1, NexusAccess lifecycle, rotation (waits out the 5-minute retire grace), Nexus outage. Never accepts a Nexus EULA.
 	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose $(E2E_NEXUS_TESTS)
 
 .PHONY: e2e-nexus-pause

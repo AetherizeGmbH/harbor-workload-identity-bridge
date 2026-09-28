@@ -34,7 +34,7 @@ import (
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/nexussecret"
 )
 
-// Condition reasons of the Nexus reconciler (ADR-0033 decision a). The
+// Condition reasons of the Nexus reconciler (ADR-0036 decision a). The
 // refusal reasons (IssuerMismatch, AudienceMismatch, InvalidSpec),
 // DeletionBlocked, ReconcileSucceeded and EnforcedByBridge are shared with
 // the Harbor reconciler.
@@ -67,14 +67,14 @@ const NexusUserRetireGrace = 5 * time.Minute
 const NexusRepositoryRecheckInterval = 5 * time.Minute
 
 // NexusReconciler reconciles NexusAccess objects into one Nexus role and
-// one Nexus local user per ServiceAccount identity (ADR-0033). Like the
+// one Nexus local user per ServiceAccount identity (ADR-0036). Like the
 // Harbor reconciler it is level-triggered: every pass reads the role, the
 // privileges the spec names and the users back from Nexus and converges
 // them, so revocations are reliable and out-of-band drift is repaired.
 //
 // A password is never changed: Nexus keeps a user's docker bearer token
 // valid across a password change and across a delete and re-create under
-// the same id (ADR-0033 Context 1). A rotation creates the identity's user
+// the same id (ADR-0036 Context 1). A rotation creates the identity's user
 // under a new generation, stores its password, and retires the previous
 // user once NexusUserRetireGrace has passed.
 type NexusReconciler struct {
@@ -321,7 +321,7 @@ func (r *NexusReconciler) reconcileNormal(ctx context.Context, nxa *nexusv1alpha
 		return ctrl.Result{}, err
 	}
 
-	// The role: exactly the spec's privileges that exist (ADR-0033
+	// The role: exactly the spec's privileges that exist (ADR-0036
 	// decision d). A missing repository is marked on the Secret before
 	// anything else is written, so the data plane stops issuing
 	// credentials at once.
@@ -357,7 +357,7 @@ func (r *NexusReconciler) reconcileNormal(ctx context.Context, nxa *nexusv1alpha
 
 	// A user an administrator disabled or locked is neither rotated nor
 	// replaced: a new generation would undo the administrator's decision.
-	// The bridge never re-enables it (ADR-0033 decision c).
+	// The bridge never re-enables it (ADR-0036 decision c).
 	if disabled := adminDisabled(owned, current, retiringID); disabled != nil {
 		if secret, err = r.putSecret(ctx, nxa, secret, false, func(s *corev1.Secret) { convergeSecretMeta(s, missing) }); err != nil {
 			return r.markTransientError(ctx, nxa, err)
@@ -476,7 +476,7 @@ func (r *NexusReconciler) checkGrants(ctx context.Context, grants []nexusGrant) 
 }
 
 // convergeRole writes the role with exactly the privileges that exist
-// (ADR-0033 decision d): a privilege the spec no longer names goes in the
+// (ADR-0036 decision d): a privilege the spec no longer names goes in the
 // same pass, even when the same edit names a missing repository, and
 // nothing missing is added. It returns the missing repositories, which
 // grow when a repository vanished between the check and the write.
@@ -668,11 +668,11 @@ func nexusRotationReason(secret *corev1.Secret, current *nexus.User, identity st
 
 // errRoleNotHeld is returned when a new user came back without the
 // identity's role: the role was deleted between its write and the user
-// create, and the user holds a hidden reference to it (ADR-0033 Context 5).
+// create, and the user holds a hidden reference to it (ADR-0036 Context 5).
 var errRoleNotHeld = errors.New("the new Nexus user does not hold the identity's role; it was deleted meanwhile and is re-created on the next pass")
 
 // rotate creates the identity's user of a new generation and stores its
-// password (ADR-0033 decision c). The previous user, if it was the
+// password (ADR-0036 decision c). The previous user, if it was the
 // current one of the same identity and active, is recorded as retiring;
 // retireIfDue deletes it after NexusUserRetireGrace. written is the Secret
 // as written.
@@ -876,7 +876,7 @@ func (r *NexusReconciler) refuse(ctx context.Context, nxa *nexusv1alpha1.NexusAc
 
 // suspend deletes the Secret of a refused NexusAccess and every active
 // user it owns. Nexus cannot suspend a user usefully: a disabled user's
-// docker bearer token is valid again once it is re-enabled (ADR-0033
+// docker bearer token is valid again once it is re-enabled (ADR-0036
 // Context 1), and resuming creates a user of a new generation anyway. A
 // user that is not active (an administrator disabled or locked it) stays,
 // so that resuming reports UserDisabled instead of undoing the
@@ -1316,7 +1316,7 @@ func nexusErrorReason(err error) string {
 	case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Op, "create user") &&
 		errors.Is(apiErr, nexus.ErrBadRequest) && strings.Contains(strings.ToLower(apiErr.Message), "password"):
 		// The operator's nexus.password.validator refused the generated
-		// password (ADR-0033 decision a).
+		// password (ADR-0036 decision a).
 		return ReasonPasswordRejected
 	}
 	return ReasonNexusError

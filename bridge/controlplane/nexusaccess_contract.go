@@ -26,7 +26,7 @@ const NexusAccessNameMaxLen = 63
 // the .invalid TLD guarantees that nothing is ever delivered.
 const nexusUserEmail = "nexus-bridge@harbor-workload-identity-bridge.invalid"
 
-// Ownership markers on Nexus objects, the ADR-0012 contract (ADR-0033
+// Ownership markers on Nexus objects, the ADR-0012 contract (ADR-0036
 // decision b). They use the robot description's tokens:
 //
 //	user firstName    managed-by=harbor-workload-identity-bridge cluster=<cluster>
@@ -86,7 +86,7 @@ func nexusUserOwner(u *nexus.User) (cluster, nxaNamespace, nxaName string, ok bo
 
 // nexusUserOwnedBy reports whether u is a user the bridge of cluster
 // created for the NexusAccess nxaNamespace/nxaName. All layers must hold
-// (ADR-0033 decision b, as robotOwnedBy for robots): the id lies in the
+// (ADR-0036 decision b, as robotOwnedBy for robots): the id lies in the
 // cluster's ownership prefix and has the shape of a user id the bridge
 // builds, it is a local user, and its markers carry the bridge's tag,
 // exactly this cluster and exactly this NexusAccess.

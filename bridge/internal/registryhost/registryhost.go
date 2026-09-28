@@ -4,7 +4,7 @@
 // Package registryhost parses the registry hosts a backend serves
 // ("host[:port][/path-prefix]", BRIDGE_HARBOR_REGISTRY_HOSTS and
 // BRIDGE_NEXUS_REGISTRY_HOSTS) and matches image references against them
-// (ADR-0033 decision f). The control plane validates the configuration
+// (ADR-0036 decision f). The control plane validates the configuration
 // with it and the data plane routes a credential request with it; both
 // import this leaf package (ADR-0002 forbids only the control plane
 // importing the data plane).
@@ -228,7 +228,7 @@ func MatchImage(hosts []Host, image string) bool {
 // whether there is one. Two backends must not share one: kubelet caches
 // credentials per registry host (cacheKeyType Registry, ADR-0016), so a
 // shared host would serve one backend's credentials for the other's
-// images (ADR-0033 decision f).
+// images (ADR-0036 decision f).
 func SharedHostPort(a, b []Host) (string, bool) {
 	for _, x := range a {
 		for _, y := range b {

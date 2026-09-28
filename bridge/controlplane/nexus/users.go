@@ -21,7 +21,7 @@ type UserStatus string
 // nexus-public release-3.76.1 and release-3.96.3). On Nexus 3.76.1 a
 // changepassword user's Basic Auth, /v2/token and existing bearer token
 // keep working, and a disabled or locked user's token is refused until
-// the user is re-activated, when it becomes valid again (ADR-0033).
+// the user is re-activated, when it becomes valid again (ADR-0036).
 const (
 	UserActive         UserStatus = "active"
 	UserLocked         UserStatus = "locked"
@@ -86,7 +86,7 @@ func validStatus(s UserStatus) bool {
 
 // listUsers returns the local users Nexus's id search returns for term:
 // every user whose id begins with term, compared case-insensitively
-// (verified on Nexus 3.76.1, ADR-0033). source=default restricts it to
+// (verified on Nexus 3.76.1, ADR-0036). source=default restricts it to
 // local users and lifts the limit of 100 Nexus applies to other sources.
 func (c *httpClient) listUsers(ctx context.Context, op, term string) ([]User, error) {
 	var users []User

@@ -69,7 +69,7 @@ spec:
                   role grants access to. A repository that does not exist is not
                   granted, and the bridge issues no credentials for this object until
                   it exists or leaves the list (Ready=False, reason RepositoryNotFound;
-                  ADR-0033).
+                  ADR-0036).
                 items:
                   description: RepositoryGrant grants an access on one Nexus repository.
                   properties:
@@ -122,7 +122,7 @@ spec:
                     description: |-
                       Namespace is the namespace of the ServiceAccount. A namespace is an
                       RFC 1123 label, so at most 63 characters; the Nexus naming relies on
-                      that bound (ADR-0033).
+                      that bound (ADR-0036).
                     maxLength: 63
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -275,7 +275,7 @@ spec:
                       UserID is the id of the Nexus user whose password the Secret holds:
                       bridge-<cluster>.<saNamespace>.<saName>_<generation>. It changes at
                       every password rotation, because the bridge replaces the user under
-                      a new generation instead of changing its password (ADR-0033).
+                      a new generation instead of changing its password (ADR-0036).
                     type: string
                 type: object
             type: object

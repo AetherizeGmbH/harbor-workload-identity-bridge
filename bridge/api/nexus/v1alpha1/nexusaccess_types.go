@@ -13,12 +13,12 @@ import (
 // ServiceAccountRef identifies the Kubernetes ServiceAccount a NexusAccess
 // grants credentials for (ADR-0010). The control plane derives the Nexus
 // role and user names from it (bridge-<cluster>.<namespace>.<name>,
-// ADR-0033), and the data plane derives the expected sub claim of incoming
+// ADR-0036), and the data plane derives the expected sub claim of incoming
 // tokens ("system:serviceaccount:<namespace>:<name>").
 type ServiceAccountRef struct {
 	// Namespace is the namespace of the ServiceAccount. A namespace is an
 	// RFC 1123 label, so at most 63 characters; the Nexus naming relies on
-	// that bound (ADR-0033).
+	// that bound (ADR-0036).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -57,7 +57,7 @@ type RepositoryAccess string
 // Access constants, in the same terms as HarborAccess. "pull" grants the
 // repository-view privilege read; "push" grants add and edit; "pull,push"
 // grants all three. A pusher declares "pull,push": a push needs read too
-// (ADR-0033).
+// (ADR-0036).
 const (
 	AccessPull     RepositoryAccess = "pull"
 	AccessPush     RepositoryAccess = "push"
@@ -70,7 +70,7 @@ type RepositoryFormat string
 
 // FormatDocker is the only format v1alpha1 grants. Nexus's "oci" format
 // (3.94 and later) authenticates through a separate token realm that has
-// not been analysed yet (ADR-0033, question 8); keeping the field makes
+// not been analysed yet (ADR-0036, question 8); keeping the field makes
 // adding it later a non-breaking change.
 const FormatDocker RepositoryFormat = "docker"
 
@@ -109,7 +109,7 @@ type NexusAccessSpec struct {
 	// role grants access to. A repository that does not exist is not
 	// granted, and the bridge issues no credentials for this object until
 	// it exists or leaves the list (Ready=False, reason RepositoryNotFound;
-	// ADR-0033).
+	// ADR-0036).
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
@@ -134,7 +134,7 @@ type UserRef struct {
 	// UserID is the id of the Nexus user whose password the Secret holds:
 	// bridge-<cluster>.<saNamespace>.<saName>_<generation>. It changes at
 	// every password rotation, because the bridge replaces the user under
-	// a new generation instead of changing its password (ADR-0033).
+	// a new generation instead of changing its password (ADR-0036).
 	UserID string `json:"userId,omitempty"`
 
 	// RoleID is the id of the Nexus role that holds the repository

@@ -17,7 +17,7 @@ import (
 )
 
 // TestLive_AgainstNexus runs the client against a real, disposable Nexus
-// and pins the Nexus behaviour ADR-0033 builds on (its "Verified at
+// and pins the Nexus behaviour ADR-0036 builds on (its "Verified at
 // runtime" table says which rows this covers). It is skipped unless
 // NEXUS_LIVE_URL is set; it creates and deletes users and roles under the
 // cluster name "hwib-live", so never point it at a shared Nexus.
@@ -318,7 +318,7 @@ func liveSetStatus(ctx context.Context, t *testing.T, admin Client, userID strin
 	}
 }
 
-// liveBearerTokens pins why ADR-0033 rotates by replacing the user under a
+// liveBearerTokens pins why ADR-0036 rotates by replacing the user under a
 // new id: Nexus's docker bearer token is a persistent per-user API key
 // that keeps working for a changepassword user, is valid again after a
 // disable plus re-enable, and survives a delete plus re-create under the
@@ -351,7 +351,7 @@ func liveBearerTokens(ctx context.Context, t *testing.T, admin Client, registry,
 	}
 	liveSetStatus(ctx, t, admin, userID, UserActive)
 	if code := registryStatus(ctx, t, registry, token); code != http.StatusOK {
-		t.Errorf("token after re-enabling: GET /v2/ = %d, want 200 (ADR-0033 rejects S2 because of this)", code)
+		t.Errorf("token after re-enabling: GET /v2/ = %d, want 200 (ADR-0036 rejects S2 because of this)", code)
 	}
 
 	identity, _, _ := ParseUserID(userID)
@@ -378,12 +378,12 @@ func liveBearerTokens(ctx context.Context, t *testing.T, admin Client, registry,
 	}
 	newPassword := recreate()
 	if code := registryStatus(ctx, t, registry, token); code != http.StatusOK {
-		t.Errorf("token after delete and re-create under the same id: GET /v2/ = %d; Nexus revoked it, ADR-0033's premise changed", code)
+		t.Errorf("token after delete and re-create under the same id: GET /v2/ = %d; Nexus revoked it, ADR-0036's premise changed", code)
 	} else {
 		t.Logf("confirmed: the docker bearer token survives a delete and re-create under the same id")
 	}
 	if again := dockerToken(ctx, t, registry, userID, newPassword); again != token {
-		t.Errorf("the re-created user got a different token; ADR-0033's premise changed")
+		t.Errorf("the re-created user got a different token; ADR-0036's premise changed")
 	}
 
 	// Presented while its user id does not exist, the token is dropped:
@@ -428,7 +428,7 @@ func liveBearerTokens(ctx context.Context, t *testing.T, admin Client, registry,
 
 // liveLeastPrivilegeAdmin runs every client call as a user whose only role
 // holds nx-users-all, nx-roles-all and nx-privileges-read: the privileges
-// ADR-0033 says the bridge's credential needs, without nx-all.
+// ADR-0036 says the bridge's credential needs, without nx-all.
 func liveLeastPrivilegeAdmin(ctx context.Context, t *testing.T, admin Client, u *url.URL, opts []Option, suffix string, privileges []string, createdUsers, createdRoles *[]string) {
 	t.Helper()
 	adminRole := "hwib-live-admin-" + suffix

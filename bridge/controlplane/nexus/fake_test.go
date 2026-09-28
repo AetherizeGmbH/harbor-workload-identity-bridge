@@ -17,7 +17,7 @@ import (
 )
 
 // fakeNexus is a Nexus REST API stand-in that reproduces the behaviour
-// verified against sonatype/nexus3:3.76.1 (ADR-0033): the case-insensitive
+// verified against sonatype/nexus3:3.76.1 (ADR-0036): the case-insensitive
 // user id prefix search, 500 text/plain for a duplicate user, 400 for a
 // duplicate role, a user create whose answer echoes the request and that
 // stores an unknown role id hidden from reads until a role with that id

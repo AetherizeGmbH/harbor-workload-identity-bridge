@@ -31,10 +31,10 @@
 #   identity ID OWNER PRIV...
 #                            exactly one role ID with exactly PRIV... and one
 #                            user ID_<generation> holding only that role, both
-#                            marked for NexusAccess OWNER (ADR-0033 decision b)
+#                            marked for NexusAccess OWNER (ADR-0036 decision b)
 #   gone ID                  neither role ID nor any user ID_* exists
 #
-# Nexus hands every user one persistent docker bearer token (ADR-0033
+# Nexus hands every user one persistent docker bearer token (ADR-0036
 # Context 1), whichever connector issues it.
 terraform {
   required_version = ">= 1.6"

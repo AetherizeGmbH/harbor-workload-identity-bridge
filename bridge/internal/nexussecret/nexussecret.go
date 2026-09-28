@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package nexussecret is the single definition of the per-NexusAccess
-// user-password Secret contract (ADR-0033 decision e): its name, its
+// user-password Secret contract (ADR-0036 decision e): its name, its
 // ownership labels, the annotations the control plane stamps on it, and
 // its data keys.
 //
@@ -35,7 +35,7 @@ import (
 // NamePrefix is the constant the bridge prepends to NexusAccess Secret
 // names. It differs from robotsecret.NamePrefix, and neither is a prefix
 // of the other, so a Nexus Secret name never equals a robot Secret name
-// (ADR-0033 Context 9).
+// (ADR-0036 Context 9).
 const NamePrefix = "nexususer-"
 
 // Data keys of the Secret: the Nexus user id and its password, the same
@@ -84,7 +84,7 @@ const (
 	AnnotationUserID = "nexus.aetherize.io/user-id"
 
 	// AnnotationPendingUserID names the user the control plane is about to
-	// create (ADR-0033 decision c). It is written before the user is
+	// create (ADR-0036 decision c). It is written before the user is
 	// created, so the janitor can tell a user being created from an orphan
 	// (Nexus reports no creation time), and removed with the write that
 	// stores the user's password.
@@ -101,7 +101,7 @@ const (
 
 	// AnnotationGrantsIncomplete is present while the NexusAccess's role
 	// lacks privileges its spec names because a repository does not exist
-	// (ADR-0033 decision d). Its value lists the missing repositories. The
+	// (ADR-0036 decision d). Its value lists the missing repositories. The
 	// data plane serves no credentials from a Secret that carries it,
 	// whatever its value.
 	AnnotationGrantsIncomplete = "nexus.aetherize.io/grants-incomplete"

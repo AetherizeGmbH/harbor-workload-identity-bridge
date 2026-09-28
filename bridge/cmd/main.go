@@ -7,7 +7,7 @@
 //   - the control-plane Reconciler (HarborAccess → persistent Harbor robot)
 //   - the orphan-robot Janitor
 //   - with BRIDGE_NEXUS_URL, the Nexus backend's reconciler (NexusAccess →
-//     Nexus role and user) and janitor (ADR-0033)
+//     Nexus role and user) and janitor (ADR-0036)
 //   - the data-plane OIDC Validator and HTTPS server, which routes a request
 //     by its image's registry host once Nexus is configured
 //
@@ -174,7 +174,7 @@ func run() error {
 	}
 
 	// Steps 5 and 6: the leader-only control plane: the Reconciler, the
-	// Janitor, and with Nexus configured the Nexus backend's (ADR-0033).
+	// Janitor, and with Nexus configured the Nexus backend's (ADR-0036).
 	if err := setupControlPlane(mgr, cfg, harborClient, logger, crmetrics.Registry); err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func newMetrics(cfg *controlplane.Config, reg prometheus.Registerer) *dataplane.
 }
 
 // nexusIdentityName maps a ServiceAccount to the Nexus identity name the
-// control plane derives its role and user ids from (ADR-0033 decision b).
+// control plane derives its role and user ids from (ADR-0036 decision b).
 func nexusIdentityName(cfg *controlplane.Config) func(saNamespace, saName string) (string, error) {
 	return func(saNamespace, saName string) (string, error) {
 		return nexus.IdentityName(cfg.ClusterName, saNamespace, saName)

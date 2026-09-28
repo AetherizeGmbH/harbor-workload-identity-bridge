@@ -200,7 +200,7 @@ func TestNewMetrics_NexusSeriesOnlyWithNexus(t *testing.T) {
 }
 
 // The manager caches NexusAccess, with the HarborAccess selector, only
-// with the backend (ADR-0026, ADR-0033).
+// with the backend (ADR-0026, ADR-0036).
 func TestManagerOptions_CachesNexusAccessOnlyWithNexus(t *testing.T) {
 	cached := func(cfg *controlplane.Config) bool {
 		for obj := range managerOptions(cfg, false).Cache.ByObject {

@@ -336,7 +336,7 @@ func TestEnvtest_NexusBackendWiring(t *testing.T) {
 	}
 
 	// A repository that does not exist: the reconciler marks the Secret,
-	// and the data plane refuses (ADR-0033 decision d).
+	// and the data plane refuses (ADR-0036 decision d).
 	editNXA := func(edit func(*nexusv1alpha1.NexusAccess)) {
 		t.Helper()
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

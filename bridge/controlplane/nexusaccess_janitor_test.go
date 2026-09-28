@@ -80,7 +80,7 @@ func TestNexusJanitor_SweepsUsersAndRolesNobodyUses(t *testing.T) {
 
 // The janitor spares the user being created (pending), the current user
 // and a retiring user within its grace, and deletes a retiring user after
-// it (ADR-0033 decision c).
+// it (ADR-0036 decision c).
 func TestNexusJanitor_RespectsPendingAndRetiringUsers(t *testing.T) {
 	h := newNexusHarness(t, nil, newNexusAccess())
 	h.mustReconcile()

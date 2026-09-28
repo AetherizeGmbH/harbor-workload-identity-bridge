@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 )
 
-// The user and role ids are a multi-tenancy boundary (ADR-0018, ADR-0033):
+// The user and role ids are a multi-tenancy boundary (ADR-0018, ADR-0036):
 // two different identities must never share a role or a user, two
 // generations of one identity never share a user, no cluster may claim
 // another cluster's names, and every name must be one Nexus accepts and

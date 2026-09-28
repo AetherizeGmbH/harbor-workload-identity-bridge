@@ -10,7 +10,7 @@ import (
 
 // Access kinds: the backend a credential request is routed to, recorded as
 // the access_kind field of every audit line once a second backend is
-// configured (ADR-0033 decision f).
+// configured (ADR-0036 decision f).
 const (
 	// AccessKindHarbor serves the request from a HarborAccess and its
 	// robot Secret.
@@ -26,7 +26,7 @@ const (
 )
 
 // NexusBackend is what the handler needs to serve NexusAccess objects
-// (ADR-0033). main builds it from the Nexus configuration; nil leaves the
+// (ADR-0036). main builds it from the Nexus configuration; nil leaves the
 // handler as it was before the backend existed.
 type NexusBackend struct {
 	// RegistryHosts are the registry hosts (host[:port][/path-prefix])

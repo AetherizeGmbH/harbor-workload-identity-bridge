@@ -559,7 +559,7 @@ workloads and recent pulls.
 
 The bridge can also hand out credentials for docker repositories in
 Sonatype Nexus Repository 3, next to Harbor
-([ADR-0033](docs/adr/0033-nexus-repository-backend.md), status Proposed:
+([ADR-0036](docs/adr/0036-nexus-repository-backend.md), status Proposed:
 its decisions may still change). Harbor stays required. With
 `nexus.enabled=false`, the default, the chart renders nothing of it and
 the bridge behaves as before.
@@ -589,7 +589,7 @@ What the bridge does in Nexus:
 1. In Nexus: activate the Docker Bearer Token Realm, make every docker
    repository kubelet pulls from reachable as a registry (a connector
    port, or a host and path prefix), and create the bridge's own account
-   (see [Caveats](#caveats-adr-0033)). Turn anonymous access off, or
+   (see [Caveats](#caveats-adr-0036)). Turn anonymous access off, or
    accept that the `nx-anonymous` role widens what every bridge user can
    read.
 2. Create the credential Secret and add these values to the install from
@@ -666,7 +666,7 @@ kubelet calling the plugin for every such host, but once Nexus is
 enabled the bridge serves only the Harbor hosts in
 `harbor.registryHosts`: list each one.
 
-### Caveats (ADR-0033)
+### Caveats (ADR-0036)
 
 - **The Nexus credential is admin-equivalent.** Whoever can create users
   and assign roles can give themselves `nx-admin`. The bridge needs a
@@ -775,7 +775,7 @@ in Nexus. Helm keeps the CRD.
     Artifact Registry image delivery, sslip.io + LoadBalancer instead
     of DNS surgery, and the AR-coexistence assertion that pins merge
     mode's "don't break the cloud's own provider" guarantee.
-  - [ADR-0033](docs/adr/0033-nexus-repository-backend.md) — Sonatype
+  - [ADR-0036](docs/adr/0036-nexus-repository-backend.md) — Sonatype
     Nexus Repository as a second backend (Proposed): why a rotation
     replaces the Nexus user under a new id instead of changing its
     password, and how the data plane routes by registry host.
@@ -834,8 +834,8 @@ In order.
 
 2. **Other registries via a backend seam.** A Nexus backend is in preview
    ([Sonatype Nexus Repository (preview)](#sonatype-nexus-repository-preview),
-   ADR-0033) as a controller of its own next to Harbor's. Still to do:
-   move what both share behind a backend seam (ADR-0033 decision g), with
+   ADR-0036) as a controller of its own next to Harbor's. Still to do:
+   move what both share behind a backend seam (ADR-0036 decision g), with
    one conformance suite over both backends, so that a further registry
    does not repeat them. The flow takes an SA token in and returns scoped
    credentials, which holds for any registry; only account provisioning
@@ -999,9 +999,9 @@ limits today.
   *Limits now:* on a cluster that removed the default binding the bridge
   cannot fetch the signing keys and exits at startup.
 
-#### Nexus backend (ADR-0033)
+#### Nexus backend (ADR-0036)
 
-- [ ] **Approve or change ADR-0033.** Its decisions are Proposed; the
+- [ ] **Approve or change ADR-0036.** Its decisions are Proposed; the
   preview implements them as written, with the deviations its
   "Implementation notes" record. Open there: the API group, the new-id
   rotation, the handling of a missing repository, whether a maintainer
@@ -1011,10 +1011,10 @@ limits today.
   `status.user.userId` stays, decision g (the backend seam, not
   extracted), and the threat-model additions of decision j, which nobody
   has rated yet. *Limits now:* the Nexus backend is a preview, verified
-  against Nexus 3.76.1 only ([Caveats](#caveats-adr-0033)).
+  against Nexus 3.76.1 only ([Caveats](#caveats-adr-0036)).
 - [ ] **Run the Nexus e2e harness; decide whether CI runs it.**
   `make e2e-nexus` (HOW-TO-TEST.md §1c) has not run yet, and `make e2e`
-  and CI run the Harbor harness only (ADR-0033 implementation note 18).
+  and CI run the Harbor harness only (ADR-0036 implementation note 18).
   *Options:* a CI job for it (the image is linux/amd64, so it runs
   natively on CI runners; the scheduled rotation waits out the 5-minute
   retire grace), or local runs only. *Limits now:* the NexusAccess

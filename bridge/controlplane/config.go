@@ -49,11 +49,11 @@ const (
 	// EnvHarborRegistryHosts lists the registry hosts
 	// (host[:port][/path-prefix], comma-separated) whose images the data
 	// plane serves from HarborAccess objects once a second backend is
-	// configured (ADR-0033 decision f). Optional; defaults to the
+	// configured (ADR-0036 decision f). Optional; defaults to the
 	// host[:port] of BRIDGE_HARBOR_URL.
 	EnvHarborRegistryHosts = "BRIDGE_HARBOR_REGISTRY_HOSTS"
 
-	// Nexus backend (ADR-0033). The backend is enabled exactly when
+	// Nexus backend (ADR-0036). The backend is enabled exactly when
 	// EnvNexusURL is set; the other BRIDGE_NEXUS_* variables are refused
 	// without it.
 	EnvNexusURL              = "BRIDGE_NEXUS_URL"
@@ -81,7 +81,7 @@ const (
 
 	// DefaultNexusRateLimitBackoff is how long the Nexus controller stops
 	// every call made with the admin credential after Nexus answered 429:
-	// Nexus's default nexus.auth.ratelimit.max-delay-seconds (ADR-0033
+	// Nexus's default nexus.auth.ratelimit.max-delay-seconds (ADR-0036
 	// decision j).
 	DefaultNexusRateLimitBackoff = 15 * time.Minute
 )
@@ -212,14 +212,14 @@ type Config struct {
 	// configured as well; with Harbor alone the image is audit-only.
 	HarborRegistryHosts []registryhost.Host
 
-	// Nexus is the Nexus backend's configuration (ADR-0033); nil when
+	// Nexus is the Nexus backend's configuration (ADR-0036); nil when
 	// BRIDGE_NEXUS_URL is unset, which leaves the bridge as it was before
 	// the backend existed.
 	Nexus *NexusConfig
 }
 
-// NexusConfig configures the Nexus backend (ADR-0033). Harbor stays
-// required alongside it (ADR-0033 question 7).
+// NexusConfig configures the Nexus backend (ADR-0036). Harbor stays
+// required alongside it (ADR-0036 question 7).
 type NexusConfig struct {
 	// URL is Nexus's base URL (scheme, host and any context path); the
 	// client appends /service/rest.
@@ -246,7 +246,7 @@ type NexusConfig struct {
 
 	// RateLimitBackoff is how long every Nexus call with the admin
 	// credential stops after Nexus answered 429, counted from the last
-	// 429 (ADR-0033 decision j). Positive.
+	// 429 (ADR-0036 decision j). Positive.
 	RateLimitBackoff time.Duration
 }
 
@@ -309,7 +309,7 @@ func (c *Config) statusRobotIsOurs(ha *harborv1alpha1.HarborAccess) bool {
 
 // Selects reports whether this bridge manages obj, a HarborAccess or a
 // NexusAccess: BRIDGE_HARBORACCESS_SELECTOR selects both kinds (ADR-0026,
-// ADR-0033).
+// ADR-0036).
 func (c *Config) Selects(obj metav1.Object) bool {
 	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(obj.GetLabels()))
 }
@@ -504,7 +504,7 @@ func LoadFromEnv() (*Config, error) {
 }
 
 // loadRegistryHostsFromEnv reads BRIDGE_HARBOR_REGISTRY_HOSTS and the Nexus
-// backend (BRIDGE_NEXUS_*, ADR-0033). It runs after HarborURL is parsed,
+// backend (BRIDGE_NEXUS_*, ADR-0036). It runs after HarborURL is parsed,
 // whose host is the default Harbor registry host.
 func (c *Config) loadRegistryHostsFromEnv() []error {
 	var errs []error

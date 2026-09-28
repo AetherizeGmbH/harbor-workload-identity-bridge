@@ -16,7 +16,7 @@ var (
 )
 
 // Two NexusAccess objects never share a Secret, a NexusAccess never shares
-// one with a HarborAccess (the cross-kind case of ADR-0033 decision e),
+// one with a HarborAccess (the cross-kind case of ADR-0036 decision e),
 // and the name of an admitted NexusAccess's Secret leads back to it.
 func FuzzNexusSecretName_Injective(f *testing.F) {
 	f.Add("a", "b.c", "a.b", "c")

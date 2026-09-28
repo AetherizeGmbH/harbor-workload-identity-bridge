@@ -1,6 +1,6 @@
 {{/*
 =====================================================================
-Sonatype Nexus Repository backend (ADR-0033) and the registry hosts the
+Sonatype Nexus Repository backend (ADR-0036) and the registry hosts the
 bridge routes by once two backends are configured.
 
 Every read of .Values.nexus goes through `.Values.nexus | default dict`
@@ -213,18 +213,18 @@ parses whenever it is set.
 {{- end -}}
 {{- $harborHosts := .Values.harbor.registryHosts | default (list) -}}
 {{- if not (kindIs "slice" $harborHosts) -}}
-{{- fail "harbor.registryHosts must be a list of host[:port][/path-prefix] entries, e.g. [\"harbor.example.com\"] (ADR-0033)." -}}
+{{- fail "harbor.registryHosts must be a list of host[:port][/path-prefix] entries, e.g. [\"harbor.example.com\"] (ADR-0036)." -}}
 {{- end -}}
 {{- range $harborHosts -}}
 {{- $e := include "harbor-bridge.registryEntry.parse" . | fromJson -}}
 {{- if $e.error -}}
-{{- fail (printf "harbor.registryHosts entry %q %s (ADR-0033)." (toString .) $e.error) -}}
+{{- fail (printf "harbor.registryHosts entry %q %s (ADR-0036)." (toString .) $e.error) -}}
 {{- end -}}
 {{- end -}}
 {{- if $enabled -}}
 {{- $url := toString (dig "url" "" $nexus) -}}
 {{- if not $url -}}
-{{- fail "nexus.url is REQUIRED when nexus.enabled=true: the base URL of Nexus, e.g. https://nexus.example.com (ADR-0033)." -}}
+{{- fail "nexus.url is REQUIRED when nexus.enabled=true: the base URL of Nexus, e.g. https://nexus.example.com (ADR-0036)." -}}
 {{- end -}}
 {{- /* The value is never repeated: it may carry user:password@. */}}
 {{- if not (regexMatch "(?i)^https?://[^/?#@[:space:]]+(/[^?#@[:space:]]*)?$" $url) -}}
@@ -238,7 +238,7 @@ parses whenever it is set.
 {{- fail "nexus.url uses plain http: the Nexus admin credentials and every new user's password would travel unencrypted. Use https (nexus.caSecret for a private CA), or set nexus.allowInsecureHTTP=true." -}}
 {{- end -}}
 {{- if not (dig "adminCredsSecret" "name" "" $nexus) -}}
-{{- fail "nexus.adminCredsSecret.name is REQUIRED when nexus.enabled=true. Pre-create a Secret in the release namespace holding the Nexus credential {username,password} the bridge manages users and roles with (ADR-0033)." -}}
+{{- fail "nexus.adminCredsSecret.name is REQUIRED when nexus.enabled=true. Pre-create a Secret in the release namespace holding the Nexus credential {username,password} the bridge manages users and roles with (ADR-0036)." -}}
 {{- end -}}
 {{- range $k := list "username" "password" -}}
 {{- if not (dig "adminCredsSecret" "keys" $k $k $nexus) -}}
@@ -250,33 +250,33 @@ parses whenever it is set.
 {{- end -}}
 {{- $backoff := toString (dig "rateLimitBackoff" "15m" $nexus) -}}
 {{- if or (not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" $backoff)) (not (regexMatch "[1-9]" $backoff)) -}}
-{{- fail (printf "nexus.rateLimitBackoff=%q must be a positive Go duration such as 15m (ADR-0033)." $backoff) -}}
+{{- fail (printf "nexus.rateLimitBackoff=%q must be a positive Go duration such as 15m (ADR-0036)." $backoff) -}}
 {{- end -}}
 {{- $nexusHosts := dig "registryHosts" (list) $nexus | default (list) -}}
 {{- if not (kindIs "slice" $nexusHosts) -}}
-{{- fail "nexus.registryHosts must be a list of host[:port][/path-prefix] entries, e.g. [\"nexus.example.com:8082\"] (ADR-0033)." -}}
+{{- fail "nexus.registryHosts must be a list of host[:port][/path-prefix] entries, e.g. [\"nexus.example.com:8082\"] (ADR-0036)." -}}
 {{- end -}}
 {{- if not $nexusHosts -}}
-{{- fail "nexus.registryHosts is REQUIRED when nexus.enabled=true: the registry hosts (host[:port][/path-prefix]) kubelet pulls Nexus's images from. The bridge routes each credential request to Nexus by the image's registry host (ADR-0033)." -}}
+{{- fail "nexus.registryHosts is REQUIRED when nexus.enabled=true: the registry hosts (host[:port][/path-prefix]) kubelet pulls Nexus's images from. The bridge routes each credential request to Nexus by the image's registry host (ADR-0036)." -}}
 {{- end -}}
 {{- $nexusEntries := list -}}
 {{- range $nexusHosts -}}
 {{- $e := include "harbor-bridge.registryEntry.parse" . | fromJson -}}
 {{- if $e.error -}}
-{{- fail (printf "nexus.registryHosts entry %q %s (ADR-0033)." (toString .) $e.error) -}}
+{{- fail (printf "nexus.registryHosts entry %q %s (ADR-0036)." (toString .) $e.error) -}}
 {{- end -}}
 {{- $nexusEntries = append $nexusEntries $e -}}
 {{- end -}}
 {{- $harborEntries := (include "harbor-bridge.harbor.registryEntries" . | fromJson).items -}}
 {{- range $harborEntries -}}
 {{- if .error -}}
-{{- fail (printf "the host of harbor.url is no registry host: it %s. Set harbor.registryHosts to the registry hosts kubelet pulls Harbor's images from (ADR-0033)." .error) -}}
+{{- fail (printf "the host of harbor.url is no registry host: it %s. Set harbor.registryHosts to the registry hosts kubelet pulls Harbor's images from (ADR-0036)." .error) -}}
 {{- end -}}
 {{- end -}}
 {{- range $h := $harborEntries -}}
 {{- range $n := $nexusEntries -}}
 {{- if eq $h.hostPort $n.hostPort -}}
-{{- fail (printf "registry host %q is both Harbor's (%s) and Nexus's (nexus.registryHosts): kubelet caches credentials per registry host, so it would hand one backend's credentials to the other's images. Give each backend its own host[:port]%s (ADR-0033)." $h.hostPort $h.source (ternary "; set harbor.registryHosts if kubelet pulls Harbor's images from another address than harbor.url" "" (ne $h.source "harbor.registryHosts"))) -}}
+{{- fail (printf "registry host %q is both Harbor's (%s) and Nexus's (nexus.registryHosts): kubelet caches credentials per registry host, so it would hand one backend's credentials to the other's images. Give each backend its own host[:port]%s (ADR-0036)." $h.hostPort $h.source (ternary "; set harbor.registryHosts if kubelet pulls Harbor's images from another address than harbor.url" "" (ne $h.source "harbor.registryHosts"))) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -285,13 +285,13 @@ parses whenever it is set.
 {{- range $nexusEntries -}}
 {{- if not (include "harbor-bridge.kubelet.coveredBy" (list . $matchImages)) -}}
 {{- $want := include "harbor-bridge.registryEntry.string" . -}}
-{{- fail (printf "nexus.registryHosts entry %q is not covered by plugin.matchImages: kubelet calls the plugin only for images a matchImages entry matches, so pulls of its images would get no credentials from the bridge. Add %q to plugin.matchImages. Kubelet compares the port exactly, takes globs only in the host (e.g. *.example.com) and compares the path as a raw string prefix: a covering entry is the host[:port] itself, or host[:port] followed by a prefix of the path prefix without a trailing '/' (ADR-0033)." $want $want) -}}
+{{- fail (printf "nexus.registryHosts entry %q is not covered by plugin.matchImages: kubelet calls the plugin only for images a matchImages entry matches, so pulls of its images would get no credentials from the bridge. Add %q to plugin.matchImages. Kubelet compares the port exactly, takes globs only in the host (e.g. *.example.com) and compares the path as a raw string prefix: a covering entry is the host[:port] itself, or host[:port] followed by a prefix of the path prefix without a trailing '/' (ADR-0036)." $want $want) -}}
 {{- end -}}
 {{- end -}}
 {{- range $harborEntries -}}
 {{- if not (include "harbor-bridge.kubelet.coveredBy" (list . $matchImages)) -}}
 {{- $want := include "harbor-bridge.registryEntry.string" . -}}
-{{- fail (printf "Harbor's registry host %q (%s) is not covered by plugin.matchImages. With nexus.enabled the bridge routes each image by its registry host, and kubelet calls the plugin only for images a matchImages entry matches. If kubelet pulls Harbor's images from another address than harbor.url, set harbor.registryHosts to it; otherwise add %q to plugin.matchImages. Kubelet compares the port exactly, takes globs only in the host and compares the path as a raw string prefix (ADR-0033)." $want .source $want) -}}
+{{- fail (printf "Harbor's registry host %q (%s) is not covered by plugin.matchImages. With nexus.enabled the bridge routes each image by its registry host, and kubelet calls the plugin only for images a matchImages entry matches. If kubelet pulls Harbor's images from another address than harbor.url, set harbor.registryHosts to it; otherwise add %q to plugin.matchImages. Kubelet compares the port exactly, takes globs only in the host and compares the path as a raw string prefix (ADR-0036)." $want .source $want) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

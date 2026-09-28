@@ -5,7 +5,7 @@
 
 # Logical name for this cluster, used as the Harbor robot-name prefix
 # (ADR-0009 / ADR-0018) and, with nexus.enabled, as the prefix of the
-# Nexus users and roles (ADR-0033). Must be a DNS label and distinct from
+# Nexus users and roles (ADR-0036). Must be a DNS label and distinct from
 # every other cluster sharing the same Harbor or Nexus. The ownership prefix is
 # dot-terminated (`bridge-<clusterName>.`), so distinct names are
 # automatically collision-free — there is no longer any requirement to
@@ -52,7 +52,7 @@ harbor:
   # Registry hosts whose images the bridge serves from HarborAccess
   # objects, as host[:port][/path-prefix] entries (no scheme, no globs).
   # Used only with nexus.enabled: with a second backend the bridge routes
-  # each credential request by the image's registry host (ADR-0033), and
+  # each credential request by the image's registry host (ADR-0036), and
   # refuses an image that matches no host of either backend. Empty = the
   # host[:port] of harbor.url, which is right only when kubelet pulls
   # Harbor's images from the same address the bridge reaches Harbor's API
@@ -85,7 +85,7 @@ tls:
     kind: ClusterIssuer  # ClusterIssuer | Issuer
 
 # ====================================================================
-# OPTIONAL: SONATYPE NEXUS REPOSITORY (preview, ADR-0033)
+# OPTIONAL: SONATYPE NEXUS REPOSITORY (preview, ADR-0036)
 # A second registry backend next to Harbor, which stays required. The
 # bridge then also serves NexusAccess objects (nexus.aetherize.io): it
 # keeps one Nexus role and one local user per ServiceAccount identity and

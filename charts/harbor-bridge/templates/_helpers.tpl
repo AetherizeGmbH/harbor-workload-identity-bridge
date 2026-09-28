@@ -140,7 +140,7 @@ harbor.aetherize.io/robot
 
 {{/*
 nexus.finalizer is finalizer for NexusAccess objects: the selector and the
-instance select NexusAccess objects too (ADR-0033,
+instance select NexusAccess objects too (ADR-0036,
 bridge/controlplane/config.go NexusFinalizer).
 */}}
 {{- define "harbor-bridge.nexus.finalizer" -}}

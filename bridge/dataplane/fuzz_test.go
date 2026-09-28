@@ -53,7 +53,7 @@ func FuzzCachedKeySet_VerifySignature(f *testing.F) {
 }
 
 // The image is caller-supplied and routed before the token is checked
-// (ADR-0033 decision f). Routing must never panic, must pick at most one
+// (ADR-0036 decision f). Routing must never panic, must pick at most one
 // backend, and must pick one only for an image whose registry host (the
 // text before the first '/', which the plugin keys the credentials by and
 // containerd sends them to) is one of that backend's hosts: credentials

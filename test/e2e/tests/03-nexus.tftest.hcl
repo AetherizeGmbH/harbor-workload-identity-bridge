@@ -1,4 +1,4 @@
-# End-to-end test of the Nexus backend (ADR-0033) on kind, next to Harbor.
+# End-to-end test of the Nexus backend (ADR-0036) on kind, next to Harbor.
 # Run it with `make e2e-nexus`; `make e2e` and CI run 01 and 02 only.
 #
 # Stages (each `run` block is a separate plan+apply; runs that use the same
@@ -16,7 +16,7 @@
 #   8. seed_image           — Harbor: your-project with the test image
 #   9. seed_nexus           — Nexus: realms, anonymous off, repositories,
 #                             app:v1 in each, the bridge's least-privilege
-#                             user (ADR-0033 decision j)
+#                             user (ADR-0036 decision j)
 #  10. bridge_install       — the chart with nexus.enabled, both backends'
 #                             registry hosts in matchImages
 #  11. nexus_check_lib      — shell helpers the check Jobs share
@@ -367,7 +367,7 @@ run "pull_harbor_routing" {
   }
 }
 
-# Routing at the data plane (ADR-0033 decision f): one pod-bound token of
+# Routing at the data plane (ADR-0036 decision f): one pod-bound token of
 # nx-pull/puller, three images. The answers must carry the Nexus user of
 # the identity for the Nexus image and the Harbor robot for the Harbor
 # image, and refuse an image of neither backend (no_backend): the Nexus
@@ -502,7 +502,7 @@ run "nexus_edit_baseline_bridge" {
   }
 }
 
-# pull,push (ADR-0033 decision b): the user of nx-ci/pusher pushes a new
+# pull,push (ADR-0036 decision b): the user of nx-ci/pusher pushes a new
 # tag to nx-push and reads it back, and is refused on nx-app, which its
 # NexusAccess does not name.
 run "nexus_push" {
@@ -545,7 +545,7 @@ run "nexus_push" {
 }
 
 # Nexus itself (admin credentials from the seed namespace): one role and
-# one user per identity, with the markers and privileges of ADR-0033
+# one user per identity, with the markers and privileges of ADR-0036
 # decision b.
 run "nexus_state_initial" {
   command = apply
@@ -600,7 +600,7 @@ run "nexus_access_update" {
 #   - puller is complete again: no grants-incomplete mark;
 #   - editor is Ready=False RepositoryNotFound naming nx-missing, its
 #     observedGeneration stays 1, and its Secret carries the mark the data
-#     plane refuses on (ADR-0033 decision d);
+#     plane refuses on (ADR-0036 decision d);
 #   - mover's user belongs to the new identity.
 run "nexus_update_state" {
   command = apply
@@ -695,9 +695,9 @@ run "pull_nexus_kept" {
   }
 }
 
-# ADR-0033 decision d: the edit that removed nx-extra (A) and named the
+# ADR-0036 decision d: the edit that removed nx-extra (A) and named the
 # missing nx-missing (C) revokes A at once for editor's existing password
-# and bearer token (one persistent token per user, ADR-0033 Context 1),
+# and bearer token (one persistent token per user, ADR-0036 Context 1),
 # while nx-app, still named and existing, stays readable.
 run "nexus_edit_revoked" {
   command = apply
@@ -723,7 +723,7 @@ run "nexus_edit_revoked" {
     SH
     ]
     timeout_seconds  = 180
-    fail_message     = "ADR-0033 decision d: removing a repository while naming a missing one did not revoke it at once, or revoked more"
+    fail_message     = "ADR-0036 decision d: removing a repository while naming a missing one did not revoke it at once, or revoked more"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
@@ -762,7 +762,7 @@ run "nexus_edit_refused" {
       ["\"logger\":\"audit\"", "\"msg\":\"credential denied\"", "\"requested_image\":\"${run.nexus.registry_hosts["nx-app"]}/edit-check:refused\""],
     ]
     timeout_seconds  = 120
-    fail_message     = "ADR-0033 decision f: the bridge did not refuse a NexusAccess whose Secret is marked grants-incomplete"
+    fail_message     = "ADR-0036 decision f: the bridge did not refuse a NexusAccess whose Secret is marked grants-incomplete"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
@@ -801,7 +801,7 @@ run "nexus_state_updated" {
   }
 }
 
-# ── Rotation replaces the user under a new id (ADR-0033 decision c).
+# ── Rotation replaces the user under a new id (ADR-0036 decision c).
 #
 # Forced: editor's Secret is deleted. The reconciler creates a user of a
 # new generation and deletes the previous one at once (implementation note
@@ -866,7 +866,7 @@ run "nexus_rotation_forced" {
 # the safety margin). The new user's credentials work at once; the
 # previous user stays for NexusUserRetireGrace (5 minutes, implementation
 # note 4) and is then deleted, which ends its bearer token. Every
-# /v2/token call of a user returns the same token (ADR-0033 Context 1).
+# /v2/token call of a user returns the same token (ADR-0036 Context 1).
 run "nexus_rotation_scheduled" {
   command = apply
   module {
@@ -887,7 +887,7 @@ run "nexus_rotation_scheduled" {
       old_user=$username
       old_token=$(docker_token nx-app "$old_user" "$password") || fail "no docker token for the current user"
       again=$(docker_token nx-app "$old_user" "$password") || fail "no second docker token for the current user"
-      [ "$again" = "$old_token" ] || fail "Nexus returned another docker token for the same user: ADR-0033 Context 1 no longer holds"
+      [ "$again" = "$old_token" ] || fail "Nexus returned another docker token for the same user: ADR-0036 Context 1 no longer holds"
       c=$(manifest_code nx-app "$old_token"); [ "$c" = 200 ] || fail "nx-app with the current token: HTTP $c, want 200"
 
       c=$(kapi PATCH "$(secret_path $secret)" application/merge-patch+json \
@@ -930,7 +930,7 @@ run "nexus_rotation_scheduled" {
   }
 }
 
-# ── DeletionBlocked while Nexus is down (ADR-0033 decision i). The check
+# ── DeletionBlocked while Nexus is down (ADR-0036 decision i). The check
 # creates its own NexusAccess, waits until it is Ready, scales Nexus to
 # zero, deletes the object and expects Ready=False DeletionBlocked with the
 # finalizer held; then it scales Nexus back and expects the bridge to

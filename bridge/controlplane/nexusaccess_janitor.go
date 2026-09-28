@@ -22,7 +22,7 @@ import (
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/nexussecret"
 )
 
-// NexusJanitor is the Janitor of the Nexus backend (ADR-0033): it
+// NexusJanitor is the Janitor of the Nexus backend (ADR-0036): it
 // periodically deletes the Nexus users and roles of this cluster that no
 // NexusAccess uses any more (the owner is gone or no longer selected, or
 // now maps to another identity), users a rotation superseded whose grace
@@ -271,7 +271,7 @@ func (j *NexusJanitor) userVerdict(u *nexus.User, owner *nexusv1alpha1.NexusAcce
 	case current == u.UserID:
 		return ""
 	case secret != nil && nexussecret.PendingUserID(secret) == u.UserID:
-		// Being created (ADR-0033 decision c).
+		// Being created (ADR-0036 decision c).
 		return ""
 	}
 	if id, after, ok := retiring(secret); ok && id == u.UserID {

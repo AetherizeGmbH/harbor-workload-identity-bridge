@@ -317,7 +317,7 @@ func TestHandler_Nexus_ServesAnyGenerationOfTheIdentity(t *testing.T) {
 // Refusals
 // ----------------------------------------------------------------------------
 
-// A repository the spec names does not exist (ADR-0033 decision d): the
+// A repository the spec names does not exist (ADR-0036 decision d): the
 // role lacks its privileges, and the data plane issues nothing, whatever
 // the annotation says.
 func TestHandler_Nexus_GrantsIncomplete_Refused(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-// Naming (ADR-0033). One workload identity (cluster, ServiceAccount
+// Naming (ADR-0036). One workload identity (cluster, ServiceAccount
 // namespace, ServiceAccount name) maps to one Nexus role and to one Nexus
 // local user at a time:
 //
@@ -25,12 +25,12 @@ import (
 // injective over DNS-label inputs. Every password rotation replaces the
 // user with one under a fresh generation, because Nexus keeps a user's
 // docker bearer token valid across a password change and across a delete
-// and re-create under the same id (ADR-0033, verified against Nexus
+// and re-create under the same id (ADR-0036, verified against Nexus
 // 3.76.1); only a user id that never exists again revokes it.
 const (
 	// NameCap bounds every user id (identity name, separator and
 	// generation). Nexus stores user ids in VARCHAR(200) (a 201-character
-	// id fails with 500 on Nexus 3.76.1, ADR-0033); the cap leaves room
+	// id fails with 500 on Nexus 3.76.1, ADR-0036); the cap leaves room
 	// below that limit, and role ids (identity names) are shorter still.
 	NameCap = 190
 
@@ -135,7 +135,7 @@ func UserID(cluster, saNamespace, saName, generation string) (string, error) {
 // NewGeneration returns a fresh random generation for UserID. A rotation
 // must never reuse the generation of an earlier user of the same identity:
 // a user id that existed before may still have a docker bearer token in
-// Nexus's API key store, which would become valid again (ADR-0033). 64
+// Nexus's API key store, which would become valid again (ADR-0036). 64
 // random bits make a repeat negligible.
 func NewGeneration() (string, error) {
 	var b [GenerationLen / 2]byte
@@ -198,8 +198,8 @@ func ClusterPrefix(cluster string) string {
 // dot-terminated and the cluster name dot-free, so "bridge-prod." is no
 // prefix of cluster "prod-eu"'s names (ADR-0018). The comparison is
 // case-sensitive: Nexus's user search matches ids case-insensitively
-// (ADR-0033), the ownership check does not. The ownership markers on the
-// user and the role (ADR-0033) remain the second layer.
+// (ADR-0036), the ownership check does not. The ownership markers on the
+// user and the role (ADR-0036) remain the second layer.
 func OwnsName(cluster, id string) bool {
 	if cluster == "" {
 		return false
@@ -237,8 +237,8 @@ type Format string
 // authenticate through a separate "OCI Bearer Token Realm" (community
 // OpenAPI spec, OciAttributes.forceBasicAuth). Whether that realm's
 // tokens expire, survive a password change or die with their user is not
-// known, and ADR-0033's rotation rests on exactly that for docker; the
-// format is added once it has been analysed (ADR-0033, question 8).
+// known, and ADR-0036's rotation rests on exactly that for docker; the
+// format is added once it has been analysed (ADR-0036, question 8).
 const (
 	FormatDocker Format = "docker"
 )
@@ -278,7 +278,7 @@ func ValidateRepositoryName(name string) error {
 
 // privilegeActions maps an access value to the actions of Nexus's built-in
 // repository-view privileges (nx-repository-view-<format>-<repo>-<action>),
-// least privilege as verified with crane against Nexus 3.76.1 (ADR-0033):
+// least privilege as verified with crane against Nexus 3.76.1 (ADR-0036):
 // read alone serves pulls, tag listings and the catalog; a push needs add
 // and edit (without edit even a new image fails) plus read, so, as with
 // Harbor, a pusher declares "pull,push". browse (UI browsing) and delete
@@ -294,7 +294,7 @@ var privilegeActions = map[Access][]string{
 // these privileges with the repository and removes them (and strips them
 // from every role) when the repository is deleted; GET
 // /v1/security/privileges/{name} answers 404 for a repository that does
-// not exist (ADR-0033). The repository name is used verbatim: privilege
+// not exist (ADR-0036). The repository name is used verbatim: privilege
 // names are case-sensitive.
 func RepositoryPrivileges(format Format, repository string, access Access) ([]string, error) {
 	if format != FormatDocker {

@@ -20,7 +20,7 @@ const PasswordLength = 48
 // failed, NEXUS-40119), ':' (the Basic Auth separator), and the characters
 // JSON or a text/plain body could escape or trim: quotes, '\\', '%', '/',
 // whitespace and control characters. A validator that forbids one of the
-// remaining symbols makes user creation fail with 400 (ADR-0033).
+// remaining symbols makes user creation fail with 400 (ADR-0036).
 const (
 	lowerChars  = "abcdefghijklmnopqrstuvwxyz"
 	upperChars  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

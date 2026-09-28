@@ -7,7 +7,7 @@
 // HTTP, with its read-backs, 404 confirmations and error mapping.
 //
 // It reproduces the behaviour verified against sonatype/nexus3:3.76.1
-// (ADR-0033, and the package-internal fake of bridge/controlplane/nexus):
+// (ADR-0036, and the package-internal fake of bridge/controlplane/nexus):
 // the case-insensitive user id prefix search, 500 text/plain for a
 // duplicate user, 400 for a duplicate role, a user create that stores an
 // unknown role id hidden from reads until a role with that id exists, 400

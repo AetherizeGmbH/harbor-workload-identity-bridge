@@ -411,7 +411,7 @@ run "invalid_limits_memory" {
   ]
 }
 
-# ── Nexus backend (ADR-0033) ─────────────────────────────────────────────────
+# ── Nexus backend (ADR-0036) ─────────────────────────────────────────────────
 # nexus renders nexus.* with the admin Secret the module creates, and
 # harbor_registry_hosts adds harbor.registryHosts next to the unchanged
 # Harbor values. The credentials are sensitive variables of the module, so

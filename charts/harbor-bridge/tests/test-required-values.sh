@@ -63,7 +63,7 @@ cases=(
   "nexus.enabled not a boolean|--set-string|nexus.enabled=true|nexus.enabled=\"true\" must be true or false"
 )
 
-# The Sonatype Nexus Repository backend (ADR-0033), on top of
+# The Sonatype Nexus Repository backend (ADR-0036), on top of
 # values-nexus.yaml, whose plugin.matchImages covers every registry host.
 nexus_cases=(
   "nexus.url|--set|nexus.url=|nexus.url is REQUIRED"
@@ -277,7 +277,7 @@ else
   failed=$((failed+1))
 fi
 
-# --- Sonatype Nexus Repository (ADR-0033): what must render ---------------
+# --- Sonatype Nexus Repository (ADR-0036): what must render ---------------
 
 # check LABEL COMMAND...: PASS when COMMAND succeeds.
 check() {

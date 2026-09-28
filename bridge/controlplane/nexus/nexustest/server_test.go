@@ -13,7 +13,7 @@ import (
 )
 
 // The fake behaves as the client expects Nexus to: these are the rows of
-// ADR-0033's runtime table that code under test relies on.
+// ADR-0036's runtime table that code under test relies on.
 func TestServer_BehavesLikeNexus(t *testing.T) {
 	ctx := context.Background()
 	s := New(t)
@@ -29,7 +29,7 @@ func TestServer_BehavesLikeNexus(t *testing.T) {
 	}
 
 	// A user created before its role holds the role hidden until the role
-	// exists (ADR-0033 Context 5).
+	// exists (ADR-0036 Context 5).
 	u, err := c.CreateUser(ctx, nexus.User{UserID: "u1", FirstName: "f", LastName: "l", EmailAddress: "x@y.invalid",
 		Status: nexus.UserActive, Roles: []string{"r1"}}, "pw-1")
 	if err != nil {

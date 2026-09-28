@@ -79,7 +79,7 @@ func TestSplitImage(t *testing.T) {
 }
 
 // Matching is segment-aware on the path and exact on host and port
-// (ADR-0033 decision f).
+// (ADR-0036 decision f).
 func TestMatchImage(t *testing.T) {
 	hosts, err := ParseList("nexus.example.com/nexus,registry.example.com:5000")
 	if err != nil {

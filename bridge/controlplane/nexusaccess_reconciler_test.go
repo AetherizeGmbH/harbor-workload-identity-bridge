@@ -381,7 +381,7 @@ func TestNexusReconcile_GrantChangeWithoutRotation(t *testing.T) {
 	}
 }
 
-// ADR-0033 decision d: an edit that removes repository A and names a
+// ADR-0036 decision d: an edit that removes repository A and names a
 // missing repository C revokes A in the same pass, adds nothing missing,
 // marks the Secret and holds observedGeneration back; once C exists the
 // full grant is written and the mark removed.
@@ -498,7 +498,7 @@ func TestNexusReconcile_RepositoryVanishesDuringTheWrite(t *testing.T) {
 	}
 }
 
-// ADR-0033 decision c: a rotation creates the next generation, stores it,
+// ADR-0036 decision c: a rotation creates the next generation, stores it,
 // and deletes the previous user after the grace, never before the promise.
 func TestNexusReconcile_ScheduledRotationReplacesTheUser(t *testing.T) {
 	h := newNexusHarness(t, nil, newNexusAccess())
@@ -597,7 +597,7 @@ func TestNexusReconcile_AdministratorsDisableIsRespected(t *testing.T) {
 	}
 }
 
-// A user in status changepassword authenticates (ADR-0033): it is rotated
+// A user in status changepassword authenticates (ADR-0036): it is rotated
 // like an active one, and its replacement is active.
 func TestNexusReconcile_ChangePasswordUserIsRotated(t *testing.T) {
 	h := newNexusHarness(t, nil, newNexusAccess())
@@ -778,7 +778,7 @@ func TestNexusReconcile_DeletionBlockedWhileNexusIsDown(t *testing.T) {
 	}
 }
 
-// ADR-0033 decision j: a 429 stops every call for the backoff window,
+// ADR-0036 decision j: a 429 stops every call for the backoff window,
 // counted from the last 429, without probing.
 func TestNexusReconcile_RateLimitStopsEveryCall(t *testing.T) {
 	h := newNexusHarness(t, nil, newNexusAccess())

@@ -4,7 +4,7 @@
 // Package v1alpha1 contains API Schema definitions for the nexus.aetherize.io
 // v1alpha1 API group: NexusAccess, which grants a Kubernetes ServiceAccount
 // access to Sonatype Nexus Repository repositories through the bridge. See
-// docs/adr/0033-nexus-repository-backend.md.
+// docs/adr/0036-nexus-repository-backend.md.
 //
 // +kubebuilder:object:generate=true
 // +groupName=nexus.aetherize.io

@@ -18,7 +18,7 @@ func mustHosts(t *testing.T, raw string) []registryhost.Host {
 	return hosts
 }
 
-// TestRoute pins how an image selects its backend (ADR-0033 decision f):
+// TestRoute pins how an image selects its backend (ADR-0036 decision f):
 // the host and port exactly, as kubelet keys its credential cache by them;
 // a path prefix only on '/' boundaries; and nothing for an image of
 // neither backend, so that no backend's credentials reach another

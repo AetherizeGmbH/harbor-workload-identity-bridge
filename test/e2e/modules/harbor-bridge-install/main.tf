@@ -169,7 +169,7 @@ variable "harbor_registry_hosts" {
   description = "harbor.registryHosts: the host[:port][/path] entries that route an image to Harbor (BRIDGE_HARBOR_REGISTRY_HOSTS). Empty leaves the value out, and the chart defaults to the host of harbor.url."
 }
 
-# The Nexus backend (ADR-0033). null leaves every nexus.* value out of the
+# The Nexus backend (ADR-0036). null leaves every nexus.* value out of the
 # release, so a Harbor-only install renders exactly as before. The
 # credentials are separate variables: a sensitive attribute inside this
 # object would make `var.nexus == null` sensitive, which count refuses.
@@ -191,7 +191,7 @@ variable "nexus_admin_username" {
   type        = string
   default     = null
   sensitive   = true
-  description = "The Nexus user the bridge authenticates as, stored in the nexus-admin Secret. Required with nexus. ADR-0033 decision j: a random name, never admin."
+  description = "The Nexus user the bridge authenticates as, stored in the nexus-admin Secret. Required with nexus. ADR-0036 decision j: a random name, never admin."
 
   validation {
     condition     = var.nexus == null || (var.nexus_admin_username != null && var.nexus_admin_username != "")

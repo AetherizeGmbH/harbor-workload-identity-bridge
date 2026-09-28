@@ -267,7 +267,7 @@ func nexusReason(nxa *nexusv1alpha1.NexusAccess) string {
 }
 
 // TestEnvtest_NexusLifecycle runs the reconciler against a real apiserver
-// and the fake Nexus through a NexusAccess's life (ADR-0033): create, a
+// and the fake Nexus through a NexusAccess's life (ADR-0036): create, a
 // grant change, a missing repository, a scheduled rotation and the
 // retirement of the previous user, a deleted Secret rebuilt through the
 // Secret watch, a serviceAccountRef change, a refusal and its end, a

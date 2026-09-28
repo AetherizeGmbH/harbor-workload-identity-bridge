@@ -275,7 +275,7 @@ func TestRepositoryPrivileges(t *testing.T) {
 		access Access
 	}{
 		{"maven2", "apps", AccessPull},
-		{"oci", "apps", AccessPull}, // not analysed yet (ADR-0033)
+		{"oci", "apps", AccessPull}, // not analysed yet (ADR-0036)
 		{"*", "apps", AccessPull},
 		{FormatDocker, "*", AccessPull},
 		{FormatDocker, "", AccessPull},

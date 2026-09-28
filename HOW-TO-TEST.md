@@ -15,7 +15,7 @@ Two paths, pick by what you're doing.
 - **§1b GKE** — the same flow on a real GKE cluster (`make e2e-gke`).
   Creates **billed** resources; local only, never in CI.
 
-- **§1c Nexus** — the Sonatype Nexus Repository backend (ADR-0033) on
+- **§1c Nexus** — the Sonatype Nexus Repository backend (ADR-0036) on
   kind, next to Harbor (`make e2e-nexus`): NexusAccess lifecycle, routing
   between the two backends, rotation by a new user id, a Nexus outage.
   Local only for now; `make e2e` and CI do not run it.
@@ -293,7 +293,7 @@ loopback-NodePort behaviour under Dataplane V2 — escape hatch:
 
 ---
 
-# §1c — Nexus e2e (`make e2e-nexus`, ADR-0033)
+# §1c — Nexus e2e (`make e2e-nexus`, ADR-0036)
 
 The Nexus backend against a real Sonatype Nexus Repository in the kind
 harness, next to Harbor (the bridge still requires Harbor). Prerequisites
@@ -312,7 +312,7 @@ run it after §1, not beside it.
 [`test/e2e/nexus/Dockerfile`](test/e2e/nexus/Dockerfile): the last
 Community Edition release without the EULA gate. 3.77 and later refuse
 service until an operator accepts the EULA, which this project never does
-on anyone's behalf (ADR-0033 decision i, question 4); `renovate.json` keeps
+on anyone's behalf (ADR-0036 decision i, question 4); `renovate.json` keeps
 the pin below 3.77. Sonatype publishes the release for linux/amd64 only.
 The Dockerfile copies its filesystem into an image of the host's platform,
 because containerd in a kind node refuses an image of another platform. On
@@ -330,7 +330,7 @@ so each hosted repository gets an HTTP connector behind its own NodePort:
 (`containerd-registry-http`, the way kind's local-registry setup does);
 Harbor keeps TLS. The bridge authenticates to Nexus as a user with a random
 name that holds only `nx-users-all`, `nx-roles-all` and
-`nx-privileges-read` (ADR-0033 decision j), so the run proves the bridge
+`nx-privileges-read` (ADR-0036 decision j), so the run proves the bridge
 needs nothing more.
 
 **Stages** (every `run` block of
@@ -347,7 +347,7 @@ needs nothing more.
 | `nexus_routing` | One pod-bound token, three images: the bridge answers with the identity's Nexus user for the Nexus image and its Harbor robot for the Harbor image, and refuses an image of neither backend with 403 (`no_backend`); all three decisions in the audit log |
 | `nexus_edit_baseline*` | editor's credentials read exactly its repositories (a token from one connector works on another); the bridge serves editor |
 | `nexus_push` | The pull,push user pushes to nx-push and is refused on nx-app |
-| `nexus_state_initial` | Nexus: one role (`bridge-dev.<ns>.<sa>`) and one user (`<role>_<16 hex>`) per identity, with the ADR-0033 markers and exactly the privileges of the spec |
+| `nexus_state_initial` | Nexus: one role (`bridge-dev.<ns>.<sa>`) and one user (`<role>_<16 hex>`) per identity, with the ADR-0036 markers and exactly the privileges of the spec |
 | `nexus_access_update` | Scenario phase `updated`: puller drops nx-extra; editor swaps nx-extra for the missing nx-missing; mover moves to a new ServiceAccount |
 | `nexus_update_state` | No spec edit created a user; editor is `Ready=False RepositoryNotFound`, its `observedGeneration` stays 1 and its Secret carries `grants-incomplete`; mover has a user of the new identity |
 | `pull_nexus_revoked`, `pull_nexus_kept` | The removed repository fails, even with kubelet's cached password; the kept one pulls |

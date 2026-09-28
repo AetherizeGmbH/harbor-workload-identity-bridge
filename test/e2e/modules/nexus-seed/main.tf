@@ -1,14 +1,14 @@
 # Seeds Nexus for the NexusAccess scenario and WAITS for the seeding Job:
 #
 #   1. realms: the local realm and DockerToken (docker bearer tokens,
-#      ADR-0033 Context 1);
+#      ADR-0036 Context 1);
 #   2. anonymous access off, so every pull needs credentials;
 #   3. one hosted docker repository per entry of var.repositories, each
 #      with its own HTTP connector (Nexus 3.76 routes docker requests by
 #      port);
 #   4. the bridge's own Nexus user: a random name, never "admin", holding
 #      only nx-users-all, nx-roles-all and nx-privileges-read, the least
-#      privilege ADR-0033 decision j names. The bridge runs with it, so the
+#      privilege ADR-0036 decision j names. The bridge runs with it, so the
 #      e2e proves that nothing the bridge does needs more;
 #   5. <repository>/app:v1 in every repository, copied with crane from
 #      var.source_image for the node's platform, and read back.
@@ -202,14 +202,14 @@ module "manifests" {
               [ "$c" = 201 ] || fail "create repository $name: HTTP $c: $(cat /tmp/nx.json)"
             done
 
-            # 5. The bridge's user, with exactly the privileges ADR-0033
+            # 5. The bridge's user, with exactly the privileges ADR-0036
             #    decision j names.
             c=$(nx GET "/v1/security/roles/$role?source=default")
             case "$c" in
               200) ;;
               404)
                 body=$(jq -cn --arg r "$role" '{id: $r, name: $r,
-                  description: "e2e: least-privilege Nexus role of the bridge (ADR-0033 decision j)",
+                  description: "e2e: least-privilege Nexus role of the bridge (ADR-0036 decision j)",
                   privileges: ["nx-users-all", "nx-roles-all", "nx-privileges-read"], roles: []}')
                 c=$(nx POST /v1/security/roles "$body")
                 [ "$c" = 200 ] || fail "create role $role: HTTP $c: $(cat /tmp/nx.json)"
@@ -325,7 +325,7 @@ output "admin_secret_name" {
 output "bridge_admin_username" {
   value       = kubernetes_secret_v1.bridge_admin.data.username
   sensitive   = true
-  description = "The bridge's Nexus user (ADR-0033 decision j recommends keeping even the name out of sight)."
+  description = "The bridge's Nexus user (ADR-0036 decision j recommends keeping even the name out of sight)."
 }
 
 output "bridge_admin_password" {

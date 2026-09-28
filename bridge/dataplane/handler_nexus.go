@@ -24,7 +24,7 @@ import (
 
 // serveNexus answers a request with a valid token for an image of the
 // Nexus backend from the NexusAccess objects and their nexususer Secrets
-// (ADR-0033 decisions d to f). The checks follow the Harbor path's, in the
+// (ADR-0036 decisions d to f). The checks follow the Harbor path's, in the
 // same order, with the Nexus Secret contract's differences: the Secret's
 // ownership labels are required (no Nexus Secret predates them), a Secret
 // marked grants-incomplete is refused, and the identity check compares
@@ -108,7 +108,7 @@ func (h *Handler) serveNexus(ctx context.Context, w http.ResponseWriter, logger 
 		return
 	}
 	// A repository the spec names does not exist, so the role lacks its
-	// privileges (ADR-0033 decision d). Refused whatever the annotation's
+	// privileges (ADR-0036 decision d). Refused whatever the annotation's
 	// value: a partial grant must not look like a working one.
 	if missing, incomplete := nexussecret.GrantsIncomplete(secret); incomplete {
 		answer(http.StatusForbidden,

@@ -12,7 +12,7 @@
 {{- $harborHosts = append $harborHosts (include "harbor-bridge.registryEntry.string" .) }}
 {{- end }}
   Harbor hosts : {{ join ", " $harborHosts }}
-  Nexus URL    : {{ .Values.nexus.url }} (preview, ADR-0033)
+  Nexus URL    : {{ .Values.nexus.url }} (preview, ADR-0036)
   Nexus hosts  : {{ join ", " .Values.nexus.registryHosts }}
 {{- end }}
   Audience     : {{ .Values.plugin.audience }}
@@ -199,7 +199,7 @@ for local development.
 
 {{- if include "harbor-bridge.nexus.enabled" . }}
 
-NEXUS (preview, ADR-0033; README "Sonatype Nexus Repository (preview)"):
+NEXUS (preview, ADR-0036; README "Sonatype Nexus Repository (preview)"):
   - The credential in Secret {{ dig "adminCredsSecret" "name" "" .Values.nexus | quote }} is admin-equivalent in
     Nexus. Give it a role with nx-users-all, nx-roles-all and
     nx-privileges-read only, and a long random username, never "admin": from

@@ -1,5 +1,5 @@
 # Sonatype Nexus Repository for the Nexus e2e (tests/03-nexus.tftest.hcl,
-# ADR-0033 decision i), labelled with the platform it is built on.
+# ADR-0036 decision i), labelled with the platform it is built on.
 #
 # 3.76.1 is the last Community Edition release without the EULA gate:
 # 3.77 and later refuse service until an operator accepts the EULA, which
