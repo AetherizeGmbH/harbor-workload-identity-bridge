@@ -198,3 +198,24 @@ func TestParseUnitEnvironment(t *testing.T) {
 		t.Fatalf("empty unit: %+v", got)
 	}
 }
+
+// TestRun_KindNode pins a kind node (kindest/node v1.37.0, systemd 257) as
+// `systemctl show` reports its kubelet unit, with its shipped
+// /etc/default/kubelet, which has no final newline and already sets
+// KUBELET_EXTRA_ARGS. The e2e harness runs on such nodes.
+func TestRun_KindNode(t *testing.T) {
+	out := "Environment=\"KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf\" KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml\n" +
+		"EnvironmentFiles=/var/lib/kubelet/kubeadm-flags.env (ignore_errors=yes)\n" +
+		"EnvironmentFiles=/etc/default/kubelet (ignore_errors=yes)\n"
+	unit := parseUnitEnvironment([]byte(out))
+	env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"})
+	env.kubelet.envFiles, env.kubelet.envAssignments = unit.Files, unit.Assignments
+	writeHostFile(t, env, defaultKubeletPath, "KUBELET_EXTRA_ARGS=--runtime-cgroups=/system.slice/containerd.service")
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := "KUBELET_EXTRA_ARGS=\"--runtime-cgroups=/system.slice/containerd.service " + flagBinDir + "=" + binDir + " " + flagConfigFile + "=" + env.cfg.ownConfigPath() + "\"\n"
+	if got := env.hostFile(t, defaultKubeletPath); got != want {
+		t.Fatalf("/etc/default/kubelet:\n%q\nwant\n%q", got, want)
+	}
+}
