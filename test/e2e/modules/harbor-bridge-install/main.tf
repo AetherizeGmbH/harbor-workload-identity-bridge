@@ -317,12 +317,13 @@ resource "null_resource" "release_harboraccess_finalizers" {
   }
 
   triggers = {
-    token_command = var.token_command
-    k8s_host      = var.kubeconfig.host
-    k8s_ca        = var.kubeconfig.cluster_ca_certificate
-    k8s_cert      = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
-    k8s_key       = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
-    k8s_token     = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+    token_command  = var.token_command
+    kubeconfig_lib = abspath("${path.module}/../../scripts/kubeconfig.sh")
+    k8s_host       = var.kubeconfig.host
+    k8s_ca         = var.kubeconfig.cluster_ca_certificate
+    k8s_cert       = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+    k8s_key        = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+    k8s_token      = var.kubeconfig.token == null ? "" : var.kubeconfig.token
   }
 
   provisioner "local-exec" {
@@ -332,20 +333,14 @@ resource "null_resource" "release_harboraccess_finalizers" {
       set -uo pipefail
       d="$(mktemp -d)"
       trap 'rm -rf "$d"' EXIT
-      chmod 700 "$d"
-      printf '%s' "$K8S_CA" > "$d/ca.crt"
-      args=(--kubeconfig=/dev/null --server="$K8S_HOST" --certificate-authority="$d/ca.crt")
       if [ -n "$TOKEN_COMMAND" ]; then
+        # A command substitution: the fresh token never reaches an argv.
         K8S_TOKEN="$(bash -c "$TOKEN_COMMAND")"
       fi
-      if [ -n "$K8S_TOKEN" ]; then
-        args+=(--token="$K8S_TOKEN")
-      else
-        printf '%s' "$K8S_CERT" > "$d/tls.crt"
-        printf '%s' "$K8S_KEY" > "$d/tls.key"
-        args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
+      if ! { source "$KUBECONFIG_LIB" && harness_kubeconfig "$d"; }; then
+        echo "could not write the kubeconfig; nothing released" >&2
+        exit 0
       fi
-      k() { kubectl "$${args[@]}" "$@"; }
       if ! k get crd harboraccesses.harbor.aetherize.io >/dev/null 2>&1; then
         echo "no HarborAccess CRD reachable (or no API access); nothing to release" >&2
         exit 0
@@ -360,12 +355,13 @@ resource "null_resource" "release_harboraccess_finalizers" {
       exit 0
     BASH
     environment = {
-      K8S_HOST      = self.triggers.k8s_host
-      K8S_CA        = self.triggers.k8s_ca
-      K8S_CERT      = self.triggers.k8s_cert
-      K8S_KEY       = self.triggers.k8s_key
-      K8S_TOKEN     = self.triggers.k8s_token
-      TOKEN_COMMAND = self.triggers.token_command
+      K8S_HOST       = self.triggers.k8s_host
+      K8S_CA         = self.triggers.k8s_ca
+      K8S_CERT       = self.triggers.k8s_cert
+      K8S_KEY        = self.triggers.k8s_key
+      K8S_TOKEN      = self.triggers.k8s_token
+      TOKEN_COMMAND  = self.triggers.token_command
+      KUBECONFIG_LIB = self.triggers.kubeconfig_lib
     }
   }
 }

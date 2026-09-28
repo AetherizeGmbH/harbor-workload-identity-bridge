@@ -202,9 +202,11 @@ locals {
 # expected bridge log lines). On failure or timeout it writes pod,
 # event, bridge, plugin and (optionally) kubelet diagnostics to diag_dir
 # and fails the run. Secret CONTENTS are never captured — only names.
-# kubectl is driven ONLY by var.kubeconfig (--kubeconfig=/dev/null keeps
-# the operator's ~/.kube/config out of it). Output of this provisioner is
-# suppressed by OpenTofu (sensitive environment), hence the files.
+# kubectl is driven ONLY by var.kubeconfig, through a private kubeconfig
+# file (test/e2e/scripts/kubeconfig.sh): the operator's ~/.kube/config
+# stays out of it, and no credential is ever on a command line. Output of
+# this provisioner is suppressed by OpenTofu (sensitive environment),
+# hence the files.
 resource "null_resource" "wait" {
   triggers = {
     job_uid = kubernetes_job_v1.this.metadata[0].uid
@@ -221,17 +223,7 @@ resource "null_resource" "wait" {
       set -uo pipefail
       d="$(mktemp -d)"
       trap 'rm -rf "$d"' EXIT
-      chmod 700 "$d"
-      printf '%s' "$K8S_CA" > "$d/ca.crt"
-      args=(--kubeconfig=/dev/null --server="$K8S_HOST" --certificate-authority="$d/ca.crt")
-      if [ -n "$K8S_TOKEN" ]; then
-        args+=(--token="$K8S_TOKEN")
-      else
-        printf '%s' "$K8S_CERT" > "$d/tls.crt"
-        printf '%s' "$K8S_KEY" > "$d/tls.key"
-        args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
-      fi
-      k() { kubectl "$${args[@]}" "$@"; }
+      source "$KUBECONFIG_LIB" && harness_kubeconfig "$d" || exit 1
 
       # Prints the EXPECT_BRIDGE_LOG entries (one per line, their strings
       # tab-separated) that no single bridge log line matches, and fails
@@ -319,6 +311,7 @@ resource "null_resource" "wait" {
       K8S_CERT            = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
       K8S_KEY             = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
       K8S_TOKEN           = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+      KUBECONFIG_LIB      = abspath("${path.module}/../../scripts/kubeconfig.sh")
       NS                  = local.ns
       JOB                 = var.name
       TIMEOUT             = tostring(var.timeout_seconds)

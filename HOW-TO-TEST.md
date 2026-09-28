@@ -199,6 +199,7 @@ cleanly. No orphan kind clusters.
 | [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests (keyed by object identity) with optional `wait` |
 | [`test/e2e/modules/test-sleep`](test/e2e/modules/test-sleep) | The pause mechanism |
 | [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log |
+| [`test/e2e/scripts/kubeconfig.sh`](test/e2e/scripts/kubeconfig.sh) | Sourced by every harness script that runs kubectl: a private kubeconfig file, so no credential (on GKE the operator's access token) is ever on a command line |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
 
 ## When it fails
