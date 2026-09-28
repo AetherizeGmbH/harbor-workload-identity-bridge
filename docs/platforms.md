@@ -22,9 +22,17 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   DaemonSet select `kubernetes.io/os: linux` by default (`bridge.nodeSelector`,
   `plugin.nodeSelector`), so Windows nodes get no plugin, and workloads on
   them get no credentials from the bridge. Keep nodes of other architectures
-  (s390x, ppc64le) out of the DaemonSet through `plugin.nodeSelector` or
-  taints: its pods never start there, and pods that never become ready stall
-  every rollout of it (`maxUnavailable: 10%`).
+  (s390x, ppc64le) out yourself: the pods never start there, and plugin pods
+  that never become ready stall every rollout of the DaemonSet
+  (`maxUnavailable: 10%`). For the plugin, select the amd64/arm64 nodes with
+  `plugin.nodeSelector` (`kubernetes.io/arch: amd64`, or `arm64`, if the
+  cluster has only one of the two, otherwise a label you give the amd64 and
+  arm64 nodes); the chart has no `plugin.affinity`. A taint on the other nodes does not keep the plugin off
+  by itself: the default `plugin.tolerations` (`operator: Exists`) tolerates
+  every taint, so replace it with tolerations that do not match that taint.
+  For the bridge, a taint works as it is (`bridge.tolerations` is empty), or
+  set a node affinity on `kubernetes.io/arch` (`In [amd64, arm64]`) in
+  `bridge.affinity`.
 - Kubernetes **1.34+** (KEP-4412: kubelet passes a ServiceAccount token to the
   credential provider; beta and on by default from 1.34).
 - `ServiceAccountNodeAudienceRestriction` (on by default since 1.32) — the chart
