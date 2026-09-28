@@ -93,8 +93,10 @@ ADR-0029 (per-install state and records); neither is reversed.
 ## Consequences
 
 - A value kubelet rejects costs each node it reaches two kubelet restarts
-  and about one verification timeout of `NotReady`, then the node runs the
-  previous config again and the pod stays in `Init:CrashLoopBackOff` with
+  and about one verification timeout (90 s) with kubelet down, longer than
+  the node-monitor grace period (40 s, 50 s since Kubernetes 1.32): the node
+  turns `NotReady` and its pods leave Service endpoints for that time. Then
+  the node runs the previous config again and the pod stays in `Init:CrashLoopBackOff` with
   an error that `kubectl logs` can show. It no longer takes kubelet down
   until someone repairs the node. On a fresh install the first pass has no
   previous entry to restore: the node runs without this plugin.

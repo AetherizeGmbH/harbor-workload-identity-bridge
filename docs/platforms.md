@@ -56,10 +56,12 @@ refuses one kubelet would exit on. When kubelet still does not come back, or in
 patch mode does not pick up the flags, the installer restores the config (and
 `/etc/default/kubelet`) it replaced, restarts kubelet onto them and fails the
 DaemonSet pod on that node; with kubelet running again,
-`kubectl logs ds/…-plugin -c install` shows why. It records the content as
-rejected in its state file and does not restart kubelet onto the same content
-again on the pod's retries: roll out corrected values, or fix the node and
-delete the state file there to retry (ADR-0033). If kubelet does not come back
+`kubectl logs ds/…-plugin -c install` shows why. Until then kubelet is down for
+about the verification timeout (90 s), and the node is `NotReady` for that
+time. The installer records the content as rejected in its state file and does
+not restart kubelet onto the same content again on the pod's retries: roll out
+corrected values, or fix the node and delete the state file there to retry
+(ADR-0033). If kubelet does not come back
 on the restored files either, the node stays `NotReady` and `kubectl logs`
 cannot reach it: run `journalctl -u kubelet` on the node; the `.bak` copy next
 to each restored file holds the content kubelet rejected.

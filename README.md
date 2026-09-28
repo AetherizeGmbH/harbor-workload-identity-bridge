@@ -381,14 +381,19 @@ file per install, see below):
 - No-op re-rolls, plugin binary updates, and CA/mTLS rotation never
   restart kubelet (the plugin re-reads the CA on every exec; the
   DaemonSet's long-running container syncs rotated certs to the node).
-- A value kubelet rejects does not take the node down. The installer
-  refuses a provider entry kubelet would exit on (`matchImages`,
+- A value kubelet rejects no longer keeps the node down until someone
+  repairs it, but it still costs an outage. The installer refuses a
+  provider entry kubelet would exit on (`matchImages`,
   `defaultCacheDuration`, the audience) before it writes anything. When
   kubelet still does not come back after the restart (or, in patch mode,
-  runs without the flags), it restores the files it replaced, restarts
-  kubelet onto them and fails the pod with the reason. It does not restart
-  kubelet onto the same content again: roll out corrected values, or fix
-  the node and delete the state file there to retry (ADR-0033).
+  runs without the flags), the installer waits out its verification
+  timeout (90 s), restores the files it replaced, restarts kubelet onto
+  them and fails the pod with the reason. Kubelet is down for about that
+  time, longer than the node-monitor grace period (40 s, 50 s since
+  Kubernetes 1.32): the node turns `NotReady` and its pods drop out of
+  Service endpoints until kubelet runs again. The installer does not
+  restart kubelet onto the same content again: roll out corrected values,
+  or fix the node and delete the state file there to retry (ADR-0033).
 
 ### Several installs per cluster (ADR-0029)
 
