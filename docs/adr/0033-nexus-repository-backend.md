@@ -761,6 +761,39 @@ the wiring of decision h's settings as follows.
     NexusAccess, and readiness waits for the NexusAccess cache
     (`Config.CachedObjects`) when it does.
 
+The e2e harness (2026-09-28) implements decision i as follows.
+
+17. **e2e** (decision i). `tests/03-nexus.tftest.hcl` covers every
+    assertion decision i lists, on Nexus 3.76.1, next to Harbor. How it
+    departs from or adds to the proposal:
+    - It runs only through `make e2e-nexus`. `make e2e`, `e2e.yml` and
+      `harbor-compat.yml` filter `tofu test` to `01-plan` and
+      `02-bridge`, whose runtime stays as it was; whether CI runs the
+      Nexus harness is left to the maintainer.
+    - `test/e2e/nexus/Dockerfile` pins the image by digest and copies its
+      filesystem into an image of the build platform: containerd's CRI
+      plugin refuses an image of another platform even after
+      `kind load`, and the image is linux/amd64 only. On arm64 the
+      binaries run through binfmt (Rosetta). `renovate.json` holds the
+      pin below 3.77.
+    - The docker connectors speak plain HTTP; containerd reaches them
+      through `hosts.toml` with an `http://` server, so no TLS front.
+      Each hosted repository has its own connector and NodePort (3.76
+      has no path routing).
+    - The bridge authenticates as a user with a random name holding only
+      `nx-users-all`, `nx-roles-all` and `nx-privileges-read` (decision
+      j), so every stage proves those suffice.
+    - The rotations are triggered through the Secret: a backdated
+      `rotation-not-before` (scheduled rotation, previous user retired
+      after `NexusUserRetireGrace`) and a deleted Secret (forced
+      rotation, on the object in `RepositoryNotFound`).
+    - "Nexus is down" is Nexus scaled to zero on its PVC. A NetworkPolicy
+      or an emptied Service would leave the client's idle keep-alive
+      connections to Nexus open.
+    - Not asserted: an image that matches no backend (decision f refuses
+      it once two backends are configured; the shared interface contract
+      of this change routes it to Harbor).
+
 ## Verified at runtime
 
 Nexus `sonatype/nexus3:3.76.1` in a local container bound to 127.0.0.1,
