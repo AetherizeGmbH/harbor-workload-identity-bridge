@@ -201,6 +201,8 @@ FUZZ_TARGETS ?= \
 	./installer:FuzzKubeletCmdline \
 	./installer:FuzzNodeFiles_Injective \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \
+	./bridge/controlplane/nexus:FuzzNexusName_Injective \
+	./bridge/controlplane/nexus:FuzzRenderMessage_WithholdsSecrets \
 	./bridge/internal/robotsecret:FuzzName_Injective \
 	./bridge/dataplane:FuzzJSONAudience \
 	./bridge/dataplane:FuzzCachedKeySet_VerifySignature
