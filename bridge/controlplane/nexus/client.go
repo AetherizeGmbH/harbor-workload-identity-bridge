@@ -109,21 +109,32 @@ type Client interface {
 	ListUsers(ctx context.Context, prefix string) ([]User, error)
 
 	// CreateUser creates a local user with the given password and returns
-	// Nexus's view of it. Nexus drops roles that do not exist instead of
-	// refusing them, so the caller checks the returned roles.
+	// the user as GetUser reads it back. Nexus's answer to the create
+	// echoes the request. A role id that does not exist is not refused:
+	// Nexus stores it with the user, hides it from every read, and the
+	// user gains that role as soon as a role with the id is created
+	// (verified on Nexus 3.76.1; UserManagerImpl stores the role ids
+	// unfiltered, reads filter them). The caller therefore compares the
+	// returned roles with the requested ones: a missing one did not exist
+	// when the user was created. A read-back that fails is an error even
+	// though the user was created; callers read the user again.
 	CreateUser(ctx context.Context, user User, password string) (*User, error)
 
 	// UpdateUser rewrites a local user's names, e-mail address, status and
 	// roles. user must come from GetUser or ListUsers with the fields to
 	// change edited: its Status is sent as it is, so an administrator's
-	// disable is not undone. The password is left unchanged.
+	// disable is not undone. The password is left unchanged. Nexus refuses
+	// an unknown role with 400. ErrNotFound only once the user listing
+	// confirms that the user does not exist.
 	UpdateUser(ctx context.Context, user User) error
 
 	// DeleteUser deletes the local user. A user that does not exist is no
 	// error once the listing confirms its absence.
 	DeleteUser(ctx context.Context, userID string) error
 
-	// GetRole returns the local role; ErrNotFound when there is none.
+	// GetRole returns the local role; ErrNotFound when there is none,
+	// which the role listing confirms (a 404 can also come from a URL that
+	// does not point at Nexus).
 	GetRole(ctx context.Context, id string) (*Role, error)
 
 	// ListRoles returns every local role whose id begins with prefix,
@@ -134,7 +145,12 @@ type Client interface {
 	CreateRole(ctx context.Context, role Role) (*Role, error)
 
 	// UpdateRole rewrites a local role's name, description, privileges
-	// and contained roles.
+	// and contained roles, then reads the role back. A privilege that does
+	// not exist fails the update: before Nexus 3.91.0 with 400
+	// (ErrBadRequest) and nothing stored, from 3.91.0 on with a
+	// *PrivilegesDroppedError (ErrPrivilegesDropped) and the role stored
+	// without it. ErrNotFound only once the role listing confirms that
+	// the role does not exist.
 	UpdateRole(ctx context.Context, role Role) error
 
 	// DeleteRole deletes the local role; Nexus also removes it from every
@@ -142,9 +158,11 @@ type Client interface {
 	// confirms its absence.
 	DeleteRole(ctx context.Context, id string) error
 
-	// GetPrivilege returns the privilege; ErrNotFound when there is none.
-	// For a built-in repository-view privilege (RepositoryPrivileges) that
-	// means the repository does not exist in that format.
+	// GetPrivilege returns the privilege; ErrNotFound when there is none,
+	// once the same endpoint returns Nexus's built-in privilege nx-all (a
+	// 404 can also come from a URL that does not point at Nexus). For a
+	// built-in repository-view privilege (RepositoryPrivileges) that means
+	// the repository does not exist in that format.
 	GetPrivilege(ctx context.Context, name string) (*Privilege, error)
 
 	// Status reports whether Nexus can serve read requests

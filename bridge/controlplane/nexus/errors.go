@@ -23,8 +23,11 @@ import (
 // verified on Nexus 3.76.1, ADR-0033). Callers therefore never infer
 // existence from a create error; they read the object again.
 var (
-	// ErrBadRequest: 400. Nexus uses it for validation errors, unknown
-	// roles or privileges, a duplicate role id and read-only objects.
+	// ErrBadRequest: 400. Nexus uses it for validation errors, an unknown
+	// role in a user update, an unknown privilege in a role create (and in
+	// a role update before 3.91.0; see ErrPrivilegesDropped), a duplicate
+	// role id and read-only objects. A user create with an unknown role is
+	// not refused (see Client.CreateUser).
 	ErrBadRequest = errors.New("nexus: bad request")
 
 	// ErrUnauthorized: 401, the credentials were rejected.
@@ -42,10 +45,41 @@ var (
 	// differs from the path.
 	ErrConflict = errors.New("nexus: conflict")
 
-	// ErrRateLimited: 429. Nexus 3.93 and later answer it to credentials
-	// that failed to log in too often, with Retry-After (RetryAfter). The
-	// client never retries; the caller waits at least that long.
+	// ErrRateLimited: 429. Nexus 3.93.0 and later count failed logins in
+	// memory on each node and key the count on the username of Basic
+	// Auth, or on the SHA-256 of an API-key token; the client IP is only
+	// audited (AuthRateLimiterServiceImpl and
+	// NexusBasicHttpAuthenticationFilter, nexus-public release-3.96.3;
+	// not verifiable on 3.76.1, ADR-0033). The failure that takes the
+	// count past nexus.auth.ratelimit.max-attempts (default 3) is
+	// answered with 429 and a Retry-After (RetryAfter) of 30 s, doubling
+	// with every further failure up to
+	// nexus.auth.ratelimit.max-delay-seconds (default 900 s).
+	//
+	// From 3.94.0 on, a username past the limit gets 429 before Nexus
+	// checks the password, so the correct password is refused as well,
+	// and every such request keeps the block alive. Retry-After is
+	// therefore not the time at which requests succeed again: the block
+	// ends only after max-delay-seconds without any request for that
+	// username, when an administrator updates the user or changes its
+	// password, or when Nexus restarts. On 3.93 a correct password still
+	// succeeds and clears the count.
+	//
+	// The client never retries. A caller that gets it stops every request
+	// with that credential for at least max-delay-seconds, not only for
+	// Retry-After.
 	ErrRateLimited = errors.New("nexus: rate limited")
+
+	// ErrPrivilegesDropped: a role update succeeded, but the role Nexus
+	// stored lacks privileges the update named. From 3.91.0 on Nexus
+	// removes privileges that do not exist from a role update, stores the
+	// rest and answers 204
+	// (SecurityConfigurationManagerImpl.validateAndCleanOrphanedPrivileges,
+	// nexus-public release-3.91.0 to release-3.96.3); before 3.91.0 it
+	// refuses such an update with 400 (ErrBadRequest, verified on 3.76.1).
+	// A role create is refused with 400 in both. UpdateRole reads the role
+	// back and returns a *PrivilegesDroppedError, which matches this.
+	ErrPrivilegesDropped = errors.New("nexus: role stored without some privileges")
 
 	// ErrServer: any 5xx.
 	ErrServer = errors.New("nexus: server error")
@@ -74,10 +108,11 @@ type APIError struct {
 	RetryAfter    time.Duration
 	HasRetryAfter bool
 
-	// endpointNotFound marks a 404 from a listing endpoint, which always
-	// exists on Nexus: the URL points somewhere else. Such an error must
-	// not read as "the object does not exist" (a deletion that trusted it
-	// would leave a user with a valid password behind).
+	// endpointNotFound marks a 404 from a listing endpoint, or for an
+	// object every Nexus has, both of which always exist on Nexus: the URL
+	// points somewhere else. Such an error must not read as "the object
+	// does not exist" (a deletion that trusted it would leave a user with
+	// a valid password behind).
 	endpointNotFound bool
 }
 
@@ -93,7 +128,7 @@ func (e *APIError) Error() string {
 		msg += fmt.Sprintf(" (Retry-After %s)", e.RetryAfter)
 	}
 	if e.endpointNotFound {
-		msg += " (a listing endpoint Nexus always serves was not found: check that the Nexus URL points at the server's base URL)"
+		msg += " (Nexus always serves this: check that the Nexus URL points at the server's base URL)"
 	}
 	return msg
 }
@@ -129,7 +164,8 @@ func (e *APIError) Is(target error) bool {
 	return false
 }
 
-// listingError marks a 404 from a listing endpoint (see endpointNotFound).
+// listingError marks a 404 from a listing endpoint, or for an object every
+// Nexus has (see endpointNotFound).
 func listingError(err error) error {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
@@ -138,9 +174,51 @@ func listingError(err error) error {
 	return err
 }
 
+// confirmAbsence checks a 404 (err) from an endpoint that addresses one
+// object: a URL that does not point at Nexus answers 404 as well.
+// present asks Nexus again in a way that fails distinguishably in that
+// case (a listing, whose 404 is endpointNotFound). confirmAbsence returns
+// nil when present confirms that the object does not exist, and otherwise
+// an error that does not match ErrNotFound: a caller must not read it as
+// "gone" (a deletion that trusted it would leave the object behind).
+func confirmAbsence(err error, what string, present func() (bool, error)) error {
+	found, checkErr := present()
+	switch {
+	case checkErr != nil:
+		// err itself is not wrapped: it matches ErrNotFound.
+		return fmt.Errorf("%s; confirming that the %s does not exist failed: %w", err.Error(), what, checkErr)
+	case found:
+		return fmt.Errorf("%s, but Nexus still lists the %s", err.Error(), what)
+	}
+	return nil
+}
+
+// PrivilegesDroppedError is UpdateRole's error when the role Nexus stored
+// lacks privileges the update named (ErrPrivilegesDropped).
+type PrivilegesDroppedError struct {
+	// Op names the operation, e.g. `update role "bridge-…"`.
+	Op string
+
+	// Dropped are the privileges the update named that the stored role
+	// lacks, sorted: privileges that do not exist, for a repository-view
+	// privilege a repository that does not exist in that format.
+	Dropped []string
+}
+
+func (e *PrivilegesDroppedError) Error() string {
+	return fmt.Sprintf("%s: Nexus answered with success but stored the role without %s; they do not exist (for a repository-view privilege: the repository is gone)",
+		e.Op, strings.Join(e.Dropped, ", "))
+}
+
+// Is matches ErrPrivilegesDropped.
+func (e *PrivilegesDroppedError) Is(target error) bool {
+	return target == ErrPrivilegesDropped
+}
+
 // RetryAfter returns the delay a rate-limited or unavailable Nexus asked
 // for with Retry-After. ok is false when err carries no such header. The
-// value is Nexus's; the caller bounds it by its own maximum wait.
+// value is Nexus's; the caller bounds it by its own maximum wait. For a
+// 429 it is not the time at which the block ends (see ErrRateLimited).
 func RetryAfter(err error) (d time.Duration, ok bool) {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.HasRetryAfter {

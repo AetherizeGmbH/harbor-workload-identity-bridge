@@ -19,10 +19,15 @@ import (
 // fakeNexus is a Nexus REST API stand-in that reproduces the behaviour
 // verified against sonatype/nexus3:3.76.1 (ADR-0033): the case-insensitive
 // user id prefix search, 500 text/plain for a duplicate user, 400 for a
-// duplicate role, silently dropped unknown roles on user create, 409 for
-// a role update whose body id differs from the path, JSON error documents
-// {"id":"*","message":"\"…\""} and validation lists, 401 for wrong and
-// 403 for missing credentials, and unauthenticated status endpoints.
+// duplicate role, a user create whose answer echoes the request and that
+// stores an unknown role id hidden from reads until a role with that id
+// exists, 409 for a role update whose body id differs from the path, JSON
+// error documents {"id":"*","message":"\"…\""} and validation lists, 401
+// for wrong and 403 for missing credentials, unauthenticated status
+// endpoints, and the built-in privilege nx-all. With
+// dropOrphanPrivileges it models Nexus 3.91.0 and later, which store a
+// role update without the privileges that do not exist and answer 204
+// (from source; 3.76.1 refuses such an update with 400).
 type fakeNexus struct {
 	t        *testing.T
 	username string
@@ -35,6 +40,9 @@ type fakeNexus struct {
 	privileges map[string]Privilege
 	writable   bool
 	requests   []recorded
+
+	// dropOrphanPrivileges selects Nexus 3.91.0+'s role update.
+	dropOrphanPrivileges bool
 
 	// override, when set, answers a request before the fake does; it
 	// returns false to let the fake handle it.
@@ -61,7 +69,7 @@ func newFakeNexus(t *testing.T) *fakeNexus {
 		users:      map[string]User{},
 		passwords:  map[string]string{},
 		roles:      map[string]Role{},
-		privileges: map[string]Privilege{},
+		privileges: map[string]Privilege{builtInPrivilege: {Type: "application", Name: builtInPrivilege, ReadOnly: true}},
 		writable:   true,
 	}
 }
@@ -202,7 +210,7 @@ func (f *fakeNexus) listUsers(w http.ResponseWriter, r *http.Request) {
 	out := []User{}
 	for _, u := range f.users {
 		if strings.HasPrefix(strings.ToLower(u.UserID), term) && (source == "" || source == u.Source) {
-			out = append(out, u)
+			out = append(out, f.visible(u))
 		}
 	}
 	slices.SortFunc(out, func(a, b User) int { return strings.Compare(a.UserID, b.UserID) })
@@ -232,19 +240,25 @@ func (f *fakeNexus) createUser(w http.ResponseWriter, body []byte) {
 		fmt.Fprintf(w, "ERROR: (ID 78742119-005e-4ea8-9605-86c4451dea58) org.sonatype.nexus.security.user.DuplicateUserException: User %s already exists.", in.UserID)
 		return
 	}
-	roles := []string{}
-	for _, id := range in.Roles {
-		if _, ok := f.roles[id]; ok { // unknown roles are dropped silently
-			roles = append(roles, id)
-		}
-	}
+	// Nexus stores every role id, existing or not, and answers with the
+	// request.
 	u := User{
 		UserID: in.UserID, FirstName: in.FirstName, LastName: in.LastName, EmailAddress: in.EmailAddress,
-		Source: DefaultSource, Status: in.Status, Roles: roles, ExternalRoles: []string{},
+		Source: DefaultSource, Status: in.Status, Roles: slices.Clone(in.Roles), ExternalRoles: []string{},
 	}
 	f.users[in.UserID] = u
 	f.passwords[in.UserID] = in.Password
 	writeJSON(w, http.StatusOK, u)
+}
+
+// visible is a stored user as Nexus reads it: role ids without a role are
+// hidden, and appear once a role with that id is created.
+func (f *fakeNexus) visible(u User) User {
+	u.Roles = slices.DeleteFunc(slices.Clone(u.Roles), func(id string) bool {
+		_, ok := f.roles[id]
+		return !ok
+	})
+	return u
 }
 
 func (f *fakeNexus) updateUser(w http.ResponseWriter, id string, body []byte) {
@@ -347,10 +361,16 @@ func (f *fakeNexus) role(w http.ResponseWriter, r *http.Request, id string, body
 			nexusError(w, http.StatusNotFound, fmt.Sprintf("Role '%s' not found.", id))
 			return
 		}
-		if !f.checkPrivileges(w, in) {
+		privileges := in.Privileges
+		if f.dropOrphanPrivileges {
+			privileges = slices.DeleteFunc(slices.Clone(privileges), func(p string) bool {
+				_, ok := f.privileges[p]
+				return !ok
+			})
+		} else if !f.checkPrivileges(w, in) {
 			return
 		}
-		f.roles[id] = Role{ID: id, Name: in.Name, Description: in.Description, Privileges: in.Privileges, Roles: in.Roles, Source: DefaultSource}
+		f.roles[id] = Role{ID: id, Name: in.Name, Description: in.Description, Privileges: privileges, Roles: in.Roles, Source: DefaultSource}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodDelete:
 		if !ok {

@@ -47,6 +47,18 @@ func seedUser(f *fakeNexus, u User) {
 	f.users[u.UserID] = u
 }
 
+// Nexus authenticates active and changepassword users (UserStatus.isActive;
+// changepassword verified on Nexus 3.76.1), not locked or disabled ones.
+func TestUserStatus_Active(t *testing.T) {
+	for s, want := range map[UserStatus]bool{
+		UserActive: true, UserChangePassword: true, UserLocked: false, UserDisabled: false, "": false, "enabled": false,
+	} {
+		if got := s.Active(); got != want {
+			t.Errorf("UserStatus(%q).Active() = %v, want %v", s, got, want)
+		}
+	}
+}
+
 // Nexus's user search matches a case-insensitive id prefix, across the
 // sources unless one is named (verified on Nexus 3.76.1). GetUser must
 // return exactly the local user with exactly the requested id.
@@ -68,6 +80,7 @@ func TestGetUser_ExactCaseSensitiveLocalMatch(t *testing.T) {
 
 	want := testUser()
 	want.Source = DefaultSource
+	seedRole(f, testRoleID)
 	seedUser(f, want)
 	got, err := c.GetUser(context.Background(), testUserID)
 	if err != nil {
@@ -148,9 +161,16 @@ func TestCreateUser_SendsApiCreateUser(t *testing.T) {
 	if got.UserID != testUserID || got.Source != DefaultSource || !slices.Equal(got.Roles, []string{testRoleID}) {
 		t.Errorf("CreateUser = %+v", got)
 	}
-	r := f.lastRequest()
+	reqs := f.recordedRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("Nexus saw %d requests, want the create and the read-back", len(reqs))
+	}
+	r := reqs[0]
 	if r.Method != http.MethodPost || r.Path != "/service/rest/v1/security/users" || r.ContentType != "application/json" {
 		t.Errorf("request = %s %s (%s)", r.Method, r.Path, r.ContentType)
+	}
+	if back := reqs[1]; back.Method != http.MethodGet || back.Query.Get("userId") != testUserID || back.Query.Get("source") != DefaultSource {
+		t.Errorf("read-back = %s %s?%s, want the user search for the new id", back.Method, back.Path, back.Query.Encode())
 	}
 	var body map[string]any
 	if err := json.Unmarshal([]byte(r.Body), &body); err != nil {
@@ -186,10 +206,12 @@ func mustJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
-// Nexus drops a role that does not exist instead of refusing the user
-// (verified on Nexus 3.76.1); CreateUser returns Nexus's view so the caller
-// sees the missing role.
-func TestCreateUser_ReturnsRolesNexusKept(t *testing.T) {
+// Nexus answers a user create with the request and does not refuse a role
+// that does not exist: it stores the id, hides it from reads, and the user
+// gains the role once a role with that id is created (verified on Nexus
+// 3.76.1). CreateUser returns the user as read back, so the caller sees the
+// role missing; the answer to the create would have shown it.
+func TestCreateUser_ReturnsTheUserAsReadBack(t *testing.T) {
 	f := newFakeNexus(t)
 	srv := f.server("")
 	c := newTestClient(t, f, srv, "")
@@ -198,7 +220,52 @@ func TestCreateUser_ReturnsRolesNexusKept(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	if len(got.Roles) != 0 {
-		t.Errorf("CreateUser roles = %v, want Nexus's view without the unknown role", got.Roles)
+		t.Errorf("CreateUser roles = %v, want the read-back without the role that does not exist", got.Roles)
+	}
+	if _, err := c.CreateRole(context.Background(), Role{ID: testRoleID, Name: testRoleID}); err != nil {
+		t.Fatal(err)
+	}
+	later, err := c.GetUser(context.Background(), testUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(later.Roles, []string{testRoleID}) {
+		t.Errorf("roles after the role was created = %v, want the stored reference in effect", later.Roles)
+	}
+}
+
+// A read-back that fails is an error although the user exists; one that
+// does not find the user must not read as "the user does not exist".
+func TestCreateUser_ReadBackFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer func(w http.ResponseWriter)
+		want   string
+		is     error
+	}{
+		{"server error", func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) }, "reading it back failed", ErrServer},
+		{"not listed", func(w http.ResponseWriter) { writeJSON(w, http.StatusOK, []User{}) }, "does not list it", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeNexus(t)
+			f.override = func(w http.ResponseWriter, r *http.Request) bool {
+				if r.Method != http.MethodGet {
+					return false
+				}
+				tc.answer(w)
+				return true
+			}
+			srv := f.server("")
+			c := newTestClient(t, f, srv, "")
+			seedRole(f, testRoleID)
+			_, err := c.CreateUser(context.Background(), testUser(), "pw")
+			if err == nil || !strings.Contains(err.Error(), tc.want) || errors.Is(err, ErrNotFound) {
+				t.Fatalf("CreateUser = %v, want %q and not ErrNotFound", err, tc.want)
+			}
+			if tc.is != nil && !errors.Is(err, tc.is) {
+				t.Errorf("CreateUser = %v, want it to match %v", err, tc.is)
+			}
+		})
 	}
 }
 
@@ -249,15 +316,26 @@ func TestCreateUser_ValidatesBeforeSending(t *testing.T) {
 }
 
 func TestCreateUser_RefusesAnswerForAnotherUser(t *testing.T) {
-	f := newFakeNexus(t)
-	f.override = func(w http.ResponseWriter, _ *http.Request) bool {
-		writeJSON(w, http.StatusOK, User{UserID: "someone-else", Source: DefaultSource})
-		return true
-	}
-	srv := f.server("")
-	c := newTestClient(t, f, srv, "")
-	if _, err := c.CreateUser(context.Background(), testUser(), "pw"); err == nil || !strings.Contains(err.Error(), "someone-else") {
-		t.Fatalf("CreateUser = %v, want the mismatch reported", err)
+	for _, tc := range []struct {
+		name   string
+		answer User
+		want   string
+	}{
+		{"other id", User{UserID: "someone-else", Source: DefaultSource}, "someone-else"},
+		{"other source", User{UserID: testUserID, Source: "LDAP"}, `in source "LDAP"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeNexus(t)
+			f.override = func(w http.ResponseWriter, _ *http.Request) bool {
+				writeJSON(w, http.StatusOK, tc.answer)
+				return true
+			}
+			srv := f.server("")
+			c := newTestClient(t, f, srv, "")
+			if _, err := c.CreateUser(context.Background(), testUser(), "pw"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CreateUser = %v, want the mismatch reported", err)
+			}
+		})
 	}
 }
 
@@ -387,6 +465,77 @@ func TestNotFoundFromAnotherServerIsNotAbsence(t *testing.T) {
 	}
 	if err := c.DeleteRole(ctx, testRoleID); err == nil || errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteRole against a 404 server = %v, want an error other than ErrNotFound", err)
+	}
+	// The methods that address one object confirm a 404 the same way.
+	u := testUser()
+	u.Source = DefaultSource
+	for name, err := range map[string]error{
+		"GetRole":      func() error { _, err := c.GetRole(ctx, testRoleID); return err }(),
+		"GetPrivilege": func() error { _, err := c.GetPrivilege(ctx, "nx-repository-view-docker-apps-read"); return err }(),
+		"UpdateUser":   c.UpdateUser(ctx, u),
+		"UpdateRole":   c.UpdateRole(ctx, Role{ID: testRoleID, Name: testRoleID}),
+	} {
+		if err == nil || errors.Is(err, ErrNotFound) || !errors.Is(err, ErrUnexpectedStatus) || !strings.Contains(err.Error(), "check that the Nexus URL") {
+			t.Errorf("%s against a 404 server = %v, want an unexpected-status error, not ErrNotFound", name, err)
+		}
+	}
+}
+
+// A 404 for one object is ErrNotFound when Nexus confirms it: the listing
+// lacks the user or role, or the privilege endpoint serves nx-all.
+func TestNotFoundConfirmedByNexus(t *testing.T) {
+	f := newFakeNexus(t)
+	srv := f.server("")
+	c := newTestClient(t, f, srv, "")
+	ctx := context.Background()
+	u := testUser()
+	u.Source = DefaultSource
+	seedRole(f, testRoleID)
+	for name, err := range map[string]error{
+		"GetRole":      func() error { _, err := c.GetRole(ctx, "bridge-c.ns.other"); return err }(),
+		"GetPrivilege": func() error { _, err := c.GetPrivilege(ctx, "nx-repository-view-docker-gone-read"); return err }(),
+		"UpdateUser":   c.UpdateUser(ctx, u),
+		"UpdateRole":   c.UpdateRole(ctx, Role{ID: "bridge-c.ns.other", Name: "x"}),
+	} {
+		if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("%s of a missing object = %v, want ErrNotFound with Nexus's message", name, err)
+		}
+	}
+	var probed bool
+	for _, r := range f.recordedRequests() {
+		probed = probed || r.Path == "/service/rest/v1/security/privileges/"+builtInPrivilege
+	}
+	if !probed {
+		t.Error("GetPrivilege did not confirm the 404 against the built-in privilege")
+	}
+}
+
+// A 404 for one object while Nexus still lists it is a contradiction, not
+// an absence.
+func TestNotFoundContradictedByTheListing(t *testing.T) {
+	f := newFakeNexus(t)
+	f.override = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut || (r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/service/rest/v1/security/roles/")) {
+			nexusError(w, http.StatusNotFound, "not found")
+			return true
+		}
+		return false
+	}
+	srv := f.server("")
+	c := newTestClient(t, f, srv, "")
+	ctx := context.Background()
+	seedRole(f, testRoleID)
+	seedUser(f, testUser())
+	u := testUser()
+	u.Source = DefaultSource
+	if _, err := c.GetRole(ctx, testRoleID); err == nil || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "still lists the role") {
+		t.Errorf("GetRole = %v, want the contradiction reported", err)
+	}
+	if err := c.UpdateRole(ctx, Role{ID: testRoleID, Name: testRoleID}); err == nil || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "still lists the role") {
+		t.Errorf("UpdateRole = %v, want the contradiction reported", err)
+	}
+	if err := c.UpdateUser(ctx, u); err == nil || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "still lists the user") {
+		t.Errorf("UpdateUser = %v, want the contradiction reported", err)
 	}
 }
 

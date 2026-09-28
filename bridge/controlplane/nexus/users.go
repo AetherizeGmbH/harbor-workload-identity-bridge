@@ -15,15 +15,27 @@ import (
 // UserStatus is a Nexus user's status.
 type UserStatus string
 
-// User statuses. Nexus refuses to authenticate a user in any status but
-// active, with a password and with its docker bearer token alike; the
-// token becomes valid again when the user is re-activated (ADR-0033).
+// User statuses. Nexus authenticates a user whose status is active or
+// changepassword and refuses one that is locked or disabled, with a
+// password and with its docker bearer token alike (UserStatus.isActive,
+// nexus-public release-3.76.1 and release-3.96.3). On Nexus 3.76.1 a
+// changepassword user's Basic Auth, /v2/token and existing bearer token
+// keep working, and a disabled or locked user's token is refused until
+// the user is re-activated, when it becomes valid again (ADR-0033).
 const (
 	UserActive         UserStatus = "active"
 	UserLocked         UserStatus = "locked"
 	UserDisabled       UserStatus = "disabled"
 	UserChangePassword UserStatus = "changepassword"
 )
+
+// Active reports whether Nexus authenticates a user in this status:
+// active and changepassword. A user whose status is not Active holds no
+// usable credential; one whose status is Active does, whatever it is
+// called.
+func (s UserStatus) Active() bool {
+	return s == UserActive || s == UserChangePassword
+}
 
 // User is a Nexus user as the REST API reports it (ApiUser). It carries no
 // password: Nexus never returns one, and CreateUser takes it separately so
@@ -187,7 +199,31 @@ func (c *httpClient) CreateUser(ctx context.Context, user User, password string)
 	if created.UserID != user.UserID || created.Source != DefaultSource {
 		return nil, fmt.Errorf("%s: Nexus reported the new user as %q in source %q", op, created.UserID, created.Source)
 	}
-	return &created, nil
+	// The answer echoes the request (UserApiResource.createUser returns
+	// the object it passed to DefaultSecuritySystem.addUser), roles
+	// included; only a read shows the roles that exist.
+	got, err := c.GetUser(ctx, user.UserID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil, fmt.Errorf("%s: Nexus accepted the user but does not list it", op)
+	case err != nil:
+		return nil, fmt.Errorf("%s: the user was created, but reading it back failed: %w", op, err)
+	}
+	return got, nil
+}
+
+// userPresent reports whether Nexus lists the local user (confirmAbsence).
+func (c *httpClient) userPresent(ctx context.Context, userID string) func() (bool, error) {
+	return func() (bool, error) {
+		_, err := c.GetUser(ctx, userID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return false, nil
+		case err != nil:
+			return false, err
+		}
+		return true, nil
+	}
 }
 
 // UpdateUser implements Client.
@@ -225,13 +261,20 @@ func (c *httpClient) UpdateUser(ctx context.Context, user User) error {
 	if err != nil {
 		return fmt.Errorf("%s: encode request: %w", op, err)
 	}
-	return c.do(ctx, request{
+	err = c.do(ctx, request{
 		op:          op,
 		method:      http.MethodPut,
 		path:        "/v1/security/users/" + pathSegment(user.UserID),
 		body:        body,
 		contentType: "application/json",
 	})
+	if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if confirmErr := confirmAbsence(err, "user", c.userPresent(ctx, user.UserID)); confirmErr != nil {
+		return confirmErr
+	}
+	return err
 }
 
 // DeleteUser implements Client. A 404 counts as success only once the user
@@ -251,14 +294,5 @@ func (c *httpClient) DeleteUser(ctx context.Context, userID string) error {
 	if !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	switch _, getErr := c.GetUser(ctx, userID); {
-	case errors.Is(getErr, ErrNotFound):
-		return nil
-	// err itself is not wrapped: it matches ErrNotFound, and a caller
-	// must not read these outcomes as "the user is gone".
-	case getErr != nil:
-		return fmt.Errorf("%s; confirming that the user is gone failed: %w", err.Error(), getErr)
-	default:
-		return fmt.Errorf("%s, but Nexus still lists the user", err.Error())
-	}
+	return confirmAbsence(err, "user", c.userPresent(ctx, userID))
 }

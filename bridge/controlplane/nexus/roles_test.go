@@ -168,7 +168,11 @@ func TestUpdateRole(t *testing.T) {
 	if err := c.UpdateRole(context.Background(), role); err != nil {
 		t.Fatalf("UpdateRole: %v", err)
 	}
-	r := f.lastRequest()
+	reqs := f.recordedRequests()
+	r, back := reqs[len(reqs)-2], reqs[len(reqs)-1]
+	if back.Method != http.MethodGet || back.Path != "/service/rest/v1/security/roles/"+testRoleID {
+		t.Errorf("request after the update = %s %s, want the role read back", back.Method, back.Path)
+	}
 	var body roleBody
 	if err := json.Unmarshal([]byte(r.Body), &body); err != nil {
 		t.Fatal(err)
@@ -183,10 +187,83 @@ func TestUpdateRole(t *testing.T) {
 	if !slices.Equal(got.Privileges, []string{testPrivilege}) {
 		t.Errorf("after update: %+v", got)
 	}
-	// A privilege whose repository is gone is refused with 400.
-	role.Privileges = append(role.Privileges, "nx-repository-view-docker-gone-read")
-	if err := c.UpdateRole(context.Background(), role); !errors.Is(err, ErrBadRequest) {
-		t.Errorf("UpdateRole with a missing privilege = %v, want ErrBadRequest", err)
+}
+
+// A privilege that does not exist (its repository is gone) fails a role
+// update in both Nexus generations: before 3.91.0 with 400 and nothing
+// stored (verified on 3.76.1), from 3.91.0 on with 204 and the role stored
+// without it (from source), which only the read-back reveals.
+func TestUpdateRole_PrivilegeThatDoesNotExist(t *testing.T) {
+	const gone = "nx-repository-view-docker-gone-read"
+	for _, tc := range []struct {
+		name   string
+		drop   bool
+		stored []string
+	}{
+		{"before 3.91", false, []string{testPrivilege}},
+		{"3.91 and later", true, []string{testPrivilege}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeNexus(t)
+			f.dropOrphanPrivileges = tc.drop
+			srv := f.server("")
+			c := newTestClient(t, f, srv, "")
+			seedPrivilege(f, testPrivilege)
+			seedPrivilege(f, "nx-repository-view-docker-old-read")
+			seedRole(f, testRoleID, "nx-repository-view-docker-old-read")
+			role := Role{ID: testRoleID, Name: testRoleID, Privileges: []string{testPrivilege, gone}}
+			err := c.UpdateRole(context.Background(), role)
+			var dropped *PrivilegesDroppedError
+			switch {
+			case tc.drop && (!errors.As(err, &dropped) || !errors.Is(err, ErrPrivilegesDropped) || !slices.Equal(dropped.Dropped, []string{gone})):
+				t.Fatalf("UpdateRole = %v, want a PrivilegesDroppedError naming %q", err, gone)
+			case !tc.drop && (!errors.Is(err, ErrBadRequest) || errors.Is(err, ErrPrivilegesDropped)):
+				t.Fatalf("UpdateRole = %v, want ErrBadRequest", err)
+			}
+			got, err := c.GetRole(context.Background(), testRoleID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := tc.stored
+			if !tc.drop {
+				want = []string{"nx-repository-view-docker-old-read"} // nothing stored
+			}
+			if !slices.Equal(got.Privileges, want) {
+				t.Errorf("stored privileges = %v, want %v", got.Privileges, want)
+			}
+		})
+	}
+}
+
+// A read-back that shows privileges the update did not name, or that
+// fails, is an error.
+func TestUpdateRole_ReadBackMismatch(t *testing.T) {
+	f := newFakeNexus(t)
+	srv := f.server("")
+	c := newTestClient(t, f, srv, "")
+	seedPrivilege(f, testPrivilege)
+	seedRole(f, testRoleID)
+	f.setOverride(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, Role{ID: testRoleID, Privileges: []string{testPrivilege, "nx-all"}})
+			return true
+		}
+		return false
+	})
+	err := c.UpdateRole(context.Background(), Role{ID: testRoleID, Name: testRoleID, Privileges: []string{testPrivilege}})
+	if err == nil || !strings.Contains(err.Error(), "did not name: nx-all") || errors.Is(err, ErrPrivilegesDropped) {
+		t.Errorf("UpdateRole with an extra stored privilege = %v, want it reported", err)
+	}
+	f.setOverride(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusBadGateway)
+			return true
+		}
+		return false
+	})
+	err = c.UpdateRole(context.Background(), Role{ID: testRoleID, Name: testRoleID, Privileges: []string{testPrivilege}})
+	if !errors.Is(err, ErrServer) || !strings.Contains(err.Error(), "reading it back failed") {
+		t.Errorf("UpdateRole with a failing read-back = %v, want ErrServer", err)
 	}
 }
 

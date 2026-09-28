@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -91,6 +92,11 @@ func (c *httpClient) GetRole(ctx context.Context, id string) (*Role, error) {
 		query:  url.Values{"source": {DefaultSource}},
 		out:    &role,
 	})
+	if errors.Is(err, ErrNotFound) {
+		if confirmErr := confirmAbsence(err, "role", c.rolePresent(ctx, id)); confirmErr != nil {
+			return nil, confirmErr
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +104,17 @@ func (c *httpClient) GetRole(ctx context.Context, id string) (*Role, error) {
 		return nil, fmt.Errorf("%s: Nexus returned role %q", op, role.ID)
 	}
 	return &role, nil
+}
+
+// rolePresent reports whether Nexus lists the local role (confirmAbsence).
+func (c *httpClient) rolePresent(ctx context.Context, id string) func() (bool, error) {
+	return func() (bool, error) {
+		roles, err := c.ListRoles(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		return slices.ContainsFunc(roles, func(r Role) bool { return r.ID == id }), nil
+	}
 }
 
 // ListRoles implements Client. Nexus cannot filter roles by id; the client
@@ -154,20 +171,55 @@ func (c *httpClient) CreateRole(ctx context.Context, role Role) (*Role, error) {
 }
 
 // UpdateRole implements Client. The body's id always equals the path's
-// (Nexus answers 409 otherwise).
+// (Nexus answers 409 otherwise). After a success it reads the role back,
+// because from 3.91.0 on Nexus stores a role update without the
+// privileges that do not exist and still answers 204
+// (ErrPrivilegesDropped).
 func (c *httpClient) UpdateRole(ctx context.Context, role Role) error {
 	op := fmt.Sprintf("update role %q", role.ID)
 	body, err := role.body(op)
 	if err != nil {
 		return err
 	}
-	return c.do(ctx, request{
+	err = c.do(ctx, request{
 		op:          op,
 		method:      http.MethodPut,
 		path:        "/v1/security/roles/" + pathSegment(role.ID),
 		body:        body,
 		contentType: "application/json",
 	})
+	if errors.Is(err, ErrNotFound) {
+		if confirmErr := confirmAbsence(err, "role", c.rolePresent(ctx, role.ID)); confirmErr != nil {
+			return confirmErr
+		}
+	}
+	if err != nil {
+		return err
+	}
+	stored, err := c.GetRole(ctx, role.ID)
+	if err != nil {
+		return fmt.Errorf("%s: the role was updated, but reading it back failed: %w", op, err)
+	}
+	var dropped, added []string
+	for _, p := range role.Privileges {
+		if !slices.Contains(stored.Privileges, p) {
+			dropped = append(dropped, p)
+		}
+	}
+	for _, p := range stored.Privileges {
+		if !slices.Contains(role.Privileges, p) {
+			added = append(added, p)
+		}
+	}
+	slices.Sort(dropped)
+	slices.Sort(added)
+	switch {
+	case len(added) > 0:
+		return fmt.Errorf("%s: Nexus stored the role with privileges the update did not name: %s", op, strings.Join(added, ", "))
+	case len(dropped) > 0:
+		return &PrivilegesDroppedError{Op: op, Dropped: slices.Compact(dropped)}
+	}
+	return nil
 }
 
 // DeleteRole implements Client. As with DeleteUser, a 404 counts as
@@ -185,18 +237,7 @@ func (c *httpClient) DeleteRole(ctx context.Context, id string) error {
 	if !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	// err itself is not wrapped: it matches ErrNotFound, and a caller
-	// must not read these outcomes as "the role is gone".
-	roles, listErr := c.ListRoles(ctx, id)
-	if listErr != nil {
-		return fmt.Errorf("%s; confirming that the role is gone failed: %w", err.Error(), listErr)
-	}
-	for _, r := range roles {
-		if r.ID == id {
-			return fmt.Errorf("%s, but Nexus still lists the role", err.Error())
-		}
-	}
-	return nil
+	return confirmAbsence(err, "role", c.rolePresent(ctx, id))
 }
 
 // GetPrivilege implements Client.
@@ -205,6 +246,30 @@ func (c *httpClient) GetPrivilege(ctx context.Context, name string) (*Privilege,
 	if err := validateID("privilege", name); err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
+	p, err := c.getPrivilege(ctx, op, name)
+	if errors.Is(err, ErrNotFound) {
+		// Listing every privilege to confirm the absence can take
+		// megabytes on a large Nexus; asking the same endpoint for a
+		// privilege that always exists shows as well that the 404 came
+		// from Nexus and not from a URL that points elsewhere.
+		if confirmErr := confirmAbsence(err, "privilege", func() (bool, error) {
+			_, probeErr := c.getPrivilege(ctx, fmt.Sprintf("get built-in privilege %q", builtInPrivilege), builtInPrivilege)
+			return false, listingError(probeErr)
+		}); confirmErr != nil {
+			return nil, confirmErr
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// builtInPrivilege is a privilege every Nexus has: read-only, contributed
+// by Nexus itself, never deletable (verified on 3.76.1: readOnly true).
+const builtInPrivilege = "nx-all"
+
+func (c *httpClient) getPrivilege(ctx context.Context, op, name string) (*Privilege, error) {
 	var p Privilege
 	err := c.do(ctx, request{
 		op:     op,

@@ -39,7 +39,12 @@ func TestClient_StatusToSentinel(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
 			f := newFakeNexus(t)
-			f.override = func(w http.ResponseWriter, _ *http.Request) bool {
+			f.override = func(w http.ResponseWriter, r *http.Request) bool {
+				if r.URL.Path == "/service/rest/v1/security/roles" {
+					// The listing that confirms a 404 is not the subject.
+					writeJSON(w, http.StatusOK, []Role{})
+					return true
+				}
 				w.WriteHeader(tc.status)
 				return true
 			}
@@ -173,6 +178,53 @@ func TestClient_ErrorsNeverCarryCredentials(t *testing.T) {
 	}
 }
 
+// For every request without a user password the admin credentials are the
+// only secrets: each of them, echoed alone, must be withheld.
+func TestClient_ErrorsNeverCarryAdminCredentials(t *testing.T) {
+	calls := map[string]func(Client) error{
+		"UpdateUser": func(c Client) error {
+			u := testUser()
+			u.Source = DefaultSource
+			return c.UpdateUser(context.Background(), u)
+		},
+		"ListUsers":  func(c Client) error { _, err := c.ListUsers(context.Background(), "bridge-c."); return err },
+		"DeleteRole": func(c Client) error { return c.DeleteRole(context.Background(), testRoleID) },
+	}
+	echoes := map[string]func(f *fakeNexus, r *http.Request) string{
+		"Authorization header": func(_ *fakeNexus, r *http.Request) string {
+			return "rejected " + r.Header.Get("Authorization")
+		},
+		"admin password": func(f *fakeNexus, _ *http.Request) string { return "rejected password " + f.password },
+	}
+	for callName, call := range calls {
+		for echoName, echo := range echoes {
+			t.Run(callName+"/"+echoName, func(t *testing.T) {
+				f := newFakeNexus(t)
+				f.override = func(w http.ResponseWriter, r *http.Request) bool {
+					w.Header().Set("Content-Type", "text/plain")
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprint(w, echo(f, r))
+					return true
+				}
+				srv := f.server("")
+				c := newTestClient(t, f, srv, "")
+				err := call(c)
+				if !errors.Is(err, ErrBadRequest) {
+					t.Fatalf("%s = %v, want ErrBadRequest", callName, err)
+				}
+				for _, secret := range []string{f.password, basicAuth(f.username, f.password)} {
+					if strings.Contains(err.Error(), secret) {
+						t.Errorf("error discloses %q: %v", secret, err)
+					}
+				}
+				if !strings.Contains(err.Error(), messageWithheld) {
+					t.Errorf("error %q does not say the message was withheld", err)
+				}
+			})
+		}
+	}
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -201,7 +253,8 @@ func TestParseRetryAfter(t *testing.T) {
 }
 
 // Nexus 3.93+ answers repeated failed logins with 429 and Retry-After.
-// The client never retries; it reports the delay for the caller to honour.
+// The client never retries; it reports the header, which for Nexus 3.94+
+// is not when the block ends (ErrRateLimited).
 func TestClient_RateLimitedCarriesRetryAfter(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
