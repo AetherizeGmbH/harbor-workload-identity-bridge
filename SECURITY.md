@@ -567,6 +567,10 @@ attestation. The images also carry a signed CycloneDX SBOM. All of it is
 bound to the artifact digest. Kubelet runs the plugin binary as root on
 every node, so verify before you deploy, and pin by digest.
 
+Tags can be re-pointed. Each release pushes `:<version>`; `:latest`
+follows the highest released version, and rebuilding an older release
+does not move it back.
+
 ```bash
 IMAGE=ghcr.io/aetherizegmbh/harbor-workload-identity-bridge   # or ...-plugin
 cosign verify "$IMAGE@sha256:<digest>" \
