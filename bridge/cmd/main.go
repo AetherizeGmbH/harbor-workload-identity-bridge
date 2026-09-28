@@ -6,7 +6,10 @@
 //
 //   - the control-plane Reconciler (HarborAccess → persistent Harbor robot)
 //   - the orphan-robot Janitor
-//   - the data-plane OIDC Validator and HTTPS server
+//   - with BRIDGE_NEXUS_URL, the Nexus backend's reconciler (NexusAccess →
+//     Nexus role and user) and janitor (ADR-0036)
+//   - the data-plane OIDC Validator and HTTPS server, which routes a request
+//     by its image's registry host once Nexus is configured
 //
 // into a single process driven by controller-runtime's Manager. See
 // docs/adr/0002-bridge-control-plane-data-plane-split.md for the split
@@ -16,6 +19,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -25,8 +30,12 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap/zapcore"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -34,9 +43,11 @@ import (
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	nexusv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/nexus/v1alpha1"
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/nexus"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/dataplane"
 )
 
@@ -127,16 +138,16 @@ func run() error {
 	logWeakTokenValidation(setupLog, validatorCfg)
 
 	// Step 2: build the scheme. clientgo gives us the core resources;
-	// harborv1alpha1 is our CRD. Also resolve the rest.Config for the
-	// Manager — in-cluster config when running as a Pod, $KUBECONFIG
-	// otherwise.
+	// harborv1alpha1 and, with Nexus, nexusv1alpha1 are our CRDs. Also
+	// resolve the rest.Config for the Manager — in-cluster config when
+	// running as a Pod, $KUBECONFIG otherwise.
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
 		return fmt.Errorf("get rest config: %w", err)
 	}
-	// clientgo gives us the core resources; add our CRD so the manager's
-	// cached client can decode HarborAccess objects.
-	if err := harborv1alpha1.AddToScheme(clientgoscheme.Scheme); err != nil {
+	// clientgo gives us the core resources; add our CRDs so the manager's
+	// cached client can decode HarborAccess (and NexusAccess) objects.
+	if err := addToScheme(clientgoscheme.Scheme, cfg); err != nil {
 		return fmt.Errorf("build scheme: %w", err)
 	}
 
@@ -150,9 +161,9 @@ func run() error {
 		return err
 	}
 	mgrOpts := managerOptions(cfg, leaderElection)
-	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
+	mgr, err := newManager(restCfg, cfg, mgrOpts)
 	if err != nil {
-		return fmt.Errorf("build manager: %w", err)
+		return err
 	}
 
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
@@ -165,27 +176,10 @@ func run() error {
 		return err
 	}
 
-	// Step 5: instantiate Reconciler and register with the manager.
-	rec := &controlplane.Reconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Harbor: harborClient,
-		Config: cfg,
-	}
-	if err := rec.SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup reconciler: %w", err)
-	}
-
-	// Step 6: Janitor as a manager.Runnable.
-	if err := mgr.Add(&controlplane.Janitor{
-		Client: mgr.GetClient(),
-		// Uncached: the janitor must never judge a robot against a spec
-		// older than the one the robot was created from.
-		Reader: mgr.GetAPIReader(),
-		Harbor: harborClient,
-		Config: cfg,
-	}); err != nil {
-		return fmt.Errorf("add janitor: %w", err)
+	// Steps 5 and 6: the leader-only control plane: the Reconciler, the
+	// Janitor, and with Nexus configured the Nexus backend's (ADR-0036).
+	if err := setupControlPlane(mgr, cfg, harborClient, logger, crmetrics.Registry); err != nil {
+		return err
 	}
 
 	// Step 7: OIDC Validator. Discovery runs synchronously here so a
@@ -212,7 +206,6 @@ func run() error {
 	}
 
 	// Step 8: Handler + HTTPS server.
-	metrics := dataplane.NewMetrics(crmetrics.Registry)
 	perSource, burst, err := rateLimitFromEnv()
 	if err != nil {
 		return err
@@ -220,32 +213,14 @@ func run() error {
 	handler := &dataplane.Handler{
 		K8sClient: mgr.GetClient(),
 		Validator: validator,
-		Config: dataplane.HandlerConfig{
-			BridgeNamespace:      cfg.Namespace,
-			ForceLocalValidation: cfg.ForceLocalValidation,
-			Audience:             cfg.Audience,
-			RobotUsername:        robotUsername(cfg),
-		},
-		Metrics: metrics,
-		Limiter: dataplane.NewSourceLimiter(perSource, burst),
+		Config:    handlerConfig(cfg),
+		Metrics:   newMetrics(cfg, crmetrics.Registry),
+		Limiter:   dataplane.NewSourceLimiter(perSource, burst),
 		// Fixed at info: BRIDGE_LOG_LEVEL must not be able to silence the
 		// record of who received credentials.
 		Audit: newLogger("info").WithName("audit"),
 	}
-
-	if err := dataplane.IndexHarborAccessBySubject(startupCtx, mgr.GetFieldIndexer()); err != nil {
-		return fmt.Errorf("index HarborAccess by subject: %w", err)
-	}
-
-	server, err := dataplane.NewServer(serverConfig(credentialMux(handler), shutdownDelay))
-	if err != nil {
-		return fmt.Errorf("build server: %w", err)
-	}
-	// Ready means "can serve credentials": the listener is bound, and it
-	// binds only after the HarborAccess and Secret caches the handler
-	// reads have synced. A replica whose caches do not sync within
-	// CacheSyncTimeout exits with an error.
-	if err := controlplane.AddAfterCacheSync(mgr, "dataplane", server, controlplane.CacheSyncTimeout); err != nil {
+	if _, err := addDataPlane(startupCtx, mgr, cfg, handler, shutdownDelay); err != nil {
 		return err
 	}
 
@@ -257,6 +232,128 @@ func run() error {
 		return fmt.Errorf("manager exited with error: %w", err)
 	}
 	return nil
+}
+
+// addToScheme adds the bridge's API types to s: HarborAccess, and
+// NexusAccess with the Nexus backend. Without it the scheme does not know
+// NexusAccess, so nothing in a Harbor-only bridge can read one.
+func addToScheme(s *runtime.Scheme, cfg *controlplane.Config) error {
+	if err := harborv1alpha1.AddToScheme(s); err != nil {
+		return err
+	}
+	if cfg.Nexus != nil {
+		return nexusv1alpha1.AddToScheme(s)
+	}
+	return nil
+}
+
+// setupControlPlane adds the leader-only control plane to mgr: the
+// HarborAccess Reconciler and the orphan-robot Janitor, and with the Nexus
+// backend its reconciler and janitor, whose client re-reads the admin
+// credentials from BRIDGE_NEXUS_ADMIN_DIR on every call and whose
+// rate-limit gauge registers on reg (controlplane.SetupNexus).
+func setupControlPlane(mgr ctrl.Manager, cfg *controlplane.Config, harborClient harbor.Client, logger logr.Logger, reg prometheus.Registerer) error {
+	rec := &controlplane.Reconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Harbor: harborClient,
+		Config: cfg,
+	}
+	if err := rec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup reconciler: %w", err)
+	}
+
+	// Janitor as a manager.Runnable.
+	if err := mgr.Add(&controlplane.Janitor{
+		Client: mgr.GetClient(),
+		// Uncached: the janitor must never judge a robot against a spec
+		// older than the one the robot was created from.
+		Reader: mgr.GetAPIReader(),
+		Harbor: harborClient,
+		Config: cfg,
+	}); err != nil {
+		return fmt.Errorf("add janitor: %w", err)
+	}
+
+	// Does nothing without BRIDGE_NEXUS_URL.
+	if err := controlplane.SetupNexus(mgr, cfg, logger, reg); err != nil {
+		return fmt.Errorf("setup Nexus backend: %w", err)
+	}
+	return nil
+}
+
+// addDataPlane registers the cache indexes the handler lists by and adds
+// the credential server to mgr, on every replica. The server binds its
+// listener, and the replica turns ready, only once the caches of every
+// type the handler reads have synced: HarborAccess and Secrets, and
+// NexusAccess with the Nexus backend (Config.CachedObjects). A replica
+// whose caches do not sync within CacheSyncTimeout exits with an error.
+func addDataPlane(ctx context.Context, mgr ctrl.Manager, cfg *controlplane.Config, handler http.Handler, shutdownDelay time.Duration) (*dataplane.Server, error) {
+	if err := dataplane.IndexHarborAccessBySubject(ctx, mgr.GetFieldIndexer()); err != nil {
+		return nil, fmt.Errorf("index HarborAccess by subject: %w", err)
+	}
+	// Only with the backend: indexing creates the NexusAccess informer,
+	// which a cluster without the CRD could never sync.
+	if cfg.Nexus != nil {
+		if err := dataplane.IndexNexusAccessBySubject(ctx, mgr.GetFieldIndexer()); err != nil {
+			return nil, fmt.Errorf("index NexusAccess by subject: %w", err)
+		}
+	}
+	server, err := dataplane.NewServer(serverConfig(credentialMux(handler), shutdownDelay))
+	if err != nil {
+		return nil, fmt.Errorf("build server: %w", err)
+	}
+	if err := controlplane.AddAfterCacheSync(mgr, "dataplane", server, controlplane.CacheSyncTimeout, cfg.CachedObjects()...); err != nil {
+		return nil, err
+	}
+	return server, nil
+}
+
+// handlerConfig maps the bridge config onto the data-plane handler's. With
+// the Nexus backend it adds the registry hosts both backends serve and the
+// Nexus naming the control plane uses, so that the handler serves a Nexus
+// Secret only to the identity whose user it holds.
+func handlerConfig(cfg *controlplane.Config) dataplane.HandlerConfig {
+	hc := dataplane.HandlerConfig{
+		BridgeNamespace:      cfg.Namespace,
+		ForceLocalValidation: cfg.ForceLocalValidation,
+		Audience:             cfg.Audience,
+		RobotUsername:        robotUsername(cfg),
+	}
+	if cfg.Nexus != nil {
+		hc.HarborRegistryHosts = cfg.HarborRegistryHosts
+		hc.Nexus = &dataplane.NexusBackend{
+			RegistryHosts: cfg.Nexus.RegistryHosts,
+			IdentityName:  nexusIdentityName(cfg),
+			UserIdentity:  nexusUserIdentity,
+		}
+	}
+	return hc
+}
+
+// newMetrics registers the data plane's collectors on reg, and the Nexus
+// backend's only with the backend.
+func newMetrics(cfg *controlplane.Config, reg prometheus.Registerer) *dataplane.Metrics {
+	m := dataplane.NewMetrics(reg)
+	if cfg.Nexus != nil {
+		m.Nexus = dataplane.NewNexusMetrics(reg)
+	}
+	return m
+}
+
+// nexusIdentityName maps a ServiceAccount to the Nexus identity name the
+// control plane derives its role and user ids from (ADR-0036 decision b).
+func nexusIdentityName(cfg *controlplane.Config) func(saNamespace, saName string) (string, error) {
+	return func(saNamespace, saName string) (string, error) {
+		return nexus.IdentityName(cfg.ClusterName, saNamespace, saName)
+	}
+}
+
+// nexusUserIdentity returns the identity name of a Nexus user id the
+// control plane built, whatever its generation.
+func nexusUserIdentity(userID string) (string, bool) {
+	identity, _, ok := nexus.ParseUserID(userID)
+	return identity, ok
 }
 
 // serverConfig builds the credential listener's config.
@@ -293,6 +390,30 @@ func newHarborClient(cfg *controlplane.Config, log logr.Logger) (harbor.Client, 
 		return nil, fmt.Errorf("build harbor client: %w", err)
 	}
 	return c, nil
+}
+
+// nexusCRDFile is the chart file that holds the NexusAccess CRD.
+const nexusCRDFile = "charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml"
+
+// newManager builds the controller-runtime Manager. With the Nexus backend
+// the manager's cache needs the NexusAccess CRD at once; when the apiserver
+// does not know it, the error names the CRD and how to install it: Helm
+// installs the CRDs of crds/ only on `helm install`, never on `helm
+// upgrade`, so enabling Nexus on an existing release leaves it out
+// (ADR-0036 note 20).
+func newManager(restCfg *rest.Config, cfg *controlplane.Config, opts ctrl.Options) (ctrl.Manager, error) {
+	mgr, err := ctrl.NewManager(restCfg, opts)
+	if err == nil {
+		return mgr, nil
+	}
+	var noKind *meta.NoKindMatchError
+	if cfg.Nexus != nil && errors.As(err, &noKind) && noKind.GroupKind.Group == nexusv1alpha1.GroupVersion.Group {
+		return nil, fmt.Errorf("build manager: %s enables the Nexus backend, but the apiserver has no NexusAccess CRD "+
+			"(nexusaccesses.%s). helm upgrade never installs a chart's CRDs: apply %s of the chart you installed "+
+			"(kubectl apply -f), and the bridge starts: %w",
+			controlplane.EnvNexusURL, nexusv1alpha1.GroupVersion.Group, nexusCRDFile, err)
+	}
+	return nil, fmt.Errorf("build manager: %w", err)
 }
 
 // managerOptions builds the controller-runtime Manager's options.

@@ -763,11 +763,11 @@ func (r *Reconciler) requeueAfter(ha *harborv1alpha1.HarborAccess, notBefore, no
 
 // resyncAfter is ResyncInterval less a per-object offset of up to a tenth
 // of it, derived from the UID. Every object is reconciled when the bridge
-// starts; the offset spreads their resyncs instead of hitting Harbor with
-// all of them in lockstep an interval later.
-func resyncAfter(ha *harborv1alpha1.HarborAccess) time.Duration {
+// starts; the offset spreads their resyncs instead of hitting Harbor (or
+// Nexus) with all of them in lockstep an interval later.
+func resyncAfter(obj metav1.Object) time.Duration {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(ha.UID))
+	_, _ = h.Write([]byte(obj.GetUID()))
 	jitter := time.Duration(h.Sum32()%uint32(ResyncInterval/10/time.Second)) * time.Second
 	return ResyncInterval - jitter
 }

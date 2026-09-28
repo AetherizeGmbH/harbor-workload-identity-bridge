@@ -2,7 +2,8 @@ apiVersion: v2
 name: harbor-workload-identity-bridge
 description: |
   Translate Kubernetes Service Account tokens into Harbor robot credentials
-  so workloads can pull from Harbor without long-lived imagePullSecrets.
+  so workloads can pull from Harbor without long-lived imagePullSecrets
+  (and, in preview, into Sonatype Nexus Repository user credentials).
   Installs the bridge (controller + HTTPS server) plus, unless
   plugin.enabled=false, the kubelet image-credential-provider plugin
   (KEP-4412) onto every node.
@@ -12,6 +13,7 @@ appVersion: "0.11.5"
 kubeVersion: ">=1.34.0-0"
 keywords:
   - harbor
+  - nexus
   - registry
   - credentials
   - kep-4412

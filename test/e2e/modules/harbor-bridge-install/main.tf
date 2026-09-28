@@ -181,6 +181,54 @@ variable "bridge_resources" {
   }
 }
 
+variable "harbor_registry_hosts" {
+  type        = list(string)
+  default     = []
+  description = "harbor.registryHosts: the host[:port][/path] entries that route an image to Harbor (BRIDGE_HARBOR_REGISTRY_HOSTS). Empty leaves the value out, and the chart defaults to the host of harbor.url."
+}
+
+# The Nexus backend (ADR-0036). null leaves every nexus.* value out of the
+# release, so a Harbor-only install renders exactly as before. The
+# credentials are separate variables: a sensitive attribute inside this
+# object would make `var.nexus == null` sensitive, which count refuses.
+variable "nexus" {
+  type = object({
+    url            = string
+    registry_hosts = list(string)
+  })
+  default     = null
+  description = "Enables the Nexus backend: nexus.url (in-cluster REST base URL, without /service/rest) and nexus.registryHosts (host[:port][/path] entries routed to Nexus; each must be covered by match_images)."
+
+  validation {
+    condition     = var.nexus == null || (can(regex("^https?://", var.nexus.url)) && length(var.nexus.registry_hosts) > 0)
+    error_message = "nexus needs an http(s) url and at least one registry host."
+  }
+}
+
+variable "nexus_admin_username" {
+  type        = string
+  default     = null
+  sensitive   = true
+  description = "The Nexus user the bridge authenticates as, stored in the nexus-admin Secret. Required with nexus. ADR-0036 decision j: a random name, never admin."
+
+  validation {
+    condition     = var.nexus == null || (var.nexus_admin_username != null && var.nexus_admin_username != "")
+    error_message = "nexus_admin_username is required when nexus is set."
+  }
+}
+
+variable "nexus_admin_password" {
+  type        = string
+  default     = null
+  sensitive   = true
+  description = "Password of nexus_admin_username. Required with nexus."
+
+  validation {
+    condition     = var.nexus == null || (var.nexus_admin_password != null && var.nexus_admin_password != "")
+    error_message = "nexus_admin_password is required when nexus is set."
+  }
+}
+
 provider "helm" {
   kubernetes = {
     host                   = var.kubeconfig.host
@@ -220,6 +268,19 @@ resource "kubernetes_secret_v1" "admin" {
   data = {
     username = "admin"
     password = var.harbor_admin_password
+  }
+  type = "Opaque"
+}
+
+resource "kubernetes_secret_v1" "nexus_admin" {
+  count = var.nexus == null ? 0 : 1
+  metadata {
+    name      = "nexus-admin"
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+  }
+  data = {
+    username = var.nexus_admin_username
+    password = var.nexus_admin_password
   }
   type = "Opaque"
 }
@@ -328,28 +389,22 @@ resource "kubernetes_resource_quota_v1" "critical_pods" {
   }
 }
 
-# CRDs are installed automatically by helm from the chart's crds/
-# directory on first install. No separate kubectl_manifest needed.
-
-resource "helm_release" "bridge" {
-  name      = "harbor-bridge"
-  namespace = kubernetes_namespace_v1.this.metadata[0].name
-  chart     = abspath("${path.module}/${var.chart_path}")
-  timeout   = 600
-  wait      = true
-  atomic    = false # the plugin DaemonSet restarts kubelet — be patient
-
-  values = [yamlencode({
-    clusterName = var.cluster_name
-    harbor = {
-      url = var.harbor_url
-      # The test Harbor is reached over the pod network (harbor-core
-      # Service, plain http); production uses https.
-      allowInsecureHTTP = startswith(var.harbor_url, "http://")
-      adminCredsSecret = {
-        name = kubernetes_secret_v1.admin.metadata[0].name
-      }
+locals {
+  harbor_values = {
+    url = var.harbor_url
+    # The test Harbor is reached over the pod network (harbor-core
+    # Service, plain http); production uses https.
+    allowInsecureHTTP = startswith(var.harbor_url, "http://")
+    adminCredsSecret = {
+      name = kubernetes_secret_v1.admin.metadata[0].name
     }
+  }
+
+  # The release's values without the Nexus backend: exactly what a
+  # Harbor-only install always rendered.
+  base_values = {
+    clusterName = var.cluster_name
+    harbor      = local.harbor_values
     plugin = merge(
       {
         matchImages = var.match_images
@@ -383,10 +438,44 @@ resource "helm_release" "bridge" {
         kind = "ClusterIssuer"
       }
     }
-  })]
+  }
+
+  nexus_values = var.nexus == null ? null : {
+    enabled = true
+    url     = var.nexus.url
+    # The test Nexus is reached over the pod network (plain http), like
+    # Harbor above.
+    allowInsecureHTTP = startswith(var.nexus.url, "http://")
+    adminCredsSecret = {
+      name = kubernetes_secret_v1.nexus_admin[0].metadata[0].name
+    }
+    registryHosts = var.nexus.registry_hosts
+  }
+
+  # Keys added to base_values only when set. jsondecode of a string on both
+  # branches: the two object shapes cannot unify in a conditional.
+  extra_values = merge(
+    jsondecode(local.nexus_values == null ? "{}" : jsonencode({ nexus = local.nexus_values })),
+    jsondecode(length(var.harbor_registry_hosts) == 0 ? "{}" : jsonencode({ harbor = merge(local.harbor_values, { registryHosts = var.harbor_registry_hosts }) })),
+  )
+}
+
+# CRDs are installed automatically by helm from the chart's crds/
+# directory on first install. No separate kubectl_manifest needed.
+
+resource "helm_release" "bridge" {
+  name      = "harbor-bridge"
+  namespace = kubernetes_namespace_v1.this.metadata[0].name
+  chart     = abspath("${path.module}/${var.chart_path}")
+  timeout   = 600
+  wait      = true
+  atomic    = false # the plugin DaemonSet restarts kubelet — be patient
+
+  values = [length(keys(local.extra_values)) == 0 ? yamlencode(local.base_values) : yamlencode(merge(local.base_values, local.extra_values))]
 
   depends_on = [
     kubectl_manifest.cluster_issuer,
+    kubernetes_secret_v1.nexus_admin,
     kubernetes_resource_quota_v1.critical_pods,
   ]
 }
@@ -506,21 +595,23 @@ output "credentials_url" {
   value = "https://${helm_release.bridge.name}.${helm_release.bridge.namespace}.svc:8443/v1/credentials"
 }
 
-# Teardown guard. HarborAccess objects carry the bridge's finalizer, which
-# only a running bridge releases. tofu test destroys states in reverse
-# order of the LAST run that touched each, so after a failure (or with any
-# stage order that ends on an install/upgrade run) the bridge used to be
-# uninstalled while HarborAccess objects still existed — their deletion,
-# and that of their namespaces, then hung until the cleanup timed out.
+# Teardown guard. HarborAccess and NexusAccess objects carry the bridge's
+# finalizers, which only a running bridge releases. tofu test destroys
+# states in reverse order of the LAST run that touched each, so after a
+# failure (or with any stage order that ends on an install/upgrade run)
+# the bridge used to be uninstalled while HarborAccess objects still
+# existed — their deletion, and that of their namespaces, then hung until
+# the cleanup timed out.
 #
 # This resource depends on the release, so tofu destroys it FIRST: its
-# destroy-time provisioner deletes every HarborAccess while the bridge is
-# still up (the finalizers revoke the robots, as they would for a user),
-# and only then does helm uninstall the chart. If the bridge cannot
-# release them in time (e.g. Harbor already gone), the finalizers are
-# dropped so the throwaway cluster can be torn down — the test run is
-# ending anyway, and a real deletion path is asserted by the scenario's
-# teardown stage while everything is healthy.
+# destroy-time provisioner deletes every HarborAccess and NexusAccess
+# while the bridge is still up (the finalizers revoke the robots and the
+# Nexus users, as they would for a user), and only then does helm
+# uninstall the chart. If the bridge cannot release them in time (e.g.
+# Harbor or Nexus already gone), the finalizers are dropped so the
+# throwaway cluster can be torn down — the test run is ending anyway, and
+# a real deletion path is asserted by the scenario's teardown stage while
+# everything is healthy.
 #
 # Ordering comes from depends_on, NOT from a trigger on the release: a
 # trigger that is unknown while helm plans an in-place upgrade replaced
@@ -560,17 +651,23 @@ resource "null_resource" "release_harboraccess_finalizers" {
         echo "could not write the kubeconfig; nothing released" >&2
         exit 0
       fi
-      if ! k get crd harboraccesses.harbor.aetherize.io >/dev/null 2>&1; then
-        echo "no HarborAccess CRD reachable (or no API access); nothing to release" >&2
-        exit 0
-      fi
-      if k delete harboraccesses.harbor.aetherize.io --all -A --wait=true --timeout=180s; then
-        exit 0
-      fi
-      echo "HarborAccess deletion did not finish; dropping finalizers so teardown can proceed" >&2
-      for o in $(k get harboraccesses.harbor.aetherize.io -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{end}'); do
-        k -n "$${o%/*}" patch harboraccess "$${o#*/}" --type=merge -p '{"metadata":{"finalizers":null}}' || true
-      done
+      # release RESOURCE KIND: delete every object of the CRD while the
+      # bridge runs; drop the finalizers of what it cannot release in time.
+      release() {
+        if ! k get crd "$1" >/dev/null 2>&1; then
+          echo "no $2 CRD reachable (or no API access); nothing to release" >&2
+          return 0
+        fi
+        if k delete "$1" --all -A --wait=true --timeout=180s; then
+          return 0
+        fi
+        echo "$2 deletion did not finish; dropping finalizers so teardown can proceed" >&2
+        for o in $(k get "$1" -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{end}'); do
+          k -n "$${o%/*}" patch "$1" "$${o#*/}" --type=merge -p '{"metadata":{"finalizers":null}}' || true
+        done
+      }
+      release harboraccesses.harbor.aetherize.io HarborAccess
+      release nexusaccesses.nexus.aetherize.io NexusAccess
       exit 0
     BASH
     environment = {

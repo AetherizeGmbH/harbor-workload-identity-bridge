@@ -140,6 +140,19 @@ harbor.aetherize.io/robot
 {{- end -}}
 {{- end -}}
 
+{{/*
+nexus.finalizer is finalizer for NexusAccess objects: the selector and the
+instance select NexusAccess objects too (ADR-0036,
+bridge/controlplane/config.go NexusFinalizer).
+*/}}
+{{- define "harbor-bridge.nexus.finalizer" -}}
+{{- if .Values.bridge.harborAccessSelector -}}
+nexus.aetherize.io/user-{{ include "harbor-bridge.instance" . }}
+{{- else -}}
+nexus.aetherize.io/user
+{{- end -}}
+{{- end -}}
+
 {{- define "harbor-bridge.validateRequiredValues" -}}
 {{- if not .Values.clusterName -}}
 {{- fail "clusterName is REQUIRED. Set --set clusterName=<dns-label> or values.yaml. Must be unique across clusters sharing one Harbor (ADR-0009)." -}}
@@ -344,6 +357,7 @@ harbor.aetherize.io/robot
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- include "harbor-bridge.nexus.validate" . -}}
 {{- end -}}
 
 {{/*

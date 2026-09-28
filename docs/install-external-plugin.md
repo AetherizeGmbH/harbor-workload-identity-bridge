@@ -113,6 +113,12 @@ Notes:
   chart does not issue the client certificate when `plugin.enabled=false`.
 - kubelet must be 1.34 or newer (KEP-4412 ServiceAccount tokens for credential
   providers, beta and on by default).
+- With `nexus.enabled` (README, "Sonatype Nexus Repository (preview)"),
+  `matchImages` must also cover every entry of `nexus.registryHosts`, and every
+  Harbor registry host (`harbor.registryHosts`, default the host of
+  `harbor.url`): the bridge routes by the image's registry host. The chart
+  cannot check an entry it does not render; its NOTES print a `matchImages`
+  list with exactly those hosts.
 
 ## Talos Linux
 

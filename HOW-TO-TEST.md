@@ -16,6 +16,11 @@ Two paths, pick by what you're doing.
 - **§1b GKE** — the same flow on a real GKE cluster (`make e2e-gke`).
   Creates **billed** resources; local only, never in CI.
 
+- **§1c Nexus** — the Sonatype Nexus Repository backend (ADR-0036) on
+  kind, next to Harbor (`make e2e-nexus`): NexusAccess lifecycle, routing
+  between the two backends, rotation by a new user id, a Nexus outage.
+  Local only for now; `make e2e` and CI do not run it.
+
 - **§2 Remote / manual cluster** — drive the bridge against your own
   pre-existing Kubernetes + Harbor by hand, without the Helm chart.
   Useful when you're iterating on the bridge binary against real
@@ -68,7 +73,9 @@ dashed arrow is the one-time setup tofu drives.
 ## Stages, in order
 
 Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-bridge.tftest.hcl)
-(`01-plan.tftest.hcl` holds plan-only checks of the install module):
+(`01-plan.tftest.hcl` holds plan-only checks of the install module;
+`03-nexus.tftest.hcl` is the Nexus harness of §1c, which `make e2e` filters
+out):
 
 | # | Stage | What it does |
 |---|---|---|
@@ -210,16 +217,26 @@ cleanly. No orphan kind clusters.
 | [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log, and can mount a projected token for the bridge audience or Secrets |
 | [`test/e2e/scripts/kubeconfig.sh`](test/e2e/scripts/kubeconfig.sh) | Sourced by every harness script that runs kubectl: a private kubeconfig file, so no credential (on GKE the operator's access token) is ever on a command line |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
+| [`test/e2e/tests/03-nexus.tftest.hcl`](test/e2e/tests/03-nexus.tftest.hcl) | The Nexus harness (§1c) |
+| [`test/e2e/nexus/Dockerfile`](test/e2e/nexus/Dockerfile) | Nexus 3.76.1 (pinned by digest), relabelled for the host's platform |
+| [`test/e2e/modules/nexus`](test/e2e/modules/nexus) | Nexus Deployment on a PVC, REST Service, NodePort per docker connector |
+| [`test/e2e/modules/nexus-seed`](test/e2e/modules/nexus-seed) | Realms, anonymous off, repositories, images, the bridge's least-privilege Nexus user |
+| [`test/e2e/modules/nexus-access-scenario`](test/e2e/modules/nexus-access-scenario) | The NexusAccess fixtures per lifecycle phase |
+| [`test/e2e/modules/containerd-registry-http`](test/e2e/modules/containerd-registry-http) | containerd `hosts.toml` for plain-HTTP registries (the Nexus connectors) |
+| [`test/e2e/modules/nexus-check-lib`](test/e2e/modules/nexus-check-lib) | Shell helpers of the Nexus check Jobs |
+| [`test/e2e/modules/kubectl-check`](test/e2e/modules/kubectl-check) | Host-side kubectl checks (conditions, Secret annotations, the Nexus outage) |
 
 ## When it fails
 
 A failing Job stage writes diagnostics before the cluster is destroyed, to
 `test/e2e/.diag/<job>/` (CI uploads the directory as an artifact): pod and Job
 descriptions, namespace events, the pod log, the bridge logs, all HarborAccess
-objects, the names (never the contents) of the bridge Secrets, the installer
-log of the node, and that node's kubelet journal. A bridge install whose
-replicas do not all become Ready writes the Deployment, the bridge pods'
-descriptions and their logs to `test/e2e/.diag/bridge-rollout/`.
+and NexusAccess objects, the names (never the contents) of the bridge Secrets,
+the installer log of the node, and that node's kubelet journal. A bridge install
+whose replicas do not all become Ready writes the Deployment, the bridge pods'
+descriptions and their logs to `test/e2e/.diag/bridge-rollout/`. A failing
+host-side check (`kubectl-check`, Nexus harness) writes its own log, the bridge
+logs, the objects, events and pods there.
 
 While a run is still up (or paused):
 
@@ -286,6 +303,98 @@ findings flagged in [ADR-0022](docs/adr/0022-gke-e2e-harness.md)
 loopback-NodePort behaviour under Dataplane V2 — escape hatch:
 `TF_VAR_bridge_endpoint='https://$(NODE_IP):31443'`, which every install
 run of the harness passes to the install module).
+
+---
+
+# §1c — Nexus e2e (`make e2e-nexus`, ADR-0036)
+
+The Nexus backend against a real Sonatype Nexus Repository in the kind
+harness, next to Harbor (the bridge still requires Harbor). Prerequisites
+as in §1.
+
+```bash
+make e2e-nexus         # 01-plan + 03-nexus, no pause
+make e2e-nexus-pause   # pause after the assertions, before the teardown stages
+```
+
+It creates its own cluster, `bridge-e2e-nexus` (kubeconfig
+`test/e2e/.gen/bridge-e2e-nexus.kubeconfig`), on the same host ports as §1:
+run it after §1, not beside it.
+
+**Nexus version.** `sonatype/nexus3:3.76.1`, pinned by digest in
+[`test/e2e/nexus/Dockerfile`](test/e2e/nexus/Dockerfile): the last
+Community Edition release without the EULA gate. 3.77 and later refuse
+service until an operator accepts the EULA, which this project never does
+on anyone's behalf (ADR-0036 decision i, question 4); `renovate.json` keeps
+the pin below 3.77. Sonatype publishes the release for linux/amd64 only.
+The Dockerfile copies its filesystem into an image of the host's platform,
+because containerd in a kind node refuses an image of another platform. On
+an arm64 host the amd64 binaries then run through the kernel's binfmt
+handler (Docker Desktop: Rosetta), and Nexus takes a few minutes to become
+writable.
+
+**Topology.** Nexus runs in the cluster (namespace `nexus`, data on a PVC).
+The bridge reaches its REST API over the pod network at
+`http://nexus.nexus.svc.cluster.local:8081` (`nexus.allowInsecureHTTP`).
+Nexus 3.76 routes docker requests to a repository by connector port only,
+so each hosted repository gets an HTTP connector behind its own NodePort:
+`nexus.e2e:30851` (nx-app), `:30852` (nx-other), `:30853` (nx-extra),
+`:30854` (nx-push). containerd reaches them over plain HTTP
+(`containerd-registry-http`, the way kind's local-registry setup does);
+Harbor keeps TLS. The bridge authenticates to Nexus as a user with a random
+name that holds only `nx-users-all`, `nx-roles-all` and
+`nx-privileges-read` (ADR-0036 decision j), so the run proves the bridge
+needs nothing more.
+
+**Stages** (every `run` block of
+[`test/e2e/tests/03-nexus.tftest.hcl`](test/e2e/tests/03-nexus.tftest.hcl)):
+
+| Stage | What it asserts |
+|---|---|
+| `build_images` … `bridge_install` | Cluster, Harbor, Nexus, containerd, CoreDNS, both seeds, the chart with `nexus.enabled`; `matchImages` holds Harbor's host and every Nexus connector |
+| `nexus_access` | Scenario phase `initial`: `puller` (nx-app, nx-extra, plus a HarborAccess on your-project), `pusher` (pull,push nx-push), `editor` (nx-app, nx-extra), `mover` (nx-app); each Ready at generation 1 |
+| `nexus_record` | Records each checked object's Nexus user id (status and Secret agree) |
+| `pull_nexus`, `pull_nexus_extra` | kubelet pulls the granted repositories through the plugin and the bridge's Nexus route |
+| `pull_nexus_ungranted` | A repository the NexusAccess does not name fails with an authorization error |
+| `pull_nexus_ungranted_issued` | The bridge's audit log shows it issued puller's Nexus user for that image, so Nexus refused the pull (a pull without credentials fails the same way) |
+| `pull_harbor_routing` | The same ServiceAccount pulls from Harbor |
+| `nexus_routing` | One pod-bound token, three images: the bridge answers with the identity's Nexus user for the Nexus image and its Harbor robot for the Harbor image, and refuses an image of neither backend with 403 (`no_backend`); all three decisions in the audit log |
+| `robot_check_initial` | Harbor lists exactly puller's robot under the fuzzy `name=~bridge-dev.` query `robot_check_teardown` relies on |
+| `nexus_edit_baseline*` | editor's credentials read exactly its repositories (a token from one connector works on another); the bridge serves editor |
+| `nexus_push` | The pull,push user pushes to nx-push and is refused on nx-app |
+| `nexus_state_initial` | Nexus: one role (`bridge-dev.<ns>.<sa>`) and one user (`<role>_<16 hex>`) per identity, with the ADR-0036 markers and exactly the privileges of the spec |
+| `nexus_access_update` | Scenario phase `updated`: puller drops nx-extra; editor swaps nx-extra for the missing nx-missing; mover moves to a new ServiceAccount |
+| `nexus_update_state` | No spec edit created a user; editor is `Ready=False RepositoryNotFound`, its `observedGeneration` stays 1 and its Secret carries `grants-incomplete`; mover has a user of the new identity |
+| `pull_nexus_revoked`, `pull_nexus_kept` | The removed repository fails, even with kubelet's cached password; the kept one pulls |
+| `nexus_edit_revoked` | editor's existing password and bearer token lose nx-extra at once and keep nx-app (decision d) |
+| `nexus_edit_refused` | The bridge answers editor's token with 403 while its grants are incomplete (audit `reason=grants_incomplete`, `missing_repositories=nx-missing`) |
+| `nexus_state_updated` | Nexus: the roles shrank; mover's old identity has neither role nor user |
+| `nexus_rotation_forced` | editor's Secret deleted: a user of a new generation, the previous user's bearer token and password refused at once, the `grants-incomplete` mark kept (a RepositoryNotFound object still rotates) |
+| `nexus_rotation_scheduled` | puller's `rotation-not-before` backdated: a new user at once, the previous one kept for the 5-minute grace and then deleted, which ends its bearer token (decision c) |
+| `nexus_outage` | Nexus scaled to zero: a deleted NexusAccess reports `DeletionBlocked` and keeps its finalizer; Nexus back: the bridge releases it on its own |
+| `nexus_outage_state` | Nothing of that object's identity is left in Nexus |
+| `nexus_access_teardown` | Scenario phase `none` while the bridge runs |
+| `nexus_teardown_check`, `robot_check_teardown` | No user or role of cluster `dev` in Nexus, no robot in Harbor (a Harbor query that fails or does not answer with a list fails the check); the bridge's own Nexus user and role are intact |
+
+The rotation stages run after every kubelet pull of their identities:
+they retire users whose credentials kubelet may still cache. They take
+the bridge's view of time as given (a backdated promise, a deleted
+Secret); the daily schedule itself is covered by the reconciler's unit
+and envtest tests.
+
+Not covered: Nexus 3.77 and later (EULA, see above), and with them the
+failed-login rate limiter of 3.93+ (`NexusRateLimited`), the role update of
+3.91+ and the `oci` format.
+
+While paused, Nexus's REST API is reachable through a port-forward:
+
+```bash
+export KUBECONFIG=$PWD/test/e2e/.gen/bridge-e2e-nexus.kubeconfig
+kubectl -n nexus port-forward svc/nexus 18081:8081 &
+pw=$(kubectl -n nexus-seed get secret nexus-admin -o jsonpath='{.data.password}' | base64 -d)
+curl -s -u "admin:$pw" 'http://127.0.0.1:18081/service/rest/v1/security/users?userId=bridge-dev.' | jq '.[].userId'
+kubectl get nexusaccess -A
+```
 
 ---
 
@@ -358,6 +467,9 @@ curl -s http://127.0.0.1:8001/openid/v1/jwks | jq .keys[0].kid
 
 ```bash
 kubectl apply -f config/crd/bases/harbor.aetherize.io_harboraccesses.yaml
+# Only to run it with the Nexus backend (BRIDGE_NEXUS_URL): without this CRD
+# that bridge exits at startup, naming it.
+kubectl apply -f config/crd/bases/nexus.aetherize.io_nexusaccesses.yaml
 kubectl create namespace harbor-bridge-system
 
 # Drop Harbor admin creds where the bridge expects them: owner-only,

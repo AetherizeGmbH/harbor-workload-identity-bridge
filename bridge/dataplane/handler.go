@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/nexussecret"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/registryhost"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
 
@@ -51,12 +52,15 @@ const cacheKeyTypeRegistry = "Registry"
 
 // Request is the HTTP API the kubelet plugin POSTs to the bridge. The SA
 // token rides in the Authorization: Bearer header; the body carries only
-// audit information about the image being pulled.
+// the image being pulled.
 type Request struct {
-	// Image is the image reference the kubelet wants to pull. Used only
-	// for audit logging — credential decisions are made from the SA
-	// token's aud/sub claims (no per-image cache key, no per-image
-	// permission decision).
+	// Image is the image reference the kubelet wants to pull. With Harbor
+	// alone it is used only for audit logging: credential decisions are
+	// made from the SA token's aud/sub claims (no per-image cache key, no
+	// per-image permission decision). With the Nexus backend its registry
+	// host selects the backend (ADR-0036 decision f); which repositories
+	// the credentials reach is still the backend's decision, never the
+	// image's.
 	Image string `json:"image"`
 }
 
@@ -93,11 +97,24 @@ type HandlerConfig struct {
 	// plus the robot name (ADR-0018). A Secret holding another username is
 	// not served. Required; nil serves nothing.
 	RobotUsername func(saNamespace, saName string) (string, error)
+
+	// Nexus enables the Nexus backend (ADR-0036). The handler then routes
+	// every request by its image's registry host: to NexusAccess objects
+	// for Nexus.RegistryHosts, to HarborAccess objects for
+	// HarborRegistryHosts, and refuses an image that belongs to neither
+	// (reason no_backend). nil serves HarborAccess objects only, for any
+	// image, exactly as before the backend existed.
+	Nexus *NexusBackend
+
+	// HarborRegistryHosts are the registry hosts whose images are
+	// Harbor's. Read only when Nexus is set.
+	HarborRegistryHosts []registryhost.Host
 }
 
 // Handler is the HTTP handler that validates an SA token, looks up the
-// matching HarborAccess CR, and returns the robot's Basic Auth
-// credentials. See ADR-0013 for why we return Basic Auth rather than
+// matching HarborAccess CR (or, for an image of the Nexus backend, the
+// matching NexusAccess), and returns the robot's (the Nexus user's) Basic
+// Auth credentials. See ADR-0013 for why we return Basic Auth rather than
 // pre-minted JWTs.
 type Handler struct {
 	K8sClient client.Client
@@ -124,7 +141,10 @@ type Handler struct {
 	// request, a missing bearer or a bad body is counted in the metrics, a
 	// wrong method or path is not counted either. main wires a logger
 	// fixed at info level, so BRIDGE_LOG_LEVEL=warn cannot silence the
-	// audit trail. Unset falls back to the request logger.
+	// audit trail. Unset falls back to the request logger. With the Nexus
+	// backend every line also names the backend the image was routed to
+	// (access_kind: harbor, nexus or none); with Harbor alone the lines
+	// are unchanged.
 	Audit logr.Logger
 }
 
@@ -232,6 +252,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Select the backend by the image's registry host (ADR-0036 decision
+	// f). Cheap and before the token check, so every audit line below
+	// names it; an image of no backend is refused only once the token is
+	// valid, so that the refusal is attributed. With Harbor alone every
+	// request is Harbor's and the audit lines carry no access_kind.
+	kind := h.route(req.Image)
+	if h.routing() {
+		caller = append(caller, "access_kind", kind)
+	}
+
 	// 1. Validate the SA token (signature, expiry, issuer, lifetime, pod
 	// binding; ADR-0028).
 	claims, err := h.Validator.Validate(ctx, rawToken)
@@ -244,7 +274,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "token signing keys unavailable; retry", http.StatusServiceUnavailable)
 		h.recordOIDCFailure(OIDCReasonKeysUnavailable)
-		h.recordResult(ResultUnavailable)
+		h.record(kind, ResultUnavailable)
 		return
 	}
 	if err != nil {
@@ -254,10 +284,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"requested_image", truncate(req.Image, maxAuditImageLen))...)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		h.recordOIDCFailure(category)
-		h.recordResult(ResultUnauthorized)
+		h.record(kind, ResultUnauthorized)
 		return
 	}
 
+	switch kind {
+	case AccessKindHarbor:
+		h.serveHarbor(ctx, w, logger, caller, claims, &req)
+	case AccessKindNexus:
+		h.serveNexus(ctx, w, logger, caller, claims, &req)
+	default:
+		// Two backends and an image of neither: whichever credentials
+		// the bridge returned, containerd would send them to a registry
+		// they do not belong to. Typically plugin.matchImages covers a
+		// host that no backend's registry hosts name.
+		h.audit(logger).Info("credential denied", append(append(caller, claimFields(claims)...),
+			"reason", "no_backend",
+			"requested_image", truncate(req.Image, maxAuditImageLen))...)
+		http.Error(w, "the requested image belongs to no registry this bridge serves", http.StatusForbidden)
+		h.recordResult(ResultForbidden)
+	}
+}
+
+// serveHarbor answers a request with a valid token from the HarborAccess
+// objects: with Harbor alone every request, with Nexus as well the
+// requests for an image of a Harbor registry host.
+func (h *Handler) serveHarbor(ctx context.Context, w http.ResponseWriter, logger logr.Logger, caller []any, claims *Claims, req *Request) {
 	// 2. Find the HarborAccess whose serviceAccountRef-derived subject
 	// matches claims.sub AND whose trustPolicy.audience appears in
 	// claims.aud.
@@ -393,7 +445,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ttl := cacheDuration(matched.Spec.TokenTTL.Duration, creds.rotationNotBefore, creds.hasRotationNotBefore, h.now())
 
 	h.writeResponse(w, creds, ttl)
-	auditIssuance(h.audit(logger), caller, claims, matched, audMatched, &req, creds.username, ttl)
+	auditIssuance(h.audit(logger), caller, claims, matched, audMatched, req, creds.username, ttl)
 	h.recordResult(ResultOK)
 }
 
@@ -405,6 +457,15 @@ func (h *Handler) recordResult(result string) {
 		return
 	}
 	h.Metrics.Issuances.WithLabelValues(result).Inc()
+}
+
+// record is recordResult for a request routed to the backend kind: a
+// request of the Nexus backend also counts in the Nexus metrics.
+func (h *Handler) record(kind, result string) {
+	h.recordResult(result)
+	if kind == AccessKindNexus {
+		h.recordNexusResult(result)
+	}
 }
 
 // recordOIDCFailure counts a Validate failure under its classifyOIDCError
@@ -451,90 +512,26 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 	); err != nil {
 		return nil, "", nil, fmt.Errorf("list HarborAccess: %w", err)
 	}
-	type match struct {
-		ha  *harborv1alpha1.HarborAccess
-		aud string
-	}
-	var matches, deletingMatches []match
+	cands := make([]accessCandidate, len(list.Items))
 	for i := range list.Items {
 		ha := &list.Items[i]
-		// Defense-in-depth: a CR with an empty audience or issuer must
-		// never match. The CRD enforces MinLength=1 on both
-		// trustPolicy.audience and trustPolicy.issuer, but the data plane is
-		// the security boundary and must not rely solely on CRD validation
-		// (a CR applied with --validate=false, or a future API revision that
-		// relaxes the marker, would otherwise let an empty trustPolicy.audience
-		// match a token carrying aud:"" — a silent auth bypass).
-		if ha.Spec.TrustPolicy.Audience == "" || ha.Spec.TrustPolicy.Issuer == "" {
-			continue
-		}
-		// The bridge serves exactly one audience (ADR-0026). The reconciler
-		// already marks a CR with another audience not ready; the data
-		// plane, as the security boundary, never matches one either. An
-		// unset configured audience matches nothing (fail closed).
-		if ha.Spec.TrustPolicy.Audience != h.Config.Audience {
-			continue
-		}
-		// The index already selected on this; kept so the match never
-		// depends on how the list was filtered.
-		if harborAccessSubject(ha) != claims.Subject {
-			continue
-		}
-		// Defense-in-depth: the Validator already pins iss to the bridge's
-		// configured issuer, and the reconciler refuses to provision a robot
-		// for a CR whose trustPolicy.issuer disagrees with the cluster
-		// issuer. Re-checking here means a CR is never matched against a
-		// token from an issuer it did not declare, even if those upstream
-		// invariants regress.
-		if ha.Spec.TrustPolicy.Issuer != claims.Issuer {
-			continue
-		}
-		for _, aud := range claims.Audience {
-			// Never honor an empty aud entry, even against a (guarded-above)
-			// non-empty CR audience — keeps the match total over both sides.
-			if aud == "" {
-				continue
-			}
-			if aud == ha.Spec.TrustPolicy.Audience {
-				if ha.DeletionTimestamp.IsZero() {
-					matches = append(matches, match{ha: ha, aud: aud})
-				} else {
-					deletingMatches = append(deletingMatches, match{ha: ha, aud: aud})
-				}
-				break
-			}
+		cands[i] = accessCandidate{
+			namespace: ha.Namespace,
+			name:      ha.Name,
+			deleting:  !ha.DeletionTimestamp.IsZero(),
+			subject:   harborAccessSubject(ha),
+			issuer:    ha.Spec.TrustPolicy.Issuer,
+			audience:  ha.Spec.TrustPolicy.Audience,
 		}
 	}
-	byName := func(ms []match) {
-		sort.Slice(ms, func(i, j int) bool {
-			if ms[i].ha.Namespace != ms[j].ha.Namespace {
-				return ms[i].ha.Namespace < ms[j].ha.Namespace
-			}
-			return ms[i].ha.Name < ms[j].ha.Name
-		})
+	m, aud, d := h.matchAccess(ctx, "HarborAccess CRs", claims, cands)
+	switch {
+	case m >= 0:
+		return &list.Items[m], aud, nil, nil
+	case d >= 0:
+		return nil, "", &list.Items[d], nil
 	}
-	if len(matches) == 0 {
-		if len(deletingMatches) == 0 {
-			return nil, "", nil, nil
-		}
-		byName(deletingMatches)
-		return nil, "", deletingMatches[0].ha, nil
-	}
-	byName(matches)
-	if len(matches) > 1 {
-		names := make([]string, len(matches))
-		for i, m := range matches {
-			names[i] = m.ha.Namespace + "/" + m.ha.Name
-		}
-		log.FromContext(ctx).WithName("dataplane").Info(
-			"multiple HarborAccess CRs match this token; selecting deterministically by namespace/name — resolve this ambiguity, the matched CRs grant potentially different permissions",
-			"subject", claims.Subject,
-			"audience", matches[0].aud,
-			"matches", strings.Join(names, ","),
-			"selected", names[0],
-		)
-	}
-	return matches[0].ha, matches[0].aud, nil, nil
+	return nil, "", nil, nil
 }
 
 // specError reports a spec the reconciler rejects as InvalidSpec although
@@ -573,9 +570,9 @@ func harborAccessSubjectIndex(obj client.Object) []string {
 	return []string{harborAccessSubject(ha)}
 }
 
-// robotCreds carries the username and password read from a robot Secret.
-// Private to keep the wire response struct from accidentally accreting
-// credentials fields.
+// robotCreds carries the username and password read from a robot Secret,
+// or from a nexususer Secret. Private to keep the wire response struct
+// from accidentally accreting credentials fields.
 type robotCreds struct {
 	username string
 	password string
@@ -629,6 +626,12 @@ func (h *Handler) readRobotSecret(ctx context.Context, ha *harborv1alpha1.Harbor
 	// handed out as robot credentials.
 	if !robotsecret.IsManaged(secret) {
 		return nil, fmt.Errorf("%w: Secret %s/%s is not managed by the bridge", errSecretOwnerMismatch, h.Config.BridgeNamespace, name)
+	}
+	// A Secret of another access kind (a nexususer Secret) is never a
+	// robot's, whatever its name and other labels (ADR-0036 decision e).
+	// No robot Secret carries the label.
+	if kind, ok := secret.Labels[nexussecret.LabelAccessKind]; ok {
+		return nil, fmt.Errorf("%w: Secret %s/%s is of access kind %q, not a robot Secret", errSecretOwnerMismatch, h.Config.BridgeNamespace, name, kind)
 	}
 	// Read-path collision backstop (ADR-0018). If the Secret's ownership
 	// labels name a DIFFERENT HarborAccess than the one matched for this

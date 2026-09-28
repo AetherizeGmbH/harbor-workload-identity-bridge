@@ -53,6 +53,70 @@ type Metrics struct {
 	HarborAccessLookupFailures prometheus.Counter
 	RobotSecretMissing         prometheus.Counter
 	IssuanceDuration           prometheus.Histogram
+
+	// Nexus holds the Nexus backend's collectors (NewNexusMetrics); nil
+	// without the backend.
+	Nexus *NexusMetrics
+}
+
+// NexusMetrics are the data plane's collectors of the Nexus backend
+// (ADR-0036). main registers them only with the backend, so a Harbor-only
+// bridge exports exactly the series it did before. The metrics above
+// count every request, the Nexus ones included; these count the requests
+// whose image routed to Nexus, from the routing on.
+type NexusMetrics struct {
+	// Issuances is bridge_nexus_credential_issuances_total{result}: the
+	// Nexus share of bridge_credential_issuances_total, with the same
+	// result values. Requests refused before routing (rate limit, missing
+	// bearer, bad body, forceLocalValidation off) cannot be attributed and
+	// count only in the total.
+	Issuances *prometheus.CounterVec
+
+	// NexusAccessLookupFailures counts Kubernetes API failures while
+	// listing NexusAccess objects.
+	NexusAccessLookupFailures prometheus.Counter
+
+	// UserSecretMissing counts requests whose matched NexusAccess had no
+	// usable nexususer Secret: absent, or holding no complete password
+	// yet (HTTP 503).
+	UserSecretMissing prometheus.Counter
+}
+
+// nexusResults are the result values a request routed to Nexus can end
+// with.
+var nexusResults = []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultServerError}
+
+// NewNexusMetrics constructs the Nexus backend's collectors and registers
+// them on reg. Set the result as Metrics.Nexus.
+func NewNexusMetrics(reg prometheus.Registerer) *NexusMetrics {
+	m := &NexusMetrics{
+		Issuances: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "bridge_nexus_credential_issuances_total",
+			Help: "Credential-issuance HTTP requests whose image belongs to the Nexus backend, labelled by outcome (a subset of bridge_credential_issuances_total).",
+		}, []string{"result"}),
+		NexusAccessLookupFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "bridge_nexusaccess_lookup_failures_total",
+			Help: "Kubernetes API failures while listing NexusAccess objects in the credential-issuance hot path.",
+		}),
+		UserSecretMissing: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "bridge_nexus_user_secret_missing_total",
+			Help: "Requests where the matched NexusAccess's user Secret was absent from the bridge namespace or held no complete password yet (returned HTTP 503).",
+		}),
+	}
+	reg.MustRegister(m.Issuances, m.NexusAccessLookupFailures, m.UserSecretMissing)
+	for _, r := range nexusResults {
+		m.Issuances.WithLabelValues(r)
+	}
+	return m
+}
+
+// recordNexusResult counts a request routed to Nexus in the Nexus
+// metrics.
+func (h *Handler) recordNexusResult(result string) {
+	if h.Metrics == nil || h.Metrics.Nexus == nil {
+		return
+	}
+	h.Metrics.Nexus.Issuances.WithLabelValues(result).Inc()
 }
 
 // NewMetrics constructs the metric collectors and registers them on reg.

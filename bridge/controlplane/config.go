@@ -16,10 +16,12 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/registryhost"
 )
 
 // Environment variable names. Constants so wiring (Helm chart, Deployment
@@ -44,6 +46,23 @@ const (
 	EnvTokenMaxLifetime     = "BRIDGE_TOKEN_MAX_LIFETIME"
 	EnvRequirePodBoundToken = "BRIDGE_REQUIRE_POD_BOUND_TOKEN"
 
+	// EnvHarborRegistryHosts lists the registry hosts
+	// (host[:port][/path-prefix], comma-separated) whose images the data
+	// plane serves from HarborAccess objects once a second backend is
+	// configured (ADR-0036 decision f). Optional; defaults to the
+	// host[:port] of BRIDGE_HARBOR_URL.
+	EnvHarborRegistryHosts = "BRIDGE_HARBOR_REGISTRY_HOSTS"
+
+	// Nexus backend (ADR-0036). The backend is enabled exactly when
+	// EnvNexusURL is set; the other BRIDGE_NEXUS_* variables are refused
+	// without it.
+	EnvNexusURL              = "BRIDGE_NEXUS_URL"
+	EnvNexusAdminDir         = "BRIDGE_NEXUS_ADMIN_DIR"
+	EnvNexusCAFile           = "BRIDGE_NEXUS_CA_FILE"
+	EnvNexusAllowHTTP        = "BRIDGE_NEXUS_ALLOW_INSECURE_HTTP"
+	EnvNexusRegistryHosts    = "BRIDGE_NEXUS_REGISTRY_HOSTS"
+	EnvNexusRateLimitBackoff = "BRIDGE_NEXUS_RATE_LIMIT_BACKOFF"
+
 	// instanceMaxLen keeps the per-instance finalizer's name part
 	// ("robot-<instance>") within the 63-character limit.
 	instanceMaxLen = 50
@@ -59,6 +78,12 @@ const (
 
 	adminUsernameKey = "username"
 	adminPasswordKey = "password"
+
+	// DefaultNexusRateLimitBackoff is how long the Nexus controller stops
+	// every call made with the admin credential after Nexus answered 429:
+	// Nexus's default nexus.auth.ratelimit.max-delay-seconds (ADR-0036
+	// decision j).
+	DefaultNexusRateLimitBackoff = 15 * time.Minute
 )
 
 var (
@@ -180,6 +205,67 @@ type Config struct {
 	// kubernetes.io pod claim (ADR-0028). Defaults to true. false weakens
 	// the bridge and exists for hand-minted tokens in local development.
 	RequirePodBoundToken bool
+
+	// HarborRegistryHosts are the registry hosts whose images belong to
+	// Harbor (BRIDGE_HARBOR_REGISTRY_HOSTS; by default the host[:port] of
+	// HarborURL). The data plane routes by them only when Nexus is
+	// configured as well; with Harbor alone the image is audit-only.
+	HarborRegistryHosts []registryhost.Host
+
+	// Nexus is the Nexus backend's configuration (ADR-0036); nil when
+	// BRIDGE_NEXUS_URL is unset, which leaves the bridge as it was before
+	// the backend existed.
+	Nexus *NexusConfig
+}
+
+// NexusConfig configures the Nexus backend (ADR-0036). Harbor stays
+// required alongside it (ADR-0036 question 7).
+type NexusConfig struct {
+	// URL is Nexus's base URL (scheme, host and any context path); the
+	// client appends /service/rest.
+	URL *url.URL
+
+	// AdminDir is the path of the mounted Secret with the files
+	// "username" and "password" of the Nexus credential the bridge
+	// manages users and roles with. They are read on every Nexus call
+	// (NewNexusAdminCredsReader), so a rotated Secret needs no restart.
+	AdminDir string
+
+	// CAFile, when set, is the only trust root for Nexus's TLS
+	// certificate (a private CA).
+	CAFile string
+
+	// AllowHTTP permits an http:// URL. The admin credential and every new
+	// user's password would then travel unencrypted.
+	AllowHTTP bool
+
+	// RegistryHosts are the registry hosts (host[:port][/path-prefix])
+	// whose images the data plane serves from NexusAccess objects. None
+	// shares a host[:port] with Config.HarborRegistryHosts.
+	RegistryHosts []registryhost.Host
+
+	// RateLimitBackoff is how long every Nexus call with the admin
+	// credential stops after Nexus answered 429, counted from the last
+	// 429 (ADR-0036 decision j). Positive.
+	RateLimitBackoff time.Duration
+}
+
+// LoadAdminCreds reads the Nexus admin credentials from AdminDir, both
+// from the same version of the volume (readAdminCredsDir).
+func (n *NexusConfig) LoadAdminCreds() (*AdminCreds, error) {
+	return readAdminCredsDir(n.AdminDir)
+}
+
+// LoadCA reads the PEM bundle at CAFile; nil when CAFile is unset.
+func (n *NexusConfig) LoadCA() ([]byte, error) {
+	if n.CAFile == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(n.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", EnvNexusCAFile, err)
+	}
+	return pem, nil
 }
 
 // Finalizer returns the finalizer this bridge sets on the HarborAccess
@@ -221,9 +307,32 @@ func (c *Config) statusRobotIsOurs(ha *harborv1alpha1.HarborAccess) bool {
 		harbor.OwnsRobot(c.ClusterName, strings.TrimPrefix(ha.Status.Robot.Name, c.HarborRobotPrefix))
 }
 
-// Selects reports whether this bridge manages ha.
-func (c *Config) Selects(ha *harborv1alpha1.HarborAccess) bool {
-	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(ha.Labels))
+// Selects reports whether this bridge manages obj, a HarborAccess or a
+// NexusAccess: BRIDGE_HARBORACCESS_SELECTOR selects both kinds (ADR-0026,
+// ADR-0036).
+func (c *Config) Selects(obj metav1.Object) bool {
+	return !c.selective() || c.HarborAccessSelector.Matches(labels.Set(obj.GetLabels()))
+}
+
+// NexusFinalizer is Finalizer for NexusAccess objects: NexusFinalizerName
+// without a selector, a per-instance one with a selector.
+func (c *Config) NexusFinalizer() string {
+	if !c.selective() {
+		return NexusFinalizerName
+	}
+	return NexusFinalizerName + "-" + c.Instance
+}
+
+// NexusReleasedFinalizers is ReleasedFinalizers for NexusAccess objects.
+func (c *Config) NexusReleasedFinalizers() []string {
+	switch {
+	case c.selective():
+		return []string{c.NexusFinalizer(), NexusFinalizerName}
+	case c.Instance != "":
+		return []string{NexusFinalizerName, NexusFinalizerName + "-" + c.Instance}
+	default:
+		return []string{NexusFinalizerName}
+	}
 }
 
 func (c *Config) selective() bool {
@@ -386,10 +495,106 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q must be a DNS label of at most %d characters", EnvInstance, cfg.Instance, instanceMaxLen))
 	}
 
+	errs = append(errs, cfg.loadRegistryHostsFromEnv()...)
+
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("invalid bridge configuration: %w", errors.Join(errs...))
 	}
 	return cfg, nil
+}
+
+// loadRegistryHostsFromEnv reads BRIDGE_HARBOR_REGISTRY_HOSTS and the Nexus
+// backend (BRIDGE_NEXUS_*, ADR-0036). It runs after HarborURL is parsed,
+// whose host is the default Harbor registry host.
+func (c *Config) loadRegistryHostsFromEnv() []error {
+	var errs []error
+	rawURL := strings.TrimSpace(os.Getenv(EnvNexusURL))
+	if raw := strings.TrimSpace(os.Getenv(EnvHarborRegistryHosts)); raw != "" {
+		hosts, err := registryhost.ParseList(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", EnvHarborRegistryHosts, err))
+		}
+		c.HarborRegistryHosts = hosts
+	} else if c.HarborURL != nil {
+		h, err := registryhost.Parse(c.HarborURL.Host)
+		switch {
+		case err == nil:
+			c.HarborRegistryHosts = []registryhost.Host{h}
+		case rawURL != "":
+			// Only routing needs it; with Harbor alone the image is
+			// audit-only and an unusual Harbor host must keep working.
+			errs = append(errs, fmt.Errorf("the host of %s is no registry host; set %s: %w", EnvHarborURL, EnvHarborRegistryHosts, err))
+		}
+	}
+
+	if rawURL == "" {
+		var stray []string
+		for _, k := range []string{EnvNexusAdminDir, EnvNexusCAFile, EnvNexusAllowHTTP, EnvNexusRegistryHosts, EnvNexusRateLimitBackoff} {
+			if strings.TrimSpace(os.Getenv(k)) != "" {
+				stray = append(stray, k)
+			}
+		}
+		if len(stray) > 0 {
+			// Half a Nexus configuration: the operator meant to enable the
+			// backend, and the bridge would silently serve Harbor only.
+			errs = append(errs, fmt.Errorf("%s set without %s, which enables the Nexus backend", strings.Join(stray, ", "), EnvNexusURL))
+		}
+		return errs
+	}
+
+	n := &NexusConfig{RateLimitBackoff: DefaultNexusRateLimitBackoff}
+	if raw := strings.TrimSpace(os.Getenv(EnvNexusAllowHTTP)); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s %q must be a boolean", EnvNexusAllowHTTP, raw))
+		}
+		n.AllowHTTP = v
+	}
+	if v, err := requireURL(rawURL, EnvNexusURL); err != nil {
+		errs = append(errs, err)
+	} else {
+		switch {
+		case v.User != nil:
+			errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): the bridge authenticates to Nexus with the credentials in %s (chart nexus.adminCredsSecret)", EnvNexusURL, EnvNexusAdminDir))
+		case v.RawQuery != "" || v.ForceQuery || v.Fragment != "":
+			errs = append(errs, fmt.Errorf("%s must not carry a query or fragment: it is Nexus's base URL", EnvNexusURL))
+		case v.Scheme == "http" && !n.AllowHTTP:
+			errs = append(errs, fmt.Errorf("%s %q uses plain http: the Nexus admin credentials and every new user's password would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvNexusURL, redactURL(v), EnvNexusCAFile, EnvNexusAllowHTTP))
+		default:
+			n.URL = v
+		}
+	}
+	n.AdminDir = strings.TrimSpace(os.Getenv(EnvNexusAdminDir))
+	if n.AdminDir == "" {
+		errs = append(errs, fmt.Errorf("%s is required when %s is set", EnvNexusAdminDir, EnvNexusURL))
+	}
+	n.CAFile = strings.TrimSpace(os.Getenv(EnvNexusCAFile))
+
+	if raw := strings.TrimSpace(os.Getenv(EnvNexusRegistryHosts)); raw == "" {
+		errs = append(errs, fmt.Errorf("%s is required when %s is set: the data plane routes a request to Nexus by the image's registry host", EnvNexusRegistryHosts, EnvNexusURL))
+	} else if hosts, err := registryhost.ParseList(raw); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", EnvNexusRegistryHosts, err))
+	} else {
+		n.RegistryHosts = hosts
+		if hp, shared := registryhost.SharedHostPort(c.HarborRegistryHosts, hosts); shared {
+			errs = append(errs, fmt.Errorf("registry host %s is both Harbor's (%s) and Nexus's (%s): kubelet caches credentials per registry host, so it would hand one backend's credentials to the other's images; give each backend its own host[:port]",
+				hp, EnvHarborRegistryHosts, EnvNexusRegistryHosts))
+		}
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(EnvNexusRateLimitBackoff)); raw != "" {
+		v, err := time.ParseDuration(raw)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s %q must be a duration such as 15m", EnvNexusRateLimitBackoff, raw))
+		case v <= 0:
+			errs = append(errs, fmt.Errorf("%s %q must be positive", EnvNexusRateLimitBackoff, raw))
+		default:
+			n.RateLimitBackoff = v
+		}
+	}
+	c.Nexus = n
+	return errs
 }
 
 // requireURL parses an http(s) URL setting. Its errors never repeat the
@@ -493,7 +698,26 @@ func (c *Config) Sanitized() map[string]string {
 	if c.OIDCTokenFile != "" {
 		out[EnvOIDCTokenFile] = c.OIDCTokenFile
 	}
+	if n := c.Nexus; n != nil {
+		out[EnvHarborRegistryHosts] = hostList(c.HarborRegistryHosts)
+		out[EnvNexusURL] = redactURL(n.URL)
+		out[EnvNexusAdminDir] = n.AdminDir
+		out[EnvNexusAllowHTTP] = strconv.FormatBool(n.AllowHTTP)
+		out[EnvNexusRegistryHosts] = hostList(n.RegistryHosts)
+		out[EnvNexusRateLimitBackoff] = n.RateLimitBackoff.String()
+		if n.CAFile != "" {
+			out[EnvNexusCAFile] = n.CAFile
+		}
+	}
 	return out
+}
+
+func hostList(hosts []registryhost.Host) string {
+	parts := make([]string, len(hosts))
+	for i, h := range hosts {
+		parts[i] = h.String()
+	}
+	return strings.Join(parts, ",")
 }
 
 // AdminCreds is the loaded Harbor admin / system-robot credentials.

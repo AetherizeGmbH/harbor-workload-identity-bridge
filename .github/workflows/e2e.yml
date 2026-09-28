@@ -66,11 +66,15 @@ jobs:
         # No `| tee`: with the runner's default `bash -e` (no pipefail)
         # a tee'd `tofu test` once returned tee's exit code and a real
         # failure looked green. The step log already holds the output.
+        # The Nexus harness (tests/03-nexus.tftest.hcl, ADR-0036) is not
+        # run here: `make e2e-nexus`. Same filters as the Makefile's
+        # E2E_HARBOR_TESTS.
         shell: bash
         run: |
           set -Eeuo pipefail
           tofu init
-          TF_VAR_pause_after_pull=false tofu test -verbose
+          TF_VAR_pause_after_pull=false tofu test -verbose \
+            -filter=tests/01-plan.tftest.hcl -filter=tests/02-bridge.tftest.hcl
       # A failing Job stage writes pod/event/bridge/installer/kubelet
       # diagnostics to test/e2e/.diag/<job>/ before tofu destroys the
       # cluster. Never Secret contents — only their names.

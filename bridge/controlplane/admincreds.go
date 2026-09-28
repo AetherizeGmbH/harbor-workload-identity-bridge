@@ -90,8 +90,10 @@ func readAdminCredsFrom(dir string) (*AdminCreds, error) {
 // files each time costs nothing worth caching. A failed read fails the
 // call; the previous credentials are never reused silently.
 type AdminCredsReader struct {
-	cfg *Config
-	log logr.Logger
+	// dir returns the directory to read, evaluated on every call.
+	dir     func() string
+	backend string
+	log     logr.Logger
 
 	mu   sync.Mutex
 	last AdminCreds
@@ -100,13 +102,20 @@ type AdminCredsReader struct {
 // NewAdminCredsReader returns a reader for cfg.HarborAdminDir that logs,
 // without the values, when the credentials on disk change.
 func NewAdminCredsReader(cfg *Config, log logr.Logger) *AdminCredsReader {
-	return &AdminCredsReader{cfg: cfg, log: log}
+	return &AdminCredsReader{dir: func() string { return cfg.HarborAdminDir }, backend: "Harbor", log: log}
+}
+
+// NewNexusAdminCredsReader returns a reader for n.AdminDir, the Nexus
+// admin credentials (ADR-0036), with the same behaviour.
+func NewNexusAdminCredsReader(n *NexusConfig, log logr.Logger) *AdminCredsReader {
+	return &AdminCredsReader{dir: func() string { return n.AdminDir }, backend: "Nexus", log: log}
 }
 
 // Read returns the current credentials. Its signature matches
-// harbor.CredentialSource.
+// harbor.CredentialSource and nexus.CredentialSource.
 func (r *AdminCredsReader) Read() (username, password string, err error) {
-	creds, err := r.cfg.LoadAdminCreds()
+	dir := r.dir()
+	creds, err := readAdminCredsDir(dir)
 	if err != nil {
 		return "", "", err
 	}
@@ -115,7 +124,7 @@ func (r *AdminCredsReader) Read() (username, password string, err error) {
 	r.last = *creds
 	r.mu.Unlock()
 	if changed {
-		r.log.Info("Harbor admin credentials changed on disk; using the new ones", "dir", r.cfg.HarborAdminDir)
+		r.log.Info(r.backend+" admin credentials changed on disk; using the new ones", "dir", dir)
 	}
 	return creds.Username, creds.Password, nil
 }

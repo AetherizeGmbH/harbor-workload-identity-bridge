@@ -11,6 +11,7 @@ set -euo pipefail
 
 CHART_DIR="${CHART_DIR:-charts/harbor-bridge}"
 COMPLETE="${CHART_DIR}/tests/values-complete.yaml"
+NEXUS="${CHART_DIR}/tests/values-nexus.yaml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
@@ -118,21 +119,79 @@ cases=(
   "service.nodePort null with the default endpoint|--set|service.nodePort=null|service.nodePort=null must be a fixed port while plugin.bridgeEndpoint is empty"
   "service.nodePort not a port with the default endpoint|--set|service.nodePort=70000|service.nodePort=70000 must be a fixed port"
   "plugin.priorityClassName not a string|--set|plugin.priorityClassName=true|plugin.priorityClassName must be a string (a PriorityClass name, or \"\" to leave it out), but it was read as the bool true"
+  "harbor.registryHosts with a scheme (without Nexus too)|--set|harbor.registryHosts={https://harbor.example.com}|harbor.registryHosts entry \"https://harbor.example.com\" must not carry a scheme"
+  "harbor.registryHosts as a string|--set-string|harbor.registryHosts=harbor.example.com|harbor.registryHosts must be a list"
+  "nexus.enabled not a boolean|--set-string|nexus.enabled=true|nexus.enabled=\"true\" must be true or false"
+)
+
+# The Sonatype Nexus Repository backend (ADR-0036), on top of
+# values-nexus.yaml, whose plugin.matchImages covers every registry host.
+nexus_cases=(
+  "nexus.url|--set|nexus.url=|nexus.url is REQUIRED"
+  "nexus.url over plain http|--set|nexus.url=http://nexus.example.com|nexus.url uses plain http"
+  "nexus.url with credentials|--set|nexus.url=https://admin:s3cr3t-pw@nexus.example.com|nexus.url must not contain \"@\""
+  "nexus.url with an @ after the host|--set|nexus.url=https://nexus.example.com/a@b|nexus.url must not contain \"@\""
+  "nexus.url with a query|--set|nexus.url=https://nexus.example.com/?x=1|nexus.url must be the base URL of Nexus"
+  "nexus.url with a space|--set|nexus.url=https://nexus.example.com/a b|nexus.url must be the base URL of Nexus"
+  "nexus.url over plain http in upper case|--set|nexus.url=HTTP://nexus.example.com|nexus.url uses plain http"
+  "nexus.url with a fragment|--set|nexus.url=https://nexus.example.com/#x|nexus.url must be the base URL of Nexus"
+  "nexus.url without a scheme|--set|nexus.url=nexus.example.com|nexus.url must be an http:// or https:// URL with a host"
+  "nexus.allowInsecureHTTP not a boolean|--set-string|nexus.allowInsecureHTTP=yes|nexus.allowInsecureHTTP=\"yes\" must be true or false"
+  "nexus.adminCredsSecret.name|--set|nexus.adminCredsSecret.name=|nexus.adminCredsSecret.name is REQUIRED"
+  "nexus.adminCredsSecret missing|--set|nexus.adminCredsSecret=null|nexus.adminCredsSecret.name is REQUIRED"
+  "nexus.adminCredsSecret missing without the plugin|--set|nexus.adminCredsSecret=null,plugin.enabled=false|nexus.adminCredsSecret.name is REQUIRED"
+  "nexus.adminCredsSecret.keys.password empty|--set|nexus.adminCredsSecret.keys.password=|nexus.adminCredsSecret.keys.password must name the key"
+  "nexus.caSecret.key empty|--set|nexus.caSecret.key=|nexus.caSecret.key must name the key"
+  "nexus.rateLimitBackoff without a unit|--set|nexus.rateLimitBackoff=900|nexus.rateLimitBackoff=\"900\" must be a positive Go duration"
+  "nexus.rateLimitBackoff zero|--set|nexus.rateLimitBackoff=0s|must be a positive Go duration"
+  "nexus.registryHosts missing|--set|nexus.registryHosts=null|nexus.registryHosts is REQUIRED"
+  "nexus.registryHosts as a string|--set-string|nexus.registryHosts=nexus.example.com:8082|nexus.registryHosts must be a list"
+  "nexus.registryHosts with a scheme|--set|nexus.registryHosts={https://nexus.example.com}|nexus.registryHosts entry \"https://nexus.example.com\" must not carry a scheme"
+  "nexus.registryHosts with a glob|--set|nexus.registryHosts={*.example.com}|no credentials, query, fragment, wildcard or whitespace"
+  "nexus.registryHosts with a trailing slash|--set|nexus.registryHosts={nexus.example.com:8082/team/}|path segment \"\", which is not a repository path component"
+  "nexus.registryHosts with an upper-case path|--set|nexus.registryHosts={nexus.example.com:8082/Team}|path segment \"Team\", which is not a repository path component"
+  "nexus.registryHosts port with a leading zero|--set|nexus.registryHosts={nexus.example.com:08082}|port \"08082\", which must be a number from 1 to 65535 without leading zeros"
+  "nexus.registryHosts port out of range|--set|nexus.registryHosts={nexus.example.com:65536}|port \"65536\", which must be a number from 1 to 65535"
+  "nexus.registryHosts empty port|--set|nexus.registryHosts={nexus.example.com:}|port \"\", which must be a number"
+  "nexus.registryHosts IPv6 without brackets|--set|nexus.registryHosts={fd00::1}|must write an IPv6 address in brackets"
+  "nexus.registryHosts host name with an underscore|--set|nexus.registryHosts={nexus_1.example.com}|\"nexus_1.example.com\", which is not a host name or IP address"
+  "nexus.registryHosts label over 63 characters|--set|nexus.registryHosts={$(printf 'a%.0s' {1..64}).example.com}|which is not a host name or IP address"
+  "Nexus host not in plugin.matchImages|--set|plugin.matchImages={harbor.example.com}|nexus.registryHosts entry \"nexus.example.com:8082\" is not covered by plugin.matchImages"
+  "plugin.matchImages without the port|--set|plugin.matchImages={harbor.example.com,nexus.example.com,*.example.com/nexus}|entry \"nexus.example.com:8082\" is not covered"
+  "plugin.matchImages with another port|--set|plugin.matchImages={harbor.example.com,nexus.example.com:8083,*.example.com/nexus}|entry \"nexus.example.com:8082\" is not covered"
+  "plugin.matchImages with a literal /* path|--set|plugin.matchImages={harbor.example.com,nexus.example.com:8082/*,*.example.com/nexus}|plugin.matchImages entry \"nexus.example.com:8082/*\" is not host[:port][/path]"
+  "plugin.matchImages path with a trailing slash|--set|plugin.matchImages={harbor.example.com,nexus.example.com:8082,*.example.com/nexus/}|entry \"registry.example.com/nexus\" is not covered"
+  "plugin.matchImages path longer than the prefix|--set|plugin.matchImages={harbor.example.com,nexus.example.com:8082,registry.example.com/nexus/app}|entry \"registry.example.com/nexus\" is not covered"
+  "plugin.matchImages glob covering fewer labels|--set|plugin.matchImages={harbor.example.com,nexus.example.com:8082,*.com/nexus}|entry \"registry.example.com/nexus\" is not covered"
+  "plugin.matchImages glob with a question mark (a URL query to kubelet)|--set|plugin.matchImages={harbor.example.com,nexus.example.com:8082,registr?.example.com/nexus}|plugin.matchImages entry \"registr?.example.com/nexus\" is not host[:port][/path]"
+  "plugin.matchImages in upper case|--set|plugin.matchImages={harbor.example.com,NEXUS.example.com:8082,*.example.com/nexus}|entry \"nexus.example.com:8082\" is not covered"
+  "Harbor registry host not in plugin.matchImages|--set|harbor.registryHosts={harbor-2.example.com}|Harbor's registry host \"harbor-2.example.com\" (harbor.registryHosts) is not covered by plugin.matchImages"
+  "Harbor registry host from harbor.url not in plugin.matchImages|--set|harbor.registryHosts=null,harbor.url=https://harbor-core.harbor.svc|Harbor's registry host \"harbor-core.harbor.svc\" (the host of harbor.url) is not covered by plugin.matchImages"
+  "harbor.url host no registry host|--set|harbor.registryHosts=null,harbor.url=https://harbor.example.com:0443|the host of harbor.url is no registry host: it has the port \"0443\""
+  "a host:port both backends name|--set|harbor.registryHosts={nexus.example.com:8082}|registry host \"nexus.example.com:8082\" is both Harbor's (harbor.registryHosts) and Nexus's (nexus.registryHosts)"
+  "a host both backends name, in another case|--set|harbor.registryHosts={NEXUS.Example.com:8082}|registry host \"nexus.example.com:8082\" is both Harbor's"
+  "a host both backends name, from harbor.url|--set|harbor.registryHosts=null,harbor.url=https://registry.example.com|registry host \"registry.example.com\" is both Harbor's (the host of harbor.url) and Nexus's"
 )
 
 failed=0
-for case in "${cases[@]}"; do
-  IFS='|' read -r label flag setval want <<< "${case}"
-  out=$(render -f "${COMPLETE}" "${flag}" "${setval}" 2>&1 || true)
-  if grep -qF "${want}" <<<"${out}"; then
-    echo "PASS  ${label}"
-  else
-    echo "FAIL  ${label}"
-    echo "      expected error containing: ${want}"
-    head -3 <<<"      got: ${out}"
-    failed=$((failed+1))
-  fi
-done
+run_cases() {
+  local base="$1"; shift
+  local case label flag setval want out
+  for case in "$@"; do
+    IFS='|' read -r label flag setval want <<< "${case}"
+    out=$(render -f "${base}" "${flag}" "${setval}" 2>&1 || true)
+    if grep -qF "${want}" <<<"${out}"; then
+      echo "PASS  ${label}"
+    else
+      echo "FAIL  ${label}"
+      echo "      expected error containing: ${want}"
+      head -3 <<<"      got: ${out}"
+      failed=$((failed+1))
+    fi
+  done
+}
+run_cases "${COMPLETE}" "${cases[@]}"
+run_cases "${NEXUS}" "${nexus_cases[@]}"
 
 # plugin.matchImages defaults to [] which is "set" but empty; clearing via
 # --set doesn't reproduce the empty-list path. Use a values overlay.
@@ -617,6 +676,143 @@ else
   echo "FAIL  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
   failed=$((failed+1))
 fi
+
+# --- Sonatype Nexus Repository (ADR-0036): what must render ---------------
+
+# check LABEL COMMAND...: PASS when COMMAND succeeds.
+check() {
+  local label="$1"; shift
+  if "$@"; then
+    echo "PASS  ${label}"
+  else
+    echo "FAIL  ${label}"
+    failed=$((failed+1))
+  fi
+}
+
+# env_is RENDER NAME VALUE: the bridge env var NAME has the quoted VALUE.
+env_is() {
+  local ctx
+  ctx=$(grep -A1 -xE " +- name: $2" <<<"$1") || return 1
+  grep -qxF "              value: \"$3\"" <<<"${ctx}"
+}
+
+# follows RENDER LINE NEXT: some whole line LINE of RENDER is followed by
+# the whole line NEXT.
+follows() {
+  local ctx
+  ctx=$(grep -A1 -xF -- "$2" <<<"$1") || return 1
+  grep -qxF -- "$3" <<<"${ctx}"
+}
+
+# renders ARGS...: the chart renders with ARGS; the output is in ${out}.
+renders() {
+  out=$(render "$@" 2>&1) || { head -3 <<<"      got: ${out}"; return 1; }
+}
+
+# A credential in nexus.url is never repeated in the error.
+no_url_credential() {
+  out=$(render -f "${NEXUS}" --set nexus.url=https://admin:s3cr3t-pw@nexus.example.com 2>&1 || true)
+  grep -qF 'nexus.url must not contain "@"' <<<"${out}" && ! grep -qF 's3cr3t-pw' <<<"${out}"
+}
+check "nexus.url's credential is not repeated in the error" no_url_credential
+
+# nexus.enabled=false renders nothing of the backend, whatever else is set;
+# harbor.registryHosts still reaches the bridge, which parses it anyway.
+nexus_disabled() {
+  renders -f "${NEXUS}" --set nexus.enabled=false \
+    && ! grep -qE 'BRIDGE_NEXUS_|nexus\.aetherize\.io|nexusaccesses|nexus-admin|nexus-ca' <<<"${out}" \
+    && env_is "${out}" BRIDGE_HARBOR_REGISTRY_HOSTS harbor.example.com
+}
+check "nexus.enabled=false renders nothing of the Nexus backend" nexus_disabled
+
+# `helm upgrade --reuse-values` from a chart before the Nexus backend
+# renders with values that lack nexus and harbor.registryHosts; a null
+# --set removes them the same way. The render must equal the default one.
+no_nexus_block() {
+  [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set nexus=null --set harbor.registryHosts=null 2>&1)" ]
+}
+check "a missing nexus block renders the defaults (--reuse-values)" no_nexus_block
+
+# `--reuse-values --set nexus.enabled=true,...` lacks the other defaults of
+# values.yaml: they render anyway.
+partial_nexus_block() {
+  renders -f "${NEXUS}" --set nexus.rateLimitBackoff=null,nexus.adminCredsSecret.keys=null,nexus.caSecret=null,nexus.allowInsecureHTTP=null \
+    && env_is "${out}" BRIDGE_NEXUS_RATE_LIMIT_BACKOFF 15m \
+    && env_is "${out}" BRIDGE_NEXUS_ALLOW_INSECURE_HTTP false \
+    && ! grep -qE 'BRIDGE_NEXUS_CA_FILE|nexus-ca' <<<"${out}" \
+    && follows "${out}" '              - key: "username"' '                path: username' \
+    && follows "${out}" '              - key: "password"' '                path: password'
+}
+check "a partial nexus block renders the defaults of the rest" partial_nexus_block
+
+# Harbor-only installs keep today's behaviour: harbor.registryHosts renders
+# as given and is not checked against plugin.matchImages.
+harbor_hosts_without_nexus() {
+  renders -f "${COMPLETE}" --set 'harbor.registryHosts={harbor-2.example.com,harbor.example.com:8443/team}' \
+    && env_is "${out}" BRIDGE_HARBOR_REGISTRY_HOSTS 'harbor-2.example.com,harbor.example.com:8443/team'
+}
+check "harbor.registryHosts without Nexus renders, unchecked against matchImages" harbor_hosts_without_nexus
+
+# Coverage under kubelet's rules: a host glob with the port, a bare host
+# over a path prefix, and raw path prefixes shorter than the entry's.
+check "plugin.matchImages: a host glob with the port and a bare host cover" \
+  renders -f "${NEXUS}" --set 'plugin.matchImages={harbor.example.com,*.example.com:8082,registry.example.com}'
+check "plugin.matchImages: raw path prefixes shorter than the entry's cover" \
+  renders -f "${NEXUS}" --set 'plugin.matchImages={harbor.example.com,nexus.example.com:8082/,registry.example.com/nex}'
+
+# Without the chart's plugin there is no matchImages to check.
+plugin_disabled() {
+  renders -f "${NEXUS}" --set plugin.enabled=false,plugin.matchImages=null \
+    && env_is "${out}" BRIDGE_NEXUS_URL https://nexus.example.com
+}
+check "plugin.enabled=false skips the matchImages coverage check" plugin_disabled
+
+allow_http() {
+  renders -f "${NEXUS}" --set nexus.url=http://nexus.nexus.svc:8081,nexus.allowInsecureHTTP=true \
+    && env_is "${out}" BRIDGE_NEXUS_URL http://nexus.nexus.svc:8081 \
+    && env_is "${out}" BRIDGE_NEXUS_ALLOW_INSECURE_HTTP true
+}
+check "nexus.allowInsecureHTTP=true admits an http nexus.url" allow_http
+
+# IPv6: kubelet matches a bracketed address with a port label by label; a
+# bracketed address without a port stays in brackets, which filepath.Match
+# reads as a character class, so no matchImages entry covers it.
+cat <<'YAML' > "${TMP}/values-nexus-ipv6.yaml"
+nexus:
+  registryHosts: ["[FD00::1]:5000"]
+plugin:
+  matchImages: ["harbor.example.com", "[fd00::1]:5000"]
+YAML
+ipv6_with_port() {
+  renders -f "${NEXUS}" -f "${TMP}/values-nexus-ipv6.yaml" \
+    && env_is "${out}" BRIDGE_NEXUS_REGISTRY_HOSTS '[FD00::1]:5000'
+}
+check "an IPv6 registry host with a port is covered by the same literal" ipv6_with_port
+cat <<'YAML' > "${TMP}/values-nexus-ipv6-noport.yaml"
+nexus:
+  registryHosts: ["[fd00::1]"]
+plugin:
+  matchImages: ["harbor.example.com", "[fd00::1]"]
+YAML
+ipv6_without_port() {
+  out=$(render -f "${NEXUS}" -f "${TMP}/values-nexus-ipv6-noport.yaml" 2>&1 || true)
+  grep -qF 'nexus.registryHosts entry "[fd00::1]" is not covered by plugin.matchImages' <<<"${out}"
+}
+check "an IPv6 registry host without a port is never covered" ipv6_without_port
+
+# A character class or an escape in a host label is refused by the
+# matchImages syntax check before any coverage is computed: such an entry
+# never counts as covering, even where kubelet would match.
+cat <<'YAML' > "${TMP}/values-nexus-class.yaml"
+plugin:
+  matchImages: ["harbor.example.com", "nexus.example.com:8082", "[r]egistry.example.com"]
+YAML
+character_class() {
+  out=$(render -f "${NEXUS}" -f "${TMP}/values-nexus-class.yaml" 2>&1 || true)
+  grep -qF 'plugin.matchImages entry "[r]egistry.example.com" is not host[:port][/path]' <<<"${out}"
+}
+check "a matchImages host label with a character class never covers" character_class
 
 if [ "${failed}" -gt 0 ]; then
   echo

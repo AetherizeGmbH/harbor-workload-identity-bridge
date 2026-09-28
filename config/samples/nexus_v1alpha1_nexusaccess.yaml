@@ -1,0 +1,26 @@
+# Sample NexusAccess granting the flux-system source-controller ServiceAccount
+# pull access to the "docker-hosted" Nexus repository and pull and push access
+# to "ci-images" (ADR-0036).
+#
+# The issuer and the audience must equal the bridge's bridge.oidcIssuer and
+# plugin.audience, as for a HarborAccess.
+apiVersion: nexus.aetherize.io/v1alpha1
+kind: NexusAccess
+metadata:
+  name: source-controller-access
+  namespace: harbor-bridge-system
+spec:
+  serviceAccountRef:
+    namespace: flux-system
+    name: source-controller
+  trustPolicy:
+    issuer: https://kubernetes.default.svc.cluster.local
+    audience: harbor-bridge-prod
+  repositories:
+    - name: docker-hosted
+      access: pull
+    - name: ci-images
+      # A push needs read as well: a pusher declares "pull,push".
+      access: "pull,push"
+      format: docker
+  tokenTTL: 1h

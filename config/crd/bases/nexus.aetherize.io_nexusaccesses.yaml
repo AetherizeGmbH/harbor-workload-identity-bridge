@@ -1,0 +1,297 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: nexusaccesses.nexus.aetherize.io
+spec:
+  group: nexus.aetherize.io
+  names:
+    categories:
+    - nexus
+    kind: NexusAccess
+    listKind: NexusAccessList
+    plural: nexusaccesses
+    shortNames:
+    - nxa
+    singular: nexusaccess
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.serviceAccountRef.name
+      name: SA
+      type: string
+    - jsonPath: .spec.serviceAccountRef.namespace
+      name: SA-Namespace
+      priority: 1
+      type: string
+    - jsonPath: .status.user.userId
+      name: User
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          NexusAccess declares that a Kubernetes ServiceAccount, matched by
+          trustPolicy, may pull and/or push specific Nexus repositories via the
+          bridge.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NexusAccessSpec describes the desired state of a NexusAccess.
+            properties:
+              repositories:
+                description: |-
+                  Repositories are the Nexus repositories the ServiceAccount's Nexus
+                  role grants access to. A repository that does not exist is not
+                  granted, and the bridge issues no credentials for this object until
+                  it exists or leaves the list (Ready=False, reason RepositoryNotFound;
+                  ADR-0036). Neither is one whose repository-view privilege Nexus
+                  reports as anything but its own built-in privilege of that
+                  repository (reason PrivilegeConflict).
+                items:
+                  description: RepositoryGrant grants an access on one Nexus repository.
+                  properties:
+                    access:
+                      description: Access is the permission granted on the repository.
+                      enum:
+                      - pull
+                      - push
+                      - pull,push
+                      type: string
+                    format:
+                      default: docker
+                      description: Format is the repository's format. Only docker
+                        is supported.
+                      enum:
+                      - docker
+                      type: string
+                    name:
+                      description: |-
+                        Name is the Nexus repository name, following Nexus's own rule:
+                        letters, digits and '-', then also '_' and '.'. Names are
+                        case-sensitive. Wildcards such as "*" (every repository) are
+                        rejected. At most 167 characters, so that every privilege name
+                        derived from it stays within Nexus's 200-character limit.
+                      maxLength: 167
+                      minLength: 1
+                      pattern: ^[a-zA-Z0-9-][a-zA-Z0-9_.-]*$
+                      type: string
+                  required:
+                  - access
+                  - name
+                  type: object
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              serviceAccountRef:
+                description: |-
+                  ServiceAccountRef identifies the Kubernetes ServiceAccount this
+                  object grants access for.
+                properties:
+                  name:
+                    description: Name is the name of the ServiceAccount.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the ServiceAccount. A namespace is an
+                      RFC 1123 label, so at most 63 characters; the Nexus naming relies on
+                      that bound (ADR-0036).
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              tokenTTL:
+                default: 1h
+                description: |-
+                  TokenTTL is the longest time kubelet may cache the credentials the
+                  bridge returns for this NexusAccess (the credential provider's
+                  cacheDuration). The bridge shortens it further so no cache outlives
+                  the next scheduled rotation (ADR-0023). Min 5m, max 24h. Defaults to
+                  1h. A Go duration: units h, m, s, ms, us or ns, e.g. 30m, 1h or
+                  1h30m. Days ("1d") and ISO 8601 ("PT1H") are rejected.
+                maxLength: 64
+                type: string
+                x-kubernetes-validations:
+                - message: tokenTTL must be a Go duration between 5m and 24h such
+                    as 30m, 1h or 1h30m (units h, m, s, ms, us, ns; days are not supported)
+                  optionalOldSelf: true
+                  rule: (oldSelf.hasValue() && self == oldSelf.value()) || (duration(self)
+                    >= duration('5m') && duration(self) <= duration('24h'))
+              trustPolicy:
+                description: |-
+                  TrustPolicy declares which ServiceAccount tokens may receive
+                  credentials through this object.
+                properties:
+                  audience:
+                    description: |-
+                      Audience must appear in the aud claim of incoming tokens. It must
+                      equal the one audience the bridge serves (chart: plugin.audience,
+                      ADR-0026).
+                    minLength: 1
+                    type: string
+                  issuer:
+                    description: |-
+                      Issuer is the OIDC issuer expected on incoming ServiceAccount tokens.
+                      It must equal the bridge's configured issuer byte for byte (chart:
+                      bridge.oidcIssuer).
+                    minLength: 1
+                    pattern: ^https?://.+
+                    type: string
+                required:
+                - audience
+                - issuer
+                type: object
+            required:
+            - repositories
+            - serviceAccountRef
+            - trustPolicy
+            type: object
+          status:
+            description: NexusAccessStatus is the observed state of a NexusAccess.
+            properties:
+              conditions:
+                description: |-
+                  Conditions follow the Kubernetes standard pattern. Expected types:
+                  Ready, UserProvisioned, TrustPolicyApplied.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the bridge last applied
+                  in full. It does not advance while the generation is only partly
+                  applied (for example a repository that does not exist).
+                format: int64
+                type: integer
+              user:
+                description: |-
+                  User reports the Nexus user and role provisioned for this object.
+                  Empty until the first reconcile succeeds.
+                properties:
+                  lastRotated:
+                    description: LastRotated is when the current user was created.
+                    format: date-time
+                    type: string
+                  passwordSecretRef:
+                    description: |-
+                      PasswordSecretRef is the name of the Secret holding the user's
+                      password. It lives in the bridge's namespace, not in the
+                      NexusAccess's, so a workload cannot read it.
+                    type: string
+                  roleId:
+                    description: |-
+                      RoleID is the id of the Nexus role that holds the repository
+                      privileges: bridge-<cluster>.<saNamespace>.<saName>. It persists
+                      across rotations.
+                    type: string
+                  userId:
+                    description: |-
+                      UserID is the id of the Nexus user whose password the Secret holds:
+                      bridge-<cluster>.<saNamespace>.<saName>_<generation>. It changes at
+                      every password rotation, because the bridge replaces the user under
+                      a new generation instead of changing its password (ADR-0036).
+                    type: string
+                type: object
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be at most 63 characters: it is stamped as
+            a label value on the user Secret'
+          rule: size(self.metadata.name) <= 63
+        - fieldPath: .spec
+          message: 'spec is required: serviceAccountRef, trustPolicy and repositories'
+          optionalOldSelf: true
+          reason: FieldValueRequired
+          rule: has(self.spec) || (oldSelf.hasValue() && !has(oldSelf.value().spec))
+    served: true
+    storage: true
+    subresources:
+      status: {}

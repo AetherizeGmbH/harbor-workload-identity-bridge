@@ -6,6 +6,15 @@
 
   Cluster name : {{ .Values.clusterName }}
   Harbor URL   : {{ .Values.harbor.url }}
+{{- if include "harbor-bridge.nexus.enabled" . }}
+{{- $harborHosts := list }}
+{{- range (include "harbor-bridge.harbor.registryEntries" . | fromJson).items }}
+{{- $harborHosts = append $harborHosts (include "harbor-bridge.registryEntry.string" .) }}
+{{- end }}
+  Harbor hosts : {{ join ", " $harborHosts }}
+  Nexus URL    : {{ .Values.nexus.url }} (preview, ADR-0036)
+  Nexus hosts  : {{ join ", " .Values.nexus.registryHosts }}
+{{- end }}
   Audience     : {{ .Values.plugin.audience }}
   Namespace    : {{ .Release.Namespace }}
 {{- if include "harbor-bridge.plugin.split" . }}
@@ -23,6 +32,9 @@
 {{- end }}
 
 This cluster's robot-ownership prefix in Harbor is `bridge-{{ .Values.clusterName }}.`
+{{- if include "harbor-bridge.nexus.enabled" . }}
+It also starts the names of the bridge's users and roles in Nexus.
+{{- end }}
 Bridges sharing one Harbor must each use a distinct clusterName (ADR-0009 /
 ADR-0018; the trailing dot makes distinct names collision-free).
 
@@ -99,7 +111,18 @@ NEXT STEPS
 
        - name: {{ include "harbor-bridge.plugin.providerNameYAML" . }}
          apiVersion: credentialprovider.kubelet.k8s.io/v1
+{{- if include "harbor-bridge.nexus.enabled" . }}
+{{- $hosts := list }}
+{{- range (include "harbor-bridge.harbor.registryEntries" . | fromJson).items }}
+{{- $hosts = append $hosts (include "harbor-bridge.registryEntry.string" . | quote) }}
+{{- end }}
+{{- range .Values.nexus.registryHosts }}
+{{- $hosts = append $hosts (include "harbor-bridge.registryEntry.string" (include "harbor-bridge.registryEntry.parse" . | fromJson) | quote) }}
+{{- end }}
+         matchImages: [{{ join ", " $hosts }}]
+{{- else }}
          matchImages: ["<your Harbor host>"]
+{{- end }}
          defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
          env:
            - name: HARBOR_BRIDGE_ENDPOINT
@@ -157,6 +180,11 @@ NEXT STEPS
      and its spec.trustPolicy.issuer must equal (byte for byte):
 
        {{ .Values.bridge.oidcIssuer }}
+{{- if include "harbor-bridge.nexus.enabled" . }}
+
+     The same holds for a NexusAccess CR, which grants a ServiceAccount
+     repositories in Nexus (config/samples/nexus_v1alpha1_nexusaccess.yaml).
+{{- end }}
 
   4. Uninstalling: delete your HarborAccess objects BEFORE `helm uninstall`.
      Each carries a finalizer that revokes its Harbor robot; without the
@@ -166,6 +194,11 @@ NEXT STEPS
      (and "harbor.aetherize.io/robot", on objects that still carry it from
      before the selector){{ end }} and delete the leftover
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
+{{- if include "harbor-bridge.nexus.enabled" . }}
+     The same holds for NexusAccess objects: their finalizer is
+     "{{ include "harbor-bridge.nexus.finalizer" . }}", and what is left over are the
+     bridge-{{ .Values.clusterName }}.* users and roles in Nexus.
+{{- end }}
 {{- if .Values.plugin.enabled }}
      `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
      and its files on the nodes; README "Uninstalling" shows how to remove them.
@@ -202,6 +235,25 @@ WARNING: bridge.tokenValidation.requirePodBinding=false weakens the bridge. It
 also accepts ServiceAccount tokens bound to no pod, such as those from
 `kubectl create token` without --bound-object-kind=Pod (ADR-0028). Use it only
 for local development.
+{{- end }}
+
+{{- if include "harbor-bridge.nexus.enabled" . }}
+
+NEXUS (preview, ADR-0036; README "Sonatype Nexus Repository (preview)"):
+  - The credential in Secret {{ dig "adminCredsSecret" "name" "" .Values.nexus | quote }} is admin-equivalent in
+    Nexus. Give it a role with nx-users-all, nx-roles-all and
+    nx-privileges-read only, and a long random username, never "admin": from
+    Nexus 3.94 on, anyone who reaches Nexus and knows the username can block it
+    with wrong passwords, which stops rotation and revocation of Nexus users.
+    Alert on the metric bridge_nexus_rate_limited.
+  - Nexus Community Edition 3.77 and later needs its EULA accepted before use.
+    That is your decision; the bridge never accepts it.
+{{- if .Release.IsUpgrade }}
+  - helm upgrade does not create CRDs. If this upgrade enabled Nexus, apply
+    the NexusAccess CRD of this chart version:
+      kubectl apply -f charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml
+    Until it exists, the new bridge pods exit at startup, naming it.
+{{- end }}
 {{- end }}
 
 Docs: https://github.com/AetherizeGmbH/harbor-workload-identity-bridge

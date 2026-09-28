@@ -49,7 +49,8 @@ generate: $(CONTROLLER_GEN) ## Generate deepcopy methods for API types
 .PHONY: manifests
 manifests: $(CONTROLLER_GEN) ## Generate CRD manifests under config/crd/bases (and the chart's copy)
 	$(CONTROLLER_GEN) crd paths=./bridge/api/... output:crd:dir=config/crd/bases
-	cp config/crd/bases/harbor.aetherize.io_harboraccesses.yaml $(PROJECT_DIR)/charts/harbor-bridge/crds/
+	cp config/crd/bases/harbor.aetherize.io_harboraccesses.yaml config/crd/bases/nexus.aetherize.io_nexusaccesses.yaml \
+		$(PROJECT_DIR)/charts/harbor-bridge/crds/
 
 .PHONY: tidy
 tidy: ## Resolve module dependencies
@@ -99,7 +100,7 @@ envtest-setup: $(SETUP_ENVTEST) ## Fetch kube-apiserver + etcd binaries for envt
 .PHONY: envtest
 envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
 	@KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-		go test ./bridge/controlplane/... -run TestEnvtest -count=1 -v -timeout 120s
+		go test ./bridge/controlplane/... ./bridge/cmd/... -run TestEnvtest -count=1 -v -timeout 180s
 
 # Optional pin for the Harbor Helm chart version the e2e harness installs.
 # Empty → the harness default (test/e2e/modules/harbor/main.tf). Set e.g.
@@ -109,13 +110,29 @@ envtest: $(SETUP_ENVTEST) manifests ## Run envtest-backed integration tests
 HARBOR_CHART_VERSION ?=
 e2e_harbor_var := $(if $(HARBOR_CHART_VERSION),TF_VAR_version_harbor=$(HARBOR_CHART_VERSION),)
 
+# Test files of each harness (tofu test runs every file of tests/ unless
+# filtered). 01-plan (mocked providers, seconds) runs first in both; the
+# Nexus harness (03, ADR-0036) builds its own kind cluster with Harbor AND
+# Nexus and is not part of `make e2e` or CI (.github/workflows/e2e.yml
+# and harbor-compat.yml pass the same filters as E2E_HARBOR_TESTS).
+E2E_HARBOR_TESTS := -filter=tests/01-plan.tftest.hcl -filter=tests/02-bridge.tftest.hcl
+E2E_NEXUS_TESTS := -filter=tests/01-plan.tftest.hcl -filter=tests/03-nexus.tftest.hcl
+
 .PHONY: e2e
 e2e: ## Run the full e2e harness — fresh kind cluster, harbor, chart, pull/push assertions (~5 min). HARBOR_CHART_VERSION=<chart> pins Harbor.
-	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose
+	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose $(E2E_HARBOR_TESTS)
 
 .PHONY: e2e-pause
 e2e-pause: ## Run e2e but pause AFTER the assertions — `rm test/e2e/.tofu-sleep-*` to continue
-	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose
+	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose $(E2E_HARBOR_TESTS)
+
+.PHONY: e2e-nexus
+e2e-nexus: ## Run the Nexus e2e harness (ADR-0036) — kind cluster with Harbor and Nexus 3.76.1, NexusAccess lifecycle, rotation (waits out the 5-minute retire grace), Nexus outage. Never accepts a Nexus EULA.
+	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=false tofu test -verbose $(E2E_NEXUS_TESTS)
+
+.PHONY: e2e-nexus-pause
+e2e-nexus-pause: ## Nexus e2e, but pause AFTER the assertions — `rm test/e2e/.tofu-sleep-*` to continue
+	cd test/e2e && tofu init -no-color && $(e2e_harbor_var) TF_VAR_pause_after_pull=true tofu test -verbose $(E2E_NEXUS_TESTS)
 
 .PHONY: e2e-gke
 e2e-gke: ## Run the GKE e2e harness (ADR-0022). CREATES BILLED GCP RESOURCES in $$GOOGLE_PROJECT (zonal spot GKE cluster, Artifact Registry repo, static IP); destroyed at the end of the run. Needs gcloud auth (application-default + docker) and docker. Never runs in CI.
@@ -201,9 +218,13 @@ FUZZ_TARGETS ?= \
 	./installer:FuzzKubeletCmdline \
 	./installer:FuzzNodeFiles_Injective \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \
+	./bridge/controlplane/nexus:FuzzNexusName_Injective \
+	./bridge/controlplane/nexus:FuzzRenderMessage_WithholdsSecrets \
 	./bridge/internal/robotsecret:FuzzName_Injective \
+	./bridge/internal/nexussecret:FuzzNexusSecretName_Injective \
 	./bridge/dataplane:FuzzJSONAudience \
-	./bridge/dataplane:FuzzCachedKeySet_VerifySignature
+	./bridge/dataplane:FuzzCachedKeySet_VerifySignature \
+	./bridge/dataplane:FuzzRoute
 FUZZTIME ?= 10s
 
 .PHONY: fuzz
@@ -268,7 +289,7 @@ GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 # (release harbor-bridge in namespace harbor-bridge-system unless given). The
 # single list drives lint, golden diff, and golden update so they cannot drift;
 # the release config (.releaserc.json) commits every tests/golden/*.yaml.
-CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace second-instance:second-instance:harbor-bridge-eu:harbor-bridge-eu
+CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace second-instance:second-instance:harbor-bridge-eu:harbor-bridge-eu nexus:nexus
 # CHART_CASE splits the case in the loop variable c into v (values file
 # suffix), g (golden file), rel (release name) and ns (namespace).
 CHART_CASE = IFS=:; set -- $$c; unset IFS; v=$$1; g=$$2; rel=$${3:-harbor-bridge}; ns=$${4:-harbor-bridge-system}

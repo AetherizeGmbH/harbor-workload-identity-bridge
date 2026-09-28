@@ -587,6 +587,207 @@ pulls by the same ServiceAccount on that node until it expires.
 only for a plugin response without a cache duration, and the plugin
 always sends one.
 
+## Sonatype Nexus Repository (preview)
+
+The bridge can also hand out credentials for docker repositories in
+Sonatype Nexus Repository 3, next to Harbor
+([ADR-0036](docs/adr/0036-nexus-repository-backend.md), status Proposed:
+its decisions may still change). Harbor stays required. With
+`nexus.enabled=false`, the default, the chart's templates render nothing
+of it and the bridge behaves as before. `helm install` still creates the
+NexusAccess CRD from the chart's `crds/`, as it does every CRD there; it
+stays inert without the backend.
+
+What the bridge does in Nexus:
+
+- A `NexusAccess` object (`nexus.aetherize.io/v1alpha1`, short name
+  `nxa`) names a ServiceAccount, the trust policy and the docker
+  repositories the ServiceAccount may pull from or push to: the Nexus
+  counterpart of a HarborAccess. `bridge.harborAccessSelector` and
+  `bridge.instance` select NexusAccess objects too.
+- Per ServiceAccount identity it keeps one role,
+  `bridge-<clusterName>.<namespace>.<name>`, holding the repositories'
+  built-in `nx-repository-view-docker-<repository>-*` privileges, and one
+  local user holding only that role, `<role>_<16 hex digits>`.
+- The user's password lives in the Secret `nexususer-<namespace>.<name>`
+  in the bridge namespace. The data plane serves it to kubelet for images
+  whose registry host is one of `nexus.registryHosts`.
+- A rotation (every 24 hours) creates a user under a new id, writes the
+  Secret, and deletes the previous user 5 minutes later. Nexus's docker
+  bearer token survives a password change, and even deleting and
+  re-creating the user under the same id; only retiring the user id ends
+  it.
+
+### Install
+
+1. In Nexus: activate the Docker Bearer Token Realm, make every docker
+   repository kubelet pulls from reachable as a registry (a connector
+   port, or a host and path prefix), and create the bridge's own account
+   (see [Caveats](#caveats-adr-0036)). Turn anonymous access off, or
+   accept that the `nx-anonymous` role widens what every bridge user can
+   read.
+2. On a release installed from an earlier chart version, apply the
+   NexusAccess CRD first. Helm creates the CRDs of `crds/` only on `helm
+   install`, never on `helm upgrade`, and a bridge with `nexus.enabled`
+   but without the CRD exits at startup, naming it. Use the file of the
+   chart version you upgrade to:
+
+   ```bash
+   kubectl apply -f charts/harbor-bridge/crds/nexus.aetherize.io_nexusaccesses.yaml
+   ```
+
+   A fresh `helm install` needs no such step.
+3. Create the credential Secret and add these values to the install from
+   the [Quickstart](#quickstart) (or to the `helm upgrade` of the release):
+
+   ```bash
+   kubectl create secret generic nexus-admin -n harbor-bridge-system \
+     --from-literal=username=YOUR_LONG_RANDOM_USERNAME \
+     --from-literal=password=YOUR_PASSWORD
+   ```
+
+   ```yaml
+   harbor:
+     # The hosts kubelet pulls Harbor's images from. Default: the host of
+     # harbor.url, which is wrong when that is an API-only address.
+     registryHosts: [harbor.example.com]
+   nexus:
+     enabled: true
+     url: https://nexus.example.com
+     adminCredsSecret:
+       name: nexus-admin
+     # caSecret: {name: nexus-ca, key: ca.crt}   # Nexus behind a private CA
+     registryHosts:
+       - nexus.example.com:8082                  # a docker connector's port
+     # rateLimitBackoff: 15m
+   plugin:
+     matchImages:
+       - harbor.example.com
+       - nexus.example.com:8082
+   ```
+
+4. Apply a NexusAccess (also in
+   `config/samples/nexus_v1alpha1_nexusaccess.yaml`):
+
+   ```yaml
+   apiVersion: nexus.aetherize.io/v1alpha1
+   kind: NexusAccess
+   metadata: {name: web, namespace: team-a}
+   spec:
+     serviceAccountRef: {namespace: team-a, name: web}
+     trustPolicy:
+       issuer: https://kubernetes.default.svc.cluster.local  # = bridge.oidcIssuer
+       audience: harbor-bridge-prod-eu-west                  # = plugin.audience
+     repositories:
+       - {name: docker-hosted, access: pull}
+       - {name: ci-images, access: "pull,push"}  # a push needs read too
+     tokenTTL: 1h
+   ```
+
+   `kubectl get nxa -A` shows the Nexus user and `Ready`; the `Ready`
+   condition's reason says what is wrong, e.g. `RepositoryNotFound`.
+
+### Registry hosts and matchImages
+
+With two backends the bridge routes every credential request by the
+image's registry host: `harbor.registryHosts` (default: the host[:port]
+of `harbor.url`) to Harbor, `nexus.registryHosts` to Nexus, and it
+refuses an image that matches neither. An entry is `host[:port]` with an
+optional path prefix, matched on `/` boundaries (the bridge answers for
+`host/nexus/app` and refuses `host/nexus-old/app`); no globs. The two
+lists must not share a host[:port]: kubelet caches credentials per
+registry host, so one backend's credentials would reach the other's
+images.
+
+A path prefix selects only which requests the bridge answers. Once it has
+issued credentials for an image of a host[:port], kubelet uses them, from
+its cache and without asking the bridge, for every image of that
+host[:port] that `plugin.matchImages` covers until the cache duration ends
+(`cacheKeyType: Registry`,
+[ADR-0016](docs/adr/0016-credential-provider-cache-key-type.md)). A
+prefix therefore does not keep Nexus credentials away from another
+service behind the same host[:port]; give that service its own host or
+port.
+
+With the chart-managed plugin the chart fails at template time unless,
+for each registry host of both backends, one `plugin.matchImages` entry
+covers it by kubelet's rules: the same port, globs only in the host (a
+`*` matches within one label, as in `*.example.com`), and the path
+compared as a raw string prefix of the image's path. So `host` and
+`host/nex` cover `host/nexus`; `host/nexus/` does not (it misses the
+image named `nexus` itself). The chart refuses a `matchImages` entry
+with a path glob such as `host/*`, a `?`, a character class or an escape
+before it checks coverage, and a bracketed IPv6 address without a port
+covers nothing, as for kubelet. A glob such as `*.harbor.example.com`
+keeps kubelet calling the plugin for every such host, but once Nexus is
+enabled the bridge serves only the Harbor hosts in
+`harbor.registryHosts`: list each one.
+
+### Caveats (ADR-0036)
+
+- **The Nexus credential is admin-equivalent.** Whoever can create users
+  and assign roles can give themselves `nx-admin`. The bridge needs a
+  role with `nx-users-all`, `nx-roles-all` and `nx-privileges-read` only,
+  never `nx-all`. Keep the credential in its Secret and nowhere else.
+- **Failed-login rate limiter** (Nexus 3.93 and later; read from Nexus's
+  source, not verified at runtime). Nexus counts failed logins per
+  username. From 3.94 on, a username past the limit is refused even with
+  the right password, and every request during the block extends it.
+  Anyone who reaches Nexus and knows the bridge's username can keep it
+  blocked with a few wrong passwords; rotation, the deletion of retired
+  users and revocation then stop. Give the account a long random username
+  (never `admin`), limit who reaches Nexus's REST API, and alert on
+  `bridge_nexus_rate_limited` (1 while the bridge has stopped calling
+  Nexus; meanwhile every NexusAccess reports `NexusRateLimited`, one being
+  deleted `DeletionBlocked`). After a 429 the bridge makes no call with
+  the credential for `nexus.rateLimitBackoff` (15m, Nexus's default
+  `nexus.auth.ratelimit.max-delay-seconds`; raise both together), counted
+  from the last 429. An administrator's update of the account or a Nexus
+  restart ends the block early; restarting the bridge ends its wait.
+  Nexus keeps the counts per node, so an HA Nexus allows proportionally
+  more wrong passwords.
+- **A leaked docker bearer token** stays valid until its user is retired:
+  no expiry was found. The bridge retires users at the next rotation (24
+  hours after the previous one, plus a safety margin and the 5-minute
+  grace) or at deletion, and only while it can authenticate to Nexus.
+- **Community Edition 3.77 and later requires accepting a EULA** before
+  use. Accepting it is the operator's legal decision; neither the bridge
+  nor this project's test harness ever accepts it. What the design relies
+  on was verified against 3.76.1 only; the rate limiter (3.93+), the role
+  update of 3.91+ and any later change of the token behaviour are not.
+  Sonatype documents limits for the Community Edition (100,000
+  `/repository/*` requests a day, 40,000 components); whether docker
+  traffic counts is not verified.
+- **Rights the bridge cannot see.** The `nx-anonymous` role (with
+  anonymous access on) and the DefaultRole realm give every bridge user
+  more than its NexusAccess grants.
+- **docker only.** `repositories[].format` has the single value `docker`;
+  `oci` repositories (Nexus 3.94 and later) wait until their token realm
+  has been analysed.
+- **A missing repository** makes the NexusAccess `RepositoryNotFound`:
+  its role keeps only the privileges that exist (removals still apply),
+  the data plane issues no credentials for it, and the bridge checks again
+  every 5 minutes. While a repository does not exist, anyone holding
+  `nx-privileges-create` can create a privilege of any kind under its
+  `nx-repository-view-docker-<repository>-<action>` name. The bridge
+  grants only Nexus's own built-in privilege of the repository; for any
+  other it treats the repository as missing and reports
+  `PrivilegeConflict` until an administrator deletes that privilege.
+- **Audit trail.** The Nexus user id changes at every rotation; the role,
+  the Secret and the NexusAccess keep their names.
+- Several bridges sharing one Nexus need distinct `clusterName` values,
+  as with Harbor.
+
+### Uninstalling Nexus access
+
+Delete your NexusAccess objects before `helm uninstall`, as with
+HarborAccess objects: their finalizer, `nexus.aetherize.io/user` (with
+`bridge.harborAccessSelector`, `nexus.aetherize.io/user-<instance>`),
+makes the bridge delete the users and the role in Nexus, and only a
+running bridge releases it. If the bridge is already gone, remove the
+finalizer by hand and delete the `bridge-<clusterName>.*` users and roles
+in Nexus. Helm keeps the CRD.
+
 ## Architecture and decisions
 
 - [`docs/PHASES.md`](docs/PHASES.md) — historical build log of Phases
@@ -636,6 +837,10 @@ always sends one.
     Artifact Registry image delivery, sslip.io + LoadBalancer instead
     of DNS surgery, and the AR-coexistence assertion that pins merge
     mode's "don't break the cloud's own provider" guarantee.
+  - [ADR-0036](docs/adr/0036-nexus-repository-backend.md) — Sonatype
+    Nexus Repository as a second backend (Proposed): why a rotation
+    replaces the Nexus user under a new id instead of changing its
+    password, and how the data plane routes by registry host.
 
 ## Harbor compatibility
 
@@ -689,12 +894,15 @@ In order.
    Dataplane V2) and folds them back into ADR-0022. EKS/AKS harnesses
    can follow the same module split.
 
-2. **Other registries via a backend plugin.** Move the Harbor-specific
-   code behind a translation layer so the CRD, reconciler, and data
-   plane no longer depend on Harbor, then add a Nexus backend. The flow
-   takes an SA token in and returns scoped credentials, which holds for
-   any registry; only account provisioning and the credential handshake
-   differ. It reuses the control-plane and data-plane split
+2. **Other registries via a backend seam.** A Nexus backend is in preview
+   ([Sonatype Nexus Repository (preview)](#sonatype-nexus-repository-preview),
+   ADR-0036) as a controller of its own next to Harbor's. Still to do:
+   move what both share behind a backend seam (ADR-0036 decision g), with
+   one conformance suite over both backends, so that a further registry
+   does not repeat them. The flow takes an SA token in and returns scoped
+   credentials, which holds for any registry; only account provisioning
+   and the credential handshake differ. It reuses the control-plane and
+   data-plane split
    ([ADR-0002](docs/adr/0002-bridge-control-plane-data-plane-split.md)),
    with the backend as a third seam.
 
@@ -852,6 +1060,31 @@ limits today.
   the role to the bridge's ServiceAccount, or document the reliance only.
   *Limits now:* on a cluster that removed the default binding the bridge
   cannot fetch the signing keys and exits at startup.
+
+#### Nexus backend (ADR-0036)
+
+- [ ] **Approve or change ADR-0036.** Its decisions are Proposed; the
+  preview implements them as written, with the deviations its
+  "Implementation notes" record. Open there: the API group, the new-id
+  rotation, the handling of a missing repository, whether a maintainer
+  accepts the Community Edition EULA for a verification run of 3.77 and
+  later, a credential self-check, the Community Edition limits, a bridge
+  with Nexus only (Harbor is required today), the `oci` format, whether
+  `status.user.userId` stays, decision g (the backend seam, not
+  extracted), whether a path-prefixed registry host should confine
+  credentials to the image (question 10: kubelet reuses them for every
+  image of the host[:port] today), and the threat-model additions of
+  decision j, which nobody has rated yet. *Limits now:* the Nexus backend is a preview, verified
+  against Nexus 3.76.1 only ([Caveats](#caveats-adr-0036)).
+- [ ] **Run the Nexus e2e harness; decide whether CI runs it.**
+  `make e2e-nexus` (HOW-TO-TEST.md §1c) has not run yet, and `make e2e`
+  and CI run the Harbor harness only (ADR-0036 implementation note 18).
+  *Options:* a CI job for it (the image is linux/amd64, so it runs
+  natively on CI runners; the scheduled rotation waits out the 5-minute
+  retire grace), or local runs only. *Limits now:* the NexusAccess
+  lifecycle, routing and rotation are tested against a fake Nexus (unit
+  and envtest) and the REST client against a live 3.76.1, but not end to
+  end with kubelet, containerd and a real Nexus.
 
 #### Nodes
 
