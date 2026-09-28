@@ -110,6 +110,59 @@ func TestRobotName_DotDelimiterIsInjective(t *testing.T) {
 	}
 }
 
+// Cluster, namespace and ServiceAccount names are DNS labels, which may
+// contain consecutive hyphens; Harbor refuses robot names with doubled
+// separators (validateName). RobotName must say so with a permanent error
+// instead of returning a name Harbor answers with 400 on every retry.
+func TestRobotName_RejectsNamesHarborRefuses(t *testing.T) {
+	for _, in := range [][3]string{
+		{"prod", "team--a", "sa"},
+		{"prod", "ns", "build--runner"},
+		{"prod--eu", "ns", "sa"},
+		{"prod", "xn--80ak6aa92e", "sa"}, // punycode namespace
+		{"prod", "ns", strings.Repeat("s", 150) + "--" + strings.Repeat("t", 100)}, // "--" in the kept part of a truncated name
+	} {
+		name, err := RobotName(in[0], in[1], in[2])
+		if !errors.Is(err, ErrInvalidRobotName) {
+			t.Errorf("RobotName(%q, %q, %q) = %q, %v; want ErrInvalidRobotName", in[0], in[1], in[2], name, err)
+		}
+	}
+	// A "--" that truncation cuts off does not reach Harbor.
+	sa := strings.Repeat("s", 250) + "--x"
+	name, err := RobotName("prod", "ns", sa)
+	if err != nil || !IsValidHarborRobotName(name) {
+		t.Errorf("RobotName with \"--\" only in the truncated-away part = %q, %v; want a valid name", name, err)
+	}
+}
+
+// TestRobotName_TruncatedNamesAreDisjointFromNaturalNames pins the property
+// the overflow path relies on (see RobotName): with real input lengths
+// (cluster and namespace at most 63 characters) the cut falls inside the
+// dot-free SA name, so a truncated name has three dots after "bridge-" and
+// a natural name exactly two.
+func TestRobotName_TruncatedNamesAreDisjointFromNaturalNames(t *testing.T) {
+	for _, in := range [][3]string{
+		{strings.Repeat("c", 63), strings.Repeat("n", 63), strings.Repeat("s", 253)},
+		{"c", "n", strings.Repeat("s", 253)},
+		{"prod", strings.Repeat("n", 63), strings.Repeat("s", 175)},
+	} {
+		name, err := RobotName(in[0], in[1], in[2])
+		if err != nil {
+			t.Fatal(err)
+		}
+		natural := "bridge-" + in[0] + "." + in[1] + "." + in[2]
+		if len(natural) <= RobotNameCap {
+			t.Fatalf("test premise: %d-character natural name is not truncated", len(natural))
+		}
+		if got := strings.Count(name, "."); got != 3 {
+			t.Errorf("truncated name %q has %d dots, want 3 (natural names have 2)", name, got)
+		}
+		if !strings.HasPrefix(name, "bridge-"+in[0]+"."+in[1]+".") {
+			t.Errorf("truncated name %q does not keep the cluster and namespace fields", name)
+		}
+	}
+}
+
 func TestRobotName_ClusterNameTooLong(t *testing.T) {
 	// A 230-char cluster name leaves no room for the ns/sa even with the
 	// hash. Note: real configurations cap clusterName at 63 chars via the
@@ -157,16 +210,6 @@ func TestOwnsRobot_PositiveCases(t *testing.T) {
 		{"prod", "bridge-prod.flux-system.source-controller"},
 		{"prod-eu-west", "bridge-prod-eu-west.flux-system.source-controller"},
 		{"a", "bridge-a.b"}, // minimum-length both sides
-
-		// Harbor adds "robot$" to system-level robot names on read paths
-		// (GET /robots and GET /robots/{id}). POST /robots accepts the
-		// un-prefixed form we send. So both forms must match — this is
-		// the bug discovered in the first manual e2e: GetByName was
-		// looking for "bridge-..." but Harbor returned "robot$bridge-...",
-		// and every subsequent reconcile re-took the create branch and
-		// got 409.
-		{"prod", "robot$bridge-prod.flux-system.source-controller"},
-		{"prod-eu-west", "robot$bridge-prod-eu-west.flux"},
 	}
 	for _, c := range cases {
 		if !OwnsRobot(c.cluster, c.robot) {
@@ -180,14 +223,12 @@ func TestOwnsRobot_NegativeCases(t *testing.T) {
 		cluster string
 		robot   string
 	}{
-		{"prod", "bridge-staging-flux"},          // different cluster
-		{"prod", "robot$bridge-staging-flux"},    // ditto, with Harbor's prefix
-		{"prod", "bridgeXprod-flux"},             // different separator
-		{"prod", "bridge-production-flux"},       // longer cluster name, no hyphen boundary
-		{"prod", "robot$bridge-production-flux"}, // ditto with prefix
-		{"prod", "bridge-prod"},                  // missing trailing "."
-		{"prod", ""},                             // empty robot name
-		{"", "bridge-prod-flux"},                 // empty cluster — must refuse to claim anything
+		{"prod", "bridge-staging-flux"},    // different cluster
+		{"prod", "bridgeXprod-flux"},       // different separator
+		{"prod", "bridge-production-flux"}, // longer cluster name, no hyphen boundary
+		{"prod", "bridge-prod"},            // missing trailing "."
+		{"prod", ""},                       // empty robot name
+		{"", "bridge-prod-flux"},           // empty cluster — must refuse to claim anything
 	}
 	for _, c := range cases {
 		if OwnsRobot(c.cluster, c.robot) {
@@ -207,13 +248,29 @@ func TestOwnsRobot_DotDelimiterFixesPrefixCollision(t *testing.T) {
 	if OwnsRobot("prod", "bridge-prod-eu.flux-system.source-controller") {
 		t.Error("OwnsRobot(\"prod\", prod-eu's robot) = true; dot delimiter should make it false (ADR-0018)")
 	}
-	// The robot$-prefixed read-path form must also be rejected.
-	if OwnsRobot("prod", "robot$bridge-prod-eu.flux-system.source-controller") {
-		t.Error("OwnsRobot(\"prod\", robot$ + prod-eu's robot) = true; want false")
-	}
 	// And the bridge still owns its own cluster's robot.
 	if !OwnsRobot("prod", "bridge-prod.flux-system.source-controller") {
 		t.Error("OwnsRobot(\"prod\", prod's own robot) = false; want true")
+	}
+}
+
+// TestOwnsRobot_TakesInternalNamesOnly pins ADR-0023: the Harbor client
+// strips Harbor's robot_name_prefix on every read path, and ownership is
+// decided on the internal name only. On-wire names ("robot$bridge-…") are
+// not claimed: stripping a hard-coded "robot$" here made a bridge whose
+// prefix did not match Harbor's claim, and the janitor delete, robots it
+// could not otherwise recognise.
+func TestOwnsRobot_TakesInternalNamesOnly(t *testing.T) {
+	for _, wire := range []string{
+		"robot$bridge-prod.flux-system.source-controller",
+		"robot_bridge-prod.flux-system.source-controller",
+	} {
+		if OwnsRobot("prod", wire) {
+			t.Errorf("OwnsRobot(\"prod\", %q) = true; on-wire names must not be claimed", wire)
+		}
+		if legacy := strings.ReplaceAll(wire, ".", "-"); OwnsLegacyRobot("prod", legacy) {
+			t.Errorf("OwnsLegacyRobot(\"prod\", %q) = true; on-wire names must not be claimed", legacy)
+		}
 	}
 }
 
@@ -253,9 +310,9 @@ func TestOwnsLegacyRobot(t *testing.T) {
 		want          bool
 	}{
 		{"prod", "bridge-prod-ns-sa", true},
-		{"prod", "robot$bridge-prod-ns-sa", true},
-		{"prod", "bridge-prod-eu-ns-sa", true}, // weak by design: the description tag must decide
-		{"prod", "bridge-prod.ns.sa", false},   // current scheme, not legacy
+		{"prod", "robot$bridge-prod-ns-sa", false}, // on-wire name: the client strips the prefix first
+		{"prod", "bridge-prod-eu-ns-sa", true},     // weak by design: the description tag must decide
+		{"prod", "bridge-prod.ns.sa", false},       // current scheme, not legacy
 		{"prod", "bridge-prod-eu.ns.sa", false},
 		{"prod", "bridge-prod-", false},
 		{"prod", "bridge-staging-ns-sa", false},

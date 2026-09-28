@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,6 +51,10 @@ type fakeHarbor struct {
 
 	// queries records every q value GET /robots received.
 	queries []string
+
+	// afterGet, if set, runs after GET /robots has computed its page,
+	// before it responds: another actor changing Harbor between pages.
+	afterGet func()
 }
 
 type fakeHarborState struct {
@@ -69,11 +75,15 @@ func newFakeHarbor(t *testing.T) *fakeHarbor {
 	}
 }
 
-// render returns the read-path view of a stored robot (prefixed name, no
-// secret — Harbor never returns secrets on read paths).
+// render returns the read-path view of a stored robot: no secret (Harbor
+// never returns secrets on read paths), and the prefixed name for an
+// editable (v2) robot only — Harbor returns legacy v1 robots raw
+// (src/controller/robot/controller.go populate).
 func (f *fakeHarbor) render(r *models.Robot) *models.Robot {
 	out := *r
-	out.Name = f.prefix + r.Name
+	if r.Editable {
+		out.Name = f.prefix + r.Name
+	}
 	out.Secret = ""
 	return &out
 }
@@ -116,6 +126,11 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "name required")
 			return
 		}
+		// Harbor's validateName (src/server/v2.0/handler/robot.go).
+		if !robotNameRegex.MatchString(body.Name) {
+			writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "robot name is not in lower case or contains illegal characters")
+			return
+		}
 		id := f.mu.nextID
 		f.mu.nextID++
 		for _, existing := range f.mu.robots {
@@ -143,24 +158,49 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 			Secret: stored.Secret,
 		})
 	case http.MethodGet:
-		// Honor page / page_size so the wrapper's pagination walk
-		// actually terminates. Harbor pages are 1-indexed.
+		// Like Harbor (src/lib/orm/query.go QuerySetter): filter, sort,
+		// then LIMIT/OFFSET. Pages are 1-indexed; each request is a
+		// separate query, so robots deleted between two requests shift
+		// the offsets.
 		page := parseInt64Default(r.URL.Query().Get("page"), 1)
 		size := parseInt64Default(r.URL.Query().Get("page_size"), 10)
-		// Stable order so pagination is deterministic.
 		ids := make([]int64, 0, len(f.mu.robots))
 		for id := range f.mu.robots {
 			ids = append(ids, id)
 		}
-		sortInt64s(ids)
-		// q=name=<exact> filters on the STORED (un-prefixed) name, like
-		// Harbor's ORM filter on the robot.name column.
+		// Harbor's default order is the stored name (src/pkg/robot/model
+		// Name `sort:"default"`); sort=id orders by ID.
+		if r.URL.Query().Get("sort") == "id" {
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		} else {
+			sort.Slice(ids, func(i, j int) bool { return f.mu.robots[ids[i]].Name < f.mu.robots[ids[j]].Name })
+		}
+		// q holds comma-separated terms, ANDed (src/lib/q Build):
+		// name=<exact> filters on the STORED (un-prefixed) name like
+		// Harbor's ORM filter on the robot.name column; id=[min~] is a
+		// range on the ID.
 		if q := r.URL.Query().Get("q"); q != "" {
 			f.queries = append(f.queries, q)
-			if want, ok := strings.CutPrefix(q, "name="); ok && !f.ignoreQuery {
+			for _, term := range strings.Split(q, ",") {
+				if f.ignoreQuery {
+					break
+				}
+				key, value, _ := strings.Cut(term, "=")
+				keep := func(*models.Robot) bool { return true }
+				switch key {
+				case "name":
+					keep = func(r *models.Robot) bool { return r.Name == value }
+				case "id":
+					minID, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(value, "["), "~]"), 10, 64)
+					if err != nil {
+						writeHarborError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid query string value: "+value)
+						return
+					}
+					keep = func(r *models.Robot) bool { return r.ID >= minID }
+				}
 				kept := ids[:0]
 				for _, id := range ids {
-					if f.mu.robots[id].Name == want {
+					if keep(f.mu.robots[id]) {
 						kept = append(kept, id)
 					}
 				}
@@ -178,6 +218,9 @@ func (f *fakeHarbor) handleCollection(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			out = append(out, f.render(f.mu.robots[id]))
+		}
+		if f.afterGet != nil {
+			f.afterGet()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
@@ -414,6 +457,117 @@ func TestClient_ReadPathsStripRobotPrefix(t *testing.T) {
 	}
 }
 
+// A bridge whose robot prefix differs from Harbor's robot_name_prefix
+// cannot recognise its own robots: the lookup would miss (a create/409
+// loop), and HarborAccess deletion and the janitor would skip the robot,
+// release the finalizer and leave it alive with a valid password. Every
+// read path must fail with ErrRobotPrefixMismatch instead, and Create must
+// not leave a robot behind that the bridge could never find again.
+func TestClient_RobotPrefixMismatchFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ harbor, bridge string }{
+		{"robot_", "robot$"}, // Harbor admin changed the prefix
+		{"robot$", "robot_"}, // bridge configured with a prefix Harbor does not use
+		{"robot$", "robot"},  // one prefix is a prefix of the other
+		{"robot", "robot$"},
+		{"robotx$", "robot"}, // the rest of Harbor's prefix is no valid name start
+	} {
+		t.Run(tc.harbor+"/"+tc.bridge, func(t *testing.T) {
+			fake := newFakeHarbor(t)
+			fake.prefix = tc.harbor
+			srv := fake.server()
+			defer srv.Close()
+			u, _ := url.Parse(srv.URL)
+			c, err := NewClient(u, "", "", srv.Client().Transport, WithRobotPrefix(tc.bridge))
+			if err != nil {
+				t.Fatal(err)
+			}
+			perms := []ProjectPermission{{Project: "p", Action: "pull"}}
+
+			if _, err := c.Create(context.Background(), "bridge-prod.ns.new", "", perms); !errors.Is(err, ErrRobotPrefixMismatch) {
+				t.Errorf("Create: err = %v, want ErrRobotPrefixMismatch", err)
+			}
+			for id, r := range fake.mu.robots {
+				t.Errorf("Create left robot %d %q in Harbor that the bridge cannot recognise", id, r.Name)
+			}
+
+			// A robot that already exists, e.g. from before the Harbor
+			// administrator changed the prefix.
+			fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod.ns.sa", Editable: true, Description: "d"}
+			if _, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotPrefixMismatch) {
+				t.Errorf("GetByName: err = %v, want ErrRobotPrefixMismatch (not NotFound, which drives a create/409 loop)", err)
+			}
+			// HarborAccess deletion and the janitor list every robot: a
+			// listing under names the bridge does not recognise would make
+			// them skip the robot and release the finalizer.
+			if robots, err := c.List(context.Background()); !errors.Is(err, ErrRobotPrefixMismatch) {
+				t.Errorf("List: robots = %+v, err = %v, want ErrRobotPrefixMismatch", robots, err)
+			}
+		})
+	}
+}
+
+// When Harbor's prefix is the configured one plus characters a robot name
+// may contain, the listing cannot tell (configured "robot$", Harbor
+// "robot$ci-" lists "robot$ci-bridge-…" as "ci-bridge-…", a valid name).
+// The exact name query can: Harbor finds the robot under its stored name,
+// but not under the name the configured prefix leaves.
+func TestClient_GetByName_DetectsPrefixMismatchTheListingCannot(t *testing.T) {
+	fake := newFakeHarbor(t)
+	fake.prefix = "robot$ci-"
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod.ns.sa", Editable: true}
+	if _, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotPrefixMismatch) {
+		t.Fatalf("GetByName: err = %v, want ErrRobotPrefixMismatch", err)
+	}
+	// The blind spot the control plane covers with the robot description
+	// (misnamedRobot in controlplane/contract.go): the listing succeeds
+	// with a name OwnsRobot does not claim.
+	robots, err := c.List(context.Background())
+	if err != nil || len(robots) != 1 || robots[0].Name != "ci-bridge-prod.ns.sa" {
+		t.Fatalf("List = %+v, %v; want the one robot as ci-bridge-prod.ns.sa", robots, err)
+	}
+}
+
+// A Harbor that ignores the name filter returns every robot. One whose
+// name merely ends with the looked-up name (another cluster's robot) is no
+// evidence of a prefix mismatch: the lookup must fall back to the full
+// scan and report NotFound so the reconciler creates the robot.
+func TestClient_GetByName_SuffixHitUnderIgnoredFilterIsNoMismatch(t *testing.T) {
+	fake := newFakeHarbor(t)
+	fake.ignoreQuery = true
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-eu-bridge-prod.ns.sa", Editable: true}
+	if r, err := c.GetByName(context.Background(), "bridge-prod.ns.sa"); !errors.Is(err, ErrRobotNotFound) {
+		t.Fatalf("GetByName = %+v, %v; want ErrRobotNotFound", r, err)
+	}
+}
+
+// Legacy (v1, non-editable) robots are returned without Harbor's prefix;
+// they must not trip the prefix check.
+func TestClient_List_AcceptsLegacyRobotsWithoutPrefix(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	fake.mu.robots[1] = &models.Robot{ID: 1, Name: "bridge-prod-ns-sa", Editable: false}
+	fake.mu.robots[2] = &models.Robot{ID: 2, Name: "bridge-prod.ns.sa", Editable: true}
+	robots, err := c.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range robots {
+		got[r.Name] = r.WireName
+	}
+	if got["bridge-prod-ns-sa"] != "bridge-prod-ns-sa" || got["bridge-prod.ns.sa"] != "robot$bridge-prod.ns.sa" {
+		t.Errorf("listed names (internal -> wire) = %v", got)
+	}
+}
+
 // TestClient_GetByName_UsesExactNameQuery pins the O(1) lookup: the client
 // asks Harbor for q=name=<internal name> instead of paging every robot.
 func TestClient_GetByName_UsesExactNameQuery(t *testing.T) {
@@ -428,8 +582,10 @@ func TestClient_GetByName_UsesExactNameQuery(t *testing.T) {
 	if _, err := c.GetByName(context.Background(), "bridge-a.b.c"); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.queries) != 1 || fake.queries[0] != "name=bridge-a.b.c" {
-		t.Errorf("queries = %q, want exactly [name=bridge-a.b.c]", fake.queries)
+	// The id range rides along from the first page on, so every lookup
+	// exercises Harbor's parsing of name= ANDed with a range.
+	if len(fake.queries) != 1 || fake.queries[0] != "name=bridge-a.b.c,id=[1~]" {
+		t.Errorf("queries = %q, want exactly [name=bridge-a.b.c,id=[1~]]", fake.queries)
 	}
 }
 
@@ -466,6 +622,23 @@ func TestClient_Create_409IsAlreadyExists(t *testing.T) {
 	_, err := c.Create(context.Background(), "bridge-a.b.c", "", perms)
 	if !errors.Is(err, ErrRobotAlreadyExists) {
 		t.Fatalf("second Create: got %v, want ErrRobotAlreadyExists", err)
+	}
+}
+
+// Harbor answers a robot name with doubled separators with 400, on every
+// retry. RobotName refuses such identities, so the reconciler reports a
+// permanent InvalidSpec instead of retrying a create Harbor never accepts.
+func TestClient_Create_HarborRefusesNamesRobotNameRejects(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	if _, err := RobotName("prod", "team--a", "sa"); !errors.Is(err, ErrInvalidRobotName) {
+		t.Fatalf("RobotName: err = %v, want ErrInvalidRobotName", err)
+	}
+	_, err := c.Create(context.Background(), "bridge-prod.team--a.sa", "", []ProjectPermission{{Project: "p", Action: "pull"}})
+	if err == nil || errors.Is(err, ErrRobotAlreadyExists) || !strings.Contains(err.Error(), "illegal characters") {
+		t.Fatalf("Create with a doubled separator: err = %v, want Harbor's 400", err)
 	}
 }
 
@@ -612,8 +785,9 @@ func TestPermissionsMatch(t *testing.T) {
 
 func TestFromHarborRobot_FlagsForeignAccess(t *testing.T) {
 	c := &goClient{robotPrefix: "robot$"}
-	r := c.fromHarborRobot(&models.Robot{
-		Name: "robot$bridge-a.b.c",
+	r, err := c.fromHarborRobot(&models.Robot{
+		Name:     "robot$bridge-a.b.c",
+		Editable: true,
 		Permissions: []*models.RobotPermission{
 			{Kind: "project", Namespace: "p", Access: []*models.Access{
 				{Resource: "repository", Action: "pull"},
@@ -621,16 +795,23 @@ func TestFromHarborRobot_FlagsForeignAccess(t *testing.T) {
 			}},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !r.ForeignAccess {
 		t.Error("an artifact:delete grant must be flagged as foreign access")
 	}
 	if r.Name != "bridge-a.b.c" {
 		t.Errorf("Name = %q", r.Name)
 	}
-	r = c.fromHarborRobot(&models.Robot{
+	r, err = c.fromHarborRobot(&models.Robot{
 		Name:        "robot$bridge-a.b.c",
+		Editable:    true,
 		Permissions: []*models.RobotPermission{{Kind: "system", Namespace: "/", Access: []*models.Access{{Resource: "robot", Action: "create"}}}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !r.ForeignAccess {
 		t.Error("a system-kind grant must be flagged as foreign access")
 	}
@@ -680,11 +861,8 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 	defer srv.Close()
 	c := newClientFor(t, srv, "", "")
 
-	// Create more robots than one page would hold to verify the wrapper
-	// keeps walking. Page size in production is 100; the fake ignores
-	// page params and returns all robots in one shot, so we can't truly
-	// test pagination round-trips here, but we can at least assert the
-	// wrapper returns all of them.
+	// More robots than one page holds (pageSize is 100): the client must
+	// walk two pages and return every robot once.
 	for i := 0; i < 150; i++ {
 		if _, err := c.Create(context.Background(),
 			fmt.Sprintf("bridge-x-y-z%d", i), "",
@@ -699,6 +877,59 @@ func TestClient_List_PaginatesAcrossPages(t *testing.T) {
 	if len(robots) != 150 {
 		t.Errorf("List returned %d robots, want 150", len(robots))
 	}
+	// The first page carries the range too (id=[1~]): the e2e and
+	// harbor-compat runs never reach a second page, and this way they
+	// still send Harbor the range on every listing.
+	want := []string{"id=[1~]", fmt.Sprintf("id=[%d~]", robots[99].ID+1)}
+	if !slices.Equal(fake.queries, want) {
+		t.Errorf("queries = %q, want %q", fake.queries, want)
+	}
+}
+
+// Another actor (the janitor, another cluster's bridge on the same Harbor,
+// an administrator) deletes a robot while the client walks the listing.
+// With offset paging over Harbor's name order every later robot shifts one
+// place forward and the one at the page boundary is never listed, so
+// HarborAccess deletion would release its finalizer with that robot alive.
+// Keyset paging must still list every robot that exists throughout.
+func TestClient_List_ConcurrentDeleteHidesNoRobot(t *testing.T) {
+	fake := newFakeHarbor(t)
+	srv := fake.server()
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+	for i := 0; i < 150; i++ {
+		if _, err := c.Create(context.Background(), fmt.Sprintf("bridge-prod.ns.sa%03d", i), "",
+			[]ProjectPermission{{Project: "p", Action: "pull"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Created last, sorts first by name: cluster "a"'s robot.
+	victim, err := c.Create(context.Background(), "bridge-a.ns.sa", "", []ProjectPermission{{Project: "p", Action: "pull"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	fake.afterGet = func() {
+		if gets++; gets == 1 {
+			delete(fake.mu.robots, victim.ID)
+		}
+	}
+	robots, err := c.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, r := range robots {
+		if listed[r.Name] {
+			t.Errorf("robot %q listed twice", r.Name)
+		}
+		listed[r.Name] = true
+	}
+	for _, r := range fake.mu.robots {
+		if !listed[r.Name] {
+			t.Errorf("robot %q exists throughout the walk but was not listed", r.Name)
+		}
+	}
 }
 
 func parseInt64Default(raw string, def int64) int64 {
@@ -710,14 +941,6 @@ func parseInt64Default(raw string, def int64) int64 {
 		return def
 	}
 	return v
-}
-
-func sortInt64s(s []int64) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
 }
 
 // TestFormatHarborMessage_TypedPayload exercises the decoder against the
@@ -766,18 +989,47 @@ func TestFormatHarborMessage_MultipleErrorsAreJoined(t *testing.T) {
 }
 
 // TestFormatHarborMessage_FallbackOnUntyped covers the swagger-undeclared
-// path: Harbor returns 409 on POST /robots but the SDK doesn't enumerate
-// that status code in the response handler, so the wrapper sees a
-// runtime.APIError. The decoder must not crash and must surface
-// something better than a Go pointer.
+// path through the real SDK: Harbor answers 409 on POST /robots and 401 on
+// GET /robots, neither of which the SDK's swagger declares, so the SDK
+// returns a runtime.APIError whose own rendering of the response is "{}".
+// The message must keep the status and Harbor's error text, and must not
+// copy a proxy's HTML page into the status condition.
 func TestFormatHarborMessage_FallbackOnUntyped(t *testing.T) {
-	apiErr := runtime.NewAPIError("create robot", "{}", 409)
-	got := formatHarborMessage(apiErr)
-	if !strings.Contains(got, "409") {
-		t.Errorf("expected status 409 in fallback message, got %q", got)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			writeHarborError(w, http.StatusConflict, "CONFLICT", "robot bridge-x.y.z\nalready exists")
+		case !strings.Contains(r.URL.Query().Get("q"), "name="): // List, not GetByName
+			writeHarborError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html><body>502 Bad Gateway</body></html>"))
+		}
+	}))
+	defer srv.Close()
+	c := newClientFor(t, srv, "", "")
+
+	_, err := c.Create(context.Background(), "bridge-x.y.z", "", []ProjectPermission{{Project: "p", Action: "pull"}})
+	if !errors.Is(err, ErrRobotAlreadyExists) {
+		t.Errorf("409 not tagged as ErrRobotAlreadyExists: %v", err)
 	}
-	if strings.Contains(got, "0x") {
-		t.Errorf("fallback message contains a raw pointer: %q", got)
+	if got := fmt.Sprint(err); !strings.Contains(got, "status 409") || !strings.Contains(got, "CONFLICT: robot bridge-x.y.zalready exists") || strings.Contains(got, "{}") {
+		t.Errorf("409 message = %q, want the status and Harbor's message (control characters dropped)", got)
+	}
+	_, err = c.List(context.Background())
+	if got := fmt.Sprint(err); !strings.Contains(got, "status 401") || !strings.Contains(got, "UNAUTHORIZED: unauthorized") {
+		t.Errorf("401 message = %q, want the status and Harbor's message", got)
+	}
+	_, err = c.GetByName(context.Background(), "bridge-x.y.z")
+	if got := fmt.Sprint(err); !strings.Contains(got, "status 502") || strings.Contains(got, "html") {
+		t.Errorf("502 message = %q, want the status without the proxy's page", got)
+	}
+
+	// An APIError that does not carry the client's response still renders
+	// cleanly.
+	if got := formatHarborMessage(runtime.NewAPIError("create robot", "{}", 409)); got != "unexpected status 409 from Harbor" {
+		t.Errorf("bare APIError = %q", got)
 	}
 }
 

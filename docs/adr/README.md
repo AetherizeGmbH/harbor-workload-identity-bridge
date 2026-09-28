@@ -19,7 +19,7 @@
 | 0015 | [The plugin duplicates wire types instead of importing them](0015-plugin-duplicates-wire-types.md) | Accepted (enum-mismatch reasoning corrected by 0016; since #111 the plugin does validate `cacheKeyType`; the JSON keys are pinned by the golden files in `bridge/dataplane/testdata`, read by both sides' tests) |
 | 0016 | [`cacheKeyType` in the credential-provider response is `Registry`, not `ServiceAccount`](0016-credential-provider-cache-key-type.md) | Accepted (supersedes the enum claim in 0015; `tokenAttributes.cacheType` is no SA-token cache: with `tokenAttributes` set kubelet keys cached credentials per ServiceAccount under either value, `Token` only adds the token's hash; and `cacheDuration`, not the token lifetime, bounds plugin runs) |
 | 0017 | [The chart provisions audience-scoped RBAC for kubelet token requests](0017-chart-provisions-audience-rbac.md) | Accepted |
-| 0018 | [Dot-delimited robot and Secret names for collision-free identity mapping](0018-dot-delimited-naming.md) | Accepted (supersedes 0009 naming scheme) |
+| 0018 | [Dot-delimited robot and Secret names for collision-free identity mapping](0018-dot-delimited-naming.md) | Accepted (supersedes 0009 naming scheme; Harbor-validity and truncation claims amended by 0031) |
 | 0019 | [Code conventions and CI quality gates](0019-code-conventions-and-ci-quality-gates.md) | Accepted |
 | 0020 | [Harbor compatibility is tested, not asserted](0020-harbor-compatibility-matrix.md) | Accepted |
 | 0021 | [Node installer: Go binary with auto/merge/patch/none modes](0021-node-installer-modes.md) | Accepted |
@@ -30,5 +30,6 @@
 | 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0010, 0017, 0023) |
 | 0027 | [The plugin DaemonSet can run in its own namespace](0027-optional-plugin-namespace.md) | Accepted (extends 0021, 0024) |
 | 0028 | [Token lifetime cap and pod binding](0028-token-lifetime-cap-and-pod-binding.md) | Accepted (extends 0006, 0010) |
+| 0031 | [Robot names Harbor refuses, and what keeps truncated names apart](0031-robot-name-validity-and-truncation.md) | Accepted (amends 0018) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

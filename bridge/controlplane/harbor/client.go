@@ -4,27 +4,33 @@
 package harbor
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
-	v2client "github.com/goharbor/go-client/pkg/sdk/v2.0/client"
+	"github.com/go-openapi/strfmt"
 	sdkrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
 	"github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 )
 
 const (
-	// harborBasePath is the v2 API root Harbor exposes. The SDK requires
-	// this on the URL passed to v2client.New.
+	// harborBasePath is the v2 API root Harbor exposes; every SDK request
+	// path is relative to it.
 	harborBasePath = "/api/v2.0"
 
 	// pageSize is the page size the wrapper uses when walking the paginated
@@ -32,9 +38,10 @@ const (
 	// without hammering memory on huge fleets.
 	pageSize int64 = 100
 
-	// maxPages bounds one robot listing (maxPages*pageSize robots). A
-	// Harbor or proxy that ignores the page parameter would otherwise
-	// make the walk loop forever and grow memory without bound.
+	// maxPages bounds one robot listing (maxPages*pageSize robots), and
+	// with it the memory one listing can take. Every page must also
+	// advance the ID cursor (see list), so a Harbor or proxy that ignores
+	// the query cannot make the walk loop.
 	maxPages = 1000
 
 	// DefaultCallTimeout bounds one Harbor API call. The generated SDK
@@ -80,7 +87,7 @@ type Robot struct {
 
 	// Name is the bridge-internal robot name: what RobotName returns and
 	// what Create sends. The client strips Harbor's configured robot name
-	// prefix (default "robot$", ADR-0014) on every read path, so callers
+	// prefix (default "robot$", ADR-0023) on every read path, so callers
 	// compare internal names only and never handle the prefix themselves.
 	Name string
 
@@ -127,6 +134,16 @@ var ErrRobotNotFound = errors.New("robot not found")
 // See ADR-0003 for the persistent-robot lifecycle.
 var ErrRobotAlreadyExists = errors.New("robot already exists")
 
+// ErrRobotPrefixMismatch is returned when Harbor reports a robot name that
+// the configured robot prefix (WithRobotPrefix) cannot account for: Harbor
+// is configured with another robot_name_prefix. The bridge would then
+// fail to recognise its own robots, which silently breaks lookups (a
+// create/409 loop), revocation on HarborAccess deletion, and the janitor,
+// so every read path that can see the mismatch fails closed with this
+// error instead (see fromHarborRobot for the one shape a listing cannot
+// see; the control plane wraps this error for it too).
+var ErrRobotPrefixMismatch = errors.New("robot name prefix does not match Harbor's robot_name_prefix")
+
 // Client is the small surface the reconciler and janitor need against
 // Harbor. The bridge's ownership-prefix safety invariant (ADR-0009) is the
 // caller's responsibility; Client is intentionally cluster-agnostic so its
@@ -147,10 +164,18 @@ type Client interface {
 // Option configures NewClient.
 type Option func(*goClient)
 
+// DefaultRobotPrefix is Harbor's default robot_name_prefix, the client's
+// default for WithRobotPrefix.
+const DefaultRobotPrefix = "robot$"
+
 // WithRobotPrefix sets the robot name prefix the Harbor instance is
-// configured with (Harbor's robot_name_prefix setting, default "robot$").
-// Harbor stores robot names without it and prepends it on every read
-// path; the client strips it again so callers only see internal names.
+// configured with (Harbor's robot_name_prefix setting, default
+// DefaultRobotPrefix). Harbor stores robot names without it and prepends
+// it on every read path and in the create response; the client strips it
+// again so callers only see internal names (ADR-0023). A prefix that does
+// not match Harbor's makes the client return ErrRobotPrefixMismatch
+// wherever it can tell. An empty prefix selects nothing special: Harbor's
+// prefix is then taken to be empty.
 func WithRobotPrefix(prefix string) Option {
 	return func(c *goClient) { c.robotPrefix = prefix }
 }
@@ -163,7 +188,7 @@ func WithCallTimeout(d time.Duration) Option {
 // goClient is the production Client implementation, backed by
 // github.com/goharbor/go-client.
 type goClient struct {
-	api         *v2client.HarborAPI
+	robots      sdkrobot.API
 	robotPrefix string
 	callTimeout time.Duration
 }
@@ -220,6 +245,14 @@ func (noLogger) Debugf(string, ...any) {}
 // transport is optional; pass non-nil to override the default (httptest
 // servers, custom TLS, mTLS, instrumented round-trippers, etc.). nil
 // selects defaultTransport.
+//
+// The client follows no redirects. Every request carries the Harbor admin
+// credentials, and net/http re-sends the Authorization header (and on
+// 307/308 the body) to a redirect target on the same host or a subdomain
+// of it whatever its scheme: an https Harbor behind a proxy that answers
+// with a redirect to http:// would put the admin credentials and robot
+// passwords on the wire in clear text, bypassing the https requirement.
+// A redirect fails the call with an error naming the target instead.
 func NewClient(harborURL *url.URL, username, password string, transport http.RoundTripper, opts ...Option) (Client, error) {
 	if harborURL == nil {
 		return nil, errors.New("harborURL is nil")
@@ -237,30 +270,40 @@ func NewClient(harborURL *url.URL, username, password string, transport http.Rou
 	if transport == nil {
 		transport = defaultTransport()
 	}
-	cfg := v2client.Config{
-		URL:       &u,
-		Transport: transport,
-		AuthInfo:  httptransport.BasicAuth(username, password),
-	}
-	api := v2client.New(cfg)
+	// The runtime would otherwise build its own http.Client lazily, with
+	// net/http's default policy of following up to 10 redirects.
+	hc := &http.Client{Transport: transport, CheckRedirect: refuseRedirect}
+	rt := httptransport.NewWithClient(u.Host, u.Path, []string{u.Scheme}, hc)
 	// The go-openapi runtime turns on full request/response dumps when
 	// DEBUG or SWAGGER_DEBUG is set in the environment: every call's
 	// Authorization header (the Harbor admin credentials) and every
 	// create/refresh response (robot passwords) would go to stdout.
 	// Those variable names are generic enough to be set for unrelated
 	// reasons, so the dumps are switched off unconditionally.
-	rt, ok := api.Transport.(*httptransport.Runtime)
-	if !ok {
-		return nil, fmt.Errorf("harbor SDK transport is %T, want *client.Runtime (wire dumps could not be disabled)", api.Transport)
-	}
 	rt.SetDebug(false)
 	rt.SetLogger(noLogger{})
+	rt.SetResponseReader(newErrorBodyResponse)
 
-	c := &goClient{api: api, robotPrefix: HarborRobotPrefix, callTimeout: DefaultCallTimeout}
+	c := &goClient{
+		robots:      sdkrobot.New(rt, strfmt.Default, httptransport.BasicAuth(username, password)),
+		robotPrefix: DefaultRobotPrefix,
+		callTimeout: DefaultCallTimeout,
+	}
 	for _, o := range opts {
 		o(c)
 	}
 	return c, nil
+}
+
+// refuseRedirect is the Harbor client's http.Client.CheckRedirect: Harbor's
+// /api/v2.0 endpoints do not redirect, so a redirect means a proxy or a
+// harbor.url that points somewhere other than the API itself. net/http
+// closes the redirect response and returns this error from the call.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("refusing to follow a redirect to %s: the Harbor client follows no redirects "+
+		"(it would re-send the Harbor admin credentials); set the Harbor URL (BRIDGE_HARBOR_URL, chart harbor.url) "+
+		"to the https scheme and host, plus any path prefix in front of %s, at which Harbor's API answers without a redirect",
+		req.URL.Redacted(), harborBasePath)
 }
 
 func (c *goClient) Create(ctx context.Context, name, description string, perms []ProjectPermission) (*Robot, error) {
@@ -274,10 +317,10 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 		Duration:    robotDurationNeverExpires,
 		Permissions: toHarborPermissions(perms),
 	}
-	ctx, cancel := c.call(ctx)
+	callCtx, cancel := c.call(ctx)
 	defer cancel()
-	params := sdkrobot.NewCreateRobotParamsWithContext(ctx).WithRobot(body)
-	resp, err := c.api.Robot.CreateRobot(ctx, params)
+	params := sdkrobot.NewCreateRobotParamsWithContext(callCtx).WithRobot(body)
+	resp, err := c.robots.CreateRobot(callCtx, params)
 	if err != nil {
 		return nil, wrapHarborOp(fmt.Sprintf("create robot %q", name), err)
 	}
@@ -286,9 +329,25 @@ func (c *goClient) Create(ctx context.Context, name, description string, perms [
 		// next scheduled rotation, 24h later.
 		return nil, fmt.Errorf("create robot %q: Harbor returned no secret", name)
 	}
+	// Harbor answers with <its robot_name_prefix><name>. An empty name or
+	// the bare input name (ADR-0014 recorded a Harbor echoing it) carries
+	// no information about the prefix; anything else must be exactly the
+	// configured prefix plus name.
 	wire := resp.Payload.Name
-	if wire == "" {
+	switch wire {
+	case "", name:
 		wire = c.robotPrefix + name
+	case c.robotPrefix + name:
+	default:
+		// The bridge could not recognise this robot on any later read
+		// (lookup, deletion, janitor), so it must not stay alive with a
+		// valid password. Delete it before reporting the mismatch.
+		mismatch := fmt.Errorf("create robot %q: %w: Harbor named the new robot %q, the configured prefix %q expects %q; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+			name, ErrRobotPrefixMismatch, wire, c.robotPrefix, c.robotPrefix+name)
+		if derr := c.Delete(ctx, resp.Payload.ID); derr != nil {
+			return nil, fmt.Errorf("%w; deleting the new robot (id %d) failed too, delete it in Harbor: %w", mismatch, resp.Payload.ID, derr)
+		}
+		return nil, mismatch
 	}
 	return &Robot{
 		ID:          resp.Payload.ID,
@@ -305,7 +364,7 @@ func (c *goClient) Delete(ctx context.Context, id int64) error {
 	ctx, cancel := c.call(ctx)
 	defer cancel()
 	params := sdkrobot.NewDeleteRobotParamsWithContext(ctx).WithRobotID(id)
-	if _, err := c.api.Robot.DeleteRobot(ctx, params); err != nil {
+	if _, err := c.robots.DeleteRobot(ctx, params); err != nil {
 		if isNotFound(err) {
 			// Delete is idempotent at the bridge level.
 			return nil
@@ -318,15 +377,44 @@ func (c *goClient) Delete(ctx context.Context, id int64) error {
 // List returns every system-level robot (Harbor's GET /robots without a
 // Level filter lists exactly those).
 func (c *goClient) List(ctx context.Context) ([]Robot, error) {
-	return c.list(ctx, nil)
+	return c.list(ctx, "")
 }
 
-func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
-	page := int64(1)
-	size := pageSize
+// list returns every robot matching filter (a Harbor q expression, or "").
+// It pages by keyset, not by offset: each request asks for the first page
+// of robots sorted by ID with an ID above the highest one seen so far
+// (sort=id, q=id=[<last+1>~]; id=[1~] on the first page).
+//
+// Harbor pages with LIMIT/OFFSET over its default order, the robot name
+// (goharbor/harbor src/lib/orm/query.go QuerySetter, src/pkg/robot/model
+// Name `sort:"default"`), and every page is a separate query. A robot that
+// another actor deletes between two pages (the janitor, another cluster's
+// bridge on the same Harbor, an administrator) shifts every later robot
+// one place forward, so the robot at the page boundary is never listed:
+// HarborAccess deletion would then release its finalizer and leave that
+// robot alive with a valid password. IDs only grow, so a deletion cannot
+// move an unseen robot behind the cursor, and a robot created during the
+// walk is listed at most once. A server that ignores the sort or the
+// range shows up as an ID that does not increase, and the listing fails
+// instead of silently missing robots.
+//
+// That Harbor honours both parameters on GET /robots is read from its
+// source, not tested against a live Harbor: for v2.9.5, v2.11.2, v2.13.5,
+// v2.15.1 (the harbor-compat matrix) and main, ListRobot passes q and
+// sort to BuildQuery, src/lib/q parseRange accepts "[n~]", and
+// src/lib/orm/metadata.go makes the id column sortable and filterable.
+// The e2e and harbor-compat runs hold fewer robots than one page, so the
+// first page carries the range too (id=[1~], every robot): every listing
+// and every GetByName they make sends the range and its AND with name=,
+// and a Harbor that rejects either syntax fails them. A Harbor that
+// accepts the range but ignores it only shows on a second page, where the
+// ID check stops the listing.
+func (c *goClient) list(ctx context.Context, filter string) ([]Robot, error) {
 	var out []Robot
-	for ; page <= maxPages; page++ {
-		resp, err := c.listPage(ctx, page, size, q)
+	var cursor int64 // highest robot ID seen; Harbor's IDs start at 1
+	for page := 1; page <= maxPages; page++ {
+		q := joinQuery(filter, fmt.Sprintf("id=[%d~]", cursor+1))
+		resp, err := c.listPage(ctx, q)
 		if err != nil {
 			return nil, wrapHarborOp(fmt.Sprintf("list robots (page %d)", page), err)
 		}
@@ -334,23 +422,45 @@ func (c *goClient) list(ctx context.Context, q *string) ([]Robot, error) {
 			if r == nil {
 				continue
 			}
-			out = append(out, c.fromHarborRobot(r))
+			if r.ID <= cursor {
+				return nil, fmt.Errorf("list robots: Harbor returned robot id %d after id %d; the endpoint does not honour sort=id or the id range filter, refusing to continue with a listing that could miss robots", r.ID, cursor)
+			}
+			cursor = r.ID
+			robot, err := c.fromHarborRobot(r)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, robot)
 		}
-		if int64(len(resp.Payload)) < size {
+		if int64(len(resp.Payload)) < pageSize {
 			return out, nil
 		}
 	}
-	return nil, fmt.Errorf("list robots: more than %d pages of %d; refusing to continue (does the Harbor endpoint ignore the page parameter?)", maxPages, size)
+	return nil, fmt.Errorf("list robots: more than %d pages of %d robots; refusing to continue", maxPages, pageSize)
 }
 
-func (c *goClient) listPage(ctx context.Context, page, size int64, q *string) (*sdkrobot.ListRobotOK, error) {
+// joinQuery ANDs Harbor q terms ("k=v,k=[min~max]").
+func joinQuery(terms ...string) string {
+	kept := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if t != "" {
+			kept = append(kept, t)
+		}
+	}
+	return strings.Join(kept, ",")
+}
+
+// listPage requests the first page of robots matching q, sorted by ID.
+func (c *goClient) listPage(ctx context.Context, q string) (*sdkrobot.ListRobotOK, error) {
 	ctx, cancel := c.call(ctx)
 	defer cancel()
+	page, size, sortByID := int64(1), pageSize, "id"
 	params := sdkrobot.NewListRobotParamsWithContext(ctx).
 		WithPage(&page).
 		WithPageSize(&size).
-		WithQ(q)
-	return c.api.Robot.ListRobot(ctx, params)
+		WithSort(&sortByID).
+		WithQ(&q)
+	return c.robots.ListRobot(ctx, params)
 }
 
 // GetByName looks the robot up by its internal name. It asks Harbor for
@@ -361,13 +471,15 @@ func (c *goClient) listPage(ctx context.Context, page, size int64, q *string) (*
 // filter behaves differently degrades to the old O(robots) cost instead
 // of a create/409 loop.
 func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
-	q := "name=" + name
-	robots, err := c.list(ctx, &q)
+	robots, err := c.list(ctx, "name="+name)
 	if err != nil {
 		return nil, err
 	}
 	if r := matchName(robots, name); r != nil {
 		return r, nil
+	}
+	if err := c.checkSuffixHit(ctx, name, robots); err != nil {
+		return nil, err
 	}
 	robots, err = c.List(ctx)
 	if err != nil {
@@ -377,6 +489,42 @@ func (c *goClient) GetByName(ctx context.Context, name string) (*Robot, error) {
 		return r, nil
 	}
 	return nil, ErrRobotNotFound
+}
+
+// checkSuffixHit looks at the robots the filtered lookup of name
+// returned without an exact match. A Harbor that honours q=name=<name>
+// returns only the robot stored as name, reported as <its prefix><name>:
+// a hit of that shape that the configured prefix does not strip to name
+// means the prefixes differ in a way list() cannot see (Harbor's is the
+// configured one plus characters a robot name may contain: configured
+// "robot$", Harbor "robot$ci-"). Without this check the lookup would
+// report NotFound and drive a create/409 loop.
+//
+// A Harbor that ignores the filter returns every robot, and one that
+// merely ends with name ("bridge-eu-bridge-prod.ns.sa" for
+// "bridge-prod.ns.sa") proves nothing. The hit is therefore looked up
+// again under the name the configured prefix leaves: a Harbor that
+// honours the filter finds it there only if that is its stored name (the
+// prefixes match, the first answer was no exact match after all), and one
+// that ignores the filter returns it again. Either way the first answer
+// told nothing about name, and GetByName falls back to the full scan.
+func (c *goClient) checkSuffixHit(ctx context.Context, name string, robots []Robot) error {
+	for i := range robots {
+		r := &robots[i]
+		if r.WireName == c.robotPrefix+name || !strings.HasSuffix(r.WireName, name) {
+			continue
+		}
+		again, err := c.list(ctx, "name="+r.Name)
+		if err != nil {
+			return err
+		}
+		if slices.ContainsFunc(again, func(o Robot) bool { return o.ID == r.ID }) {
+			return nil
+		}
+		return fmt.Errorf("look up robot %q: %w: Harbor stores it as %q and reports it as %q, the configured prefix %q expects %q; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+			name, ErrRobotPrefixMismatch, name, r.WireName, c.robotPrefix, c.robotPrefix+name)
+	}
+	return nil
 }
 
 func matchName(robots []Robot, name string) *Robot {
@@ -394,7 +542,7 @@ func (c *goClient) RefreshSecret(ctx context.Context, id int64) (string, error) 
 	params := sdkrobot.NewRefreshSecParamsWithContext(ctx).
 		WithRobotID(id).
 		WithRobotSec(&models.RobotSec{})
-	resp, err := c.api.Robot.RefreshSec(ctx, params)
+	resp, err := c.robots.RefreshSec(ctx, params)
 	if err != nil {
 		return "", wrapHarborOp(fmt.Sprintf("refresh secret for robot %d", id), err)
 	}
@@ -427,7 +575,7 @@ func (c *goClient) Update(ctx context.Context, current *Robot, description strin
 	params := sdkrobot.NewUpdateRobotParamsWithContext(ctx).
 		WithRobotID(current.ID).
 		WithRobot(body)
-	if _, err := c.api.Robot.UpdateRobot(ctx, params); err != nil {
+	if _, err := c.robots.UpdateRobot(ctx, params); err != nil {
 		return wrapHarborOp(fmt.Sprintf("update robot %d", current.ID), err)
 	}
 	return nil
@@ -531,10 +679,30 @@ func toHarborPermissions(perms []ProjectPermission) []*models.RobotPermission {
 	return out
 }
 
-// fromHarborRobot converts a Harbor read-path robot. The prefix is
-// stripped only when present, so legacy (v1, non-editable) robots whose
-// names Harbor returns raw keep their names.
-func (c *goClient) fromHarborRobot(r *models.Robot) Robot {
+// fromHarborRobot converts a Harbor read-path robot. Harbor prepends its
+// robot_name_prefix to the name of every editable (v2) robot and returns
+// legacy (v1, non-editable) robots raw (goharbor/harbor
+// src/controller/robot/controller.go populate), so the prefix is stripped
+// only when present. Harbor also refuses to create a robot whose name
+// fails robotNameRegex (validateName in src/server/v2.0/handler/robot.go,
+// the same regex since robot accounts v2 in 2.2), so every editable
+// robot's stored name matches it. An editable robot that lacks the
+// configured prefix, or whose remainder fails the regex once it is
+// stripped (configured "robot", Harbor "robot$" or "robotx$"), proves
+// that Harbor uses another prefix: ErrRobotPrefixMismatch. What this
+// cannot see is a Harbor prefix that is the configured one plus
+// characters a robot name may contain (configured "robot$", Harbor
+// "robot$ci-"): GetByName and Create catch that for the names they
+// handle, and the control plane refuses to act on a robot whose
+// description it wrote but whose name it does not recognise.
+func (c *goClient) fromHarborRobot(r *models.Robot) (Robot, error) {
+	if r.Editable {
+		rest, ok := strings.CutPrefix(r.Name, c.robotPrefix)
+		if !ok || !robotNameRegex.MatchString(rest) {
+			return Robot{}, fmt.Errorf("%w: Harbor reports robot %q (id %d), which the configured prefix %q does not account for; set BRIDGE_HARBOR_ROBOT_PREFIX (chart harbor.robotNamePrefix) to Harbor's robot_name_prefix",
+				ErrRobotPrefixMismatch, r.Name, r.ID, c.robotPrefix)
+		}
+	}
 	out := Robot{
 		ID:          r.ID,
 		Name:        strings.TrimPrefix(r.Name, c.robotPrefix),
@@ -565,7 +733,7 @@ func (c *goClient) fromHarborRobot(r *models.Robot) Robot {
 		}
 	}
 	out.Permissions = normalizePermissions(perms)
-	return out
+	return out, nil
 }
 
 // harborStatusErr is the interface every generated go-client error response
@@ -605,35 +773,111 @@ type harborPayloadErr interface {
 	GetPayload() *models.Errors
 }
 
+// maxErrorBody bounds how much of an error response body the client keeps
+// to explain the error.
+const maxErrorBody = 4 << 10
+
+// errorBodyResponse is the runtime.ClientResponse the client hands the SDK
+// (Runtime.SetResponseReader). For a status of 300 or more it keeps the
+// first maxErrorBody bytes of the body, and still serves the whole body to
+// the SDK's typed readers. For a status its swagger does not declare
+// (Harbor's 409 on POST /robots, a 401 on GET /robots, a proxy's 502) the
+// SDK returns a runtime.APIError that holds only this response, after the
+// runtime has closed the body; the kept bytes are all that is left of
+// Harbor's explanation.
+type errorBodyResponse struct {
+	res  *http.Response
+	body io.ReadCloser
+	head []byte
+}
+
+func newErrorBodyResponse(res *http.Response) runtime.ClientResponse {
+	r := &errorBodyResponse{res: res, body: res.Body}
+	if res.StatusCode >= http.StatusMultipleChoices && res.Body != nil {
+		// A read error only shortens the explanation; the typed readers
+		// see the same error on the rest of the body.
+		head, _ := io.ReadAll(io.LimitReader(res.Body, maxErrorBody))
+		r.head = head
+		r.body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), res.Body), res.Body}
+	}
+	return r
+}
+
+func (r *errorBodyResponse) Code() int                       { return r.res.StatusCode }
+func (r *errorBodyResponse) Message() string                 { return r.res.Status }
+func (r *errorBodyResponse) GetHeader(name string) string    { return r.res.Header.Get(name) }
+func (r *errorBodyResponse) GetHeaders(name string) []string { return r.res.Header.Values(name) }
+func (r *errorBodyResponse) Body() io.ReadCloser             { return r.body }
+
 // formatHarborMessage returns a human-readable rendering of err. When the
 // underlying SDK error carries a models.Errors payload (typed 4xx
-// responses) it formats as "CODE: message; CODE: message"; otherwise it
-// falls through to err.Error(), which for runtime.APIError (untyped
-// fallback) already includes the status code and raw body.
+// responses) it formats as "CODE: message; CODE: message". A status the
+// SDK's swagger does not declare arrives as runtime.APIError, whose own
+// Error() renders the response as "{}"; it formats as "unexpected status
+// N from Harbor", followed by Harbor's error messages when the kept body
+// is Harbor's error document (a proxy's HTML page is left out). Anything
+// else falls through to err.Error().
 func formatHarborMessage(err error) string {
 	if err == nil {
 		return ""
 	}
 	var hpe harborPayloadErr
 	if errors.As(err, &hpe) {
-		payload := hpe.GetPayload()
-		if payload != nil && len(payload.Errors) > 0 {
-			parts := make([]string, 0, len(payload.Errors))
-			for _, e := range payload.Errors {
-				code := e.Code
-				if code == "" {
-					code = "UNKNOWN"
-				}
-				if e.Message != "" {
-					parts = append(parts, code+": "+e.Message)
-				} else {
-					parts = append(parts, code)
-				}
-			}
-			return strings.Join(parts, "; ")
+		if msg := renderHarborErrors(hpe.GetPayload()); msg != "" {
+			return msg
 		}
 	}
+	var apiErr *runtime.APIError
+	if errors.As(err, &apiErr) {
+		msg := fmt.Sprintf("unexpected status %d from Harbor", apiErr.Code)
+		if r, ok := apiErr.Response.(*errorBodyResponse); ok {
+			var payload models.Errors
+			if json.Unmarshal(r.head, &payload) == nil {
+				if detail := renderHarborErrors(&payload); detail != "" {
+					msg += ": " + detail
+				}
+			}
+		}
+		return msg
+	}
 	return err.Error()
+}
+
+// renderHarborErrors formats Harbor's error document as "CODE: message;
+// CODE: message", or "" when it holds no errors. Control characters are
+// dropped: the text ends up in a single-line status condition.
+func renderHarborErrors(payload *models.Errors) string {
+	if payload == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(payload.Errors))
+	for _, e := range payload.Errors {
+		if e == nil {
+			continue
+		}
+		code := dropControl(e.Code)
+		if code == "" {
+			code = "UNKNOWN"
+		}
+		if m := dropControl(e.Message); m != "" {
+			parts = append(parts, code+": "+m)
+		} else {
+			parts = append(parts, code)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func dropControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // hbErr wraps an SDK error so .Error() renders a clean message while

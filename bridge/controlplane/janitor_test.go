@@ -12,7 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
 )
@@ -185,6 +187,26 @@ func TestJanitor_RevokesRobotOfPreviousServiceAccount(t *testing.T) {
 	}
 }
 
+// When the owner's serviceAccountRef changes to one Harbor cannot name
+// (a "--" in it), RobotName fails and the reconciler stops at InvalidSpec
+// before its stale-robot cleanup. The robot of the previous identity must
+// still be revoked, as it was when RobotName returned the refused name.
+func TestJanitor_RevokesRobotWhenOwnerMapsToNoValidName(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.ServiceAccountRef.Name = "build--runner"
+	mh := newMockHarbor()
+	staleID := mh.preexisting("bridge-prod-eu-west.flux-system.source-controller",
+		RobotDescription(testCluster, ha.Namespace, ha.Name))
+	j := newJanitor(t, mh, ha)
+
+	if err := j.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mh.robots[staleID]; ok {
+		t.Error("robot of the previous serviceAccountRef survived an edit to an identity Harbor cannot name")
+	}
+}
+
 // TestJanitor_RevokesLegacyDashNamedRobots covers upgrades from 0.2.x,
 // whose dash-named robots the dot-prefix ownership check never matched:
 // they leaked with valid passwords. Recognised via the legacy prefix plus
@@ -264,5 +286,32 @@ func TestJanitor_DeletesOrphanRobotSecrets(t *testing.T) {
 		if !exists(s) {
 			t.Errorf("Secret %s must not be deleted", s.Name)
 		}
+	}
+}
+
+// A robot the bridge's description claims but whose name the ownership
+// prefix does not cover (configured robot prefix shorter than Harbor's) is
+// never deleted, and its owner keeps the finalizer that promises its
+// revocation.
+func TestJanitor_KeepsFinalizerForRobotItCannotRecogniseByName(t *testing.T) {
+	moved := newHarborAccess() // no bridge label: moved away from bridge-a
+	moved.Finalizers = []string{FinalizerName + "-bridge-a"}
+	mh := newMockHarbor()
+	mh.preexisting("ci-bridge-prod-eu-west.flux-system.source-controller", RobotDescription(testCluster, moved.Namespace, moved.Name))
+	j := newJanitor(t, mh, moved)
+	selective(j.Config)
+
+	if err := j.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(mh.deleteCalls) != 0 {
+		t.Errorf("deleted robots %v outside the ownership prefix", mh.deleteCalls)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := j.Client.Get(context.Background(), reqFor(moved).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(got, FinalizerName+"-bridge-a") {
+		t.Error("finalizer released although the robot survives")
 	}
 }

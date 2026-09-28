@@ -3,7 +3,14 @@
 ## Status
 
 Accepted (supersedes the naming scheme and the hyphen-prefix operator
-caveat of [ADR-0009](0009-multi-cluster-topology.md) §2–§3)
+caveat of [ADR-0009](0009-multi-cluster-topology.md) §2–§3). **Amended by
+[ADR-0031](0031-robot-name-validity-and-truncation.md):** the trailing
+`saName` field may NOT take dots (a dotted SA name gives a natural name
+the shape of a truncated one), identities with `--` map to no name Harbor
+accepts (`RobotName` returns `ErrInvalidRobotName`, and a cluster name
+with `--` is refused), and the overflow path's disjointness from natural
+names also rests on dot-free SA names and the cut falling inside the SA
+name.
 
 ## Context
 

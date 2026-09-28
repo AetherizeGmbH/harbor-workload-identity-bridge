@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
+	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
 )
 
 // Environment variable names. Constants so wiring (Helm chart, Deployment
@@ -52,9 +53,6 @@ const (
 	clusterNamePattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	clusterNameMaxLen  = 63
 	defaultLogLevel    = "info"
-
-	// defaultHarborRobotPrefix is Harbor's default robot_name_prefix.
-	defaultHarborRobotPrefix = "robot$"
 
 	// defaultTokenMaxLifetime admits kubelet's credential-provider tokens,
 	// which carry the TokenRequest default lifetime of one hour (ADR-0028).
@@ -135,9 +133,9 @@ type Config struct {
 	// HarborRobotPrefix is the robot name prefix the Harbor instance is
 	// configured with (Harbor's robot_name_prefix, default "robot$").
 	// Harbor stores robot names without it and reports them with it; the
-	// Harbor client strips it on read paths (ADR-0014). Set it when the
-	// Harbor administrator changed the prefix — otherwise the bridge cannot
-	// recognise its own robots when it lists them.
+	// Harbor client strips it on read paths (ADR-0023). Set it when the
+	// Harbor administrator changed the prefix — otherwise the Harbor client
+	// fails every read with ErrRobotPrefixMismatch.
 	HarborRobotPrefix string
 
 	// ForceLocalValidation gates whether the data plane performs full local
@@ -211,7 +209,7 @@ func LoadFromEnv() (*Config, error) {
 	cfg := &Config{
 		LogLevel:             defaultLogLevel,
 		ForceLocalValidation: true,
-		HarborRobotPrefix:    defaultHarborRobotPrefix,
+		HarborRobotPrefix:    harbor.DefaultRobotPrefix,
 		TokenMaxLifetime:     defaultTokenMaxLifetime,
 		RequirePodBoundToken: true,
 	}
@@ -225,6 +223,10 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q exceeds %d-char DNS-label limit", EnvClusterName, cfg.ClusterName, clusterNameMaxLen))
 	case !clusterNameRegex.MatchString(cfg.ClusterName):
 		errs = append(errs, fmt.Errorf("%s %q must match %s", EnvClusterName, cfg.ClusterName, clusterNamePattern))
+	case strings.Contains(cfg.ClusterName, "--"):
+		// The cluster name is part of every robot name, and Harbor refuses
+		// robot names with doubled separators: no robot could be created.
+		errs = append(errs, fmt.Errorf("%s %q must not contain consecutive hyphens: Harbor refuses robot names with them, so the bridge could not create any robot", EnvClusterName, cfg.ClusterName))
 	}
 
 	cfg.Namespace = strings.TrimSpace(os.Getenv(EnvNamespace))
@@ -239,13 +241,20 @@ func LoadFromEnv() (*Config, error) {
 
 	if v, err := requireURL(os.Getenv(EnvOIDCIssuer), EnvOIDCIssuer); err != nil {
 		errs = append(errs, err)
+	} else if v.User != nil {
+		// The issuer is compared with each token's iss claim and each
+		// HarborAccess's trustPolicy.issuer, neither of which carries
+		// credentials: no token could ever match.
+		errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): a token's iss claim never carries them, so no token would match", EnvOIDCIssuer))
 	} else {
 		cfg.OIDCIssuer = v
 	}
 
 	if raw := strings.TrimSpace(os.Getenv(EnvOIDCJWKSURL)); raw != "" {
 		// Optional — when set, must still parse as a URL with a scheme
-		// and host. Same shape as the other URL knobs.
+		// and host. Same shape as the other URL knobs. Unlike them it may
+		// carry user:password@: net/http sends that as Basic auth to the
+		// JWKS endpoint. Sanitized() hides the whole part (redactURL).
 		if v, err := requireURL(raw, EnvOIDCJWKSURL); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -267,8 +276,12 @@ func LoadFromEnv() (*Config, error) {
 	cfg.HarborAllowHTTP = envBoolOr(EnvHarborAllowHTTP, false)
 	if v, err := requireURL(os.Getenv(EnvHarborURL), EnvHarborURL); err != nil {
 		errs = append(errs, err)
+	} else if v.User != nil {
+		// The Harbor client never used URL credentials (the SDK takes only
+		// scheme, host and path); they would only end up in logs.
+		errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): the bridge ignores them and authenticates to Harbor with the credentials in %s (chart harbor.adminCredsSecret)", EnvHarborURL, EnvHarborAdminDir))
 	} else if v.Scheme == "http" && !cfg.HarborAllowHTTP {
-		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, v.String(), EnvHarborCAFile, EnvHarborAllowHTTP))
+		errs = append(errs, fmt.Errorf("%s %q uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (with %s for a private CA), or set %s=true", EnvHarborURL, redactURL(v), EnvHarborCAFile, EnvHarborAllowHTTP))
 	} else {
 		cfg.HarborURL = v
 	}
@@ -351,33 +364,82 @@ func LoadFromEnv() (*Config, error) {
 	return cfg, nil
 }
 
+// requireURL parses an http(s) URL setting. Its errors never repeat the
+// value or any part of it that could hold a credential: the value may
+// carry user:password@, and a malformed one leaks it in ways
+// url.URL.Redacted does not hide:
+//
+//   - without a scheme ("user:password@host") the user name parses as the
+//     scheme and the password lands in the opaque part;
+//   - a '/', '?' or '#' inside the password ends the host part early, so
+//     the parser quotes the password's start as an invalid port
+//     ("https://admin:s3cr/et@host": invalid port ":s3cr"), or, when that
+//     start is all digits, accepts host "admin:1234" and keeps the rest of
+//     the password in the path.
 func requireURL(raw, name string) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, fmt.Errorf("%s is required", name)
 	}
+	hasAt := strings.Contains(raw, "@")
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s %q: %w", name, raw, err)
+		if hasAt {
+			return nil, fmt.Errorf("%s is not a valid URL (the parser's reason is left out because the value contains '@' "+
+				"and the reason could quote a credential); percent-encode any '/', '?', '#' or '@' inside a user:password@ part", name)
+		}
+		// *url.Error repeats the whole input; keep only the cause.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return nil, fmt.Errorf("%s is not a valid URL: %w", name, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("%s %q must use http or https scheme", name, raw)
+		if hasAt {
+			return nil, fmt.Errorf("%s must use http or https scheme", name)
+		}
+		return nil, fmt.Errorf("%s must use http or https scheme (got scheme %q)", name, u.Scheme)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("%s %q must include a host", name, raw)
+		return nil, fmt.Errorf("%s must include a host", name)
+	}
+	// Only a literal '@': one written as %40 cannot have come from a
+	// user:password@ part.
+	if strings.Contains(u.EscapedPath()+u.RawQuery+u.EscapedFragment(), "@") {
+		return nil, fmt.Errorf("%s has an '@' after its host part: a '/', '?' or '#' inside a user:password@ part ends the host early, "+
+			"so percent-encode them, and write an '@' that belongs to the path, query or fragment as %%40 "+
+			"(the value is left out because it could hold a credential)", name)
 	}
 	return u, nil
 }
 
+// redactURL renders u for logs and error messages with its whole
+// user:password@ part replaced. url.URL.Redacted hides only a password,
+// so a credential given as the user name alone (https://TOKEN@host,
+// which net/http sends as Basic auth "TOKEN:") would be printed in full.
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.User == nil {
+		return u.String()
+	}
+	c := *u
+	c.User = url.User("xxxxx")
+	return c.String()
+}
+
 // Sanitized returns a representation of the Config suitable for startup
 // logging. Admin credentials are deliberately excluded; only the path to the
-// secret mount is included.
+// secret mount is included. URLs are redacted: the user:password@ part
+// of one (only BRIDGE_OIDC_JWKS_URL may carry it) is replaced by "xxxxx".
 func (c *Config) Sanitized() map[string]string {
 	out := map[string]string{
 		EnvClusterName:          c.ClusterName,
 		EnvNamespace:            c.Namespace,
-		EnvOIDCIssuer:           c.OIDCIssuer.String(),
-		EnvHarborURL:            c.HarborURL.String(),
+		EnvOIDCIssuer:           redactURL(c.OIDCIssuer),
+		EnvHarborURL:            redactURL(c.HarborURL),
 		EnvHarborAdminDir:       c.HarborAdminDir,
 		EnvHarborRobotPrefix:    c.HarborRobotPrefix,
 		EnvForceLocalValidation: strconv.FormatBool(c.ForceLocalValidation),
@@ -395,7 +457,7 @@ func (c *Config) Sanitized() map[string]string {
 		out[EnvInstance] = c.Instance
 	}
 	if c.OIDCJWKSURL != nil {
-		out[EnvOIDCJWKSURL] = c.OIDCJWKSURL.String()
+		out[EnvOIDCJWKSURL] = redactURL(c.OIDCJWKSURL)
 	}
 	if c.OIDCCAFile != "" {
 		out[EnvOIDCCAFile] = c.OIDCCAFile

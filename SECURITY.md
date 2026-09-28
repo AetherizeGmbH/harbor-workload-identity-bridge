@@ -177,7 +177,15 @@ A `HarborAccess` is cleaned up via finalizer:
 
 There is no path where the CR is gone but the robot persists. If the
 bridge crashes between steps, the janitor catches the orphan robot
-within one sweep interval (default 5 minutes).
+within one sweep interval (default 5 minutes). If
+`harbor.robotNamePrefix` does not match Harbor's `robot_name_prefix`,
+the bridge cannot recognise its robots by name, so it refuses to act:
+a listing with a name the configured prefix does not account for fails,
+and a robot whose description names the `HarborAccess` but whose name
+is outside the bridge's ownership prefix is left alone and holds the
+deletion. Either way deletion waits (`reason=DeletionBlocked`) until the
+prefix is corrected. An empty Harbor `robot_name_prefix` cannot be
+matched: an empty `harbor.robotNamePrefix` selects `robot$`.
 
 ### Credential leakage via logs
 
@@ -187,6 +195,15 @@ robot username, and the requested image, but **never the robot
 password**. Admin credentials loaded at startup are read from disk
 and logged only as the directory path, never the values
 (see `Sanitized()` in [`bridge/controlplane/config.go`](bridge/controlplane/config.go)).
+`BRIDGE_HARBOR_URL` and `BRIDGE_OIDC_ISSUER` refuse a `user:password@`
+part at startup: the bridge never authenticated with it. Only
+`BRIDGE_OIDC_JWKS_URL` may carry one (it is sent as Basic auth to the
+JWKS endpoint). The startup log shows URLs with the whole
+`user:password@` part redacted, user name included, and configuration
+errors never repeat a URL's credentials. A URL setting with an `@` after
+its host part is refused: a `/`, `?` or `#` inside a password ends the
+host early (percent-encode them), and the value would otherwise be
+accepted and logged with part of the password in it.
 
 ## What the bridge does *not* defend against
 
@@ -469,7 +486,7 @@ their own RBAC.
 | Lever | Default | Recommendation |
 | --- | --- | --- |
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
-| Harbor transport (`harbor.url`) | https required | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http |
+| Harbor transport (`harbor.url`) | https required, no redirects followed | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http. Point `harbor.url` at the address Harbor's API answers on directly: the bridge refuses redirects, which would re-send the admin credentials to a target on the same host (in clear text if it is http://) |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
 | `tokenTTL` | per-CR, 5m–24h, a Go duration (`30m`, `1h`; no days) | Use 1h or less unless you have a measured pull-rate problem |
 | `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
@@ -483,7 +500,7 @@ their own RBAC.
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
-| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`; otherwise the janitor cannot recognise the bridge's robots |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once. An empty Harbor `robot_name_prefix` cannot be matched (an empty value selects `robot$`) |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape
@@ -536,7 +553,14 @@ robot Secret that does not exist yet (`503`) and Kubernetes API errors
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never
 answers makes reconciles fail with an error and a `Ready=False`
-condition instead of blocking the controller.
+condition instead of blocking the controller. The Harbor client follows
+no redirects: net/http would re-send the admin credentials, and on
+307/308 the request body, to a redirect target on the same host even
+over plain http. A redirect fails the call with an error that names the
+target (`TestClient_RefusesRedirects`). Robot listings, which deletion
+and the janitor rely on to find every robot, page by robot ID rather
+than by offset, so a robot deleted by someone else during the walk
+cannot hide another one (`TestClient_List_ConcurrentDeleteHidesNoRobot`).
 
 OIDC discovery and JWKS fetches follow no redirects and are bounded
 (30s). The bridge's own ServiceAccount token, which the apiserver

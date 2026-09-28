@@ -31,19 +31,12 @@ const (
 	hashSuffixLen = 16
 
 	// robotNamePrefix is the constant the bridge prepends to every robot
-	// it owns. Combined with the cluster name (and a trailing dash) it
+	// it owns. Combined with the cluster name (and a trailing dot) it
 	// forms the ownership prefix that gates every Harbor write call.
+	// Harbor's own robot_name_prefix ("robot$") is a different thing: the
+	// client strips it on read paths (see DefaultRobotPrefix and
+	// WithRobotPrefix), so every name in this file is an internal name.
 	robotNamePrefix = "bridge-"
-
-	// HarborRobotPrefix is the literal Harbor prepends server-side to
-	// every system-level robot name on read paths (GET /robots,
-	// GET /robots/{id}). POST /robots accepts the un-prefixed name and
-	// Harbor adds the prefix on store. So the bridge sends
-	// "bridge-<cluster>.<ns>.<sa>" to Create but reads back
-	// "robot$bridge-<cluster>.<ns>.<sa>". Every comparison between an
-	// internally-constructed name and a name from Harbor must reckon
-	// with this asymmetry — see OwnsRobot and GetByName.
-	HarborRobotPrefix = "robot$"
 )
 
 // robotNameRegex mirrors Harbor's server-side validateName check:
@@ -58,6 +51,14 @@ var robotNameRegex = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
 // name cap. The fix is operator-side: shorten BRIDGE_CLUSTER_NAME.
 var ErrClusterNameTooLong = errors.New("cluster name leaves no room for SA identity within robot name limit")
 
+// ErrInvalidRobotName is returned by RobotName when the identity maps to a
+// name Harbor refuses to create (robotNameRegex). Cluster, namespace and
+// ServiceAccount names are DNS labels, which may contain consecutive
+// hyphens ("team--a", "xn--…"); Harbor allows only single separators. No
+// robot can exist for such an identity, so the error is permanent, not a
+// Harbor outage to retry.
+var ErrInvalidRobotName = errors.New("identity maps to a robot name Harbor does not accept")
+
 // RobotName computes the deterministic Harbor robot name for the given
 // (cluster, SA namespace, SA name) tuple. Reconciles must produce the same
 // output for the same input, so this function is intentionally pure.
@@ -69,24 +70,53 @@ var ErrClusterNameTooLong = errors.New("cluster name leaves no room for SA ident
 // ("bridge-c-a-b-x" could be ns "a"/sa "b-x" or ns "a-b"/sa "x"). A '.'
 // delimiter is unambiguous because every field LEFT of the last dot is a
 // Kubernetes namespace or the cluster label, none of which may contain a
-// dot (RFC 1123 label). The trailing field (SA name) may contain dots
-// without breaking the split. The same '.'-after-cluster boundary also
-// retires ADR-0009's hyphen-prefix ownership footgun (see OwnsRobot).
+// dot (RFC 1123 label). The same '.'-after-cluster boundary also retires
+// ADR-0009's hyphen-prefix ownership footgun (see OwnsRobot).
 //
 // If the natural form exceeds RobotNameCap, the function falls back to a
 // deterministic truncation: the "bridge-<cluster>." prefix is preserved,
-// the ns.sa portion is truncated to fit, and a hex-encoded SHA-256 suffix
-// of the full pre-truncation name disambiguates (probabilistically — this
-// is the only path where injectivity rests on the hash rather than the
-// delimiter).
+// the ns.sa portion is truncated to fit, and the first 16 hex characters
+// of the SHA-256 of the full natural name are appended after a '.'. Such a
+// name, "bridge-<cluster>.<ns>.<sa prefix>.<digest>", has three dots after
+// "bridge-", a natural name exactly two, so the two sets are disjoint as
+// long as (ADR-0031):
 //
-// All inputs must satisfy Harbor's robot-name regex segment rules
-// (lowercase alphanumerics + . _ - separators) AND the injectivity
-// invariant above (no dots in cluster or SA namespace); the caller is
-// responsible for validating this upstream (CRD pattern markers on
-// serviceAccountRef fields and BRIDGE_CLUSTER_NAME validation handle this
-// today — both forbid dots).
+//   - the SA name is dot-free (the CRD pattern). An SA name with a dot
+//     would give a natural name the shape of a truncated one, and because
+//     the digest is an unkeyed hash of public inputs, anyone could choose
+//     the SA name that equals another identity's truncated name. The
+//     trailing SA field may therefore NOT take dots without first joining
+//     the digest with a character no DNS name contains (e.g. '_'), which
+//     renames every truncated robot.
+//   - the cut falls inside the SA name. It does for every real input: a
+//     cluster name has at most 63 characters (config) and a namespace too
+//     (Kubernetes), so ns plus separator always fits the budget. Only a
+//     serviceAccountRef.namespace longer than any namespace can be (the
+//     CRD allows 253) cuts inside the namespace, and no token can come
+//     from such a namespace.
+//
+// Between two truncated names injectivity rests on the 64-bit digest.
+//
+// The inputs must not contain dots in cluster or SA namespace (the
+// injectivity invariant above) nor in the SA name (the truncation
+// disjointness above); the CRD pattern markers on the serviceAccountRef
+// fields and BRIDGE_CLUSTER_NAME validation enforce this. They do NOT keep
+// the result valid for Harbor: DNS labels may contain "--", which Harbor
+// refuses. RobotName checks the result and returns ErrInvalidRobotName for
+// such identities.
 func RobotName(cluster, saNamespace, saName string) (string, error) {
+	name, err := robotName(cluster, saNamespace, saName)
+	if err != nil {
+		return "", err
+	}
+	if !IsValidHarborRobotName(name) {
+		return "", fmt.Errorf("%w: %q (Harbor allows lower-case letters and digits separated by single '.', '_' or '-'; "+
+			"a cluster, namespace or ServiceAccount name with consecutive hyphens cannot be mapped to a Harbor robot)", ErrInvalidRobotName, name)
+	}
+	return name, nil
+}
+
+func robotName(cluster, saNamespace, saName string) (string, error) {
 	full := fmt.Sprintf("%s%s.%s.%s", robotNamePrefix, cluster, saNamespace, saName)
 	if len(full) <= RobotNameCap {
 		return full, nil
@@ -94,7 +124,7 @@ func RobotName(cluster, saNamespace, saName string) (string, error) {
 	prefix := fmt.Sprintf("%s%s.", robotNamePrefix, cluster)
 	digest := hashOf(full)
 
-	// budget = chars available between prefix and trailing "-<digest>".
+	// budget = chars available between prefix and the trailing ".<digest>".
 	budget := RobotNameCap - len(prefix) - 1 - hashSuffixLen
 	if budget < 1 {
 		return "", fmt.Errorf("%w: cluster %q", ErrClusterNameTooLong, cluster)
@@ -126,10 +156,12 @@ func ClusterPrefix(cluster string) string {
 // the given cluster. A bridge MUST NOT list, modify, or delete a robot for
 // which OwnsRobot returns false; this is enforced at every Harbor write site.
 //
-// Accepts both the internal name (what RobotName returns, what we send to
-// POST /robots) and the Harbor-on-wire name (what List/Get return,
-// "robot$<internal>"). Callers should not have to know which form they
-// hold — this is the single normalization point.
+// robotName must be an internal name: what RobotName returns, or
+// Robot.Name from the client, which strips Harbor's robot_name_prefix on
+// every read path (ADR-0023). Never pass Robot.WireName: with any prefix
+// the answer would be false, and stripping a hard-coded "robot$" here
+// would claim unstripped names under a prefix mismatch, which the client
+// reports as ErrRobotPrefixMismatch instead.
 //
 // The ownership prefix is "bridge-<cluster>." (dot-terminated, ADR-0018).
 // Because the cluster field is a dot-free DNS label, distinct cluster names
@@ -143,8 +175,7 @@ func OwnsRobot(cluster, robotName string) bool {
 	if cluster == "" {
 		return false
 	}
-	n := strings.TrimPrefix(robotName, HarborRobotPrefix)
-	return strings.HasPrefix(n, ClusterPrefix(cluster))
+	return strings.HasPrefix(robotName, ClusterPrefix(cluster))
 }
 
 // OwnsLegacyRobot reports whether robotName is a robot this cluster's
@@ -160,19 +191,19 @@ func OwnsRobot(cluster, robotName string) bool {
 // none, and every current name has one right after the cluster field),
 // and callers MUST additionally require the description's cluster tag
 // to equal cluster exactly (RobotBelongsToCluster). That tag is what
-// tells "prod"'s legacy robots apart from "prod-eu"'s.
+// tells "prod"'s legacy robots apart from "prod-eu"'s. Like OwnsRobot it
+// takes the internal name (Robot.Name), never the on-wire name.
 func OwnsLegacyRobot(cluster, robotName string) bool {
 	if cluster == "" {
 		return false
 	}
-	n := strings.TrimPrefix(robotName, HarborRobotPrefix)
-	rest, ok := strings.CutPrefix(n, robotNamePrefix+cluster+"-")
+	rest, ok := strings.CutPrefix(robotName, robotNamePrefix+cluster+"-")
 	return ok && rest != "" && !strings.Contains(rest, ".")
 }
 
 // IsValidHarborRobotName reports whether the given name would be accepted
-// by Harbor's server-side validateName check. Exposed for tests and for
-// defensive checks inside the Harbor client wrapper.
+// by Harbor's server-side validateName check. RobotName refuses every name
+// that fails it (ErrInvalidRobotName).
 func IsValidHarborRobotName(name string) bool {
 	return robotNameRegex.MatchString(name)
 }
