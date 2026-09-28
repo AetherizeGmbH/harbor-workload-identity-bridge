@@ -1,3 +1,9 @@
+## [0.11.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.10.2...v0.11.0) (2026-09-28)
+
+### Features
+
+* **chart:** configurable plugin provider name for several installs per cluster ([#130](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/130)) ([ac4591b](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/ac4591b6c0a3a19b89e5bc290b1a246d57d0d263))
+
 ## [0.10.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.10.1...v0.10.2) (2026-09-28)
 
 ### Bug Fixes
