@@ -720,6 +720,40 @@ credential unavailable                   # token not judged: signing keys unavai
   source=…  reason=signing_keys_unavailable  err=…  requested_image=…
 ```
 
+With the Nexus backend (`BRIDGE_NEXUS_URL`, ADR-0033) the data plane
+routes each request by the registry host of its image, and every line
+above carries `access_kind=harbor|nexus|none` after the caller's
+attribution. `none` is an image that belongs to neither backend's
+registry hosts (or a request without an image): it is refused once the
+token is valid, as `credential denied` with `reason=no_backend`. A
+request of the Harbor backend is logged exactly as above. A request of
+the Nexus backend names the NexusAccess and the Nexus user instead of
+the HarborAccess and the robot:
+
+```
+credential issued
+  source=…  access_kind=nexus  subject=…  pod=…  pod_uid=…  node=…
+  audience=…
+  nexusaccess=team-a/web
+  generation=2
+  nexus_user=bridge-prod.team-a.web_0123456789abcdef   # changes at every rotation
+  ttl_seconds=3600
+  requested_image=nexus.example.com:8443/docker-hosted/app:v1
+
+credential denied
+  reason=no_matching_nexusaccess|invalid_nexusaccess_spec|nexusaccess_deleting|secret_owner_mismatch|grants_incomplete
+  missing_repositories=…                 # grants_incomplete only: repositories the spec names that Nexus lacks
+
+credential unavailable
+  reason=secret_missing|secret_incomplete|secret_for_previous_identity|secret_unreadable|nexusaccess_lookup_failed|nexus_identity_unknown
+  nexus_user=…  expected_identity=…      # secret_for_previous_identity only
+```
+
+The Nexus user id is also the account Nexus's failed-login rate limiter
+keys on (ADR-0033 decision j): whoever reads the audit log can target it
+until the next rotation, as can readers of `status.user.userId`
+(ADR-0033 question 9). Restrict access to the bridge's logs accordingly.
+
 The pod and node come from the `kubernetes.io` claim of the token. The
 bridge requires the pod claim to be present (ADR-0028); which pod and node
 it names is recorded for attribution only, and no authorization decision
@@ -790,6 +824,19 @@ The bridge also exposes Prometheus metrics for SOC-style alerting:
 - `bridge_harboraccess_lookup_failures_total`
 - `bridge_robot_secret_missing_total`
 - `bridge_credential_issuance_duration_seconds`
+
+With the Nexus backend also (a Harbor-only bridge does not export them):
+
+- `bridge_nexus_credential_issuances_total{result=ok|unauthorized|forbidden|unavailable|server_error}`:
+  the requests whose image routed to Nexus, a subset of
+  `bridge_credential_issuances_total`
+- `bridge_nexusaccess_lookup_failures_total`
+- `bridge_nexus_user_secret_missing_total`: the NexusAccess's user Secret
+  was absent or held no complete password yet (`503`)
+- `bridge_nexus_rate_limited`: `1` while the control plane holds back
+  every Nexus call after a `429` (ADR-0033 decision j). Only the leader
+  calls Nexus; the other replicas report `0`, so alert on the maximum
+  across replicas
 
 A non-zero rate on `result=unauthorized` or
 `oidc_validation_failures_total{reason=wrong_issuer|excessive_lifetime|not_pod_bound}`

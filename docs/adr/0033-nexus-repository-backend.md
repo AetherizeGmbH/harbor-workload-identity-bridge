@@ -5,9 +5,10 @@
 Proposed (2026-09-28). The maintainer approves or changes it. Every
 decision below is marked **maintainer may change before implementation**.
 Implemented so far: the Nexus REST client (`bridge/controlplane/nexus`),
-the `NexusAccess` API, the Secret contract, the configuration, and the
-control plane (reconciler, janitor, rate-limit backoff), none of which
-the bridge's entry point wires in yet. Where the implementation departs
+the `NexusAccess` API, the Secret contract, the configuration, the
+control plane (reconciler, janitor, rate-limit backoff), the data plane's
+routing by registry host, and the wiring of both into the bridge's entry
+point when `BRIDGE_NEXUS_URL` is set. Where the implementation departs
 from the decisions below, "Implementation notes" says so.
 
 Extends ADR-0002 (control plane / data plane), ADR-0010 (identity),
@@ -686,6 +687,56 @@ here.
     `RepositoryNotFound` is reconciled again after at most
     `NexusRepositoryRecheckInterval` (5 minutes) instead of the hourly
     resync.
+
+The data plane and the entry point (2026-09-28) implement decision f and
+the wiring of decision h's settings as follows.
+
+12. **Routing** (decision f). Without `BRIDGE_NEXUS_URL` the handler
+    does not route: every request is Harbor's and the image stays
+    audit-only, byte for byte as before (responses, audit lines and
+    metric series), except for a robot Secret that carries the
+    access-kind label, which no bridge writes (note 13). With it, an image of a Nexus registry host is served
+    from NexusAccess objects, an image of a Harbor registry host
+    (`BRIDGE_HARBOR_REGISTRY_HOSTS`, by default the host of
+    `BRIDGE_HARBOR_URL`) from HarborAccess objects exactly as before,
+    and any other image, or a request without one, is refused with 403
+    (`no_backend`). A request never falls back to the other backend. The
+    parallel workstreams' interface contract phrased the second case as
+    "otherwise the Harbor path runs", which would hand Harbor robot
+    credentials to an image of a Nexus host outside its path prefix, or
+    of a host no backend owns; this decision's `no_backend` rule is
+    implemented instead. An image both backends claim, which startup
+    refuses, is `no_backend` too. The backend is chosen before the token
+    is checked, so every audit line names it (`access_kind`), and
+    `no_backend` is decided after the check, so the refusal is
+    attributed.
+13. **Nexus refusals.** In the Harbor path's order: a NexusAccess being
+    deleted, none matching, or one whose spec the reconciler refuses
+    (an unparseable `tokenTTL`, no repositories) is 403; so is a Secret
+    that is not `OwnedBy` the matched object, and one that carries
+    `grants-incomplete`, whatever its value. A missing Secret, one
+    without a complete password (a pending-only Secret), and one whose
+    `username` differs from its `user-id` record (which the control
+    plane treats as incomplete and replaces at once) are 503, as is one
+    whose user id does not parse to the object's current identity
+    (`secret_for_previous_identity`). The Harbor path additionally
+    refuses any Secret that carries the access-kind label.
+14. **Cache duration.** `rotation-not-before` caps kubelet's cache as
+    for robot Secrets. A Nexus Secret without a parseable promise is
+    served with a cache duration of 0, not the plain `tokenTTL` a legacy
+    robot Secret gets: no Nexus Secret predates the promise, and the
+    control plane replaces the user of such a Secret soon.
+15. **Metrics.** The existing data-plane series keep their names and
+    labels and count Nexus requests too. With the backend the bridge
+    also exports `bridge_nexus_credential_issuances_total{result}` (the
+    Nexus share, from the routing on), `bridge_nexusaccess_lookup_failures_total`
+    and `bridge_nexus_user_secret_missing_total`; a Harbor-only bridge
+    exports none of them.
+16. **Scheme and caches.** The entry point adds `nexusv1alpha1` to the
+    scheme, the NexusAccess cache index and `SetupNexus` only with the
+    backend, so a Harbor-only bridge neither knows nor watches
+    NexusAccess, and readiness waits for the NexusAccess cache
+    (`Config.CachedObjects`) when it does.
 
 ## Verified at runtime
 
