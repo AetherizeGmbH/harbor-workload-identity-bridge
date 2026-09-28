@@ -62,3 +62,9 @@ variable "pause_after_pull" {
   default     = false
   description = "Pause after all assertions (file-sleep) for kubectl inspection; same semantics as the kind harness."
 }
+
+variable "bridge_endpoint" {
+  type        = string
+  default     = ""
+  description = "plugin.bridgeEndpoint for every install run (bridge_install, bridge_upgrade, bridge_mtls), so the three helm releases cannot drift apart. Empty keeps the chart default, the loopback NodePort. Escape hatch for risk R4 (ADR-0022): if the loopback NodePort does not route under Dataplane V2, set TF_VAR_bridge_endpoint='https://$(NODE_IP):31443'."
+}

@@ -126,13 +126,25 @@ variable "token_command" {
 variable "bridge_replicas" {
   type        = number
   default     = 2
-  description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (audit H1)."
+  description = "Bridge replicas. Default 2 like the chart: with one replica the e2e could never catch a data plane that serves only on the leader (audit H1). The install waits until every replica is Ready (null_resource.bridge_rollout), and the bridge_replicas stage asks each one for credentials directly."
 }
 
 variable "issuer_name" {
   type        = string
   default     = "harbor-bridge-ca"
-  description = "Name of the self-signed cert-manager ClusterIssuer created for the bridge's serving cert. Referenced by both the ClusterIssuer manifest and the chart's tls.issuerRef."
+  description = "Name of the CA ClusterIssuer created for the bridge's serving cert (and, with mtls, the plugin's client cert). Referenced by both the ClusterIssuer manifest and the chart's tls.issuerRef. Its root is <issuer_name>-root, signed by the selfSigned ClusterIssuer <issuer_name>-bootstrap."
+}
+
+variable "cert_manager_namespace" {
+  type        = string
+  default     = "cert-manager"
+  description = "Namespace cert-manager runs in: a ClusterIssuer's CA Secret must live in cert-manager's cluster resource namespace, which defaults to it."
+}
+
+variable "mtls" {
+  type        = bool
+  default     = false
+  description = "bridge.mTLS.enabled, with the client certificate issued by issuer_name — the CA that also signs the serving certificate, whose ca.crt the bridge trusts for client certificates."
 }
 
 # Resource requests/limits for the bridge Deployment container, wired into
@@ -206,6 +218,66 @@ resource "kubernetes_secret_v1" "admin" {
   type = "Opaque"
 }
 
+# The bridge's certificates come from a CA, not from a selfSigned issuer.
+# With bridge.mTLS the bridge trusts the ca.crt of its own TLS Secret for
+# client certificates, so the serving and the plugin's client certificate
+# must share an issuing CA (charts/harbor-bridge/templates/
+# bridge-certificate.yaml); a selfSigned issuer signs each certificate
+# with its own key. A selfSigned bootstrap issuer signs one root, and the
+# CA ClusterIssuer var.issuer_name issues from it: the production shape,
+# and every install already has it, so turning mTLS on (bridge_mtls)
+# changes no CA anywhere. The chart's Certificate waits for nothing, so
+# these wait until cert-manager reports each Ready.
+resource "kubectl_manifest" "bootstrap_issuer" {
+  yaml_body         = <<-YAML
+    apiVersion: cert-manager.io/v1
+    kind: ClusterIssuer
+    metadata:
+      name: ${var.issuer_name}-bootstrap
+    spec:
+      selfSigned: {}
+  YAML
+  server_side_apply = true
+  field_manager     = "tofu-e2e-harbor-bridge-install"
+  wait_for {
+    condition {
+      type   = "Ready"
+      status = "True"
+    }
+  }
+}
+
+resource "kubectl_manifest" "root_ca" {
+  yaml_body         = <<-YAML
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: ${var.issuer_name}-root
+      namespace: ${var.cert_manager_namespace}
+    spec:
+      isCA: true
+      commonName: ${var.issuer_name}-root
+      secretName: ${var.issuer_name}-root
+      duration: 2160h
+      privateKey:
+        algorithm: ECDSA
+        size: 256
+      issuerRef:
+        name: ${var.issuer_name}-bootstrap
+        kind: ClusterIssuer
+        group: cert-manager.io
+  YAML
+  server_side_apply = true
+  field_manager     = "tofu-e2e-harbor-bridge-install"
+  wait_for {
+    condition {
+      type   = "Ready"
+      status = "True"
+    }
+  }
+  depends_on = [kubectl_manifest.bootstrap_issuer]
+}
+
 resource "kubectl_manifest" "cluster_issuer" {
   yaml_body         = <<-YAML
     apiVersion: cert-manager.io/v1
@@ -213,10 +285,18 @@ resource "kubectl_manifest" "cluster_issuer" {
     metadata:
       name: ${var.issuer_name}
     spec:
-      selfSigned: {}
+      ca:
+        secretName: ${var.issuer_name}-root
   YAML
   server_side_apply = true
   field_manager     = "tofu-e2e-harbor-bridge-install"
+  wait_for {
+    condition {
+      type   = "Ready"
+      status = "True"
+    }
+  }
+  depends_on = [kubectl_manifest.root_ca]
 }
 
 # CRDs are installed automatically by helm from the chart's crds/
@@ -259,6 +339,13 @@ resource "helm_release" "bridge" {
       logLevel    = "debug"
       image       = var.bridge_image
       resources   = var.bridge_resources
+      mTLS = {
+        enabled = var.mtls
+        clientIssuerRef = {
+          name = var.issuer_name
+          kind = "ClusterIssuer"
+        }
+      }
     }
     tls = {
       enabled = true
@@ -274,8 +361,110 @@ resource "helm_release" "bridge" {
   ]
 }
 
+# helm's wait is not enough: it counts a Deployment as ready once
+# replicas - maxUnavailable pods are (1 of 2 with the chart's
+# maxUnavailable: 1), and the Service then routes everything to the one
+# ready pod. A replica that never becomes Ready, such as a follower whose
+# data plane waits for the leadership it never gets (audit H1), passed the
+# install and every pull. Wait for the whole rollout and require every
+# replica updated, Ready and available, after each install or upgrade
+# that changed the release. On failure the pods, their events and the
+# bridge logs land in .diag/bridge-rollout/ (this provisioner's own output
+# is suppressed: its environment is sensitive).
+resource "null_resource" "bridge_rollout" {
+  depends_on = [helm_release.bridge]
+
+  lifecycle {
+    replace_triggered_by = [helm_release.bridge]
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-BASH
+      set -uo pipefail
+      d="$(mktemp -d)"
+      trap 'rm -rf "$d"' EXIT
+      source "$KUBECONFIG_LIB" && harness_kubeconfig "$d" || exit 1
+      fail() {
+        rm -rf "$DIAG"; mkdir -p "$DIAG"
+        echo "$1" > "$DIAG/FAILED"
+        k -n "$NS" get deployment "$DEPLOYMENT" -o yaml > "$DIAG/deployment.yaml" 2>&1
+        k -n "$NS" describe pods -l app.kubernetes.io/component=bridge > "$DIAG/pods.describe.txt" 2>&1
+        k -n "$NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=1000 --prefix > "$DIAG/bridge.log" 2>&1
+        echo "FAILED: $1 (diagnostics: $DIAG)" >&2
+        exit 1
+      }
+      k -n "$NS" rollout status "deployment/$DEPLOYMENT" --timeout=300s >/dev/null 2>&1 \
+        || fail "the bridge Deployment did not finish its rollout within 300s"
+      got="$(k -n "$NS" get deployment "$DEPLOYMENT" -o jsonpath='{.spec.replicas} {.status.updatedReplicas} {.status.readyReplicas} {.status.availableReplicas}')" \
+        || fail "could not read the bridge Deployment"
+      read -r spec updated ready available <<< "$got"
+      for n in "$spec" "$${updated:-0}" "$${ready:-0}" "$${available:-0}"; do
+        [ "$n" = "$REPLICAS" ] || fail "bridge Deployment: $${spec:-?} replicas, $${updated:-0} updated, $${ready:-0} Ready, $${available:-0} available; want $REPLICAS of each"
+      done
+    BASH
+    environment = {
+      K8S_HOST       = var.kubeconfig.host
+      K8S_CA         = var.kubeconfig.cluster_ca_certificate
+      K8S_CERT       = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+      K8S_KEY        = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+      K8S_TOKEN      = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+      KUBECONFIG_LIB = abspath("${path.module}/../../scripts/kubeconfig.sh")
+      NS             = helm_release.bridge.namespace
+      DEPLOYMENT     = helm_release.bridge.name
+      REPLICAS       = tostring(var.bridge_replicas)
+      DIAG           = abspath("${path.cwd}/.diag/bridge-rollout")
+    }
+  }
+}
+
+# Harness-only, not part of the chart: a headless Service over the bridge
+# pods, Ready or not, so that DNS answers with one address per replica. The
+# bridge_replicas stage asks each replica for credentials at its own
+# address; the chart's Service would pick one, and hide a replica that
+# does not serve.
+resource "kubernetes_service_v1" "bridge_pods" {
+  metadata {
+    name      = "${helm_release.bridge.name}-pods"
+    namespace = helm_release.bridge.namespace
+  }
+  spec {
+    cluster_ip                  = "None"
+    publish_not_ready_addresses = true
+    # The chart's bridge selector labels (harbor-bridge.bridge.selectorLabels).
+    selector = {
+      "app.kubernetes.io/name"      = "harbor-workload-identity-bridge"
+      "app.kubernetes.io/instance"  = helm_release.bridge.name
+      "app.kubernetes.io/component" = "bridge"
+    }
+    port {
+      name        = "https"
+      port        = 8443
+      target_port = "https"
+    }
+  }
+}
+
 output "namespace" {
   value = kubernetes_namespace_v1.this.metadata[0].name
+}
+
+output "bridge_replicas" {
+  value       = var.bridge_replicas
+  description = "Bridge replicas the install waited for."
+}
+
+# The Secret holding the plugin's client certificate (tls.crt, tls.key and
+# the issuing CA as ca.crt) when mtls is on: the chart's
+# harbor-bridge.mTLSClientSecretName, in the release namespace (this
+# module leaves plugin.namespace empty).
+output "mtls_client_secret" {
+  value = var.mtls ? "${helm_release.bridge.name}-plugin-mtls-client" : ""
+}
+
+output "bridge_pods_host" {
+  value       = "${kubernetes_service_v1.bridge_pods.metadata[0].name}.${kubernetes_service_v1.bridge_pods.metadata[0].namespace}.svc"
+  description = "Headless Service name that resolves to every bridge pod's address, Ready or not (for checks that must reach each replica)."
 }
 
 # The credential endpoint through the bridge's Service, for in-cluster
@@ -317,12 +506,13 @@ resource "null_resource" "release_harboraccess_finalizers" {
   }
 
   triggers = {
-    token_command = var.token_command
-    k8s_host      = var.kubeconfig.host
-    k8s_ca        = var.kubeconfig.cluster_ca_certificate
-    k8s_cert      = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
-    k8s_key       = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
-    k8s_token     = var.kubeconfig.token == null ? "" : var.kubeconfig.token
+    token_command  = var.token_command
+    kubeconfig_lib = abspath("${path.module}/../../scripts/kubeconfig.sh")
+    k8s_host       = var.kubeconfig.host
+    k8s_ca         = var.kubeconfig.cluster_ca_certificate
+    k8s_cert       = var.kubeconfig.client_certificate == null ? "" : var.kubeconfig.client_certificate
+    k8s_key        = var.kubeconfig.client_key == null ? "" : var.kubeconfig.client_key
+    k8s_token      = var.kubeconfig.token == null ? "" : var.kubeconfig.token
   }
 
   provisioner "local-exec" {
@@ -332,20 +522,14 @@ resource "null_resource" "release_harboraccess_finalizers" {
       set -uo pipefail
       d="$(mktemp -d)"
       trap 'rm -rf "$d"' EXIT
-      chmod 700 "$d"
-      printf '%s' "$K8S_CA" > "$d/ca.crt"
-      args=(--kubeconfig=/dev/null --server="$K8S_HOST" --certificate-authority="$d/ca.crt")
       if [ -n "$TOKEN_COMMAND" ]; then
+        # A command substitution: the fresh token never reaches an argv.
         K8S_TOKEN="$(bash -c "$TOKEN_COMMAND")"
       fi
-      if [ -n "$K8S_TOKEN" ]; then
-        args+=(--token="$K8S_TOKEN")
-      else
-        printf '%s' "$K8S_CERT" > "$d/tls.crt"
-        printf '%s' "$K8S_KEY" > "$d/tls.key"
-        args+=(--client-certificate="$d/tls.crt" --client-key="$d/tls.key")
+      if ! { source "$KUBECONFIG_LIB" && harness_kubeconfig "$d"; }; then
+        echo "could not write the kubeconfig; nothing released" >&2
+        exit 0
       fi
-      k() { kubectl "$${args[@]}" "$@"; }
       if ! k get crd harboraccesses.harbor.aetherize.io >/dev/null 2>&1; then
         echo "no HarborAccess CRD reachable (or no API access); nothing to release" >&2
         exit 0
@@ -360,12 +544,13 @@ resource "null_resource" "release_harboraccess_finalizers" {
       exit 0
     BASH
     environment = {
-      K8S_HOST      = self.triggers.k8s_host
-      K8S_CA        = self.triggers.k8s_ca
-      K8S_CERT      = self.triggers.k8s_cert
-      K8S_KEY       = self.triggers.k8s_key
-      K8S_TOKEN     = self.triggers.k8s_token
-      TOKEN_COMMAND = self.triggers.token_command
+      K8S_HOST       = self.triggers.k8s_host
+      K8S_CA         = self.triggers.k8s_ca
+      K8S_CERT       = self.triggers.k8s_cert
+      K8S_KEY        = self.triggers.k8s_key
+      K8S_TOKEN      = self.triggers.k8s_token
+      TOKEN_COMMAND  = self.triggers.token_command
+      KUBECONFIG_LIB = self.triggers.kubeconfig_lib
     }
   }
 }

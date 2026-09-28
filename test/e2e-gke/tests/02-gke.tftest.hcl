@@ -33,9 +33,11 @@
 # the discovered GKE provider config path/format (installer logs show
 # it), whether GKE containerd ships a config_path (trust DS logs), and
 # whether the loopback NodePort routes under Dataplane V2 — if pull_pod
-# fails with the plugin unable to reach the bridge, set bridge_endpoint =
-# "https://$(NODE_IP):31443" on bridge_install/bridge_upgrade (see the R4
-# note in ADR-0022 about the cert SAN implications).
+# fails with the plugin unable to reach the bridge, rerun with
+# TF_VAR_bridge_endpoint='https://$(NODE_IP):31443' (see the R4 note in
+# ADR-0022 about the cert SAN implications). Every install run
+# (bridge_install, bridge_upgrade, bridge_mtls) passes that one variable,
+# so a later helm upgrade never falls back to the loopback endpoint.
 #
 # Variables: inside a run block `var` holds only CLI/TF_VAR values, so
 # every optional one is read with try(var.x, <default>).
@@ -183,6 +185,8 @@ run "bridge_install" {
     ]
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
+    # R4 escape hatch; empty keeps the loopback NodePort (header note).
+    bridge_endpoint = try(var.bridge_endpoint, "")
   }
 }
 
@@ -200,6 +204,68 @@ run "harbor_access" {
   }
 }
 
+# Audit H1 / ADR-0025: every bridge replica, asked at its own address,
+# issues credentials (details at bridge_replicas of the kind harness).
+run "bridge_replicas" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig               = run.gke.kubeconfig
+    name                     = "bridge-replicas"
+    namespace                = "token-ns"
+    service_account_name     = "token-check"
+    image                    = run.push.image_tags.seed
+    image_pull_policy        = "IfNotPresent"
+    projected_token_audience = "harbor-bridge"
+    command                  = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_install.credentials_url}'
+      pods='${run.bridge_install.bridge_pods_host}'
+      want=${run.bridge_install.bridge_replicas}
+      robot=bridge-gke-e2e.token-ns.token-check
+      host=$${url#https://}; host=$${host%%/*}
+      name=$${host%:*}; port=$${host##*:}
+
+      openssl s_client -connect "$host" -servername "$name" </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
+      test -s /tmp/bridge-ca.crt
+
+      n=0; ips=""
+      for i in $(seq 1 20); do
+        ips=$(getent ahosts "$pods" | awk '$2 == "STREAM" {print $1}' | sort -u)
+        n=$(printf '%s\n' "$ips" | grep -c . || true)
+        [ "$n" = "$want" ] && break
+        sleep 3
+      done
+      if [ "$n" != "$want" ]; then
+        echo "$pods resolves to $n bridge pods ($(echo $ips)), want $want"; exit 1
+      fi
+
+      tok=$(cat /var/run/secrets/tokens/token)
+      for ip in $ips; do
+        code=$(curl -sS -m 10 -o /tmp/response -w '%%{http_code}' --cacert /tmp/bridge-ca.crt \
+          --resolve "$name:$port:$ip" -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+          --data "{\"image\":\"replica-check/$ip\"}" "$url") || code="no answer (curl exit $?)"
+        if [ "$code" != 200 ]; then
+          echo "bridge pod $ip: $code, want 200: $(cat /tmp/response 2>/dev/null)"; exit 1
+        fi
+        if ! jq -e --arg robot "$robot" '(.username | endswith($robot))
+            and (.password | type == "string" and length > 0)' /tmp/response >/dev/null; then
+          rm -f /tmp/response; echo "bridge pod $ip: HTTP 200, but not with the credentials of $robot"; exit 1
+        fi
+        rm -f /tmp/response
+        echo "bridge pod $ip: 200 with the credentials of $robot"
+      done
+    SH
+    ]
+    timeout_seconds = 180
+    fail_message    = "audit H1 / ADR-0025: not every bridge replica serves credentials at its own address (see pod.log and bridge.log)"
+  }
+}
+
 run "pull_pod" {
   command = apply
   module {
@@ -214,7 +280,7 @@ run "pull_pod" {
     command              = ["sh", "-c"]
     args                 = ["echo test-pull/image-puller pulled your-project; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "GKE bridge pull failed. Check the installer logs (merge target), the bridge logs (issuer / JWKS), and whether the loopback NodePort routes under Dataplane V2 (R4: bridge_endpoint)"
+    fail_message         = "GKE bridge pull failed. Check the installer logs (merge target), the bridge logs (issuer / JWKS), and whether the loopback NodePort routes under Dataplane V2 (R4: TF_VAR_bridge_endpoint)"
   }
 }
 
@@ -251,6 +317,48 @@ run "pull_pod_beta" {
     args                 = ["echo team/a-svc-b pulled project-beta; exit 0"]
     timeout_seconds      = 300
     fail_message         = "ADR-0018 collision regression: team/a-svc-b could not pull project-beta"
+  }
+}
+
+# Tenant isolation, checked by Harbor (details at pull_pod_cross_tenant
+# of the kind harness): team-a/svc-b holds pull on project-alpha only.
+run "pull_pod_cross_tenant" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "pull-cross-tenant-beta"
+    namespace            = "team-a"
+    service_account_name = "svc-b"
+    image                = "${run.gke.harbor_hostname}/project-beta/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "tenant isolation broken on GKE: team-a/svc-b (granted project-alpha only) could pull project-beta, or the pull failed for a reason other than authorization"
+  }
+}
+
+# test-pull/image-puller may not pull project-gamma before the grant that
+# pull_pod_granted relies on.
+run "pull_pod_before_grant" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "pull-before-grant-gamma"
+    namespace            = "test-pull"
+    service_account_name = "image-puller"
+    image                = "${run.gke.harbor_hostname}/project-gamma/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    fail_message         = "tenant isolation broken on GKE: test-pull/image-puller could pull project-gamma before any HarborAccess granted it, or the pull failed for a reason other than authorization"
   }
 }
 
@@ -371,6 +479,8 @@ run "bridge_upgrade" {
     ]
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
+    # R4 escape hatch; empty keeps the loopback NodePort (header note).
+    bridge_endpoint = try(var.bridge_endpoint, "")
   }
 }
 
@@ -408,6 +518,12 @@ run "harbor_access_update" {
   }
 }
 
+# Unlike the kind harness, the GKE harness does not pin this stage and
+# pull_pod_revoked to the node of a warm-up pull (spot nodes can be
+# replaced mid-run), and bridge_upgrade restarted kubelet everywhere: both
+# pull with fresh credentials from the bridge. The kind harness carries the
+# cached-credential checks (no rotation on a spec edit, revocation that
+# stops a cached password).
 run "pull_pod_granted" {
   command = apply
   module {
@@ -422,7 +538,55 @@ run "pull_pod_granted" {
     command              = ["sh", "-c"]
     args                 = ["echo test-pull/image-puller pulled project-gamma; exit 0"]
     timeout_seconds      = 300
-    fail_message         = "permission update did not take effect in Harbor, or a rotation broke kubelet-cached credentials"
+    fail_message         = "permission update did not take effect in Harbor"
+  }
+}
+
+# Revocation by CR edit (ADR-0023; details at robot_narrowed of the kind
+# harness): the narrowed multi-access robot keeps what stayed and is
+# refused what was removed.
+run "robot_narrowed" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "robot-narrowed"
+    namespace            = run.bridge_upgrade.namespace
+    service_account_name = "default"
+    image                = run.push.image_tags.seed
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = "robot-${run.bridge_upgrade.namespace}.multi-access"
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      H='${run.gke.harbor_hostname}'
+      openssl s_client -connect "$H:443" -servername "$H" </dev/null 2>/dev/null \
+        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+        > /usr/local/share/ca-certificates/harbor-e2e.crt
+      test -s /usr/local/share/ca-certificates/harbor-e2e.crt
+      update-ca-certificates 2>/dev/null
+      crane auth login "$H" -u "$username" -p "$password"
+
+      refused() {
+        what=$1; shift
+        if out=$("$@" 2>&1); then echo "$what: SUCCEEDED, want an authorization failure"; exit 1; fi
+        if ! printf '%s' "$out" | grep -Eqi 'unauthorized|denied|forbidden|insufficient_scope'; then
+          echo "$what: failed, but not with an authorization error: $out"; exit 1
+        fi
+        echo "$what: refused"
+      }
+
+      crane copy "$H/beta-1/app:v1" "$H/beta-1/pushed-after-narrowing:v1"
+      crane digest "$H/beta-2/app:v1" >/dev/null
+      echo "kept: push to beta-1, pull from beta-2"
+      refused "push to beta-2 (push removed)" crane copy "$H/beta-2/app:v1" "$H/beta-2/pushed-after-narrowing:v1"
+      refused "pull from beta-3 (project removed)" crane digest "$H/beta-3/app:v1"
+    SH
+    ]
+    timeout_seconds = 180
+    fail_message    = "revocation by CR edit failed on GKE (ADR-0023): after multi-access was narrowed, its robot could still push to beta-2 or read beta-3, or lost a grant it kept (see pod.log)"
   }
 }
 
@@ -478,17 +642,38 @@ run "robot_check_update" {
     env_from_secret      = run.seed_image.admin_secret_name
     command              = ["sh", "-c"]
     args = [<<-SH
-      set -eu
+      set -euo pipefail
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
-      count() { curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D$1" | jq 'length'; }
-      old=$(count bridge-gke-e2e.team-a.svc-b); new=$(count bridge-gke-e2e.team-a.svc-renamed)
-      echo "old robot: $old, new robot: $new"
-      test "$old" = 0
-      test "$new" = 1
+      # robots QUERY: the names of the robots Harbor lists for QUERY, as a
+      # JSON array. A failed request, or an answer that is not exactly one
+      # JSON list (an empty body included), ends the Job (details at
+      # robot_check_update of the kind harness).
+      robots() {
+        body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
+        printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end'
+      }
+      old=$(robots name%3Dbridge-gke-e2e.team-a.svc-b)
+      new=$(robots name%3Dbridge-gke-e2e.team-a.svc-renamed)
+      all=$(robots name%3D~bridge-gke-e2e.)
+      echo "old robot: $old; new robot: $new; robots of cluster gke-e2e: $all"
+      printf '%s' "$old" | jq -e 'length == 0' >/dev/null
+      printf '%s' "$new" | jq -e 'length == 1' >/dev/null
+      printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_update.harbor_accesses)} \
+        'length == $want and any(.[]; endswith("bridge-gke-e2e.team-a.svc-renamed"))' >/dev/null
+
+      # The narrowed robot's grants as Harbor stores them.
+      body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3Dbridge-gke-e2e.beta-ns.beta-runner")
+      grants=$(printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" and (.[0] | length) == 1 then .[0][0].permissions
+          | map({kind, namespace, actions: ([.access[] | "\(.resource):\(.action)"] | sort)}) | sort_by(.namespace)
+        else error("want exactly one robot bridge-gke-e2e.beta-ns.beta-runner") end')
+      echo "narrowed robot's grants: $grants"
+      printf '%s' "$grants" | jq -e '. == [
+        {kind: "project", namespace: "beta-1", actions: ["repository:pull", "repository:push"]},
+        {kind: "project", namespace: "beta-2", actions: ["repository:pull"]}]' >/dev/null
     SH
     ]
     timeout_seconds = 120
-    fail_message    = "Harbor state after the serviceAccountRef change is wrong: the old robot must be deleted and the new one present"
+    fail_message    = "Harbor state after harbor_access_update is wrong: the old robot must be deleted, the new one present, the fuzzy name=~bridge-gke-e2e. query must list one robot per HarborAccess, and the narrowed robot must hold exactly its new grants (or Harbor could not be asked; see pod.log)"
   }
 }
 
@@ -521,9 +706,9 @@ run "token_rejection" {
       sa=/var/run/secrets/kubernetes.io/serviceaccount
       ns=$(cat "$sa/namespace")
 
-      # The bridge's serving certificate, off the wire. The bridge install's
-      # issuer is selfSigned, so it is the CA cert-manager writes to ca.crt
-      # for the plugin; curl still checks that it names the Service host.
+      # The bridge's serving certificate, off the wire: the leaf, which curl
+      # takes as the trust anchor (a partial chain, curl's default with
+      # OpenSSL); curl still checks that it names the Service host.
       host=$${url#https://}; host=$${host%%/*}
       openssl s_client -connect "$host" -servername "$${host%:*}" </dev/null 2>/dev/null \
         | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
@@ -620,6 +805,122 @@ run "token_rejection" {
   }
 }
 
+# mTLS between plugin and bridge, end to end (details at bridge_mtls,
+# mtls_check and pull_pod_mtls of the kind harness).
+# (From here on the install module's outputs come from run.bridge_mtls.)
+run "bridge_mtls" {
+  command = apply
+  module {
+    source = "../e2e/modules/harbor-bridge-install"
+  }
+  variables {
+    kubeconfig            = run.gke.kubeconfig
+    cluster_name          = "gke-e2e"
+    harbor_url            = run.harbor.internal_api_url
+    harbor_admin_password = run.harbor.admin_password
+    audience              = "harbor-bridge"
+    oidc_issuer           = run.gke.oidc_issuer
+    oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
+    token_command         = "gcloud auth print-access-token"
+    match_images = [
+      "${run.gke.harbor_hostname}/your-project",
+      "${run.gke.harbor_hostname}/project-alpha",
+      "${run.gke.harbor_hostname}/project-beta",
+      "${run.gke.harbor_hostname}/project-gamma",
+      "${run.gke.harbor_hostname}/beta-1",
+      "${run.gke.harbor_hostname}/beta-2",
+      "${run.gke.harbor_hostname}/beta-3",
+      "${run.gke.harbor_hostname}/upgrade-only",
+    ]
+    bridge_image = run.push.image_refs.bridge
+    plugin_image = run.push.image_refs.plugin
+    # R4 escape hatch; empty keeps the loopback NodePort (header note).
+    bridge_endpoint = try(var.bridge_endpoint, "")
+    mtls            = true
+  }
+}
+
+run "mtls_check" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "mtls-check"
+    namespace            = run.bridge_mtls.namespace
+    service_account_name = "default"
+    image                = run.push.image_tags.seed
+    image_pull_policy    = "IfNotPresent"
+    secret_volumes       = { (run.bridge_mtls.mtls_client_secret) = "/mtls" }
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_mtls.credentials_url}'
+      pods='${run.bridge_mtls.bridge_pods_host}'
+      want=${run.bridge_mtls.bridge_replicas}
+      host=$${url#https://}; host=$${host%%/*}
+      name=$${host%:*}; port=$${host##*:}
+      for f in tls.crt tls.key ca.crt; do test -s "/mtls/$f"; done
+
+      n=0; ips=""
+      for i in $(seq 1 20); do
+        ips=$(getent ahosts "$pods" | awk '$2 == "STREAM" {print $1}' | sort -u)
+        n=$(printf '%s\n' "$ips" | grep -c . || true)
+        [ "$n" = "$want" ] && break
+        sleep 3
+      done
+      if [ "$n" != "$want" ]; then
+        echo "$pods resolves to $n bridge pods ($(echo $ips)), want $want"; exit 1
+      fi
+
+      for ip in $ips; do
+        code=$(curl -sS -m 10 -o /tmp/response -w '%%{http_code}' --cacert /mtls/ca.crt \
+          --cert /mtls/tls.crt --key /mtls/tls.key --resolve "$name:$port:$ip" \
+          --data '{"image":"mtls-check"}' "$url") || code="no answer (curl exit $?)"
+        body=$(cat /tmp/response 2>/dev/null || true)
+        if [ "$code" != 401 ] || [ "$body" != "missing Bearer credential" ]; then
+          echo "bridge pod $ip, with the plugin's client certificate: $code ($body), want 401 missing Bearer credential"; exit 1
+        fi
+        echo "bridge pod $ip, with the plugin's client certificate: the bridge answered (401, no token)"
+
+        if out=$(curl -sS -m 10 -o /dev/null -w '%%{http_code}' --cacert /mtls/ca.crt \
+            --resolve "$name:$port:$ip" --data '{"image":"mtls-check"}' "$url" 2>&1); then
+          echo "bridge pod $ip, without a client certificate: answered HTTP $out, want a refused TLS handshake"; exit 1
+        fi
+        if ! printf '%s' "$out" | grep -Eq 'alert (certificate required|bad certificate|handshake failure)'; then
+          echo "bridge pod $ip, without a client certificate: failed, but not with a TLS alert: $out"; exit 1
+        fi
+        echo "bridge pod $ip, without a client certificate: TLS handshake refused"
+      done
+    SH
+    ]
+    timeout_seconds = 180
+    fail_message    = "bridge.mTLS on GKE: a bridge replica served a request without a client certificate, or refused the plugin's (see pod.log and bridge.log)"
+  }
+}
+
+run "pull_pod_mtls" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "pull-mtls-upgrade-only"
+    namespace            = "upgrade-ns"
+    service_account_name = "upgrade-runner"
+    image                = "${run.gke.harbor_hostname}/upgrade-only/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo upgrade-ns/upgrade-runner pulled upgrade-only over mTLS; exit 0"]
+    expect_bridge_log = [
+      ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"${run.gke.harbor_hostname}/upgrade-only/app\"", "\"client_cert\":\"CN=harbor-bridge-plugin\""],
+    ]
+    timeout_seconds = 300
+    fail_message    = "bridge.mTLS on GKE: the pull failed with mTLS on, or the bridge did not log the plugin's client certificate for it (see pod.log and bridge.log)"
+  }
+}
+
 run "file_sleep" {
   command = apply
   module {
@@ -627,6 +928,55 @@ run "file_sleep" {
   }
   variables {
     enabled = try(var.pause_after_pull, false)
+  }
+}
+
+# A tenant namespace deleted with its HarborAccess in it (details at
+# harbor_access_cascade of the kind harness).
+run "harbor_access_cascade" {
+  command = apply
+  module {
+    source = "../e2e/modules/harbor-access-scenario"
+  }
+  variables {
+    kubeconfig       = run.gke.kubeconfig
+    phase            = "ns-cascade"
+    bridge_namespace = run.bridge_mtls.namespace
+    issuer           = run.gke.oidc_issuer
+    audience         = "harbor-bridge"
+  }
+}
+
+run "robot_check_cascade" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "robot-check-cascade"
+    namespace            = run.seed_image.namespace
+    service_account_name = "default"
+    image                = run.push.image_tags.seed
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = run.seed_image.admin_secret_name
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -euo pipefail
+      api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      robots() {
+        body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
+        printf '%s' "$body" | jq -cs 'if length == 1 and (.[0] | type) == "array" then [.[0][].name] else error("Harbor did not answer with one robot list") end'
+      }
+      gone=$(robots name%3Dbridge-gke-e2e.app-ns.runner)
+      all=$(robots name%3D~bridge-gke-e2e.)
+      echo "robot of app-ns/runner: $gone; robots of cluster gke-e2e: $all"
+      printf '%s' "$gone" | jq -e 'length == 0' >/dev/null
+      printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_cascade.harbor_accesses)} 'length == $want' >/dev/null
+    SH
+    ]
+    timeout_seconds = 120
+    fail_message    = "namespace deletion released tenant-access without revoking its robot, or took other robots with it (or Harbor could not be asked; see pod.log)"
   }
 }
 
@@ -638,7 +988,7 @@ run "harbor_access_teardown" {
   variables {
     kubeconfig       = run.gke.kubeconfig
     phase            = "none"
-    bridge_namespace = run.bridge_upgrade.namespace
+    bridge_namespace = run.bridge_mtls.namespace
     issuer           = run.gke.oidc_issuer
     audience         = "harbor-bridge"
   }
@@ -661,15 +1011,25 @@ run "robot_check_teardown" {
     args = [<<-SH
       set -eu
       api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      # Only an empty LIST passes (details at robot_check_teardown of the
+      # kind harness): a failed request is retried and fails the Job if
+      # Harbor never answers; an answer that is not exactly one JSON list
+      # (an empty body included) fails it at once.
+      state="Harbor was never asked"
       for i in $(seq 1 30); do
-        left=$(curl -fsS -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-gke-e2e." | jq -r '.[].name')
-        if [ -z "$left" ]; then echo "no robots of cluster gke-e2e left in Harbor"; exit 0; fi
+        if body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=name%3D~bridge-gke-e2e."); then
+          left=$(printf '%s' "$body" | jq -rs 'if length == 1 and (.[0] | type) == "array" then .[0][].name else error("Harbor did not answer with one robot list") end')
+          if [ -z "$left" ]; then echo "no robots of cluster gke-e2e left in Harbor"; exit 0; fi
+          state="robots left behind: $left"
+        else
+          state="the Harbor query failed (curl exit $?)"
+        fi
         sleep 3
       done
-      echo "robots left behind:"; echo "$left"; exit 1
+      echo "$state"; exit 1
     SH
     ]
-    timeout_seconds = 120
-    fail_message    = "finalizer cleanup incomplete: robots of cluster gke-e2e are still in Harbor after every HarborAccess was deleted"
+    timeout_seconds = 150
+    fail_message    = "finalizer cleanup incomplete: robots of cluster gke-e2e are still in Harbor after every HarborAccess was deleted, or Harbor could not be asked (see pod.log)"
   }
 }
