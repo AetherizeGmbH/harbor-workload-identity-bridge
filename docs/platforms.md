@@ -109,7 +109,8 @@ spec:
 
 `plugin.priorityClassName: ""` avoids the quota, but the pods then lose the
 critical-pod treatment (a custom PriorityClass cannot reach it either). The
-GKE harness has not confirmed this yet.
+GKE harness creates this quota before the install (`critical_pods_quota`);
+it has not been run yet.
 
 The e2e harness (`test/e2e-gke`, ADR-0022) creates a zonal spot cluster
 with Dataplane V2, Workload Identity (pods cannot read the node's credentials),

@@ -158,6 +158,45 @@ run "defaults" {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.resources.limits.memory == "256Mi"
     error_message = "default limits.memory should be 256Mi"
   }
+  assert {
+    condition     = length(kubernetes_resource_quota_v1.critical_pods) == 0
+    error_message = "the critical-pods ResourceQuota is opt-in (GKE); kind needs none"
+  }
+}
+
+# ── Critical-pods quota (GKE) ────────────────────────────────────────────────
+# GKE admits pods of PriorityClass system-node-critical (the plugin
+# DaemonSet's default class) outside kube-system only in a namespace with a
+# ResourceQuota scoped to that class. The GKE harness opts in; without the
+# quota its DaemonSet creates no pods and bridge_install times out.
+run "critical_pods_quota" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    critical_pods_quota = true
+  }
+  assert {
+    condition     = length(kubernetes_resource_quota_v1.critical_pods) == 1
+    error_message = "critical_pods_quota = true must create the ResourceQuota"
+  }
+  assert {
+    condition     = kubernetes_resource_quota_v1.critical_pods[0].metadata[0].namespace == "harbor-bridge-system"
+    error_message = "the quota must be in the namespace the plugin DaemonSet runs in (the release namespace)"
+  }
+  assert {
+    condition = alltrue([
+      kubernetes_resource_quota_v1.critical_pods[0].spec[0].scope_selector[0].match_expression[0].scope_name == "PriorityClass",
+      kubernetes_resource_quota_v1.critical_pods[0].spec[0].scope_selector[0].match_expression[0].operator == "In",
+      toset(kubernetes_resource_quota_v1.critical_pods[0].spec[0].scope_selector[0].match_expression[0].values) == toset(["system-node-critical"]),
+    ])
+    error_message = "the quota must be scoped to PriorityClass In [system-node-critical]"
+  }
+  assert {
+    condition     = tonumber(kubernetes_resource_quota_v1.critical_pods[0].spec[0].hard["pods"]) >= 1000
+    error_message = "the quota's pod limit must exceed any node count (one plugin pod per node)"
+  }
 }
 
 # ── Custom namespace ─────────────────────────────────────────────────────────
