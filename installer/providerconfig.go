@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -219,11 +220,49 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 	if reflect.DeepEqual(orig, cfg) {
 		return existing, false, nil
 	}
-	out, err = marshalMatching(cfg, isJSON(existing))
+	asJSON := isJSON(existing)
+	out, err = marshalMatching(cfg, asJSON)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal merged credential-provider config: %w", err)
 	}
+	if err := checkRoundTrip(out, cfg, asJSON); err != nil {
+		return nil, false, fmt.Errorf("merged credential-provider config: %w; refusing to write it", err)
+	}
 	return out, true, nil
+}
+
+// errNoRoundTrip marks a config the installer would write that does not
+// read back as the document it meant to write (checkRoundTrip).
+var errNoRoundTrip = errors.New("does not read back as the document it was written from")
+
+// checkRoundTrip refuses out, the config the installer is about to write
+// for the document want, unless reading it back gives want again: with
+// sigs.k8s.io/yaml, as the installer reads every config on its next pass
+// and kubelet's decoder reads YAML (YAML to JSON), and for JSON output also
+// with encoding/json, as kubelet's decoder reads a file that starts with
+// "{". encoding/json writes some characters raw that YAML reads
+// differently: U+0085 (NEL) is a line break to YAML (found by
+// FuzzMergeProvider), so the next pass could not parse the file, or would
+// read and later write back a changed value of another provider.
+func checkRoundTrip(out []byte, want map[string]any, asJSON bool) error {
+	back := map[string]any{}
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		return fmt.Errorf("%w: parsing it again fails: %w", errNoRoundTrip, err)
+	}
+	if !reflect.DeepEqual(back, want) {
+		return fmt.Errorf("%w (YAML)", errNoRoundTrip)
+	}
+	if !asJSON {
+		return nil
+	}
+	back = map[string]any{}
+	if err := json.Unmarshal(out, &back); err != nil {
+		return fmt.Errorf("%w: parsing it again as JSON fails: %w", errNoRoundTrip, err)
+	}
+	if !reflect.DeepEqual(back, want) {
+		return fmt.Errorf("%w (JSON)", errNoRoundTrip)
+	}
+	return nil
 }
 
 // isBridgeProvider reports whether a provider entry belongs to a
@@ -300,6 +339,9 @@ func composeOwnConfig(existing, rendered []byte, entry map[string]any, sibling f
 	out, err = yaml.Marshal(doc)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal credential-provider config: %w", err)
+	}
+	if err := checkRoundTrip(out, doc, false); err != nil {
+		return nil, nil, err
 	}
 	return out, dropped, nil
 }

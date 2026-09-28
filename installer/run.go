@@ -608,7 +608,11 @@ func chartOwnedConfigIn(cfg *config, dir *os.Root, own kubeletWiring, rendered [
 	case !prior.existed:
 		return rendered, prior, nil
 	}
-	return chartOwnedConfig(path, prior.data, rendered, entry, cfg.siblingIn(own.BinDir)), prior, nil
+	desired, err := chartOwnedConfig(path, prior.data, rendered, entry, cfg.siblingIn(own.BinDir))
+	if err != nil {
+		return nil, priorContent{}, err
+	}
+	return desired, prior, nil
 }
 
 // chartOwnedConfig returns the content a chart-owned provider config at
@@ -619,19 +623,24 @@ func chartOwnedConfigIn(cfg *config, dir *os.Root, own kubeletWiring, rendered [
 // the rendered config on every pass. It still gets exactly that while it
 // holds no other install's entry. Other installs' entries stay in place;
 // this install's entry is replaced whatever it holds; everything else is
-// dropped, as it always was.
-func chartOwnedConfig(path string, existing, rendered []byte, entry map[string]any, sibling func(map[string]any) bool) []byte {
+// dropped, as it always was. The result must read back as written
+// (checkRoundTrip); otherwise the pass is refused rather than dropping the
+// other installs' entries.
+func chartOwnedConfig(path string, existing, rendered []byte, entry map[string]any, sibling func(map[string]any) bool) ([]byte, error) {
 	desired, dropped, err := composeOwnConfig(existing, rendered, entry, sibling)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNoRoundTrip):
+		return nil, fmt.Errorf("credential-provider config %s with this install's entry: %w; refusing to write it", path, err)
+	case err != nil:
 		// Kubelet cannot start with this file either. It is the chart's
 		// own file and was always replaced; it still is.
 		logf("replacing %s, which is not a credential-provider config to merge into: %v", path, err)
-		return rendered
+		return rendered, nil
 	}
 	for _, name := range dropped {
 		logf("dropping provider %s from %s: not an entry of another harbor-bridge install on this node, or not as that install recorded it", name, path)
 	}
-	return desired
+	return desired, nil
 }
 
 // siblingIn returns the function that reports whether entry, found in a
@@ -731,7 +740,9 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 	if chartOwned {
 		claim = wiring.ConfigFile
 		logf("kubelet's credential-provider config %s is a chart-owned config: keeping only the entries the records in %s vouch for", wiring.ConfigFile, wiring.BinDir)
-		merged = chartOwnedConfig(wiring.ConfigFile, existing, rendered, entry, cfg.siblingIn(wiring.BinDir))
+		if merged, err = chartOwnedConfig(wiring.ConfigFile, existing, rendered, entry, cfg.siblingIn(wiring.BinDir)); err != nil {
+			return err
+		}
 		mergeChanged = !bytes.Equal(merged, existing)
 	} else {
 		if merged, mergeChanged, err = mergeProvider(existing, entry); err != nil {
