@@ -1,8 +1,10 @@
 {{/*
-HarborAccess CRs can live in any namespace, so the bridge needs
-cluster-scoped list/watch on them. Secrets and the leader-election
-Lease are namespace-scoped (release namespace only) — the bridge
-never reads Secrets outside its own namespace (ADR-0011).
+HarborAccess CRs (and, with nexus.enabled, NexusAccess CRs) can live in
+any namespace, so the bridge needs cluster-scoped list/watch on them.
+Secrets and the leader-election Lease are namespace-scoped (release
+namespace only) — the bridge never reads Secrets outside its own
+namespace (ADR-0011). The nexususer Secrets of NexusAccess objects live
+there too, under the same Secret rule.
 */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -23,6 +25,20 @@ rules:
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/finalizers]
     verbs: [update]
+  {{- if include "harbor-bridge.nexus.enabled" . }}
+  # NexusAccess objects (ADR-0033): the same access as HarborAccess. The
+  # reconciler, the janitor and the data plane read them cluster-wide.
+  - apiGroups: [nexus.aetherize.io]
+    resources: [nexusaccesses]
+    # patch: finalizers; status goes through the status subresource.
+    verbs: [get, list, watch, patch]
+  - apiGroups: [nexus.aetherize.io]
+    resources: [nexusaccesses/status]
+    verbs: [update, patch]
+  - apiGroups: [nexus.aetherize.io]
+    resources: [nexusaccesses/finalizers]
+    verbs: [update]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

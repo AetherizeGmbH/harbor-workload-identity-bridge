@@ -135,6 +135,31 @@ spec:
               value: /etc/bridge/harbor-admin
             - name: BRIDGE_HARBOR_ROBOT_PREFIX
               value: {{ .Values.harbor.robotNamePrefix | quote }}
+            {{- with .Values.harbor.registryHosts }}
+            # Registry hosts whose images the data plane serves from
+            # HarborAccess objects once Nexus is enabled (ADR-0033).
+            - name: BRIDGE_HARBOR_REGISTRY_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if include "harbor-bridge.nexus.enabled" . }}
+            {{- $nexus := .Values.nexus }}
+            # Sonatype Nexus Repository backend (ADR-0033). The bridge
+            # reads the admin credentials on every Nexus call.
+            - name: BRIDGE_NEXUS_URL
+              value: {{ $nexus.url | quote }}
+            - name: BRIDGE_NEXUS_ALLOW_INSECURE_HTTP
+              value: {{ dig "allowInsecureHTTP" false $nexus | quote }}
+            {{- if dig "caSecret" "name" "" $nexus }}
+            - name: BRIDGE_NEXUS_CA_FILE
+              value: /etc/bridge/nexus-ca/ca.crt
+            {{- end }}
+            - name: BRIDGE_NEXUS_ADMIN_DIR
+              value: /etc/bridge/nexus-admin
+            - name: BRIDGE_NEXUS_REGISTRY_HOSTS
+              value: {{ join "," $nexus.registryHosts | quote }}
+            - name: BRIDGE_NEXUS_RATE_LIMIT_BACKOFF
+              value: {{ dig "rateLimitBackoff" "15m" $nexus | toString | quote }}
+            {{- end }}
             - name: BRIDGE_FORCE_LOCAL_VALIDATION
               value: {{ .Values.bridge.forceLocalValidation | quote }}
             - name: BRIDGE_LOG_LEVEL
@@ -173,6 +198,16 @@ spec:
             - name: harbor-ca
               mountPath: /etc/bridge/harbor-ca
               readOnly: true
+            {{- end }}
+            {{- if include "harbor-bridge.nexus.enabled" . }}
+            - name: nexus-admin
+              mountPath: /etc/bridge/nexus-admin
+              readOnly: true
+            {{- if dig "caSecret" "name" "" .Values.nexus }}
+            - name: nexus-ca
+              mountPath: /etc/bridge/nexus-ca
+              readOnly: true
+            {{- end }}
             {{- end }}
           # Ready = the credential listener is bound (it binds only after
           # the informer caches synced) — so every replica the Service
@@ -216,6 +251,27 @@ spec:
             defaultMode: 0444
             items:
               - key: {{ .key }}
+                path: ca.crt
+        {{- end }}
+        {{- end }}
+        {{- if include "harbor-bridge.nexus.enabled" . }}
+        {{- $nexus := .Values.nexus }}
+        - name: nexus-admin
+          secret:
+            secretName: {{ dig "adminCredsSecret" "name" "" $nexus | quote }}
+            defaultMode: 0400
+            items:
+              - key: {{ dig "adminCredsSecret" "keys" "username" "username" $nexus | quote }}
+                path: username
+              - key: {{ dig "adminCredsSecret" "keys" "password" "password" $nexus | quote }}
+                path: password
+        {{- with dig "caSecret" "name" "" $nexus }}
+        - name: nexus-ca
+          secret:
+            secretName: {{ . | quote }}
+            defaultMode: 0444
+            items:
+              - key: {{ dig "caSecret" "key" "ca.crt" $nexus | quote }}
                 path: ca.crt
         {{- end }}
         {{- end }}

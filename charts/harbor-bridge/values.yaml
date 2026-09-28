@@ -4,8 +4,9 @@
 # ====================================================================
 
 # Logical name for this cluster, used as the Harbor robot-name prefix
-# (ADR-0009 / ADR-0018). Must be a DNS label and distinct from every
-# other cluster sharing the same Harbor. The ownership prefix is
+# (ADR-0009 / ADR-0018) and, with nexus.enabled, as the prefix of the
+# Nexus users and roles (ADR-0033). Must be a DNS label and distinct from
+# every other cluster sharing the same Harbor or Nexus. The ownership prefix is
 # dot-terminated (`bridge-<clusterName>.`), so distinct names are
 # automatically collision-free — there is no longer any requirement to
 # avoid being a hyphen-prefix of another cluster's name (the old
@@ -48,6 +49,22 @@ harbor:
   # "$" in a username trips up shells and some registry clients).
   robotNamePrefix: "robot$"
 
+  # Registry hosts whose images the bridge serves from HarborAccess
+  # objects, as host[:port][/path-prefix] entries (no scheme, no globs).
+  # Used only with nexus.enabled: with a second backend the bridge routes
+  # each credential request by the image's registry host (ADR-0033), and
+  # refuses an image that matches no host of either backend. Empty = the
+  # host[:port] of harbor.url, which is right only when kubelet pulls
+  # Harbor's images from the same address the bridge reaches Harbor's API
+  # on. List every Harbor host plugin.matchImages covers: a glob such as
+  # *.harbor.example.com in matchImages has no counterpart here, and its
+  # other hosts are refused once Nexus is enabled. A host[:port] must not
+  # also be one of nexus.registryHosts (kubelet caches credentials per
+  # registry host). With nexus.enabled and the chart-managed plugin, the
+  # chart checks that plugin.matchImages covers every entry.
+  # Example: ["harbor.example.com"]
+  registryHosts: []
+
 tls:
   # The bridge ALWAYS serves TLS and the plugin ALWAYS verifies it; this
   # switch only chooses who provides the serving certificate.
@@ -66,6 +83,79 @@ tls:
   issuerRef:
     name: ""
     kind: ClusterIssuer  # ClusterIssuer | Issuer
+
+# ====================================================================
+# OPTIONAL: SONATYPE NEXUS REPOSITORY (preview, ADR-0033)
+# A second registry backend next to Harbor, which stays required. The
+# bridge then also serves NexusAccess objects (nexus.aetherize.io): it
+# keeps one Nexus role and one local user per ServiceAccount identity and
+# replaces the user under a new id at every rotation. Read README,
+# "Sonatype Nexus Repository (preview)", before enabling it.
+# ====================================================================
+
+nexus:
+  # Enable the Nexus backend. false renders nothing of the rest.
+  enabled: false
+
+  # Base URL of Nexus (scheme, host and any context path; the bridge
+  # appends /service/rest). REQUIRED when enabled. Use https: over plain
+  # http the admin credentials travel on every call and every new user's
+  # password in the requests. No user:password@, query or fragment.
+  url: ""
+
+  # Allow an http:// url anyway (e.g. an in-cluster Nexus reached over the
+  # pod network in a test cluster).
+  allowInsecureHTTP: false
+
+  # Existing Secret in the release namespace with the CA that signs
+  # Nexus's certificate, for a Nexus behind a private CA. Empty = the
+  # system trust store.
+  caSecret:
+    name: ""
+    key: ca.crt
+
+  # Reference to an *existing* Secret in the release namespace holding the
+  # Nexus credential the bridge manages users and roles with. REQUIRED when
+  # enabled; the chart does NOT create it. The bridge reads it on every
+  # Nexus call, so a rotated Secret needs no restart.
+  #
+  # This credential is admin-equivalent: whoever can create users and
+  # assign roles can give themselves nx-admin. It needs a role holding
+  # nx-users-all, nx-roles-all and nx-privileges-read only, never nx-all.
+  # Use a dedicated account with a long random username, never "admin":
+  # from Nexus 3.94 on, anyone who reaches Nexus and knows the username can
+  # block it with a few wrong passwords, which stops rotation and
+  # revocation (see rateLimitBackoff).
+  adminCredsSecret:
+    name: ""
+    # Override key names if the existing Secret uses different ones.
+    keys:
+      username: username
+      password: password
+
+  # Registry hosts whose images the bridge serves from NexusAccess
+  # objects, as host[:port][/path-prefix] entries (no scheme, no globs):
+  # the addresses kubelet pulls Nexus's docker repositories from (a
+  # connector's host:port, or a host and path prefix in front of Nexus).
+  # REQUIRED when enabled. A path prefix matches on '/' boundaries
+  # (host/nexus serves host/nexus/app, not host/nexus-old/app). No
+  # host[:port] may also be Harbor's (harbor.registryHosts, default the
+  # host of harbor.url): kubelet caches credentials per registry host.
+  # With the chart-managed plugin every entry must be covered by
+  # plugin.matchImages under kubelet's rules (same port; globs only in
+  # the host; the path compared as a raw prefix, so host or host/nex
+  # covers host/nexus, host/nexus/ does not); the chart checks it.
+  # Example: ["nexus.example.com:8082"]
+  registryHosts: []
+
+  # After Nexus answers 429 (its failed-login rate limiter, 3.93 and
+  # later), the bridge stops every call made with the admin credential for
+  # this long, counted from the last 429, without probing: every request
+  # during a block extends it. Every NexusAccess reports NexusRateLimited
+  # meanwhile and the gauge bridge_nexus_rate_limited is 1; alert on it.
+  # Nexus's default nexus.auth.ratelimit.max-delay-seconds is 900 (15m);
+  # if you raised it, raise this too. A positive Go duration.
+  rateLimitBackoff: 15m
 
 # ====================================================================
 # DEFAULTED VALUES — override as needed
@@ -146,15 +236,17 @@ bridge:
 
   # Several bridges on one cluster (e.g. one per Harbor instance): each
   # serves only the HarborAccess objects whose labels match this map
-  # (ADR-0026). Empty = every HarborAccess. Bridges that share a Harbor
-  # must use different clusterName values. The bridge only ever serves
-  # plugin.audience, whatever a CR names.
+  # (ADR-0026), and with nexus.enabled only the NexusAccess objects that
+  # match it too. Empty = every HarborAccess (and NexusAccess). Bridges
+  # that share a Harbor or a Nexus must use different clusterName values.
+  # The bridge only ever serves plugin.audience, whatever a CR names.
   # harborAccessSelector:
   #   harbor.aetherize.io/bridge: harbor-eu
   harborAccessSelector: {}
 
   # Names this bridge among several (its HarborAccess finalizer is
-  # harbor.aetherize.io/robot-<instance>). Used only with a selector.
+  # harbor.aetherize.io/robot-<instance>, its NexusAccess finalizer
+  # nexus.aetherize.io/user-<instance>). Used only with a selector.
   # Empty = the release name, never fullnameOverride: set it whenever
   # fullnameOverride is what tells two releases apart. DNS label, at most
   # 50 characters.
@@ -248,12 +340,15 @@ plugin:
   # path prefix and won't match `harbor.example.com/library/img:tag`.
   # Use the bare host (or host:port) form to match any image from a
   # registry. Subdomain globs work: `*.harbor.example.com`.
+  # With nexus.enabled, cover every entry of nexus.registryHosts and of
+  # harbor.registryHosts (default: the host of harbor.url) too; the chart
+  # checks it.
   # Example: ["harbor.example.com", "*.harbor.example.com"]
   matchImages: []
 
   # Audience the kubelet projects the SA token with. Must match
-  # spec.trustPolicy.audience on every HarborAccess CR served by this
-  # bridge. Pick one string per cluster; embedding the cluster name is
+  # spec.trustPolicy.audience on every HarborAccess (and NexusAccess) CR
+  # served by this bridge. Pick one string per cluster; embedding the cluster name is
   # a defensible default ("harbor-bridge-<cluster>"). REQUIRED even when
   # plugin.enabled=false: kubelet needs RBAC to mint tokens for it.
   audience: ""

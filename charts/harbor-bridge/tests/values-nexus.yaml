@@ -1,0 +1,43 @@
+# values-complete plus the Sonatype Nexus Repository backend (ADR-0033):
+# the Nexus env, the admin credential and CA mounts (both with non-default
+# keys), the NexusAccess RBAC and explicit registry hosts for both
+# backends. plugin.matchImages covers every registry host under kubelet's
+# rules: the Nexus connector by its host:port, the prefixed entry through
+# a host glob with a raw path prefix.
+clusterName: prod-eu-west
+
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+  registryHosts:
+    - harbor.example.com
+
+nexus:
+  enabled: true
+  url: https://nexus.example.com
+  adminCredsSecret:
+    name: nexus-admin
+    keys:
+      username: nexus-username
+      password: nexus-password
+  caSecret:
+    name: nexus-ca
+    key: ca.pem
+  registryHosts:
+    - nexus.example.com:8082
+    - registry.example.com/nexus
+  rateLimitBackoff: 30m
+
+plugin:
+  matchImages:
+    - "harbor.example.com"
+    - "nexus.example.com:8082"
+    - "*.example.com/nexus"
+  audience: harbor-bridge-prod-eu-west
+
+tls:
+  enabled: true
+  issuerRef:
+    name: harbor-bridge-ca
+    kind: ClusterIssuer

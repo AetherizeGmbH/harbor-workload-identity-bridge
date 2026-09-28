@@ -273,7 +273,7 @@ GOLDEN_DIR ?= $(CHART_TESTS_DIR)/golden
 # (release harbor-bridge in namespace harbor-bridge-system unless given). The
 # single list drives lint, golden diff, and golden update so they cannot drift;
 # the release config (.releaserc.json) commits every tests/golden/*.yaml.
-CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace second-instance:second-instance:harbor-bridge-eu:harbor-bridge-eu
+CHART_CASES ?= complete:default mtls:mtls install-none:none plugin-disabled:plugin-disabled plugin-namespace:plugin-namespace second-instance:second-instance:harbor-bridge-eu:harbor-bridge-eu nexus:nexus
 # CHART_CASE splits the case in the loop variable c into v (values file
 # suffix), g (golden file), rel (release name) and ns (namespace).
 CHART_CASE = IFS=:; set -- $$c; unset IFS; v=$$1; g=$$2; rel=$${3:-harbor-bridge}; ns=$${4:-harbor-bridge-system}
