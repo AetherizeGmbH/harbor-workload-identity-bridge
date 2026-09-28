@@ -84,6 +84,41 @@ func TestLive_AgainstNexus(t *testing.T) {
 			t.Errorf("GetPrivilege(%q) = %v, want ErrNotFound (names are case-sensitive)", upper, err)
 		}
 	}
+	// The built-in privileges read back as VerifyRepositoryPrivilege
+	// expects (type, format, repository, one upper-case action,
+	// read-only), for every action the bridge grants.
+	every, err := RepositoryPrivileges(FormatDocker, repo, AccessPullPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range every {
+		p, err := admin.GetPrivilege(ctx, name)
+		if err != nil {
+			t.Fatalf("GetPrivilege(%q): %v", name, err)
+		}
+		if err := VerifyRepositoryPrivilege(p, FormatDocker, repo); err != nil {
+			t.Errorf("built-in privilege: %v", err)
+		}
+	}
+	// While a repository does not exist, anyone who may create privileges
+	// can create one under its repository-view name; Nexus reports it under
+	// that name, and VerifyRepositoryPrivilege refuses it.
+	squatted, _ := RepositoryPrivileges(FormatDocker, "hwib-live-squatted-repository", AccessPull)
+	squatter := squatted[0]
+	if code := raw.status(ctx, t, http.MethodPost, "/v1/security/privileges/wildcard",
+		`{"name":"`+squatter+`","description":"hwib-live squatter","pattern":"nexus:*"}`, true); code != http.StatusCreated {
+		t.Fatalf("creating a wildcard privilege named %q: status %d, want 201", squatter, code)
+	}
+	t.Cleanup(func() {
+		if code := raw.status(context.Background(), t, http.MethodDelete, "/v1/security/privileges/"+squatter, "", true); code != http.StatusNoContent {
+			t.Errorf("cleanup: deleting privilege %q: status %d", squatter, code)
+		}
+	})
+	if p, err := admin.GetPrivilege(ctx, squatter); err != nil {
+		t.Errorf("GetPrivilege of the squatter: %v", err)
+	} else if err := VerifyRepositoryPrivilege(p, FormatDocker, "hwib-live-squatted-repository"); err == nil {
+		t.Errorf("VerifyRepositoryPrivilege accepted %+v", *p)
+	}
 
 	suffix, err := NewGeneration()
 	if err != nil {

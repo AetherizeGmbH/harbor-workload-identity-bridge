@@ -69,7 +69,9 @@ spec:
                   role grants access to. A repository that does not exist is not
                   granted, and the bridge issues no credentials for this object until
                   it exists or leaves the list (Ready=False, reason RepositoryNotFound;
-                  ADR-0036).
+                  ADR-0036). Neither is one whose repository-view privilege Nexus
+                  reports as anything but its own built-in privilege of that
+                  repository (reason PrivilegeConflict).
                 items:
                   description: RepositoryGrant grants an access on one Nexus repository.
                   properties:

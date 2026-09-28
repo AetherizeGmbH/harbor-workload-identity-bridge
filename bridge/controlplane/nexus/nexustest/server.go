@@ -136,6 +136,15 @@ func privilegeName(format, repo, action string) string {
 	return "nx-repository-view-" + format + "-" + repo + "-" + action
 }
 
+// PutPrivilege stores a privilege as an administrator would create it,
+// for example a custom privilege under the name of a repository-view
+// privilege of a repository that does not exist.
+func (s *Server) PutPrivilege(p nexus.Privilege) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.privileges[p.Name] = p
+}
+
 // SetUnavailable makes every request fail with 503, as a Nexus that is
 // down behind a proxy.
 func (s *Server) SetUnavailable(v bool) {

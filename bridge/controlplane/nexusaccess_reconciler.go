@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ const (
 	ReasonRoleConflict       = "RoleConflict"
 	ReasonUserDisabled       = "UserDisabled"
 	ReasonRepositoryNotFound = "RepositoryNotFound"
+	ReasonPrivilegeConflict  = "PrivilegeConflict"
 	ReasonPasswordRejected   = "PasswordRejected"
 	ReasonNexusError         = "NexusError"
 	ReasonNexusAuthFailed    = "NexusAuthFailed"
@@ -207,6 +209,7 @@ func (r *NexusReconciler) now() time.Time {
 // nexusGrant is one repository of the spec with the privileges its access
 // needs.
 type nexusGrant struct {
+	format     nexus.Format
 	repository string
 	privileges []string
 }
@@ -232,7 +235,7 @@ func nexusGrants(repos []nexusv1alpha1.RepositoryGrant) ([]nexusGrant, error) {
 		if err != nil {
 			return nil, fmt.Errorf("spec.repositories: %w", err)
 		}
-		out = append(out, nexusGrant{repository: g.Name, privileges: privileges})
+		out = append(out, nexusGrant{format: nexus.Format(format), repository: g.Name, privileges: privileges})
 	}
 	return out, nil
 }
@@ -321,22 +324,23 @@ func (r *NexusReconciler) reconcileNormal(ctx context.Context, nxa *nexusv1alpha
 		return ctrl.Result{}, err
 	}
 
-	// The role: exactly the spec's privileges that exist (ADR-0036
-	// decision d). A missing repository is marked on the Secret before
-	// anything else is written, so the data plane stops issuing
-	// credentials at once.
-	existing, missing, err := r.checkGrants(ctx, grants)
+	// The role: exactly the spec's privileges that exist as Nexus's own
+	// (ADR-0036 decision d). A repository the role cannot grant is marked
+	// on the Secret before anything else is written, so the data plane
+	// stops issuing credentials at once.
+	check, err := r.checkGrants(ctx, grants)
 	if err != nil {
 		return r.markError(ctx, nxa, err)
 	}
-	if len(missing) > 0 && secret != nil {
-		if secret, err = r.putSecret(ctx, nxa, secret, false, func(s *corev1.Secret) { setGrantsIncomplete(s, missing) }); err != nil {
+	if len(check.missing) > 0 && secret != nil {
+		if secret, err = r.putSecret(ctx, nxa, secret, false, func(s *corev1.Secret) { setGrantsIncomplete(s, check.missing) }); err != nil {
 			return r.markTransientError(ctx, nxa, err)
 		}
 	}
-	if missing, err = r.convergeRole(ctx, nxa, identity, role, grants, existing, missing); err != nil {
+	if check, err = r.convergeRole(ctx, nxa, identity, role, grants, check); err != nil {
 		return r.markError(ctx, nxa, err)
 	}
+	missing := check.missing
 
 	// The users of the identity this NexusAccess owns.
 	owned, err := r.ownedUsers(ctx, nxa, identity+"_")
@@ -415,9 +419,8 @@ func (r *NexusReconciler) reconcileNormal(ctx context.Context, nxa *nexusv1alpha
 	requeue := r.requeueAfter(nxa, secret, now)
 	if len(missing) > 0 {
 		requeue = min(requeue, NexusRepositoryRecheckInterval)
-		if err := r.setNotReady(ctx, nxa, ReasonRepositoryNotFound, fmt.Sprintf(
-			"Nexus has no %s repository %s; the role grants the others, and the bridge issues no credentials for this NexusAccess until every repository exists or leaves spec.repositories",
-			nexusv1alpha1.FormatDocker, quoteList(missing))); err != nil {
+		reason, message := check.notReady()
+		if err := r.setNotReady(ctx, nxa, reason, message); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: requeue}, nil
@@ -448,48 +451,102 @@ func (r *NexusReconciler) lookupRole(ctx context.Context, nxa *nexusv1alpha1.Nex
 		identity, r.Config.ClusterName)}
 }
 
-// checkGrants reads every privilege the spec needs and returns those that
-// exist (sorted) and the repositories whose privileges do not (sorted). A
-// repository counts as missing when any of its privileges does.
-func (r *NexusReconciler) checkGrants(ctx context.Context, grants []nexusGrant) (existing, missing []string, err error) {
+// grantCheck is what checkGrants found out about the spec's repositories.
+type grantCheck struct {
+	// existing are the privileges the role grants, sorted.
+	existing []string
+	// missing are the repositories the role does not grant, sorted: those
+	// Nexus has no privilege for, and those in conflicts.
+	missing []string
+	// conflicts maps a repository to why the privilege Nexus reports under
+	// one of its repository-view names is not Nexus's own.
+	conflicts map[string]string
+}
+
+// notReady is the Ready condition's reason and message while repositories
+// are missing: PrivilegeConflict when a privilege is not Nexus's own, which
+// only an administrator can resolve, else RepositoryNotFound.
+func (c grantCheck) notReady() (reason, message string) {
+	var absent []string
+	for _, repo := range c.missing {
+		if _, conflict := c.conflicts[repo]; !conflict {
+			absent = append(absent, repo)
+		}
+	}
+	const tail = "; the role grants the others, and the bridge issues no credentials for this NexusAccess until "
+	if len(c.conflicts) == 0 {
+		return ReasonRepositoryNotFound, fmt.Sprintf("Nexus has no %s repository %s", nexusv1alpha1.FormatDocker, quoteList(absent)) +
+			tail + "every repository exists or leaves spec.repositories"
+	}
+	var parts []string
+	for _, repo := range slices.Sorted(maps.Keys(c.conflicts)) {
+		parts = append(parts, c.conflicts[repo])
+	}
+	if len(absent) > 0 {
+		parts = append(parts, fmt.Sprintf("Nexus has no %s repository %s", nexusv1alpha1.FormatDocker, quoteList(absent)))
+	}
+	return ReasonPrivilegeConflict, strings.Join(parts, "; ") + tail +
+		"an administrator deletes each privilege that is not Nexus's own (Nexus reports it under the repository-view name while no repository of that name exists) and every repository exists, or those repositories leave spec.repositories"
+}
+
+// checkGrants reads every privilege the spec needs. A repository is
+// granted only when each of its privileges exists and is Nexus's built-in
+// repository-view privilege of it (nexus.VerifyRepositoryPrivilege): a
+// privilege someone created under that name while the repository does not
+// exist may carry any permission, such as a wildcard privilege, and the
+// bridge would hand it to every credential of the identity (ADR-0036
+// decision b). A repository counts as missing when any of its privileges
+// does not exist or is not Nexus's own.
+func (r *NexusReconciler) checkGrants(ctx context.Context, grants []nexusGrant) (grantCheck, error) {
+	var c grantCheck
 	for _, g := range grants {
-		found := true
-		for _, p := range g.privileges {
-			_, err := r.Nexus.GetPrivilege(ctx, p)
+		granted := true
+		for _, name := range g.privileges {
+			p, err := r.Nexus.GetPrivilege(ctx, name)
 			if errors.Is(err, nexus.ErrNotFound) {
-				found = false
+				granted = false
 				break
 			}
 			if err != nil {
-				return nil, nil, fmt.Errorf("check privilege %q: %w", p, err)
+				return grantCheck{}, fmt.Errorf("check privilege %q: %w", name, err)
+			}
+			if err := nexus.VerifyRepositoryPrivilege(p, g.format, g.repository); err != nil {
+				if c.conflicts == nil {
+					c.conflicts = map[string]string{}
+				}
+				c.conflicts[g.repository] = err.Error()
+				granted = false
+				break
 			}
 		}
-		if found {
-			existing = append(existing, g.privileges...)
+		if granted {
+			c.existing = append(c.existing, g.privileges...)
 		} else {
-			missing = append(missing, g.repository)
+			c.missing = append(c.missing, g.repository)
 		}
 	}
-	slices.Sort(existing)
-	slices.Sort(missing)
-	return slices.Compact(existing), missing, nil
+	slices.Sort(c.existing)
+	c.existing = slices.Compact(c.existing)
+	slices.Sort(c.missing)
+	return c, nil
 }
 
-// convergeRole writes the role with exactly the privileges that exist
-// (ADR-0036 decision d): a privilege the spec no longer names goes in the
-// same pass, even when the same edit names a missing repository, and
-// nothing missing is added. It returns the missing repositories, which
-// grow when a repository vanished between the check and the write.
+// convergeRole writes the role with exactly the privileges check found to
+// exist (ADR-0036 decision d): a privilege the spec no longer names goes in
+// the same pass, even when the same edit names a missing repository, and
+// nothing missing is added. It returns the check with the missing
+// repositories, which grow when a repository vanished between the check
+// and the write.
 func (r *NexusReconciler) convergeRole(
 	ctx context.Context, nxa *nexusv1alpha1.NexusAccess, identity string,
-	role *nexus.Role, grants []nexusGrant, existing, missing []string,
-) ([]string, error) {
+	role *nexus.Role, grants []nexusGrant, check grantCheck,
+) (grantCheck, error) {
 	logger := log.FromContext(ctx)
 	for attempt := 0; ; attempt++ {
 		want := nexus.Role{
 			ID: identity, Name: identity,
 			Description: NexusRoleDescription(r.Config.ClusterName, nxa.Namespace, nxa.Name),
-			Privileges:  existing,
+			Privileges:  check.existing,
 		}
 		var err error
 		switch {
@@ -500,38 +557,38 @@ func (r *NexusReconciler) convergeRole(
 			logger.Info("updating Nexus role to match spec", "role", identity)
 			err = r.Nexus.UpdateRole(ctx, want)
 		default:
-			return missing, nil
+			return check, nil
 		}
 		var dropped *nexus.PrivilegesDroppedError
 		switch {
 		case err == nil:
-			return missing, nil
+			return check, nil
 		case errors.As(err, &dropped):
 			// Nexus 3.91+: stored without the privileges of a repository
 			// that vanished after the check. The role is right; the
 			// repository is missing.
 			for _, g := range grants {
 				if slices.ContainsFunc(g.privileges, func(p string) bool { return slices.Contains(dropped.Dropped, p) }) &&
-					!slices.Contains(missing, g.repository) {
-					missing = append(missing, g.repository)
+					!slices.Contains(check.missing, g.repository) {
+					check.missing = append(check.missing, g.repository)
 				}
 			}
-			slices.Sort(missing)
-			return missing, nil
+			slices.Sort(check.missing)
+			return check, nil
 		case errors.Is(err, nexus.ErrBadRequest) && attempt == 0:
 			// Before 3.91 a repository that vanished after the check fails
 			// the write with 400 and nothing is stored; for a create the
 			// role may also have appeared meanwhile. Check and write again
 			// once, so a removal waits for one retry at most.
 			logger.Info("Nexus refused the role write; checking the privileges and the role again", "role", identity, "err", err.Error())
-			if existing, missing, err = r.checkGrants(ctx, grants); err != nil {
-				return nil, err
+			if check, err = r.checkGrants(ctx, grants); err != nil {
+				return grantCheck{}, err
 			}
 			if role, err = r.lookupRole(ctx, nxa, identity); err != nil {
-				return nil, err
+				return grantCheck{}, err
 			}
 		default:
-			return nil, fmt.Errorf("write role %q: %w", identity, err)
+			return grantCheck{}, fmt.Errorf("write role %q: %w", identity, err)
 		}
 	}
 }

@@ -449,6 +449,67 @@ func TestNexusReconcile_MissingRepositoryOnCreate(t *testing.T) {
 	}
 }
 
+// A privilege created under the repository-view name of a repository that
+// does not exist is not Nexus's own: it may carry any permission (here a
+// wildcard privilege, as anyone holding nx-privileges-create can create on
+// Nexus 3.76.1), and the bridge never writes it into a role. The object is
+// PrivilegeConflict and the Secret carries grants-incomplete. Once the
+// repository exists, Nexus reports its built-in privilege under the name
+// (verified on 3.76.1) and the full grant is written.
+func TestNexusReconcile_PrivilegeThatIsNotNexussOwnIsNeverGranted(t *testing.T) {
+	h := newNexusHarness(t, nil, newNexusAccess())
+	h.mustReconcile()
+	h.nx.PutPrivilege(nexus.Privilege{Type: "wildcard", Name: "nx-repository-view-docker-ghost-read", Description: "not Nexus's own"})
+	h.edit(func(n *nexusv1alpha1.NexusAccess) {
+		n.Spec.Repositories = append(n.Spec.Repositories,
+			nexusv1alpha1.RepositoryGrant{Name: "ghost", Access: nexusv1alpha1.AccessPull},
+			nexusv1alpha1.RepositoryGrant{Name: "absent", Access: nexusv1alpha1.AccessPull})
+	})
+	res := h.mustReconcile()
+
+	role, _ := h.nx.Role(testIdentity)
+	if !slices.Equal(role.Privileges, []string{"nx-repository-view-docker-" + testRepo + "-read"}) {
+		t.Errorf("privileges = %v, want only %s's: a privilege that is not Nexus's own is never granted", role.Privileges, testRepo)
+	}
+	if missing, incomplete := nexussecret.GrantsIncomplete(h.secret()); !incomplete || !slices.Equal(missing, []string{"absent", "ghost"}) {
+		t.Errorf("grants-incomplete = %v, %v, want absent and ghost", missing, incomplete)
+	}
+	got := h.object()
+	assertNexusCondition(t, got, nexusv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonPrivilegeConflict)
+	msg := meta.FindStatusCondition(got.Status.Conditions, nexusv1alpha1.ConditionReady).Message
+	for _, want := range []string{`privilege "nx-repository-view-docker-ghost-read" is not Nexus's built-in`, `its type is "wildcard"`, "not read-only", `Nexus has no docker repository "absent"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Ready message %q lacks %q", msg, want)
+		}
+	}
+	if got.Status.ObservedGeneration != 1 {
+		t.Errorf("observedGeneration = %d, want 1 (not advanced)", got.Status.ObservedGeneration)
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > NexusRepositoryRecheckInterval {
+		t.Errorf("RequeueAfter = %s, want a re-check within %s", res.RequeueAfter, NexusRepositoryRecheckInterval)
+	}
+
+	// The role is created without it too.
+	h.nx.RemoveRole(testIdentity)
+	h.mustReconcile()
+	if role, ok := h.nx.Role(testIdentity); !ok || slices.Contains(role.Privileges, "nx-repository-view-docker-ghost-read") {
+		t.Errorf("re-created role = %+v (exists %v)", role, ok)
+	}
+
+	h.nx.AddRepository("docker", "ghost")
+	h.nx.AddRepository("docker", "absent")
+	h.mustReconcile()
+	role, _ = h.nx.Role(testIdentity)
+	want := []string{"nx-repository-view-docker-absent-read", "nx-repository-view-docker-" + testRepo + "-read", "nx-repository-view-docker-ghost-read"}
+	if !slices.Equal(role.Privileges, want) {
+		t.Errorf("privileges once the repositories exist = %v, want %v", role.Privileges, want)
+	}
+	if _, incomplete := nexussecret.GrantsIncomplete(h.secret()); incomplete {
+		t.Error("grants-incomplete kept once Nexus reports its own privileges")
+	}
+	assertNexusCondition(t, h.object(), nexusv1alpha1.ConditionReady, metav1.ConditionTrue, ReasonReconcileSucceeded)
+}
+
 // A repository deleted in Nexus strips its privileges; the object turns
 // RepositoryNotFound, and a re-created repository is granted again.
 func TestNexusReconcile_RepositoryDeletedOutOfBand(t *testing.T) {

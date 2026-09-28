@@ -742,7 +742,12 @@ enabled the bridge serves only the Harbor hosts in
 - **A missing repository** makes the NexusAccess `RepositoryNotFound`:
   its role keeps only the privileges that exist (removals still apply),
   the data plane issues no credentials for it, and the bridge checks again
-  every 5 minutes.
+  every 5 minutes. While a repository does not exist, anyone holding
+  `nx-privileges-create` can create a privilege of any kind under its
+  `nx-repository-view-docker-<repository>-<action>` name. The bridge
+  grants only Nexus's own built-in privilege of the repository; for any
+  other it treats the repository as missing and reports
+  `PrivilegeConflict` until an administrator deletes that privilege.
 - **Audit trail.** The Nexus user id changes at every rotation; the role,
   the Secret and the NexusAccess keep their names.
 - Several bridges sharing one Nexus need distinct `clusterName` values,

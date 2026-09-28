@@ -100,10 +100,11 @@ const (
 	AnnotationRetireAfter    = "nexus.aetherize.io/retire-after"
 
 	// AnnotationGrantsIncomplete is present while the NexusAccess's role
-	// lacks privileges its spec names because a repository does not exist
-	// (ADR-0036 decision d). Its value lists the missing repositories. The
-	// data plane serves no credentials from a Secret that carries it,
-	// whatever its value.
+	// lacks privileges its spec names because a repository does not exist,
+	// or because Nexus reports a privilege under one of its names that is
+	// not its own built-in privilege (ADR-0036 decision d, note 19). Its
+	// value lists those repositories. The data plane serves no credentials
+	// from a Secret that carries it, whatever its value.
 	AnnotationGrantsIncomplete = "nexus.aetherize.io/grants-incomplete"
 )
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -295,7 +296,8 @@ var privilegeActions = map[Access][]string{
 // from every role) when the repository is deleted; GET
 // /v1/security/privileges/{name} answers 404 for a repository that does
 // not exist (ADR-0036). The repository name is used verbatim: privilege
-// names are case-sensitive.
+// names are case-sensitive. A privilege of such a name is not necessarily
+// Nexus's own; VerifyRepositoryPrivilege checks what Nexus reports for it.
 func RepositoryPrivileges(format Format, repository string, access Access) ([]string, error) {
 	if format != FormatDocker {
 		return nil, fmt.Errorf("repository format %q is not %q, the only format the bridge grants", format, FormatDocker)
@@ -313,4 +315,61 @@ func RepositoryPrivileges(format Format, repository string, access Access) ([]st
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// RepositoryViewType is the type Nexus reports for its repository-view
+// privileges.
+const RepositoryViewType = "repository-view"
+
+// VerifyRepositoryPrivilege returns nil when p, read back under a name
+// RepositoryPrivileges built for the format and the repository, is the
+// built-in repository-view privilege Nexus created with that repository:
+// type repository-view, that format, that repository, exactly the action
+// the name ends in (upper-case, as Nexus reports it) and read-only (Nexus
+// contributes these privileges and reports them read-only; verified on
+// 3.76.1). The name alone proves nothing: while no repository of that name
+// exists, anyone who may create privileges can create one under it, of any
+// type (a wildcard privilege, for example), and a role that grants it would
+// hand that permission to every credential of the identity (ADR-0036
+// decision b). The error says what differs and never carries a
+// credential.
+func VerifyRepositoryPrivilege(p *Privilege, format Format, repository string) error {
+	if p == nil {
+		return errors.New("no privilege to verify")
+	}
+	action, ok := strings.CutPrefix(p.Name, "nx-repository-view-"+string(format)+"-"+repository+"-")
+	if !ok || !grantsAction(action) {
+		return fmt.Errorf("privilege %q is not named as a repository-view privilege the bridge grants on %s repository %q", p.Name, format, repository)
+	}
+	var diffs []string
+	if p.Type != RepositoryViewType {
+		diffs = append(diffs, fmt.Sprintf("its type is %q, not %q", p.Type, RepositoryViewType))
+	}
+	if p.Format != string(format) {
+		diffs = append(diffs, fmt.Sprintf("its format is %q, not %q", p.Format, format))
+	}
+	if p.Repository != repository {
+		diffs = append(diffs, fmt.Sprintf("its repository is %q, not %q", p.Repository, repository))
+	}
+	if want := []string{strings.ToUpper(action)}; !slices.Equal(p.Actions, want) {
+		diffs = append(diffs, fmt.Sprintf("its actions are %q, not %q", p.Actions, want))
+	}
+	if !p.ReadOnly {
+		diffs = append(diffs, "it is not read-only, so Nexus did not create it with the repository")
+	}
+	if len(diffs) > 0 {
+		return fmt.Errorf("privilege %q is not Nexus's built-in repository-view privilege of %s repository %q: %s",
+			p.Name, format, repository, strings.Join(diffs, "; "))
+	}
+	return nil
+}
+
+// grantsAction reports whether privilegeActions uses action.
+func grantsAction(action string) bool {
+	for _, actions := range privilegeActions {
+		if slices.Contains(actions, action) {
+			return true
+		}
+	}
+	return false
 }

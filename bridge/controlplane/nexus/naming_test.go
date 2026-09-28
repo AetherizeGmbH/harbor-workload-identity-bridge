@@ -299,3 +299,51 @@ func TestRepositoryPrivileges(t *testing.T) {
 		}
 	}
 }
+
+// Only Nexus's own repository-view privilege of the repository is
+// accepted: a privilege created under the same name while the repository
+// does not exist may carry any permission (ADR-0036 decision b).
+func TestVerifyRepositoryPrivilege(t *testing.T) {
+	builtIn := func() *Privilege {
+		return &Privilege{
+			Type: RepositoryViewType, Name: "nx-repository-view-docker-apps-read", ReadOnly: true,
+			Format: "docker", Repository: "apps", Actions: []string{"READ"},
+		}
+	}
+	for _, action := range []string{"read", "add", "edit"} {
+		p := builtIn()
+		p.Name, p.Actions = "nx-repository-view-docker-apps-"+action, []string{strings.ToUpper(action)}
+		if err := VerifyRepositoryPrivilege(p, FormatDocker, "apps"); err != nil {
+			t.Errorf("built-in %s privilege: %v", action, err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		edit func(*Privilege)
+		want string
+	}{
+		"wildcard privilege under the name": {func(p *Privilege) {
+			p.Type, p.Format, p.Repository, p.Actions, p.ReadOnly = "wildcard", "", "", nil, false
+		}, `its type is "wildcard"`},
+		"custom repository-view privilege": {func(p *Privilege) { p.ReadOnly = false }, "not read-only"},
+		"another format":                   {func(p *Privilege) { p.Format = "maven2" }, `its format is "maven2"`},
+		"another repository":               {func(p *Privilege) { p.Repository = "apps-old" }, `its repository is "apps-old"`},
+		"more actions":                     {func(p *Privilege) { p.Actions = []string{"READ", "DELETE"} }, "its actions are"},
+		"all actions":                      {func(p *Privilege) { p.Actions = []string{"*"} }, "its actions are"},
+		"lower-case action":                {func(p *Privilege) { p.Actions = []string{"read"} }, "its actions are"},
+		"no action":                        {func(p *Privilege) { p.Actions = nil }, "its actions are"},
+		"a name of another repository":     {func(p *Privilege) { p.Name = "nx-repository-view-docker-app-read" }, "is not named as"},
+		"a name with an action never granted": {func(p *Privilege) {
+			p.Name, p.Actions = "nx-repository-view-docker-apps-delete", []string{"DELETE"}
+		}, "is not named as"},
+	} {
+		p := builtIn()
+		tc.edit(p)
+		err := VerifyRepositoryPrivilege(p, FormatDocker, "apps")
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: VerifyRepositoryPrivilege = %v, want an error containing %q", name, err, tc.want)
+		}
+	}
+	if err := VerifyRepositoryPrivilege(nil, FormatDocker, "apps"); err == nil {
+		t.Error("VerifyRepositoryPrivilege(nil) = nil")
+	}
+}

@@ -801,13 +801,35 @@ The e2e harness (2026-09-28) implements decision i as follows.
       registry host names, asked of the bridge directly, since kubelet
       calls the plugin only for images `matchImages` covers.
 
+The implementation review (2026-09-28) changed the following.
+
+19. **A privilege counts only as Nexus's own** (decisions b, d). The
+    reconciler grants a repository only when every privilege it reads
+    back under the repository's repository-view names is Nexus's built-in
+    privilege of it: type `repository-view`, format `docker`, that
+    repository, exactly the one action the name ends in (upper-case), and
+    read-only (`nexus.VerifyRepositoryPrivilege`). While a repository does
+    not exist, anyone holding `nx-privileges-create` can create a
+    privilege under its name, of any type, for example a wildcard
+    privilege with the pattern `nexus:*` (verified). A check by name
+    alone wrote it into the role, and every credential of the identity,
+    whose password reaches nodes, held it. Such a repository is not
+    granted and counts as missing for the Secret's `grants-incomplete`
+    mark; the object reports `PrivilegeConflict` (a reason decision a
+    does not list), which an administrator resolves by deleting the
+    privilege, and is checked again every `NexusRepositoryRecheckInterval`.
+    Once the repository exists, Nexus reports its built-in privilege under
+    the name again (verified).
+
 ## Verified at runtime
 
 Nexus `sonatype/nexus3:3.76.1` in a local container bound to 127.0.0.1,
 2026-09-28, `curl` and `crane` against the REST API and a hosted docker
 repository with an HTTP connector, `DockerToken` realm active, anonymous
 access off; removed afterwards. The review of this ADR repeated the
-rows marked (r) in a fresh container of the same image the same day.
+rows marked (r) in a fresh container of the same image the same day; the
+implementation review added the rows marked (i), again in a fresh
+container of the same image.
 The last column says whether `TestLive_AgainstNexus` checks the row.
 
 | Behaviour | Result | Live test |
@@ -831,6 +853,9 @@ The last column says whether `TestLive_AgainstNexus` checks the row.
 | Deleting a repository | strips its privileges from every role; re-creating it does not restore them | no |
 | `GET /v1/security/privileges/{name}` | 200 for an existing repository, 404 otherwise; names case-sensitive | yes |
 | `GET /v1/security/privileges/nx-all` (r) | 200, `readOnly: true` | 200 only |
+| Built-in repository-view privilege (i) | `type: repository-view`, `format: docker`, `repository: <name>`, one upper-case action (`actions: ["READ"]`), `readOnly: true` | yes |
+| Wildcard privilege created under the repository-view name of a repository that does not exist (i) | 201; `GET` of the name returns it (`type: wildcard`, `readOnly: false`) until the repository is created, then the built-in one; a role naming it is stored | the create and its refusal |
+| Custom repository-view privilege of a repository that does not exist (i) | 400, `Invalid repository '…' supplied.` | no |
 | `change-password` | 204 with text/plain, 415 with application/json | no |
 | Request without credentials / wrong password | 403 / 401 | yes |
 | `/v1/status`, `/v1/status/writable` without credentials | 200 | yes |
