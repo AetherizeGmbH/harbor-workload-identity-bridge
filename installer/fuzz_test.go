@@ -54,6 +54,7 @@ func FuzzMergeExtraArgs(f *testing.F) {
 		"", "KUBELET_EXTRA_ARGS=\n", "KUBELET_EXTRA_ARGS=--node-ip=10.0.0.1 --v=2\n", "# comment\nKUBELET_EXTRA_ARGS='--a --b'\n",
 		"KUBELET_EXTRA_ARGS = \"--max-pods=42\"\n", "KUBELET_EXTRA_ARGS\t=--a\nKUBELET_EXTRA_ARGS=--b\n",
 		"FOO=\"x\nKUBELET_EXTRA_ARGS=--a\n\"\n", "export KUBELET_EXTRA_ARGS=--a\r\n", "# c \\\nKUBELET_EXTRA_ARGS=--a\n",
+		"KUBELET_EXTRA_ARGS=\xcb   0\n", "FOO=\uFFFE\n", "FOO=a\x00b\n",
 	} {
 		f.Add([]byte(seed))
 	}

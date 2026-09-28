@@ -5,8 +5,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // extraArgsKey is the variable of the kubelet environment file whose
@@ -25,7 +27,8 @@ const extraArgsKey = "KUBELET_EXTRA_ARGS"
 // variable is assigned twice the last assignment wins. An assignment the
 // installer did not recognise used to get a second one appended after it,
 // which silently dropped the operator's args. Anything it cannot rewrite
-// faithfully is refused.
+// faithfully is refused, and so is a file systemd does not load
+// (errUnloadableEnvFile).
 func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) {
 	ours := []string{
 		flagBinDir + "=" + binDir,
@@ -147,6 +150,26 @@ const (
 	envShellNeedEscape = "\"\\`$"
 )
 
+// errUnloadableEnvFile marks an EnvironmentFile that systemd does not load
+// at all: with a "-" before its name in EnvironmentFile= it skips the whole
+// file silently, without it the unit does not start.
+var errUnloadableEnvFile = errors.New("systemd does not load the file")
+
+// systemdValidUTF8 reports whether s is UTF-8 as systemd's utf8_is_valid
+// accepts it (src/basic/utf8.c): valid UTF-8 without the noncharacters
+// U+FDD0..U+FDEF and U+xFFFE/U+xFFFF, which Go's utf8.ValidString allows.
+func systemdValidUTF8(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 0xFDD0 && r <= 0xFDEF) || r&0xFFFE == 0xFFFE {
+			return false
+		}
+	}
+	return true
+}
+
 // parseEnvFile returns the assignments of an EnvironmentFile in the order
 // systemd reads them, a port of parse_env_file_internal (systemd
 // src/basic/env-file.c, v254 and later). Leading whitespace is skipped; a
@@ -157,8 +180,14 @@ const (
 // or after a backslash. A line without '=' is ignored. A key that is not a
 // valid variable name is returned as it is (systemd ignores it). A
 // carriage return that does not end a line is refused: systemd ends a line
-// there, and line-based rewriting would not.
+// there, and line-based rewriting would not. A file systemd does not load
+// at all is refused with errUnloadableEnvFile: one with a NUL byte
+// (read_full_stream) or with a key or value that is not valid UTF-8
+// (load_env_file_push, systemdValidUTF8).
 func parseEnvFile(content string) ([]envAssignment, error) {
+	if i := strings.IndexByte(content, 0); i >= 0 {
+		return nil, fmt.Errorf("%w: line %d holds a NUL byte, and systemd loads no variable from such a file; remove it", errUnloadableEnvFile, strings.Count(content[:i], "\n")+1)
+	}
 	for i := 0; i < len(content); i++ {
 		if content[i] == '\r' && (i+1 == len(content) || content[i+1] != '\n') {
 			return nil, fmt.Errorf("/etc/default/kubelet has a carriage return inside a line (byte %d), which systemd reads as a line break; the installer cannot rewrite the file safely", i)
@@ -186,12 +215,18 @@ func parseEnvFile(content string) ([]envAssignment, error) {
 		startsContinued  bool
 		state            = preKey
 	)
-	push := func() {
+	push := func() error {
 		if lastKeyWS >= 0 {
 			key = key[:lastKeyWS]
 		}
+		for _, part := range []struct{ what, text string }{{"name", string(key)}, {"value", string(value)}} {
+			if !systemdValidUTF8(part.text) {
+				return fmt.Errorf("%w: the variable %s on line %d (%q) is not valid UTF-8, and systemd loads no variable from such a file; fix that line", errUnloadableEnvFile, part.what, first+1, part.text)
+			}
+		}
 		out = append(out, envAssignment{key: string(key), value: string(value), first: first, last: line, afterContinuedComment: startsContinued})
 		key, value = nil, nil
+		return nil
 	}
 	for i := 0; i < len(content); i++ {
 		c := content[i]
@@ -228,7 +263,9 @@ func parseEnvFile(content string) ([]envAssignment, error) {
 			switch {
 			case isNewline:
 				state = preKey
-				push()
+				if err := push(); err != nil {
+					return nil, err
+				}
 			case c == '\'':
 				state = singleQuote
 			case c == '"':
@@ -246,7 +283,9 @@ func parseEnvFile(content string) ([]envAssignment, error) {
 				if lastValueWS >= 0 {
 					value = value[:lastValueWS]
 				}
-				push()
+				if err := push(); err != nil {
+					return nil, err
+				}
 			case c == '\\':
 				state = valueEscape
 				lastValueWS = -1
@@ -310,7 +349,9 @@ func parseEnvFile(content string) ([]envAssignment, error) {
 		if state == inValue && lastValueWS >= 0 {
 			value = value[:lastValueWS]
 		}
-		push()
+		if err := push(); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

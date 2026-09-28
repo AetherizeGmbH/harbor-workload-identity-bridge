@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -189,14 +190,17 @@ func TestMergeExtraArgs_SystemdKeyForms(t *testing.T) {
 
 func TestMergeExtraArgs_SystemdSemanticsRefusals(t *testing.T) {
 	for name, in := range map[string]string{
-		"spaced duplicate":             "KUBELET_EXTRA_ARGS=--a\nKUBELET_EXTRA_ARGS = --b\n",
-		"value over two lines":         "KUBELET_EXTRA_ARGS=\"--a\n--b\"\n",
-		"escaped line break":           "KUBELET_EXTRA_ARGS=--a \\\n--b\n",
-		"carriage return inside":       "FOO=1\rKUBELET_EXTRA_ARGS=--a\n",
-		"after a continued comment":    "# old systemd continues this \\\nKUBELET_EXTRA_ARGS=--a\n",
-		"append after open quote":      "FOO=\"unterminated\n",
-		"append after escape":          "FOO=bar\\",
-		"append after continued comm.": "# note \\\n",
+		"spaced duplicate":              "KUBELET_EXTRA_ARGS=--a\nKUBELET_EXTRA_ARGS = --b\n",
+		"value over two lines":          "KUBELET_EXTRA_ARGS=\"--a\n--b\"\n",
+		"escaped line break":            "KUBELET_EXTRA_ARGS=--a \\\n--b\n",
+		"carriage return inside":        "FOO=1\rKUBELET_EXTRA_ARGS=--a\n",
+		"after a continued comment":     "# old systemd continues this \\\nKUBELET_EXTRA_ARGS=--a\n",
+		"append after open quote":       "FOO=\"unterminated\n",
+		"append after escape":           "FOO=bar\\",
+		"append after continued comm.":  "# note \\\n",
+		"invalid UTF-8 value":           "KUBELET_EXTRA_ARGS=\xcb   0\n",
+		"noncharacter in another value": "FOO=\uFFFE\nKUBELET_EXTRA_ARGS=--a\n",
+		"NUL byte":                      "KUBELET_EXTRA_ARGS=--a\x00--b\n",
 	} {
 		if out, err := mergeExtraArgs([]byte(in), "/b", "/c.yaml"); err == nil {
 			t.Errorf("%s: accepted:\n%s", name, out)
@@ -262,5 +266,40 @@ func TestParseEnvFile(t *testing.T) {
 	}
 	if got, err := parseEnvFile("a=\"x\\\"y\\\\z\\q\""); err != nil || len(got) != 1 || got[0].value != `x"y\z\q` {
 		t.Fatalf("double-quote escapes: %+v, %v", got, err)
+	}
+}
+
+// TestParseEnvFile_RefusesWhatSystemdDoesNotLoad: systemd loads no variable
+// from a file with a NUL byte, or with a variable name or value that is not
+// valid UTF-8 in its sense, noncharacters included; bytes in comments and
+// in lines without "=" do not count. The cases are those checked against
+// systemd 257 (kindest/node v1.37.0): a unit with EnvironmentFile=-<file>
+// got neither FOO nor BAR from the refused ones.
+func TestParseEnvFile_RefusesWhatSystemdDoesNotLoad(t *testing.T) {
+	for name, content := range map[string]string{
+		"invalid byte":     "FOO=1\nBAR=\xcb 0\n",
+		"U+FFFE":           "FOO=1\nBAR=\xef\xbf\xbe\n",
+		"U+FDD0":           "FOO=1\nBAR=\xef\xb7\x90\n",
+		"U+1FFFF":          "FOO=1\nBAR=\xf0\x9f\xbf\xbf\n",
+		"surrogate":        "FOO=1\nBAR=\xed\xa0\x80\n",
+		"overlong":         "FOO=1\nBAR=\xc0\xaf\n",
+		"above U+10FFFF":   "FOO=1\nBAR=\xf4\x90\x80\x80\n",
+		"NUL":              "FOO=1\nBAR=a\x00b\n",
+		"invalid key":      "FOO=1\nB\xffR=x\n",
+		"quoted value":     "FOO=1\nBAR=\"\xff\"\n",
+		"unterminated end": "FOO=1\nBAR=\xff",
+	} {
+		if got, err := parseEnvFile(content); !errors.Is(err, errUnloadableEnvFile) {
+			t.Errorf("%s: got %+v, %v; want errUnloadableEnvFile", name, got, err)
+		}
+	}
+	for name, content := range map[string]string{
+		"invalid byte in a comment": "FOO=1\n# comment \xff\nBAR=ok\n",
+		"line without =":            "FOO=1\nnot an assignment \xff\n",
+		"valid multibyte":           "FOO=\u00e9\u2028\U0001F600\n",
+	} {
+		if _, err := parseEnvFile(content); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
