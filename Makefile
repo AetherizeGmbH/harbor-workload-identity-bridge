@@ -133,8 +133,35 @@ proxy: ## Expose the cluster's apiserver at http://localhost:8001 so the bridge 
 	@echo "Then set BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks when invoking run-local."
 	kubectl proxy --port=8001
 
+# Self-signed serving cert for run-local: per user, inside the checkout
+# (gitignored), owner-only. A fixed path under shared /tmp let another local
+# user plant the key pair, and a cert made once with -days 1 was reused
+# after it expired. The path is stable because the plugin trusts the cert
+# as its CA bundle (HOW-TO-TEST.md Phase 5).
+RUN_LOCAL_TLS_DIR ?= $(PROJECT_DIR)/.gen/run-local-tls
+
+.PHONY: run-local-tls
+run-local-tls: ## Create or renew run-local's self-signed cert in .gen/run-local-tls (renewed when it expires within an hour)
+	@set -e; dir="$(RUN_LOCAL_TLS_DIR)"; \
+	if [ -L "$$dir" ] || { [ -e "$$dir" ] && [ ! -O "$$dir" ]; }; then \
+		echo "$$dir is a symlink or not owned by you; refusing to use it"; exit 1; \
+	fi; \
+	umask 077; mkdir -p "$$dir"; chmod 700 "$$dir"; \
+	if [ -f "$$dir/tls.key" ] && openssl x509 -checkend 3600 -noout -in "$$dir/tls.crt" >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	rm -f "$$dir/tls.crt" "$$dir/tls.key" "$$dir/tls.crt.new" "$$dir/tls.key.new"; \
+	openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
+		-keyout "$$dir/tls.key.new" \
+		-out "$$dir/tls.crt.new" \
+		-subj "/CN=localhost" \
+		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"; \
+	mv "$$dir/tls.key.new" "$$dir/tls.key"; \
+	mv "$$dir/tls.crt.new" "$$dir/tls.crt"; \
+	echo "run-local-tls: new self-signed cert $$dir/tls.crt (valid 7 days)"
+
 .PHONY: run-local
-run-local: ## Run the bridge against $KUBECONFIG with a self-signed cert in /tmp/bridge-tls
+run-local: run-local-tls ## Run the bridge against $KUBECONFIG with the self-signed cert from run-local-tls
 	@test -n "$$BRIDGE_CLUSTER_NAME" || (echo "set BRIDGE_CLUSTER_NAME" && exit 1)
 	@test -n "$$BRIDGE_NAMESPACE" || (echo "set BRIDGE_NAMESPACE" && exit 1)
 	@test -n "$$BRIDGE_OIDC_ISSUER" || (echo "set BRIDGE_OIDC_ISSUER" && exit 1)
@@ -150,15 +177,9 @@ run-local: ## Run the bridge against $KUBECONFIG with a self-signed cert in /tmp
 		echo ""; \
 		exit 1; \
 	fi
-	@mkdir -p /tmp/bridge-tls
-	@test -f /tmp/bridge-tls/tls.crt || \
-		openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-			-keyout /tmp/bridge-tls/tls.key \
-			-out /tmp/bridge-tls/tls.crt \
-			-subj "/CN=localhost" \
-			-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-	BRIDGE_TLS_CERT_FILE=/tmp/bridge-tls/tls.crt \
-	BRIDGE_TLS_KEY_FILE=/tmp/bridge-tls/tls.key \
+	@echo "serving $(RUN_LOCAL_TLS_DIR)/tls.crt (the plugin's HARBOR_BRIDGE_CA_BUNDLE)"
+	BRIDGE_TLS_CERT_FILE=$(RUN_LOCAL_TLS_DIR)/tls.crt \
+	BRIDGE_TLS_KEY_FILE=$(RUN_LOCAL_TLS_DIR)/tls.key \
 	BRIDGE_LISTEN_ADDR=:8443 \
 	BRIDGE_HEALTH_ADDR=:8081 \
 	go run ./bridge/cmd

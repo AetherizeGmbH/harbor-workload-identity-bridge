@@ -61,11 +61,11 @@
   <!-- bridge process -->
   <rect class="ours" x="40" y="340" width="500" height="220" rx="6"/>
   <text x="290" y="366" text-anchor="middle" class="lbl">bridge process (this project) — `make run-local`</text>
-  <text x="290" y="384" text-anchor="middle" class="sub">listens on :8443 (HTTPS, self-signed cert in /tmp/bridge-tls)</text>
+  <text x="290" y="384" text-anchor="middle" class="sub">listens on :8443 (HTTPS, self-signed cert in .gen/run-local-tls)</text>
   <text x="60" y="412" class="mono">BRIDGE_OIDC_ISSUER      = https://kubernetes.default.svc.cluster.local</text>
   <text x="60" y="430" class="mono">BRIDGE_OIDC_JWKS_URL    = http://127.0.0.1:8001/openid/v1/jwks</text>
   <text x="60" y="448" class="mono">BRIDGE_HARBOR_URL       = https://harbor.dev.127.0.0.1.nip.io:8443</text>
-  <text x="60" y="466" class="mono">BRIDGE_HARBOR_ADMIN_DIR = /tmp/harbor-admin</text>
+  <text x="60" y="466" class="mono">BRIDGE_HARBOR_ADMIN_DIR = .gen/harbor-admin</text>
   <text x="60" y="484" class="mono">BRIDGE_CLUSTER_NAME     = dev</text>
   <text x="60" y="502" class="mono">BRIDGE_NAMESPACE        = harbor-bridge-system</text>
   <text x="60" y="528" class="note">controller-runtime Manager + HTTPS server + OIDC validator, one process.</text>

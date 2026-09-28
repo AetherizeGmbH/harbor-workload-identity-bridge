@@ -171,7 +171,7 @@ This is preserved here so a future read of PHASES.md after compaction doesn't re
 
 ### Slice D — Server + metrics + cmd/main.go — COMPLETE
 
-Delivered: [bridge/dataplane/server.go](../bridge/dataplane/server.go) (manager.Runnable HTTPS server with TLS-from-disk reloaded on every handshake, graceful shutdown bounded by 10s, optional mTLS via ClientCAFile), [bridge/dataplane/metrics.go](../bridge/dataplane/metrics.go) (Prometheus counters + histogram registered onto controller-runtime's `metrics.Registry` so /metrics serves both data-plane and reconciler metrics from one endpoint; OIDC error classifier with explicit `other` bucket for unknown go-oidc messages), handler.go wired with optional `*Metrics` (nil-safe for slim test fixtures), [bridge/cmd/main.go](../bridge/cmd/main.go) implementing the 9-step wiring. Integration-layer env vars (`BRIDGE_TLS_CERT_FILE`, `BRIDGE_TLS_KEY_FILE`, `BRIDGE_TLS_CLIENT_CA_FILE`, `BRIDGE_LISTEN_ADDR`, `BRIDGE_HEALTH_ADDR`, `BRIDGE_ENABLE_LEADER_ELECTION`) are read in main.go with sensible defaults; the controlplane-config layer is unchanged so its fail-fast joined-errors contract holds. `make build` produces `bin/bridge`; `make run-local` regenerates a 1-day self-signed cert and runs against `$KUBECONFIG`.
+Delivered: [bridge/dataplane/server.go](../bridge/dataplane/server.go) (manager.Runnable HTTPS server with TLS-from-disk reloaded on every handshake, graceful shutdown bounded by 10s, optional mTLS via ClientCAFile), [bridge/dataplane/metrics.go](../bridge/dataplane/metrics.go) (Prometheus counters + histogram registered onto controller-runtime's `metrics.Registry` so /metrics serves both data-plane and reconciler metrics from one endpoint; OIDC error classifier with explicit `other` bucket for unknown go-oidc messages), handler.go wired with optional `*Metrics` (nil-safe for slim test fixtures), [bridge/cmd/main.go](../bridge/cmd/main.go) implementing the 9-step wiring. Integration-layer env vars (`BRIDGE_TLS_CERT_FILE`, `BRIDGE_TLS_KEY_FILE`, `BRIDGE_TLS_CLIENT_CA_FILE`, `BRIDGE_LISTEN_ADDR`, `BRIDGE_HEALTH_ADDR`, `BRIDGE_ENABLE_LEADER_ELECTION`) are read in main.go with sensible defaults; the controlplane-config layer is unchanged so its fail-fast joined-errors contract holds. `make build` produces `bin/bridge`; `make run-local` generates a self-signed cert (in `.gen/run-local-tls/`, renewed before it expires) and runs against `$KUBECONFIG`.
 
 Tests: [server_test.go](../bridge/dataplane/server_test.go) covers happy-path serve + shutdown, busy-port bind error, mTLS rejecting clients without certificates, malformed CA bundle. [metrics_test.go](../bridge/dataplane/metrics_test.go) covers every label value of `bridge_credential_issuances_total`, the OIDC error classifier on all five reason buckets, double-increment when 503 fires (both `robot_secret_missing_total` and `issuances{result=unavailable}`), the nil-Metrics-still-works branch, and the Prometheus exposition format end-to-end.
 
@@ -365,7 +365,7 @@ Originally-planned section (kept for archaeology):
 8. `harbor_access` — the `HarborAccess` CRs + test SAs: baseline, two collision-prone SAs (ADR-0018), a tenant-namespace CR, and a multi-project `pull,push` CR; waits on `Ready=True` (bridge controller's umbrella condition).
 9. `pull_pod` / `_alpha` / `_beta` / `_gamma` / `_multi` — pods pull their project via the credential provider; together they cover multi-tenancy, collision-resistance, cluster-wide CR matching, and a multi-project robot.
 10. `robot_push_test` — Job using the multi-project robot's credentials to push a tag to one project and pull another; verifies the `pull,push` action end-to-end.
-11. `file_sleep` — no-op unless `TF_VAR_pause_after_pull=true`, in which case it blocks (AFTER all assertions) on `rm test/e2e/.tofu-sleep`.
+11. `file_sleep` — no-op unless `TF_VAR_pause_after_pull=true`, in which case it blocks (AFTER all assertions) until you `rm test/e2e/.tofu-sleep-*` (a fresh suffix per run).
 
 Topology + flow diagram in [docs/img/local-dev-topology-tofu.svg](img/local-dev-topology-tofu.svg).
 
@@ -445,7 +445,7 @@ The original two-cluster setup is preserved below in case we revisit it for a mu
 
 | Topic | Resolution path |
 | --- | --- |
-| Does containerd's auth flow accept our Basic Auth credentials end-to-end? | **Resolved 2026-06-05.** The `pull_pod` stage of [test/e2e/tests/01-bridge.tftest.hcl](../test/e2e/tests/01-bridge.tftest.hcl) runs the full chain — kubelet → plugin → bridge → robot creds → containerd → Harbor — under real kubelet on `kindest/node:v1.35.0`. Pass = green. |
+| Does containerd's auth flow accept our Basic Auth credentials end-to-end? | **Resolved 2026-06-05.** The `pull_pod` stage of [test/e2e/tests/02-bridge.tftest.hcl](../test/e2e/tests/02-bridge.tftest.hcl) runs the full chain — kubelet → plugin → bridge → robot creds → containerd → Harbor — under real kubelet on `kindest/node:v1.35.0`. Pass = green. |
 | Should the data plane gate on CR `Ready=True` before returning credentials? | Phase 6 polish. Trade-off: stronger guarantee vs more code in the hot path. |
 | Should `forceLocalValidation: false` ever default `true`? | Reassess when Harbor #17520 lands. Air-gapped clusters keep `true` indefinitely. |
 | Should the chart split metrics onto a separate port? | Phase 5 design call. Currently planned: same port, same TLS. |
