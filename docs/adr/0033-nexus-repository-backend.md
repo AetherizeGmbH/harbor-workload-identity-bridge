@@ -687,6 +687,29 @@ here.
     `RepositoryNotFound` is reconciled again after at most
     `NexusRepositoryRecheckInterval` (5 minutes) instead of the hourly
     resync.
+12. **Chart** (decision h). The values are the proposed ones, with
+    `harbor.registryHosts` optional (point 6) and no selector of its own
+    (point 3). Without `nexus.enabled` the chart renders nothing of
+    Nexus, and `BRIDGE_HARBOR_REGISTRY_HOSTS` only when
+    `harbor.registryHosts` is set, so a Harbor-only install renders as
+    before. The NexusAccess RBAC mirrors the HarborAccess rules (`get`,
+    `list`, `watch`, `patch`; `update`, `patch` on the status; `update` on
+    the finalizers): the control plane writes a NexusAccess only through
+    its status and by patching its finalizers. With `nexus.enabled` the
+    chart refuses a host[:port] that both backends name, and, with the
+    chart-managed plugin, any registry host of either backend (Harbor's
+    too, also when it defaults to the host of `harbor.url`) that no single
+    `plugin.matchImages` entry covers under kubelet's `URLsMatch`: the
+    same port, as many host labels, each matched by `filepath.Match`, and
+    the entry's path a raw string prefix of `/<path prefix>`. So
+    `host/nexus/` does not cover the entry `host/nexus`, whose image
+    `host/nexus` the bridge routes to Nexus. The chart does not evaluate
+    `[...]` classes or `\` escapes in a matchImages host and never counts
+    such an entry as covering: it may report a gap kubelet would not
+    have, never miss one. It does not check the reverse, a matchImages
+    entry that no backend serves (the bridge refuses such images as
+    `no_backend`): an entry with a path prefix could never pass it,
+    because kubelet's `host/nexus` also matches `host/nexus-old/app`.
 
 The data plane and the entry point (2026-09-28) implement decision f and
 the wiring of decision h's settings as follows.
