@@ -510,7 +510,10 @@ container:
   holds another install's entry; in a config in reach of a
   `plugin.hostConfigDir`, only an entry a record in kubelet's bin dir
   vouches for counts, so a planted entry cannot keep kubelet on that
-  config.
+  config. It moves kubelet anyway when the config it moves to keeps that
+  install's entry, which takes that install's record in the new bin dir
+  (ADR-0035): a writer of `plugin.hostConfigDir` cannot bring that about,
+  since only root on the node writes the bin dir.
 - in `merge` mode into a cloud's config, keeps every other entry, but
   refuses to write the config, or restart kubelet onto it, when kubelet
   would exit at startup: an entry whose binary is missing from kubelet's

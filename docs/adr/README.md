@@ -36,5 +36,6 @@
 | 0032 | [A bridge sets its finalizer right before the robot and releases only what it set](0032-finalizer-ownership.md) | Accepted (amends 0026, 0030) |
 | 0033 | [The installer rolls back a kubelet restart that does not verify](0033-installer-rollback-of-a-rejected-restart.md) | Accepted (refines 0021, 0029) |
 | 0034 | [Patch mode edits the environment file the kubelet unit reads](0034-patch-mode-edits-the-environment-file-kubelet-reads.md) | Accepted (refines 0021) |
+| 0035 | [Auto mode moves shared directories once every install is ready](0035-auto-mode-moves-shared-directories-when-every-install-is-ready.md) | Accepted (refines 0021, 0029) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

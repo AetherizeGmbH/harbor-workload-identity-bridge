@@ -340,9 +340,11 @@ plugin:
     #         flags (EKS / GKE / AKS node images), behave as `merge`;
     #         otherwise behave as `patch`. Flags this install's own last
     #         patch-mode pass set count as `patch`: a changed
-    #         hostBinaryDir/hostConfigDir moves kubelet (unless other
-    #         installs' entries are in the old config). The right default
-    #         almost everywhere.
+    #         hostBinaryDir/hostConfigDir moves kubelet. While other
+    #         installs that have not moved yet share the old directories,
+    #         kubelet stays there, this install's files also go into the
+    #         new ones, and the last of these installs to change moves
+    #         kubelet (ADR-0035). The right default almost everywhere.
     # merge — inject our provider entry into the node's EXISTING
     #         CredentialProviderConfig (JSON or YAML; foreign providers
     #         and unknown fields are preserved) and drop the binary

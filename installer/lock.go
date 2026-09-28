@@ -28,7 +28,7 @@ import (
 //     before it reads it. Patch mode, which may point kubelet away from the
 //     config kubelet reads now, first takes that config's lock, then its
 //     own (one lock when both are the same), and holds both from before it
-//     checks the current config (checkRewire) until the pass ends
+//     checks the current config (blockingInstalls) until the pass ends
 //     (lockPatchConfigs): none mode, whose pod mounts only the two plugin
 //     directories, takes only its own config lock and cannot see the node
 //     lock, and could otherwise add an entry to either config after patch

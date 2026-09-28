@@ -365,7 +365,7 @@ The DaemonSet runs the `harbor-bridge-installer` binary on every node.
 
 | Mode | What it does | When |
 | --- | --- | --- |
-| `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch`. Flags that this install's own last patch-mode pass set (its state file says so) → `patch`, which moves kubelet when `plugin.hostBinaryDir` or `plugin.hostConfigDir` changed, unless other installs' entries are in the old config | Almost always the right choice |
+| `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch`. Flags that this install's own last patch-mode pass set (its state file says so) → `patch`, which moves kubelet when `plugin.hostBinaryDir` or `plugin.hostConfigDir` changed. While other installs that have not moved yet share the old directories, it stays there and also puts its files into the new ones; kubelet moves in the pass of the last of them (ADR-0035) | Almost always the right choice |
 | `merge` | Injects our provider entry into the node's **existing** `CredentialProviderConfig` (JSON or YAML — EKS/GKE/AKS formats both work; foreign providers and unknown fields round-trip untouched) and drops the binary into the existing bin dir. Kubelet flags untouched. | Managed nodes (EKS AL2023, GKE, AKS) |
 | `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of the environment file the kubelet unit reads (`/etc/default/kubelet`, or `/etc/sysconfig/kubelet` with RPM packages; ADR-0034) — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet whose unit reads one of the two files) |
 | `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | k3s/RKE2 (flags via their kubelet args), strict-privilege environments |
@@ -490,7 +490,12 @@ service:
   same `plugin.hostBinaryDir` and `plugin.hostConfigDir`. Patch mode
   refuses to point kubelet at other directories while the config kubelet
   reads holds another release's entry (in a chart-owned config, only an
-  entry that release's record in kubelet's bin dir vouches for). In auto
+  entry that release's record in kubelet's bin dir vouches for), unless
+  that release has its binary and record in the new bin dir and its
+  entry in the new config already. To change the directories of all
+  releases, change them in each, in auto mode: each release's pass puts
+  its files into the new directories and keeps kubelet on the old ones,
+  and the last one moves kubelet (ADR-0035). In auto
   mode a later release merges into whatever config kubelet already runs,
   and its binary goes into kubelet's bin dir. When that config is another release's
   chart-owned config, it treats it as the chart's (see "The chart-owned

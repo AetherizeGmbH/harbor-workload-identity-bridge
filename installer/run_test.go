@@ -152,7 +152,7 @@ func (f *fakeKubelet) status(string) (unitStatus, error) {
 // newTestEnv builds a fake node. kubeletCmdline is the command line of the
 // running kubelet; nil means no kubelet process at all, which only none
 // mode and merge mode with explicit targets get by with (patch mode reads
-// kubelet's wiring before it writes, checkRewire).
+// kubelet's wiring before it writes, blockingInstalls).
 func newTestEnv(t *testing.T, mode string, kubeletCmdline []string) *testEnv {
 	t.Helper()
 	root := t.TempDir()
