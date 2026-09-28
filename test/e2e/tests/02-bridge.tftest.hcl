@@ -38,6 +38,11 @@
 #  18. token_rejection      — ADR-0028: the bridge refuses a token bound to no
 #                             pod and one living 2h, serves a pod-bound 1h one
 #  19. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
+#  19b. harbor_access_cascade — scenario phase "ns-cascade": the namespace
+#                             app-ns deleted with its HarborAccess in it;
+#                             the namespace waits for the finalizer
+#  19c. robot_check_cascade — Harbor itself: that robot revoked, the others
+#                             kept
 #  20. harbor_access_teardown — scenario phase "none": every HarborAccess and
 #                             tenant namespace deleted WHILE the bridge runs;
 #                             tofu waits for each finalizer
@@ -45,12 +50,12 @@
 #                             (a Harbor that cannot be asked fails it)
 #
 # Teardown order. tofu test destroys the states in reverse order of the
-# LAST run that touched each. Stages 13 and 20 re-use the harbor_access
-# state after bridge_upgrade, and stage 20 empties it, so at cleanup time
-# no HarborAccess (and no finalizer) is left for an already-uninstalled
-# bridge to release. Before this, bridge_upgrade (the last run using the
-# bridge state) made cleanup uninstall the bridge FIRST, and deleting the
-# CRs then hung on finalizers nobody could remove.
+# LAST run that touched each. Stages 13, 19b and 20 re-use the
+# harbor_access state after bridge_upgrade, and stage 20 empties it, so at
+# cleanup time no HarborAccess (and no finalizer) is left for an
+# already-uninstalled bridge to release. Before this, bridge_upgrade (the
+# last run using the bridge state) made cleanup uninstall the bridge
+# FIRST, and deleting the CRs then hung on finalizers nobody could remove.
 #
 # Multi-tenant / collision coverage:
 #   - team-a/svc-b → project-alpha and team/a-svc-b → project-beta collide
@@ -900,6 +905,63 @@ run "file_sleep" {
   }
   variables {
     enabled = try(var.pause_after_pull, false)
+  }
+}
+
+# ── Lifecycle: `kubectl delete namespace` on a tenant. Scenario phase
+# "ns-cascade" drops only the Namespace app-ns; its HarborAccess
+# (tenant-access) and ServiceAccount stay in the phase, so the namespace
+# controller, not tofu, deletes them while the namespace is Terminating.
+# tofu waits until the namespace is gone, which it is only once the bridge
+# released tenant-access's finalizer.
+run "harbor_access_cascade" {
+  command = apply
+  module {
+    source = "./modules/harbor-access-scenario"
+  }
+  variables {
+    kubeconfig       = run.cluster.kubeconfig
+    phase            = "ns-cascade"
+    bridge_namespace = run.bridge_upgrade.namespace
+    audience         = "harbor-bridge"
+  }
+}
+
+# The finalizer released the namespace only after it revoked the robot: the
+# robot of app-ns/runner is gone from Harbor, every other one is still there.
+run "robot_check_cascade" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "robot-check-cascade"
+    namespace            = run.seed_image.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = run.seed_image.admin_secret_name
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -euo pipefail
+      api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      # As in robot_check_update: a failed request or an answer that is
+      # not a list fails the Job, never reads as "no robot".
+      robots() {
+        body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
+        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+      }
+      gone=$(robots name%3Dbridge-dev.app-ns.runner)
+      all=$(robots name%3D~bridge-dev.)
+      echo "robot of app-ns/runner: $gone; robots of cluster dev: $all"
+      printf '%s' "$gone" | jq -e 'length == 0' >/dev/null
+      printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_cascade.harbor_accesses)} 'length == $want' >/dev/null
+    SH
+    ]
+    timeout_seconds  = 120
+    fail_message     = "namespace deletion released tenant-access without revoking its robot, or took other robots with it (or Harbor could not be asked; see pod.log)"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 

@@ -803,6 +803,55 @@ run "file_sleep" {
   }
 }
 
+# A tenant namespace deleted with its HarborAccess in it (details at
+# harbor_access_cascade of the kind harness).
+run "harbor_access_cascade" {
+  command = apply
+  module {
+    source = "../e2e/modules/harbor-access-scenario"
+  }
+  variables {
+    kubeconfig       = run.gke.kubeconfig
+    phase            = "ns-cascade"
+    bridge_namespace = run.bridge_upgrade.namespace
+    issuer           = run.gke.oidc_issuer
+    audience         = "harbor-bridge"
+  }
+}
+
+run "robot_check_cascade" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "robot-check-cascade"
+    namespace            = run.seed_image.namespace
+    service_account_name = "default"
+    image                = run.push.image_tags.seed
+    image_pull_policy    = "IfNotPresent"
+    env_from_secret      = run.seed_image.admin_secret_name
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -euo pipefail
+      api=http://harbor-core.harbor.svc.cluster.local/api/v2.0
+      robots() {
+        body=$(curl -fsS -m 10 -u "$username:$password" "$api/robots?page_size=100&q=$1") || return 1
+        printf '%s' "$body" | jq -c 'if type == "array" then [.[].name] else error("Harbor did not answer with a robot list") end'
+      }
+      gone=$(robots name%3Dbridge-gke-e2e.app-ns.runner)
+      all=$(robots name%3D~bridge-gke-e2e.)
+      echo "robot of app-ns/runner: $gone; robots of cluster gke-e2e: $all"
+      printf '%s' "$gone" | jq -e 'length == 0' >/dev/null
+      printf '%s' "$all" | jq -e --argjson want ${length(run.harbor_access_cascade.harbor_accesses)} 'length == $want' >/dev/null
+    SH
+    ]
+    timeout_seconds = 120
+    fail_message    = "namespace deletion released tenant-access without revoking its robot, or took other robots with it (or Harbor could not be asked; see pod.log)"
+  }
+}
+
 run "harbor_access_teardown" {
   command = apply
   module {
