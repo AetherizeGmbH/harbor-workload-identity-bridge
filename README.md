@@ -191,7 +191,9 @@ kubectl create secret generic harbor-admin -n harbor-bridge-system \
   --from-literal=password=YOUR_HARBOR_ADMIN_PASSWORD
 
 # 2. Point cert-manager at an Issuer that signs the bridge's TLS cert.
-#    Self-signed is fine for evaluation:
+#    Self-signed is fine for evaluation, but not with bridge.mTLS: the
+#    plugin's client certificates need a CA issuer whose CA is the
+#    bridge's ca.crt (see bridge.mTLS.clientIssuerRef in values.yaml).
 cat <<'YAML' | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
