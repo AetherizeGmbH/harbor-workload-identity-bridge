@@ -1,3 +1,9 @@
+## [0.11.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.2...v0.11.3) (2026-09-28)
+
+### Bug Fixes
+
+* **controlplane:** suspend refused robots, live rotation reads, finalizer ownership ([#137](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/137)) ([4192b0c](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/4192b0ca4b004d9fa2356b7c2a02dc7bb7565f88))
+
 ## [0.11.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.1...v0.11.2) (2026-09-28)
 
 ### Bug Fixes
