@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	nexusv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/nexus/v1alpha1"
 	harborv1alpha1 "github.com/aetherize/harbor-workload-identity-bridge/bridge/api/v1alpha1"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/controlplane/harbor"
 	"github.com/aetherize/harbor-workload-identity-bridge/bridge/internal/robotsecret"
@@ -50,6 +51,7 @@ var testScheme = func() *runtime.Scheme {
 	s := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
 	utilruntime.Must(harborv1alpha1.AddToScheme(s))
+	utilruntime.Must(nexusv1alpha1.AddToScheme(s))
 	return s
 }()
 
