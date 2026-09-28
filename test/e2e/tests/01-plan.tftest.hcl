@@ -123,7 +123,7 @@ run "defaults" {
       kubernetes_service_v1.bridge_pods.spec[0].cluster_ip == "None"
       && kubernetes_service_v1.bridge_pods.spec[0].publish_not_ready_addresses == true
       && kubernetes_service_v1.bridge_pods.spec[0].selector == tomap({
-        "app.kubernetes.io/name"      = "harbor-bridge"
+        "app.kubernetes.io/name"      = "harbor-workload-identity-bridge"
         "app.kubernetes.io/instance"  = "harbor-bridge"
         "app.kubernetes.io/component" = "bridge"
       })

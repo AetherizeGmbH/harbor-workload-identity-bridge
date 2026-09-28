@@ -433,7 +433,7 @@ resource "kubernetes_service_v1" "bridge_pods" {
     publish_not_ready_addresses = true
     # The chart's bridge selector labels (harbor-bridge.bridge.selectorLabels).
     selector = {
-      "app.kubernetes.io/name"      = "harbor-bridge"
+      "app.kubernetes.io/name"      = "harbor-workload-identity-bridge"
       "app.kubernetes.io/instance"  = helm_release.bridge.name
       "app.kubernetes.io/component" = "bridge"
     }
