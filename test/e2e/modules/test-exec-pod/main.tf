@@ -83,7 +83,7 @@ variable "diag_dir" {
 variable "diag_bridge_namespace" {
   type        = string
   default     = "harbor-bridge-system"
-  description = "Namespace of the bridge release whose logs and HarborAccess state are captured on failure, and whose logs expect_bridge_log searches."
+  description = "Namespace of the bridge release whose logs and Secret names are captured on failure (with every HarborAccess and NexusAccess), and whose logs expect_bridge_log searches."
 }
 
 variable "node_log_command" {
@@ -298,6 +298,7 @@ resource "null_resource" "wait" {
       k -n "$NS" get events --sort-by=.lastTimestamp > "$DIAG/events.txt" 2>&1
       k -n "$BRIDGE_NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=1000 --prefix > "$DIAG/bridge.log" 2>&1
       k get harboraccesses -A -o yaml > "$DIAG/harboraccesses.yaml" 2>&1
+      k get nexusaccesses -A -o yaml > "$DIAG/nexusaccesses.yaml" 2>&1
       k -n "$BRIDGE_NS" get secrets -o name > "$DIAG/bridge-secret-names.txt" 2>&1
       node="$(k -n "$NS" get pod -l "app=$JOB" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)"
       echo "$node" > "$DIAG/node.txt"

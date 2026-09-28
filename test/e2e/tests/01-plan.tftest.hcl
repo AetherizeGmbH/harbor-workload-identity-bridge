@@ -122,6 +122,14 @@ run "defaults" {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.resources.limits.memory == "256Mi"
     error_message = "default limits.memory should be 256Mi"
   }
+  assert {
+    condition     = !contains(keys(yamldecode(helm_release.bridge.values[0])), "nexus") && !contains(keys(yamldecode(helm_release.bridge.values[0]).harbor), "registryHosts")
+    error_message = "without nexus and harbor_registry_hosts the release must carry no nexus.* and no harbor.registryHosts value (a Harbor-only install renders as before)"
+  }
+  assert {
+    condition     = length(kubernetes_secret_v1.nexus_admin) == 0
+    error_message = "no nexus-admin Secret without nexus"
+  }
 }
 
 # ── Custom namespace ─────────────────────────────────────────────────────────
@@ -400,5 +408,136 @@ run "invalid_limits_memory" {
 
   expect_failures = [
     var.bridge_resources,
+  ]
+}
+
+# ── Nexus backend (ADR-0033) ─────────────────────────────────────────────────
+# nexus renders nexus.* with the admin Secret the module creates, and
+# harbor_registry_hosts adds harbor.registryHosts next to the unchanged
+# Harbor values. The credentials are sensitive variables of the module, so
+# these runs also prove that they reach neither count nor the values.
+run "nexus_enabled" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    nexus = {
+      url            = "http://nexus.nexus.svc.cluster.local:8081"
+      registry_hosts = ["nexus.e2e:30851", "nexus.e2e:30852"]
+    }
+    nexus_admin_username  = "hwib-e2e-mock"
+    nexus_admin_password  = "mock-nexus-password"
+    harbor_registry_hosts = ["harbor.e2e:30843"]
+    match_images          = ["harbor.e2e:30843", "nexus.e2e:30851", "nexus.e2e:30852"]
+  }
+
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).nexus.enabled == true
+    error_message = "nexus.enabled should be true when nexus is set"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).nexus.url == "http://nexus.nexus.svc.cluster.local:8081"
+    error_message = "nexus.url should be wired from var.nexus.url"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).nexus.allowInsecureHTTP == true
+    error_message = "an http:// nexus.url needs nexus.allowInsecureHTTP"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).nexus.adminCredsSecret.name == "nexus-admin"
+    error_message = "nexus.adminCredsSecret.name should reference the nexus-admin Secret the module creates"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).nexus.registryHosts == ["nexus.e2e:30851", "nexus.e2e:30852"]
+    error_message = "nexus.registryHosts should be wired from var.nexus.registry_hosts"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).harbor.registryHosts == ["harbor.e2e:30843"]
+    error_message = "harbor.registryHosts should be wired from var.harbor_registry_hosts"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).harbor.url == "http://harbor-core.harbor.svc.cluster.local" && yamldecode(helm_release.bridge.values[0]).harbor.adminCredsSecret.name == "harbor-admin"
+    error_message = "the Harbor values must stay as they are next to harbor.registryHosts"
+  }
+  assert {
+    condition     = kubernetes_secret_v1.nexus_admin[0].data.username == "hwib-e2e-mock" && kubernetes_secret_v1.nexus_admin[0].data.password == "mock-nexus-password"
+    error_message = "the nexus-admin Secret should hold var.nexus.admin_username and var.nexus_admin_password"
+  }
+}
+
+run "nexus_https" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    nexus = {
+      url            = "https://nexus.example.com"
+      registry_hosts = ["registry.example.com"]
+    }
+    nexus_admin_username = "hwib-e2e-mock"
+    nexus_admin_password = "mock-nexus-password"
+  }
+
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).nexus.allowInsecureHTTP == false
+    error_message = "an https:// nexus.url must not allow plain HTTP"
+  }
+  assert {
+    condition     = !contains(keys(yamldecode(helm_release.bridge.values[0]).harbor), "registryHosts")
+    error_message = "without harbor_registry_hosts the chart's default (the host of harbor.url) applies"
+  }
+}
+
+run "harbor_registry_hosts_only" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    harbor_registry_hosts = ["harbor.e2e:30843"]
+  }
+
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).harbor.registryHosts == ["harbor.e2e:30843"] && !contains(keys(yamldecode(helm_release.bridge.values[0])), "nexus")
+    error_message = "harbor_registry_hosts alone adds harbor.registryHosts and no nexus.* value"
+  }
+}
+
+run "invalid_nexus_without_registry_hosts" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    nexus = {
+      url            = "http://nexus.nexus.svc.cluster.local:8081"
+      registry_hosts = []
+    }
+    nexus_admin_username = "hwib-e2e-mock"
+    nexus_admin_password = "mock-nexus-password"
+  }
+
+  expect_failures = [
+    var.nexus,
+  ]
+}
+
+run "invalid_nexus_without_credentials" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    nexus = {
+      url            = "http://nexus.nexus.svc.cluster.local:8081"
+      registry_hosts = ["nexus.e2e:30851"]
+    }
+  }
+
+  expect_failures = [
+    var.nexus_admin_username,
+    var.nexus_admin_password,
   ]
 }
