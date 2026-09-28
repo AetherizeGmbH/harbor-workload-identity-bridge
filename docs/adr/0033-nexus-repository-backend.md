@@ -7,9 +7,11 @@ decision below is marked **maintainer may change before implementation**.
 Implemented so far: the Nexus REST client (`bridge/controlplane/nexus`),
 the `NexusAccess` API, the Secret contract, the configuration, the
 control plane (reconciler, janitor, rate-limit backoff), the data plane's
-routing by registry host, and the wiring of both into the bridge's entry
-point when `BRIDGE_NEXUS_URL` is set. Where the implementation departs
-from the decisions below, "Implementation notes" says so.
+routing by registry host, the wiring of both into the bridge's entry
+point when `BRIDGE_NEXUS_URL` is set, the chart's `nexus.*` values, and
+the e2e harness (`make e2e-nexus`, not yet run). Where the
+implementation departs from the decisions below, "Implementation notes"
+says so.
 
 Extends ADR-0002 (control plane / data plane), ADR-0010 (identity),
 ADR-0011 (Secret storage), ADR-0012 (ownership markers), ADR-0018 and
@@ -687,29 +689,6 @@ here.
     `RepositoryNotFound` is reconciled again after at most
     `NexusRepositoryRecheckInterval` (5 minutes) instead of the hourly
     resync.
-12. **Chart** (decision h). The values are the proposed ones, with
-    `harbor.registryHosts` optional (point 6) and no selector of its own
-    (point 3). Without `nexus.enabled` the chart renders nothing of
-    Nexus, and `BRIDGE_HARBOR_REGISTRY_HOSTS` only when
-    `harbor.registryHosts` is set, so a Harbor-only install renders as
-    before. The NexusAccess RBAC mirrors the HarborAccess rules (`get`,
-    `list`, `watch`, `patch`; `update`, `patch` on the status; `update` on
-    the finalizers): the control plane writes a NexusAccess only through
-    its status and by patching its finalizers. With `nexus.enabled` the
-    chart refuses a host[:port] that both backends name, and, with the
-    chart-managed plugin, any registry host of either backend (Harbor's
-    too, also when it defaults to the host of `harbor.url`) that no single
-    `plugin.matchImages` entry covers under kubelet's `URLsMatch`: the
-    same port, as many host labels, each matched by `filepath.Match`, and
-    the entry's path a raw string prefix of `/<path prefix>`. So
-    `host/nexus/` does not cover the entry `host/nexus`, whose image
-    `host/nexus` the bridge routes to Nexus. The chart does not evaluate
-    `[...]` classes or `\` escapes in a matchImages host and never counts
-    such an entry as covering: it may report a gap kubelet would not
-    have, never miss one. It does not check the reverse, a matchImages
-    entry that no backend serves (the bridge refuses such images as
-    `no_backend`): an entry with a path prefix could never pass it,
-    because kubelet's `host/nexus` also matches `host/nexus-old/app`.
 
 The data plane and the entry point (2026-09-28) implement decision f and
 the wiring of decision h's settings as follows.
@@ -718,8 +697,9 @@ the wiring of decision h's settings as follows.
     does not route: every request is Harbor's and the image stays
     audit-only, byte for byte as before (responses, audit lines and
     metric series), except for a robot Secret that carries the
-    access-kind label, which no bridge writes (note 13). With it, an image of a Nexus registry host is served
-    from NexusAccess objects, an image of a Harbor registry host
+    access-kind label, which no bridge writes (note 13). With it, an
+    image of a Nexus registry host is served from NexusAccess objects,
+    an image of a Harbor registry host
     (`BRIDGE_HARBOR_REGISTRY_HOSTS`, by default the host of
     `BRIDGE_HARBOR_URL`) from HarborAccess objects exactly as before,
     and any other image, or a request without one, is refused with 403
@@ -761,9 +741,35 @@ the wiring of decision h's settings as follows.
     NexusAccess, and readiness waits for the NexusAccess cache
     (`Config.CachedObjects`) when it does.
 
+The chart (2026-09-28) implements decision h as follows.
+
+17. **Chart** (decision h). The values are the proposed ones, with
+    `harbor.registryHosts` optional (point 6) and no selector of its own
+    (point 3). Without `nexus.enabled` the chart renders nothing of
+    Nexus, and `BRIDGE_HARBOR_REGISTRY_HOSTS` only when
+    `harbor.registryHosts` is set, so a Harbor-only install renders as
+    before. The NexusAccess RBAC mirrors the HarborAccess rules (`get`,
+    `list`, `watch`, `patch`; `update`, `patch` on the status; `update` on
+    the finalizers): the control plane writes a NexusAccess only through
+    its status and by patching its finalizers. With `nexus.enabled` the
+    chart refuses a host[:port] that both backends name, and, with the
+    chart-managed plugin, any registry host of either backend (Harbor's
+    too, also when it defaults to the host of `harbor.url`) that no single
+    `plugin.matchImages` entry covers under kubelet's `URLsMatch`: the
+    same port, as many host labels, each matched by `filepath.Match`, and
+    the entry's path a raw string prefix of `/<path prefix>`. So
+    `host/nexus/` does not cover the entry `host/nexus`, whose image
+    `host/nexus` the bridge routes to Nexus. The chart does not evaluate
+    `[...]` classes or `\` escapes in a matchImages host and never counts
+    such an entry as covering: it may report a gap kubelet would not
+    have, never miss one. It does not check the reverse, a matchImages
+    entry that no backend serves (the bridge refuses such images as
+    `no_backend`): an entry with a path prefix could never pass it,
+    because kubelet's `host/nexus` also matches `host/nexus-old/app`.
+
 The e2e harness (2026-09-28) implements decision i as follows.
 
-17. **e2e** (decision i). `tests/03-nexus.tftest.hcl` covers every
+18. **e2e** (decision i). `tests/03-nexus.tftest.hcl` covers every
     assertion decision i lists, on Nexus 3.76.1, next to Harbor. How it
     departs from or adds to the proposal:
     - It runs only through `make e2e-nexus`. `make e2e`, `e2e.yml` and
