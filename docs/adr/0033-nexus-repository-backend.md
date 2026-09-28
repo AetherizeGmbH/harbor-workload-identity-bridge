@@ -3,9 +3,12 @@
 ## Status
 
 Proposed (2026-09-28). The maintainer approves or changes it. Every
-decision below is marked **maintainer may change before implementation**;
-none of it is implemented beyond the Nexus REST client
-(`bridge/controlplane/nexus`), which nothing wires in yet.
+decision below is marked **maintainer may change before implementation**.
+Implemented so far: the Nexus REST client (`bridge/controlplane/nexus`),
+the `NexusAccess` API, the Secret contract, the configuration, and the
+control plane (reconciler, janitor, rate-limit backoff), none of which
+the bridge's entry point wires in yet. Where the implementation departs
+from the decisions below, "Implementation notes" says so.
 
 Extends ADR-0002 (control plane / data plane), ADR-0010 (identity),
 ADR-0011 (Secret storage), ADR-0012 (ownership markers), ADR-0018 and
@@ -596,6 +599,88 @@ every NexusAccess after every edit until the reconciler has run.
 9. **Status user id**: `status.user.userId` maps Nexus's audit log to
    NexusAccess objects, but tells every reader of the object which
    username to lock out (decision j). Keep it, or leave it to the Secret.
+
+## Implementation notes
+
+The control plane (2026-09-28) implements decisions a to d and j with the
+deviations below. The interface contract the parallel workstreams (data
+plane, chart, wiring) share fixed some names differently from the
+proposal; where the two disagree the contract won, and it is recorded
+here.
+
+1. **Secret labels** (decision e). The Secret carries
+   `app.kubernetes.io/managed-by: harbor-workload-identity-bridge`, the
+   robot Secrets' cluster label `harbor.aetherize.io/cluster`,
+   `harbor.aetherize.io/access-kind: nexus` (not `NexusAccess`), and
+   `nexus.aetherize.io/nexusaccess-namespace` and `-name` (not under
+   `harbor.aetherize.io/`). It does not carry
+   `harbor.aetherize.io/managed-by`, so the Harbor janitor's Secret
+   listing and the Harbor reconciler's Secret watch never see it. A
+   Secret without the labels is never adopted: no Nexus Secret predates
+   them.
+2. **Secret contract package** (decisions e, g). The contract lives in
+   `bridge/internal/nexussecret`, next to `robotsecret`, not inside it.
+   The rotation promise reuses the robot Secret's annotation key
+   `harbor.aetherize.io/rotation-not-before` with its ADR-0023 meaning.
+   On top of the proposal the Secret carries
+   `nexus.aetherize.io/user-id` (the user whose password it holds, equal
+   to `username`; a Secret whose two values differ counts as incomplete),
+   the pending generation as `nexus.aetherize.io/pending-user-id`, and
+   `nexus.aetherize.io/retiring-user-id` with `retire-after` (point 4). A
+   Secret created only to record a pending user has no data; the data
+   plane must treat it like a missing Secret.
+3. **Selector** (decision a, h). `BRIDGE_HARBORACCESS_SELECTOR` and
+   `BRIDGE_INSTANCE` select NexusAccess objects too; there is no
+   `BRIDGE_NEXUSACCESS_SELECTOR`. The finalizers are
+   `nexus.aetherize.io/user` and `nexus.aetherize.io/user-<instance>` as
+   proposed.
+4. **The previous user outlives the Secret write by a grace**
+   (decision c). A rotation creates the new generation, writes the Secret,
+   and deletes the previous user `NexusUserRetireGrace` (5 minutes) later,
+   recorded in the Secret, instead of right after the write. A scheduled
+   rotation happens only after the old password's rotation-not-before,
+   so no kubelet cache holds it any more; the grace covers a pull that
+   fetched the old credentials just before and still uses the old user's
+   docker bearer token (deleting the user refuses it mid-pull), and a
+   data-plane replica whose cache has not yet seen the new Secret. It
+   extends the lifetime of a leaked bearer token by as much. A forced
+   rotation (Secret missing or incomplete, the named user gone) and a
+   serviceAccountRef change delete the previous users at once, as the
+   Harbor reconciler does.
+5. **A refused NexusAccess** (not in the proposal; ADR-0030 parity).
+   Refusal deletes the Secret and every active user of the object; it
+   does not disable them, because a disabled user's bearer token is
+   valid again once the user is re-enabled (Context 1), and resuming
+   creates a user of a new generation anyway. A user an administrator
+   disabled or locked stays, so that resuming reports `UserDisabled`
+   instead of undoing that decision; the role stays too (it grants
+   nothing without a user of the bridge). The finalizers are released
+   once neither users nor a role of the object are left (ADR-0032). A
+   user whose markers were edited out of band, while the Secret names it,
+   is reported as `UserConflict` and neither used nor replaced.
+6. **Registry hosts** (decisions f, h). `BRIDGE_HARBOR_REGISTRY_HOSTS` is
+   optional and defaults to the host[:port] of `BRIDGE_HARBOR_URL`, also
+   with Nexus enabled. `BRIDGE_NEXUS_REGISTRY_HOSTS` is required with
+   Nexus; startup refuses a host[:port] both backends name. Harbor stays
+   required (question 7). Any other `BRIDGE_NEXUS_*` setting without
+   `BRIDGE_NEXUS_URL` fails startup.
+7. **No backend seam yet** (decision g). The Nexus backend is its own
+   controller and janitor (`NexusReconciler`, `NexusJanitor` in
+   `bridge/controlplane`) that reuse the Harbor side's constants,
+   resync spreading, selector, finalizer scheme and admin-credential
+   reader. Extracting the seam and the conformance suite means
+   restructuring the Harbor reconciler, which this change was not to
+   alter; it is left to the maintainer's decision on g.
+8. **Rate limit** (decision j). The backoff wraps the client both
+   controllers share; the gauge is `bridge_nexus_rate_limited`. A
+   NexusAccess being deleted reports `DeletionBlocked` with the backoff's
+   explanation rather than `NexusRateLimited`.
+9. **`format`** (decision a) is kept as proposed, with `docker` as its
+   only value and default; `status.user.userId` is kept (question 9 stays
+   open).
+10. **`PasswordRejected`** is reported for a 400 to a user create whose
+    message mentions the password; Nexus's validator message is not
+    documented.
 
 ## Verified at runtime
 
