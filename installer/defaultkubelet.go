@@ -26,8 +26,9 @@ const extraArgsKey = "KUBELET_EXTRA_ARGS"
 // accepts whitespace around the "=" and before the value, and when a
 // variable is assigned twice the last assignment wins. An assignment the
 // installer did not recognise used to get a second one appended after it,
-// which silently dropped the operator's args. Anything it cannot rewrite
-// faithfully is refused, and so is a file systemd does not load
+// which silently dropped the operator's args; that appended line is merged
+// back into the operator's (appendedByEarlierInstaller). Anything it cannot
+// rewrite faithfully is refused, and so is a file systemd does not load
 // (errUnloadableEnvFile).
 func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) {
 	ours := []string{
@@ -46,15 +47,26 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 		lines = lines[:n-1]
 	}
 
-	found := false
+	var extra []envAssignment
 	for _, a := range assignments {
-		if a.key != extraArgsKey {
-			continue
+		if a.key == extraArgsKey {
+			extra = append(extra, a)
 		}
-		if found {
-			return nil, fmt.Errorf("multiple KUBELET_EXTRA_ARGS lines in /etc/default/kubelet — refusing to guess which one kubelet uses")
-		}
-		found = true
+	}
+	appended := -1
+	if len(extra) == 2 && appendedByEarlierInstaller(extra, lines) {
+		// Kubelet has used the appended line, the second, and not the
+		// operator's args. Merge the flags into the operator's line and
+		// drop the appended one: kubelet gets the operator's args back.
+		appended = extra[1].first
+		logf("line %d of the kubelet environment file assigns KUBELET_EXTRA_ARGS only the two --image-credential-provider-* flags: an installer before this version appended it because it did not recognise the assignment on line %d, and kubelet has run without the args of line %d since. Merging the flags into line %d and removing line %d; kubelet gets those args back", appended+1, extra[0].first+1, extra[0].first+1, extra[0].first+1, appended+1)
+		extra = extra[:1]
+	}
+	if len(extra) > 1 {
+		return nil, fmt.Errorf("multiple KUBELET_EXTRA_ARGS lines in /etc/default/kubelet (lines %d and %d) — refusing to guess which one kubelet uses", extra[0].first+1, extra[1].first+1)
+	}
+	found := len(extra) == 1
+	for _, a := range extra {
 		if a.first != a.last {
 			return nil, fmt.Errorf("KUBELET_EXTRA_ARGS in /etc/default/kubelet continues over several lines (lines %d-%d), which the installer cannot rewrite safely; put it on one line, or add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", a.first+1, a.last+1)
 		}
@@ -75,10 +87,47 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 	if (!found || !bytes.HasSuffix(existing, []byte("\n"))) && openAtEnd(string(existing)) {
 		return nil, fmt.Errorf("the last line of /etc/default/kubelet ends inside a quoted value, after an escape, or in a comment continued with a backslash, so the installer cannot add to the file safely; fix that line")
 	}
+	if appended >= 0 {
+		lines = append(lines[:appended], lines[appended+1:]...)
+	}
 	if !found {
 		lines = append(lines, extraArgsKey+`="`+strings.Join(ours, " ")+`"`)
 	}
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
+}
+
+// appendedByEarlierInstaller reports whether extra, the two
+// KUBELET_EXTRA_ARGS assignments of a kubelet environment file, has the
+// shape installers before this version left (audit #94): they recognised
+// only a line that starts with "KUBELET_EXTRA_ARGS=" after its leading and
+// trailing whitespace, missed an operator's assignment with whitespace
+// before the "=", and appended their own line, which systemd prefers
+// because it comes later. Every later pass of theirs rewrote only that
+// line, to exactly their two flags. So the first assignment is one they
+// did not recognise, and the second is a line of its own holding exactly
+// the two flags in their order and form.
+func appendedByEarlierInstaller(extra []envAssignment, lines []string) bool {
+	operator, ours := extra[0], extra[1]
+	if strings.HasPrefix(strings.TrimSpace(lines[operator.first]), extraArgsKey+"=") {
+		return false
+	}
+	if ours.first != ours.last || ours.afterContinuedComment {
+		return false
+	}
+	value, ok := strings.CutPrefix(lines[ours.first], extraArgsKey+`="`)
+	if !ok {
+		return false
+	}
+	if value, ok = strings.CutSuffix(value, `"`); !ok {
+		return false
+	}
+	binDir, configFile, ok := strings.Cut(value, " ")
+	if !ok {
+		return false
+	}
+	binDir, ok1 := strings.CutPrefix(binDir, flagBinDir+"=")
+	configFile, ok2 := strings.CutPrefix(configFile, flagConfigFile+"=")
+	return ok1 && ok2 && binDir != "" && configFile != "" && !strings.ContainsAny(binDir+configFile, " \t\"'\\$`")
 }
 
 // unquoteExtraArgs strips exactly one matching pair of outer quotes. The

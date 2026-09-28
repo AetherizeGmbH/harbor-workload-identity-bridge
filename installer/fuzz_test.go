@@ -54,7 +54,7 @@ func FuzzMergeExtraArgs(f *testing.F) {
 		"", "KUBELET_EXTRA_ARGS=\n", "KUBELET_EXTRA_ARGS=--node-ip=10.0.0.1 --v=2\n", "# comment\nKUBELET_EXTRA_ARGS='--a --b'\n",
 		"KUBELET_EXTRA_ARGS = \"--max-pods=42\"\n", "KUBELET_EXTRA_ARGS\t=--a\nKUBELET_EXTRA_ARGS=--b\n",
 		"FOO=\"x\nKUBELET_EXTRA_ARGS=--a\n\"\n", "export KUBELET_EXTRA_ARGS=--a\r\n", "# c \\\nKUBELET_EXTRA_ARGS=--a\n",
-		"KUBELET_EXTRA_ARGS=\xcb   0\n", "FOO=\uFFFE\n", "FOO=a\x00b\n",
+		"KUBELET_EXTRA_ARGS=\xcb   0\n", "FOO=\uFFFE\n", "FOO=a\x00b\n", damagedBy94,
 	} {
 		f.Add([]byte(seed))
 	}
@@ -92,8 +92,18 @@ func FuzzMergeExtraArgs(f *testing.F) {
 		before, othersBefore := split(existing)
 		after, othersAfter := split(out)
 		want := slices.Clone(ours)
-		if len(before) > 0 {
-			want = append(stripCredentialProviderFlags(before[len(before)-1]), ours...)
+		switch len(before) {
+		case 0:
+		case 1:
+			want = append(stripCredentialProviderFlags(before[0]), ours...)
+		default:
+			// Only a line an earlier installer appended goes
+			// (appendedByEarlierInstaller): it held nothing but the two
+			// flags, and the operator's assignment before it counts.
+			if len(before) != 2 || len(stripCredentialProviderFlags(before[1])) != 0 {
+				t.Fatalf("accepted %d assignments, the last %q:\ninput:\n%q\noutput:\n%q", len(before), before[len(before)-1], existing, out)
+			}
+			want = append(stripCredentialProviderFlags(before[0]), ours...)
 		}
 		if len(after) != 1 || !slices.Equal(after[0], want) {
 			t.Fatalf("systemd reads KUBELET_EXTRA_ARGS as %q, want exactly %q:\ninput:\n%q\noutput:\n%q", after, want, existing, out)

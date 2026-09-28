@@ -242,6 +242,32 @@ func TestRun_PatchKeepsOperatorArgsWrittenWithSpaces(t *testing.T) {
 	}
 }
 
+// TestRun_PatchRepairsTheLineAnEarlierInstallerAppended: on a node where an
+// installer before this version appended its own KUBELET_EXTRA_ARGS after
+// the operator's spaced assignment, the pass merges the two (one restart),
+// and kubelet runs with the operator's args again.
+func TestRun_PatchRepairsTheLineAnEarlierInstallerAppended(t *testing.T) {
+	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
+	writeHostFile(t, env, defaultKubeletPath, damagedBy94)
+	if err := run(env.cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(env.cfg.ProcRoot, strconv.Itoa(fakeKubeletPID), "cmdline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := splitCmdline(raw)
+	if !slices.Contains(argv, "--max-pods=42") || flagValue(argv, flagBinDir) != env.cfg.HostBinDir {
+		t.Fatalf("kubelet runs with %q, want the operator's --max-pods=42 and this install's flags", argv)
+	}
+	if got := extraArgsAssignments(t, []byte(env.hostFile(t, defaultKubeletPath))); len(got) != 1 {
+		t.Fatalf("KUBELET_EXTRA_ARGS assignments = %q, want one", got)
+	}
+	if err := run(env.cfg); err != nil || env.restarts != 1 {
+		t.Fatalf("re-run: %v, restarts = %d, want 1", err, env.restarts)
+	}
+}
+
 func TestRun_PatchConfigChangeRestarts(t *testing.T) {
 	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	if err := run(env.cfg); err != nil {

@@ -303,3 +303,51 @@ func TestParseEnvFile_RefusesWhatSystemdDoesNotLoad(t *testing.T) {
 		}
 	}
 }
+
+// damagedBy94 is an environment file as installers before this version
+// left it (audit #94): they did not recognise the operator's spaced
+// assignment and appended their own, which systemd prefers.
+const damagedBy94 = "# node\nKUBELET_EXTRA_ARGS = \"--max-pods=42\"\nOTHER=1\n" +
+	"KUBELET_EXTRA_ARGS=\"" + flagBinDir + "=/old/bin " + flagConfigFile + "=/old/config.yaml\"\n"
+
+// TestMergeExtraArgs_RepairsWhatEarlierInstallersAppended: the appended
+// line holds exactly the two flags. It is merged into the operator's
+// assignment and removed, so kubelet gets the operator's args back, instead
+// of a refusal on every pass (two assignments) after the upgrade.
+func TestMergeExtraArgs_RepairsWhatEarlierInstallersAppended(t *testing.T) {
+	ours := flagBinDir + "=/b " + flagConfigFile + "=/c.yaml"
+	for name, tc := range map[string]struct{ in, want string }{
+		"spaced": {damagedBy94, "# node\nKUBELET_EXTRA_ARGS=\"--max-pods=42 " + ours + "\"\nOTHER=1\n"},
+		"tab before =": {
+			"KUBELET_EXTRA_ARGS\t=--max-pods=42\nKUBELET_EXTRA_ARGS=\"" + flagBinDir + "=/b " + flagConfigFile + "=/c.yaml\"\n",
+			"KUBELET_EXTRA_ARGS=\"--max-pods=42 " + ours + "\"\n",
+		},
+		"lines added after it": {
+			damagedBy94 + "LATER=1\n",
+			"# node\nKUBELET_EXTRA_ARGS=\"--max-pods=42 " + ours + "\"\nOTHER=1\nLATER=1\n",
+		},
+	} {
+		out, err := mergeExtraArgs([]byte(tc.in), "/b", "/c.yaml")
+		if err != nil || string(out) != tc.want {
+			t.Errorf("%s: got %v\n%s\nwant\n%s", name, err, out, tc.want)
+			continue
+		}
+		if again, err := mergeExtraArgs(out, "/b", "/c.yaml"); err != nil || string(again) != string(out) {
+			t.Errorf("%s: not idempotent: %v\n%s", name, err, again)
+		}
+	}
+	// Anything else with two assignments is still refused: the installer
+	// cannot tell which one the operator wants.
+	for name, in := range map[string]string{
+		"operator line recognised before": "KUBELET_EXTRA_ARGS=\"--max-pods=42\"\nKUBELET_EXTRA_ARGS=\"" + flagBinDir + "=/b " + flagConfigFile + "=/c.yaml\"\n",
+		"more than the two flags":         "KUBELET_EXTRA_ARGS = --max-pods=42\nKUBELET_EXTRA_ARGS=\"--v=2 " + flagBinDir + "=/b " + flagConfigFile + "=/c.yaml\"\n",
+		"flags in the other order":        "KUBELET_EXTRA_ARGS = --max-pods=42\nKUBELET_EXTRA_ARGS=\"" + flagConfigFile + "=/c.yaml " + flagBinDir + "=/b\"\n",
+		"not the form written":            "KUBELET_EXTRA_ARGS = --max-pods=42\nKUBELET_EXTRA_ARGS=" + flagBinDir + "=/b " + flagConfigFile + "=/c.yaml\n",
+		"appended line first":             "KUBELET_EXTRA_ARGS=\"" + flagBinDir + "=/b " + flagConfigFile + "=/c.yaml\"\nKUBELET_EXTRA_ARGS = --max-pods=42\n",
+		"three assignments":               damagedBy94 + "KUBELET_EXTRA_ARGS = --v=2\n",
+	} {
+		if out, err := mergeExtraArgs([]byte(in), "/b", "/c.yaml"); err == nil || !strings.Contains(err.Error(), "multiple KUBELET_EXTRA_ARGS lines") {
+			t.Errorf("%s: got %v\n%s", name, err, out)
+		}
+	}
+}

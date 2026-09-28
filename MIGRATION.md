@@ -2,6 +2,14 @@
 
 ### 0.11.3: a refused HarborAccess suspends its robot (ADR-0030)
 
+### Unreleased: plugin installer
+
+| Change | What to do |
+| --- | --- |
+| Patch mode reads `/etc/default/kubelet` as systemd does, so it also recognises an assignment with whitespace before the `=`, such as `KUBELET_EXTRA_ARGS = "--max-pods=42"`. Installers before this version did not, appended a second `KUBELET_EXTRA_ARGS` line with only the two `--image-credential-provider-*` flags, and kubelet used that line: it ran without the operator's args. The installer now merges the flags into the operator's line and removes the appended one; kubelet restarts once on such a node and runs with those args again | Nothing, unless kubelet should keep running without those args: then remove them from `/etc/default/kubelet` on the affected nodes (the ones with two `KUBELET_EXTRA_ARGS` lines) before the upgrade. |
+
+### Unreleased: HarborAccess tokenTTL syntax, required spec
+
 | Change | What to do |
 | --- | --- |
 | A HarborAccess reported as `AudienceMismatch`, `IssuerMismatch` or `InvalidSpec` that already had a robot (for example one that named another audience before 0.6.0, or `*` before 0.5.5) now has the robot disabled in Harbor, or deleted if it carries a `*` grant, and its robot Secret deleted. Fixing the HarborAccess re-enables the robot with a new password | Before upgrading, find objects with `Ready=False` (`kubectl get harboraccess -A`), check their reason (`kubectl describe`), and fix the refused ones a workload still pulls through. Check `plugin.audience` on every upgrade: a wrong value now suspends every robot until it is corrected. |
