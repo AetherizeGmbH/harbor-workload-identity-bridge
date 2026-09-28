@@ -295,12 +295,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.recordResult(ResultForbidden)
 		return
 	}
-	// The reconciler reports such a HarborAccess as InvalidSpec and leaves
-	// its robot as it was: spec edits are not applied, the password is not
-	// rotated. Serving the robot's Secret would hand out those stale
-	// grants. The matched object is refused, not skipped: skipping would
-	// silently switch to another HarborAccess for the same identity, with
-	// other permissions (see findHarborAccess on several matches).
+	// The reconciler refuses such a HarborAccess as InvalidSpec: it stops
+	// applying spec edits and suspends the robot, deleting its Secret
+	// (ADR-0030). Until that pass has run, or while it fails, the Secret
+	// from before is still there, and serving it would hand out grants the
+	// bridge no longer converges. The matched object is refused, not
+	// skipped: skipping would silently switch to another HarborAccess for
+	// the same identity, with other permissions (see findHarborAccess on
+	// several matches).
 	if err := specError(matched); err != nil {
 		h.audit(logger).Info("credential denied", append(append(caller, claimFields(claims)...),
 			"reason", "invalid_harboraccess_spec", "harboraccess", matched.Namespace+"/"+matched.Name,

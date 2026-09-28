@@ -704,19 +704,20 @@ switches off the SDK's wire dumps, which the go-openapi runtime would
 otherwise enable whenever `DEBUG` or `SWAGGER_DEBUG` is set in the
 bridge's environment (`TestNewClient_DebugEnvDoesNotDumpSecrets`).
 
-Denials (token rejected, no matching CR, CR being deleted, Secret owner
-mismatch) are the `credential denied` lines above, on the same
-fixed-info audit logger. A request with a valid token that gets no
-credentials for another reason is a `credential unavailable` line: the
-robot Secret does not exist yet, or it still holds the robot of the
-previous `serviceAccountRef` (`503`, the plugin retries; the latter also
-on every pull while `harbor.robotNamePrefix` does not match Harbor's
-`robot_name_prefix`), or it is incomplete, the robot name cannot be
-derived, or the Kubernetes API failed (`500`, also on the regular log
-with the full error). So is a token the bridge could not judge because
-it could not fetch the signing keys (`503`, see below). Requests refused
-before the token is checked (rate limit, missing bearer, bad body) are
-counted in the metrics below but not logged one by one.
+Denials (token rejected, no matching CR, invalid HarborAccess spec, CR
+being deleted, Secret owner mismatch) are the `credential denied` lines
+above, on the same fixed-info audit logger. A request with a valid token
+that gets no credentials for another reason is a
+`credential unavailable` line: the robot Secret does not exist yet, or
+it still holds the robot of the previous `serviceAccountRef` (`503`, the
+plugin retries; the latter also on every pull while
+`harbor.robotNamePrefix` does not match Harbor's `robot_name_prefix`),
+or it is incomplete, the robot name cannot be derived, or the Kubernetes
+API failed (`500`, also on the regular log with the full error). So is a
+token the bridge could not judge because it could not fetch the signing
+keys (`503`, see below). Requests refused before the token is checked
+(rate limit, missing bearer, bad body) are counted in the metrics below
+but not logged one by one.
 
 Every Harbor API call is bounded (30s per call, TLS 1.2 minimum, a cap
 on paginated listings), so a Harbor that accepts connections and never

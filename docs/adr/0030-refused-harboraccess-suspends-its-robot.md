@@ -12,9 +12,11 @@ suspension). Extends ADR-0012 by one description token.
 
 The reconciler refuses a HarborAccess it must not serve:
 `IssuerMismatch` (ADR-0009), `AudienceMismatch` (ADR-0026) and
-`InvalidSpec` (a name longer than 63 characters, or a project name that
-is not a Harbor project name, such as `*`, which Harbor reads as every
-project). It returned before any Harbor call. That is right for a
+`InvalidSpec` (a missing spec, a name longer than 63 characters, a
+project name that is not a Harbor project name, such as `*`, which
+Harbor reads as every project, a `tokenTTL` that is not a Go duration, or
+a `serviceAccountRef` that maps to no robot name Harbor accepts). It
+returned before any Harbor call. That is right for a
 HarborAccess that never had a robot, and wrong for one that did (audit
 2026-09, control-plane findings 17, 38, 98):
 
@@ -101,7 +103,8 @@ robot.
 
 - A refused HarborAccess has no usable robot and no robot Secret. The data
   plane has nothing to serve for it: it refuses `AudienceMismatch` and
-  `IssuerMismatch` objects at matching (403), and finds no Secret for an
+  `IssuerMismatch` objects, and an `InvalidSpec` one whose `tokenTTL` is
+  not a Go duration, at matching (403), and finds no Secret for any other
   `InvalidSpec` one (503).
 - A wrong `BRIDGE_AUDIENCE` (or a wrong issuer that still lets the bridge
   start) now suspends every robot at once. Credentials kubelet cached stop

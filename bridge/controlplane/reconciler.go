@@ -225,17 +225,20 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	logger := log.FromContext(ctx)
 	cluster := r.Config.ClusterName
 
-	// The CRD requires spec; this guards objects stored before that rule
+	// Every refusal below (steps 0-3) deletes the robot Secret and
+	// suspends the robot the serviceAccountRef maps to, if the HarborAccess
+	// owns one (refuse, ADR-0030).
+	//
+	// 0. The CRD requires spec; this guards objects stored before that rule
 	// existed, which would otherwise be reported as an issuer mismatch.
 	if ha.Spec.ServiceAccountRef == (harborv1alpha1.ServiceAccountRef{}) &&
 		ha.Spec.TrustPolicy == (harborv1alpha1.TrustPolicy{}) && len(ha.Spec.Permissions) == 0 {
-		return r.markNotReady(ctx, ha, ReasonInvalidSpec,
+		return r.refuse(ctx, ha, ReasonInvalidSpec,
 			"spec is missing: a HarborAccess needs spec.serviceAccountRef, spec.trustPolicy and spec.permissions")
 	}
 
 	// 1. Issuer match — refuse early if the CR was applied to the wrong
-	// cluster. Refusals (steps 1-3) suspend whatever robot the HarborAccess
-	// already has (refuse, ADR-0030).
+	// cluster.
 	if ha.Spec.TrustPolicy.Issuer != r.Config.OIDCIssuer.String() {
 		return r.refuse(ctx, ha, ReasonIssuerMismatch,
 			fmt.Sprintf("CR trustPolicy.issuer %q does not match cluster issuer %q",
@@ -269,9 +272,11 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	}
 
 	// The CRD admits only Go durations; this guards values such as "1d"
-	// admitted before that rule existed, which decode to a zero TTL.
+	// admitted before that rule existed, which decode to a zero TTL. The
+	// data plane refuses such an object (403); a robot it got before the
+	// value was set is suspended like that of any refused object.
 	if err := ha.Spec.TokenTTL.Err(); err != nil {
-		return r.markNotReady(ctx, ha, ReasonInvalidSpec, "spec.tokenTTL: "+err.Error())
+		return r.refuse(ctx, ha, ReasonInvalidSpec, "spec.tokenTTL: "+err.Error())
 	}
 
 	// 3. Compute desired robot identity.
@@ -1108,16 +1113,6 @@ func (r *Reconciler) markReady(
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
-}
-
-// markNotReady writes Ready=False for spec errors only a change to the CR
-// resolves (a missing spec, a tokenTTL that is not a Go duration). The CR
-// update produces an event, so it returns nil without a requeue.
-func (r *Reconciler) markNotReady(ctx context.Context, ha *harborv1alpha1.HarborAccess, reason, message string) (ctrl.Result, error) {
-	if err := r.setNotReady(ctx, ha, reason, message); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
-	}
-	return ctrl.Result{}, nil
 }
 
 // markNotReadyWithRequeue writes Ready=False for conditions resolved

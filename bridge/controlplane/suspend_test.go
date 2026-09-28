@@ -87,20 +87,24 @@ func provisionedMessage(t *testing.T, r *Reconciler) string {
 
 func TestReconcile_RefusedHarborAccessSuspendsItsRobot(t *testing.T) {
 	for _, tc := range []struct {
-		reason string
-		edit   func(*harborv1alpha1.HarborAccess)
+		name, reason string
+		edit         func(*harborv1alpha1.HarborAccess)
 	}{
-		{ReasonAudienceMismatch, func(ha *harborv1alpha1.HarborAccess) {
+		{"AudienceMismatch", ReasonAudienceMismatch, func(ha *harborv1alpha1.HarborAccess) {
 			ha.Spec.TrustPolicy.Audience = "https://kubernetes.default.svc"
 		}},
-		{ReasonIssuerMismatch, func(ha *harborv1alpha1.HarborAccess) {
+		{"IssuerMismatch", ReasonIssuerMismatch, func(ha *harborv1alpha1.HarborAccess) {
 			ha.Spec.TrustPolicy.Issuer = "https://other-cluster.example.com"
 		}},
-		{ReasonInvalidSpec, func(ha *harborv1alpha1.HarborAccess) {
+		{"InvalidSpec", ReasonInvalidSpec, func(ha *harborv1alpha1.HarborAccess) {
 			ha.Spec.Permissions = append(ha.Spec.Permissions, harborv1alpha1.ProjectPermission{Project: "*", Action: harborv1alpha1.ActionPullPush})
 		}},
+		// A tokenTTL an older CRD admitted and Go cannot parse.
+		{"InvalidSpecTokenTTL", ReasonInvalidSpec, func(ha *harborv1alpha1.HarborAccess) {
+			ha.Spec.TokenTTL = legacyTokenTTL(t, `"1d"`)
+		}},
 	} {
-		t.Run(tc.reason, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			mh := newMockHarbor()
 			r, id := provisioned(t, mh)
 			editHA(t, r, tc.edit)
