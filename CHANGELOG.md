@@ -1,3 +1,9 @@
+## [0.11.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.0...v0.11.1) (2026-09-28)
+
+### Bug Fixes
+
+* **dataplane:** resilient JWKS keys, audited refusals, no credentials for deleting objects ([#135](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/135)) ([ade34e9](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/ade34e92514fcd1e8512af277ecfd51bf6cff374))
+
 ## [0.11.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.10.2...v0.11.0) (2026-09-28)
 
 ### Features
