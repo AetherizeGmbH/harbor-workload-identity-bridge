@@ -354,6 +354,8 @@ spec:
       securityContext:
         runAsNonRoot: false  # need root to write onto the host
         runAsUser: 0
+      nodeSelector:
+        kubernetes.io/os: linux
       tolerations:
         - operator: Exists
       initContainers:
@@ -540,6 +542,8 @@ spec:
                     app.kubernetes.io/instance: harbor-bridge
                     app.kubernetes.io/component: bridge
                 topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kubernetes.io/os: linux
       containers:
         - name: bridge
           image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge:0.11.4

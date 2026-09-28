@@ -102,6 +102,7 @@ cases=(
   "service.type ClusterIP with the default endpoint|--set|service.type=ClusterIP|service.type=ClusterIP gives the bridge no node port, but with plugin.bridgeEndpoint empty the plugin calls https://127.0.0.1:<service.nodePort> (ADR-0008). Use service.type=NodePort, or set plugin.bridgeEndpoint"
   "service.nodePort null with the default endpoint|--set|service.nodePort=null|service.nodePort=null must be a fixed port while plugin.bridgeEndpoint is empty"
   "service.nodePort not a port with the default endpoint|--set|service.nodePort=70000|service.nodePort=70000 must be a fixed port"
+  "plugin.priorityClassName not a string|--set|plugin.priorityClassName=true|plugin.priorityClassName must be a string (a PriorityClass name, or \"\" to leave it out), but it was read as the bool true"
 )
 
 failed=0
@@ -480,6 +481,37 @@ if [ -z "${nameless}" ] \
   echo "PASS  endpoint the certificate names, or an operator certificate: no server name"
 else
   echo "FAIL  endpoint the certificate names, or an operator certificate: no server name:${nameless}"
+  failed=$((failed+1))
+fi
+
+# plugin.priorityClassName: the default keeps system-node-critical, a name
+# replaces it, "" leaves the field out, and a missing key (--reuse-values
+# from a chart without it) renders the default.
+if out=$(render -f "${COMPLETE}" 2>&1) \
+   && grep -qxF '      priorityClassName: system-node-critical' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set plugin.priorityClassName=harbor-bridge-node 2>&1) \
+   && grep -qxF '      priorityClassName: harbor-bridge-node' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set plugin.priorityClassName= 2>&1) \
+   && ! grep -q 'priorityClassName' <<<"${out}" \
+   && [ "$(render -f "${COMPLETE}" --set plugin.priorityClassName=null 2>&1)" = "$(render -f "${COMPLETE}" 2>&1)" ]; then
+  echo "PASS  plugin.priorityClassName default, override, empty and missing"
+else
+  echo "FAIL  plugin.priorityClassName default, override, empty and missing"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# Both workloads select Linux nodes by default; keys a user adds are merged
+# with it, and it can be dropped explicitly.
+if out=$(render -f "${COMPLETE}" --set plugin.nodeSelector.pool=infra --set bridge.nodeSelector.pool=infra 2>&1) \
+   && [ "$(grep -cxF '        kubernetes.io/os: linux' <<<"${out}")" -eq 2 ] \
+   && [ "$(grep -cxF '        pool: infra' <<<"${out}")" -eq 2 ] \
+   && out=$(render -f "${COMPLETE}" --set 'plugin.nodeSelector.kubernetes\.io/os=null' 2>&1) \
+   && [ "$(grep -cxF '        kubernetes.io/os: linux' <<<"${out}")" -eq 1 ]; then
+  echo "PASS  Linux nodeSelector merged with user keys, and removable"
+else
+  echo "FAIL  Linux nodeSelector merged with user keys, and removable"
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 

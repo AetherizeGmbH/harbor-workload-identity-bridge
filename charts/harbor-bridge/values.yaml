@@ -220,7 +220,10 @@ bridge:
 
   podAnnotations: {}
   podLabels: {}
-  nodeSelector: {}
+  # The bridge image is Linux-only (amd64, arm64). Keys you add are
+  # merged with this one; drop it with `kubernetes.io/os: null`.
+  nodeSelector:
+    kubernetes.io/os: linux
   tolerations: []
   affinity: {}
 
@@ -459,13 +462,31 @@ plugin:
 
   podAnnotations: {}
   podLabels: {}
-  nodeSelector: {}
+  # Linux nodes only: the plugin and installer are Linux binaries (amd64,
+  # arm64) and the installer needs a systemd kubelet. Without this the
+  # toleration below would also place pods on Windows nodes (and EKS/AKS
+  # do not taint those), where they never start and stall every
+  # DaemonSet rollout (maxUnavailable 10%). Workloads on Windows nodes get
+  # no credentials from the bridge. Keys you add are merged with this
+  # one; drop it with `kubernetes.io/os: null`.
+  nodeSelector:
+    kubernetes.io/os: linux
   tolerations:
     # Plugin must land on control-plane nodes too — kubelet on every
     # node needs to exec it for image pulls. This also places a
     # privileged pod on control-plane nodes; narrow it (e.g. to your
     # worker taints) if no workload there pulls from Harbor.
     - operator: Exists
+
+  # PriorityClass of the plugin DaemonSet's pods. system-node-critical
+  # (priority 2000001000) makes kubelet treat them as critical pods: it
+  # admits them on a full node (evicting other pods to make room) and
+  # evicts them last. A custom PriorityClass is capped at 1000000000,
+  # below the critical range; "" omits the field (the cluster's default
+  # priority). GKE admits system-node-critical pods
+  # outside kube-system only in a namespace with a ResourceQuota for that
+  # priority class (docs/platforms.md, GKE).
+  priorityClassName: system-node-critical
 
 # Service shape. ADR-0008: NodePort by default so plugin pods can reach
 # the bridge via node-local routing (plugin → 127.0.0.1:<nodePort>).

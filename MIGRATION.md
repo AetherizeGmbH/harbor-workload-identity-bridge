@@ -10,6 +10,13 @@
 | In `auto` mode (the default), a changed `plugin.hostBinaryDir` or `plugin.hostConfigDir` moves kubelet to the new directories. Installers before this version merged into the files in the old directories instead, recorded `merge` mode in their state file, and ignored the new values for good; releases that share the directories now move together (ADR-0035) | Nothing for directory changes from now on. A node where an earlier installer already merged after such a change stays on the old directories, because the state file no longer shows them as this release's own (an operator could have set the same flags). To move such nodes, set the old `plugin.hostBinaryDir` and `plugin.hostConfigDir` again for one rollout, which records them as this release's patch-mode directories (one kubelet restart per node), then set the new values: kubelet moves once every release on the node has them. |
 | The chart and the installer refuse `plugin.install.binDir` and `plugin.install.configFile` with any `plugin.install.mode` but `merge` | They were silently ignored in `auto` (the default), `patch` and `none` mode: `auto` patched kubelet's flags or merged into the discovered config instead of the named files. If you set them, set `plugin.install.mode=merge` too, or clear them; otherwise `helm upgrade` fails at template time with `used only with plugin.install.mode=merge`. |
 
+### Unreleased: Linux node selector, plugin PriorityClass
+
+| Change | What to do |
+| --- | --- |
+| `bridge.nodeSelector` and `plugin.nodeSelector` default to `kubernetes.io/os: linux` | Nothing. Keys you set are merged with it. The upgrade re-rolls the bridge Deployment and the plugin DaemonSet once; kubelet is not restarted (the provider config does not change). Pods no longer land on Windows nodes, where they never started and stalled DaemonSet rollouts. `helm upgrade --reuse-values` keeps the previous empty default. |
+| New `plugin.priorityClassName` (default `system-node-critical`, `""` leaves the field out) | Nothing. On GKE, create the ResourceQuota described in docs/platforms.md (GKE) in the plugin namespace, or the DaemonSet creates no pods. |
+
 ### Unreleased: the chart refuses values the bridge cannot work with
 
 Each of these values used to render, and the install then failed at

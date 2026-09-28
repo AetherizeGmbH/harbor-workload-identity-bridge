@@ -290,6 +290,10 @@ harbor.aetherize.io/robot
 {{- fail (printf "plugin.matchImages entry %q is not host[:port][/path] as kubelet matches it: a registry host (the glob * only in its labels, e.g. *.harbor.example.com), an optional numeric port and an optional literal path prefix, with no scheme, spaces or %%. Kubelet does not start with an entry it cannot parse, such as a port glob (harbor.example.com:*), and an entry with a scheme or a path glob never matches an image." (toString .)) -}}
 {{- end -}}
 {{- end -}}
+{{- $priorityClassName := .Values.plugin.priorityClassName -}}
+{{- if not (or (kindIs "invalid" $priorityClassName) (kindIs "string" $priorityClassName)) -}}
+{{- fail (printf "plugin.priorityClassName must be a string (a PriorityClass name, or \"\" to leave it out), but it was read as the %s %v." (kindOf $priorityClassName) $priorityClassName) -}}
+{{- end -}}
 {{- $install := .Values.plugin.install | default dict -}}
 {{- if not (has $install.mode (list "auto" "merge" "patch" "none")) -}}
 {{- fail (printf "plugin.install.mode=%q is invalid. Must be one of: auto, merge, patch, none (ADR-0021)." (toString $install.mode)) -}}
@@ -642,6 +646,19 @@ explicit endpoint then.
 {{- if not (has $host (append (splitList " " (include "harbor-bridge.bridge.certDNSNames" .)) "127.0.0.1")) -}}
 {{- $svc -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+priorityClassName is plugin.priorityClassName. A missing key renders the
+default: `helm upgrade --reuse-values` renders with the previous chart's
+values, which predate the key. "" omits the field.
+*/}}
+{{- define "harbor-bridge.plugin.priorityClassName" -}}
+{{- if kindIs "invalid" .Values.plugin.priorityClassName -}}
+system-node-critical
+{{- else -}}
+{{- .Values.plugin.priorityClassName -}}
 {{- end -}}
 {{- end -}}
 

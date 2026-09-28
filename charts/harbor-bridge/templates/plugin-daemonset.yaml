@@ -75,7 +75,9 @@ spec:
       # neither and drops this.
       hostPID: true
       {{- end }}
-      priorityClassName: system-node-critical
+      {{- with include "harbor-bridge.plugin.priorityClassName" . }}
+      priorityClassName: {{ . }}
+      {{- end }}
       securityContext:
         runAsNonRoot: false  # need root to write onto the host
         runAsUser: 0
