@@ -845,8 +845,9 @@ run "bridge_mtls" {
     bridge_image = run.push.image_refs.bridge
     plugin_image = run.push.image_refs.plugin
     # R4 escape hatch; empty keeps the loopback NodePort (header note).
-    bridge_endpoint = try(var.bridge_endpoint, "")
-    mtls            = true
+    bridge_endpoint     = try(var.bridge_endpoint, "")
+    mtls                = true
+    critical_pods_quota = true # as in bridge_install (same state)
   }
 }
 
