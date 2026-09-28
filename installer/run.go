@@ -66,6 +66,10 @@ func run(cfg *config) error {
 	}
 
 	var wiring kubeletWiring
+	// movingOwn is set when auto mode found kubelet on the directories of
+	// this install's own last patch-mode pass, which it moves to the
+	// current ones.
+	movingOwn := false
 	switch mode {
 	case modeAuto:
 		wiring, err = discoverKubelet(cfg.ProcRoot)
@@ -83,7 +87,20 @@ func run(cfg *config) error {
 			// kubelet for nothing (audit H3).
 			mode = modePatch
 		default:
-			mode = modeMerge
+			if movingOwn, err = cfg.wiredByOwnPatch(wiring); err != nil {
+				return fmt.Errorf("mode auto: %w", err)
+			}
+			if movingOwn {
+				// The same, after plugin.hostBinaryDir or
+				// plugin.hostConfigDir changed: the flags point at the
+				// directories this install's last verified patch-mode
+				// pass wired. Merging would keep kubelet there and ignore
+				// the new values for good.
+				mode = modePatch
+				logf("kubelet runs with the directories of this install's last patch-mode pass (bin-dir=%q config=%q); moving it to bin-dir=%q config=%q. The files in the old directories stay", wiring.BinDir, wiring.ConfigFile, cfg.HostBinDir, cfg.ownConfigPath())
+			} else {
+				mode = modeMerge
+			}
 		}
 		logf("mode auto resolved to %s", mode)
 	case modePatch:
@@ -108,11 +125,6 @@ func run(cfg *config) error {
 		}
 	}
 
-	if mode == modeMerge && dirsOverlap(wiring.BinDir, cfg.HostConfigDir) {
-		// The binaries and records in the bin dir must be out of reach
-		// of the writers of plugin.hostConfigDir (loadConfig).
-		return fmt.Errorf("kubelet's credential-provider bin dir %s and plugin.hostConfigDir %s must not be the same directory or inside one another: every release's sync container can write plugin.hostConfigDir; choose another plugin.hostConfigDir", wiring.BinDir, cfg.HostConfigDir)
-	}
 	if mode == modePatch {
 		// Held until the pass ends: no installer may add an entry to the
 		// config kubelet reads now, or to this install's own config,
@@ -121,10 +133,26 @@ func run(cfg *config) error {
 		if err != nil {
 			return err
 		}
-		defer unlock()
-		if err := checkRewire(cfg, wiring); err != nil {
+		switch err := checkRewire(cfg, wiring); {
+		case err == nil:
+			defer unlock()
+		case movingOwn:
+			// Other installs share the old directories: keep kubelet
+			// there, as auto mode did before it recognised its own
+			// directories. The merge takes the config's lock again.
+			unlock()
+			logf("not moving kubelet: %v", err)
+			mode = modeMerge
+			logf("mode auto resolved to %s", mode)
+		default:
+			unlock()
 			return err
 		}
+	}
+	if mode == modeMerge && dirsOverlap(wiring.BinDir, cfg.HostConfigDir) {
+		// The binaries and records in the bin dir must be out of reach
+		// of the writers of plugin.hostConfigDir (loadConfig).
+		return fmt.Errorf("kubelet's credential-provider bin dir %s and plugin.hostConfigDir %s must not be the same directory or inside one another: every release's sync container can write plugin.hostConfigDir; choose another plugin.hostConfigDir", wiring.BinDir, cfg.HostConfigDir)
 	}
 
 	switch mode {
@@ -137,6 +165,22 @@ func run(cfg *config) error {
 	default:
 		return fmt.Errorf("unreachable mode %q", mode)
 	}
+}
+
+// wiredByOwnPatch reports whether kubelet's wiring is what this install's
+// last verified patch-mode pass set up, according to its state file: auto
+// mode then moves kubelet to the current directories (audit H3, after a
+// change of plugin.hostBinaryDir or plugin.hostConfigDir). The flags alone
+// cannot tell: an operator or another install may have wired them to the
+// same kind of files through the same environment file, and patch mode
+// would drop their entries. Without a state file (removed, or a
+// plugin.install.stateDir that changed too) auto mode merges, as before.
+func (c *config) wiredByOwnPatch(wiring kubeletWiring) (bool, error) {
+	st, err := loadState(c.statePath())
+	if err != nil {
+		return false, err
+	}
+	return st != nil && st.Mode == modePatch && st.BinDir == wiring.BinDir && st.ConfigFile == wiring.ConfigFile, nil
 }
 
 // runNone drops the binary and config into the chart-owned dirs and

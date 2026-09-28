@@ -338,8 +338,11 @@ plugin:
     # auto  — inspect the live kubelet command line: if the node
     #         already runs kubelet with --image-credential-provider-*
     #         flags (EKS / GKE / AKS node images), behave as `merge`;
-    #         otherwise behave as `patch`. The right default almost
-    #         everywhere.
+    #         otherwise behave as `patch`. Flags this install's own last
+    #         patch-mode pass set count as `patch`: a changed
+    #         hostBinaryDir/hostConfigDir moves kubelet (unless other
+    #         installs' entries are in the old config). The right default
+    #         almost everywhere.
     # merge — inject our provider entry into the node's EXISTING
     #         CredentialProviderConfig (JSON or YAML; foreign providers
     #         and unknown fields are preserved) and drop the binary
