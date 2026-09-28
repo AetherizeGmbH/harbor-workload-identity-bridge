@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -451,90 +450,26 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 	); err != nil {
 		return nil, "", nil, fmt.Errorf("list HarborAccess: %w", err)
 	}
-	type match struct {
-		ha  *harborv1alpha1.HarborAccess
-		aud string
-	}
-	var matches, deletingMatches []match
+	cands := make([]accessCandidate, len(list.Items))
 	for i := range list.Items {
 		ha := &list.Items[i]
-		// Defense-in-depth: a CR with an empty audience or issuer must
-		// never match. The CRD enforces MinLength=1 on both
-		// trustPolicy.audience and trustPolicy.issuer, but the data plane is
-		// the security boundary and must not rely solely on CRD validation
-		// (a CR applied with --validate=false, or a future API revision that
-		// relaxes the marker, would otherwise let an empty trustPolicy.audience
-		// match a token carrying aud:"" — a silent auth bypass).
-		if ha.Spec.TrustPolicy.Audience == "" || ha.Spec.TrustPolicy.Issuer == "" {
-			continue
-		}
-		// The bridge serves exactly one audience (ADR-0026). The reconciler
-		// already marks a CR with another audience not ready; the data
-		// plane, as the security boundary, never matches one either. An
-		// unset configured audience matches nothing (fail closed).
-		if ha.Spec.TrustPolicy.Audience != h.Config.Audience {
-			continue
-		}
-		// The index already selected on this; kept so the match never
-		// depends on how the list was filtered.
-		if harborAccessSubject(ha) != claims.Subject {
-			continue
-		}
-		// Defense-in-depth: the Validator already pins iss to the bridge's
-		// configured issuer, and the reconciler refuses to provision a robot
-		// for a CR whose trustPolicy.issuer disagrees with the cluster
-		// issuer. Re-checking here means a CR is never matched against a
-		// token from an issuer it did not declare, even if those upstream
-		// invariants regress.
-		if ha.Spec.TrustPolicy.Issuer != claims.Issuer {
-			continue
-		}
-		for _, aud := range claims.Audience {
-			// Never honor an empty aud entry, even against a (guarded-above)
-			// non-empty CR audience — keeps the match total over both sides.
-			if aud == "" {
-				continue
-			}
-			if aud == ha.Spec.TrustPolicy.Audience {
-				if ha.DeletionTimestamp.IsZero() {
-					matches = append(matches, match{ha: ha, aud: aud})
-				} else {
-					deletingMatches = append(deletingMatches, match{ha: ha, aud: aud})
-				}
-				break
-			}
+		cands[i] = accessCandidate{
+			namespace: ha.Namespace,
+			name:      ha.Name,
+			deleting:  !ha.DeletionTimestamp.IsZero(),
+			subject:   harborAccessSubject(ha),
+			issuer:    ha.Spec.TrustPolicy.Issuer,
+			audience:  ha.Spec.TrustPolicy.Audience,
 		}
 	}
-	byName := func(ms []match) {
-		sort.Slice(ms, func(i, j int) bool {
-			if ms[i].ha.Namespace != ms[j].ha.Namespace {
-				return ms[i].ha.Namespace < ms[j].ha.Namespace
-			}
-			return ms[i].ha.Name < ms[j].ha.Name
-		})
+	m, aud, d := h.matchAccess(ctx, "HarborAccess CRs", claims, cands)
+	switch {
+	case m >= 0:
+		return &list.Items[m], aud, nil, nil
+	case d >= 0:
+		return nil, "", &list.Items[d], nil
 	}
-	if len(matches) == 0 {
-		if len(deletingMatches) == 0 {
-			return nil, "", nil, nil
-		}
-		byName(deletingMatches)
-		return nil, "", deletingMatches[0].ha, nil
-	}
-	byName(matches)
-	if len(matches) > 1 {
-		names := make([]string, len(matches))
-		for i, m := range matches {
-			names[i] = m.ha.Namespace + "/" + m.ha.Name
-		}
-		log.FromContext(ctx).WithName("dataplane").Info(
-			"multiple HarborAccess CRs match this token; selecting deterministically by namespace/name — resolve this ambiguity, the matched CRs grant potentially different permissions",
-			"subject", claims.Subject,
-			"audience", matches[0].aud,
-			"matches", strings.Join(names, ","),
-			"selected", names[0],
-		)
-	}
-	return matches[0].ha, matches[0].aud, nil, nil
+	return nil, "", nil, nil
 }
 
 // specError reports a spec the reconciler rejects as InvalidSpec although
