@@ -29,7 +29,8 @@ func clearAllEnv(t *testing.T) {
 	for _, k := range []string{
 		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
 		EnvForceLocalValidation, EnvLogLevel, EnvAudience, EnvHarborAccessSelector, EnvInstance,
-		EnvTokenMaxLifetime, EnvRequirePodBoundToken,
+		EnvTokenMaxLifetime, EnvRequirePodBoundToken, EnvHarborRegistryHosts,
+		EnvNexusURL, EnvNexusAdminDir, EnvNexusCAFile, EnvNexusAllowHTTP, EnvNexusRegistryHosts, EnvNexusRateLimitBackoff,
 	} {
 		t.Setenv(k, "")
 		// t.Setenv with empty string doesn't actually unset on every Go
