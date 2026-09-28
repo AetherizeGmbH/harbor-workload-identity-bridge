@@ -1070,8 +1070,10 @@ limits today.
   later, a credential self-check, the Community Edition limits, a bridge
   with Nexus only (Harbor is required today), the `oci` format, whether
   `status.user.userId` stays, decision g (the backend seam, not
-  extracted), and the threat-model additions of decision j, which nobody
-  has rated yet. *Limits now:* the Nexus backend is a preview, verified
+  extracted), whether a path-prefixed registry host should confine
+  credentials to the image (question 10: kubelet reuses them for every
+  image of the host[:port] today), and the threat-model additions of
+  decision j, which nobody has rated yet. *Limits now:* the Nexus backend is a preview, verified
   against Nexus 3.76.1 only ([Caveats](#caveats-adr-0036)).
 - [ ] **Run the Nexus e2e harness; decide whether CI runs it.**
   `make e2e-nexus` (HOW-TO-TEST.md §1c) has not run yet, and `make e2e`

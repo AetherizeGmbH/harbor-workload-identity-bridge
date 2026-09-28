@@ -605,6 +605,13 @@ every NexusAccess after every edit until the reconciler has run.
 9. **Status user id**: `status.user.userId` maps Nexus's audit log to
    NexusAccess objects, but tells every reader of the object which
    username to lock out (decision j). Keep it, or leave it to the Secret.
+10. **Path prefix scope** (added by the implementation review): kubelet
+    reuses credentials for every image of a registry host[:port], so a
+    path prefix in `nexus.registryHosts` selects requests but does not
+    confine credentials (note 21). Answer a request that matched only
+    through path-prefixed entries with `cacheKeyType: Image`, at one
+    bridge request per image and node, or keep `Registry` and the
+    documented limit.
 
 ## Implementation notes
 
