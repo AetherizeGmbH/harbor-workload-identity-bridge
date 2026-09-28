@@ -205,6 +205,7 @@ FUZZ_TARGETS ?= \
 	./bridge/controlplane/nexus:FuzzNexusName_Injective \
 	./bridge/controlplane/nexus:FuzzRenderMessage_WithholdsSecrets \
 	./bridge/internal/robotsecret:FuzzName_Injective \
+	./bridge/internal/nexussecret:FuzzNexusSecretName_Injective \
 	./bridge/dataplane:FuzzJSONAudience \
 	./bridge/dataplane:FuzzCachedKeySet_VerifySignature
 FUZZTIME ?= 10s
