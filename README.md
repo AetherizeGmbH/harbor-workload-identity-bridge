@@ -214,7 +214,7 @@ YAML
 # Kubernetes RBAC kubelet needs to mint this audience (see ADR-0017).
 helm install harbor-bridge \
   oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
-  --version 0.11.4 \
+  --version 0.11.5 \
   -n harbor-bridge-system \
   --set clusterName=prod-eu-west \
   --set harbor.url=https://harbor.example.com \

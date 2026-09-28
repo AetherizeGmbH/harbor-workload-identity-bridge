@@ -1,3 +1,9 @@
+## [0.11.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.4...v0.11.5) (2026-09-28)
+
+### Bug Fixes
+
+* **chart:** refuse values that break pulls, mirror bridge refusals, select Linux nodes ([#142](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/142)) ([cb8511f](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/cb8511f857d9f128a6f071ad0ea75c46c6466ba0))
+
 ## [0.11.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.3...v0.11.4) (2026-09-28)
 
 ### Bug Fixes
