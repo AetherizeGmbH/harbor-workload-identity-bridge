@@ -28,8 +28,8 @@ func validProviderName(name string) error {
 
 // nodeFiles are the base names of one install's own files on the node
 // (ADR-0029). Only these belong to one install; the credential-provider
-// config, the bin dir, /etc/default/kubelet and the kubelet unit are
-// shared by every install on the node.
+// config, the bin dir, the kubelet environment file and the kubelet unit
+// are shared by every install on the node.
 type nodeFiles struct {
 	Binary string // in the kubelet bin dir: kubelet runs <bin-dir>/<provider name>
 	// Record is next to Binary in the kubelet bin dir: the canonical bytes

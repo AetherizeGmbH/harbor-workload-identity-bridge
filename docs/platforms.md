@@ -5,7 +5,7 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 
 | Platform | Chart settings | What happens on each node | Verified |
 |---|---|---|---|
-| kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`, kubelet restarted and verified | yes (CI e2e) |
+| kind, kubeadm | defaults (`install.mode: auto`) | no credential-provider flags on kubelet → **patch**: binary and config into the chart's dirs, flags added to `KUBELET_EXTRA_ARGS` in the environment file the kubelet unit reads (`/etc/default/kubelet` with Debian packages and on kind, `/etc/sysconfig/kubelet` with RPM packages; ADR-0034), kubelet restarted and verified | kind: yes (CI e2e); RPM packages: unit-tested, not run |
 | GKE Standard | defaults | kubelet already runs GKE's `auth-provider-gcp` → **merge** into that config (YAML), binary into its bin dir | harness ready (`make e2e-gke`), never run |
 | EKS (AL2023) | defaults | kubelet already runs `ecr-credential-provider` → **merge** into `/etc/eks/image-credential-provider/config.json` (stays JSON) | merge unit-tested, not run |
 | AKS | defaults | kubelet already runs `acr-credential-provider` → **merge** into its config | merge unit-tested, not run |
@@ -54,7 +54,7 @@ not affected. Before it writes anything it checks its own provider entry the
 way kubelet does (`matchImages`, `defaultCacheDuration`, the audience) and
 refuses one kubelet would exit on. When kubelet still does not come back, or in
 patch mode does not pick up the flags, the installer restores the config (and
-`/etc/default/kubelet`) it replaced, restarts kubelet onto them and fails the
+the kubelet environment file) it replaced, restarts kubelet onto them and fails the
 DaemonSet pod on that node; with kubelet running again,
 `kubectl logs ds/…-plugin -c install` shows why. Until then kubelet is down for
 about the verification timeout (90 s), and the node is `NotReady` for that

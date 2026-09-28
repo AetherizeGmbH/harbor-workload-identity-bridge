@@ -30,8 +30,13 @@ type state struct {
 	Mode          string `json:"mode"`
 	BinDir        string `json:"binDir"`
 	ConfigFile    string `json:"configFile"`
+	// EnvFile is the environment file patch mode put the kubelet flags
+	// into (ADR-0034). Empty in merge mode, and in a patch-mode record
+	// written before ADR-0034, when it was always /etc/default/kubelet
+	// (envFile).
+	EnvFile string `json:"envFile,omitempty"`
 	// AppliedHash covers the whole effective credential-provider config
-	// file plus, in patch mode, the /etc/default/kubelet bytes, as of the
+	// file plus, in patch mode, the bytes of EnvFile, as of the
 	// last kubelet restart this installer verified or converted. It keeps
 	// the meaning it had before ADR-0029, when it was the only hash: an
 	// older installer (a rollback) compares exactly this field with its own
@@ -39,7 +44,7 @@ type state struct {
 	// record and does not restart kubelet.
 	AppliedHash string `json:"appliedHash"`
 	// EntryHash covers only this install's provider entry plus, in patch
-	// mode, the /etc/default/kubelet bytes (ADR-0029). It decides about
+	// mode, the bytes of EnvFile (ADR-0029). It decides about
 	// restarts: other installs' entries in the shared file are their own
 	// installers' concern, so a change there does not make this installer
 	// restart kubelet again. Empty in a record written before ADR-0029, or
@@ -60,6 +65,7 @@ type rejection struct {
 	Mode       string `json:"mode"`
 	BinDir     string `json:"binDir"`
 	ConfigFile string `json:"configFile"`
+	EnvFile    string `json:"envFile,omitempty"`
 	// Unit is the kubelet unit the pass restarted: a pass that restarted
 	// the wrong unit did not test the content.
 	Unit        string `json:"unit"`
@@ -87,6 +93,9 @@ const stateSchemaVersion = 1
 // target is what one install pass wants kubelet to run with.
 type target struct {
 	mode, binDir, configFile string
+	// envFile is the environment file patch mode edits (ADR-0034); empty
+	// in merge mode.
+	envFile string
 	// entryHash is the EntryHash of the desired content.
 	entryHash string
 	// fileHash is the AppliedHash of the desired content: the hash over
@@ -96,7 +105,7 @@ type target struct {
 
 // state returns the record of a successful restart for t.
 func (t target) state() *state {
-	return &state{Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, AppliedHash: t.fileHash, EntryHash: t.entryHash}
+	return &state{Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, EnvFile: t.envFile, AppliedHash: t.fileHash, EntryHash: t.entryHash}
 }
 
 func loadState(path string) (*state, error) {
@@ -136,12 +145,12 @@ func saveState(path string, s *state) error {
 // rejection returns the record (state.Rejected) that marks t, restarted
 // through unit, as content the kubelet identified by kubelet
 // (kubeletIdentity) rejected at at, with the error reason. Every field of t
-// counts: a changed entry, a changed shared file or /etc/default/kubelet,
-// other paths or another unit are new content, which a pass may try again;
-// so is the same content for another kubelet (rejection.testedBy).
+// counts: a changed entry, a changed shared file or kubelet environment
+// file, other paths or another unit are new content, which a pass may try
+// again; so is the same content for another kubelet (rejection.testedBy).
 func (t target) rejection(unit, kubelet, reason string, at time.Time) *rejection {
 	return &rejection{
-		Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, Unit: unit,
+		Mode: t.mode, BinDir: t.binDir, ConfigFile: t.configFile, EnvFile: t.envFile, Unit: unit,
 		EntryHash: t.entryHash, AppliedHash: t.fileHash, Kubelet: kubelet,
 		Reason: reason, At: at.UTC().Format(time.RFC3339),
 	}
@@ -154,7 +163,7 @@ func (s *state) rejects(t target, unit string) *rejection {
 		return nil
 	}
 	r := s.Rejected
-	if r.Mode == t.mode && r.BinDir == t.binDir && r.ConfigFile == t.configFile && r.Unit == unit &&
+	if r.Mode == t.mode && r.BinDir == t.binDir && r.ConfigFile == t.configFile && r.EnvFile == t.envFile && r.Unit == unit &&
 		r.EntryHash == t.entryHash && r.AppliedHash == t.fileHash {
 		return r
 	}
@@ -168,6 +177,7 @@ func (s *state) matches(t target) bool {
 		s.Mode == t.mode &&
 		s.BinDir == t.binDir &&
 		s.ConfigFile == t.configFile &&
+		s.envFile() == t.envFile &&
 		s.EntryHash != "" &&
 		s.EntryHash == t.entryHash
 }
@@ -180,8 +190,19 @@ func (s *state) matchesLegacy(t target) bool {
 		s.Mode == t.mode &&
 		s.BinDir == t.binDir &&
 		s.ConfigFile == t.configFile &&
+		s.envFile() == t.envFile &&
 		s.EntryHash == "" &&
 		s.AppliedHash == t.fileHash
+}
+
+// envFile is the environment file the record's patch-mode restart was for.
+// Records written before ADR-0034 have none; patch mode then always edited
+// /etc/default/kubelet.
+func (s *state) envFile() string {
+	if s.EnvFile == "" && s.Mode == modePatch {
+		return defaultKubeletPath
+	}
+	return s.EnvFile
 }
 
 // contentHash hashes the restart-relevant byte slices in order.

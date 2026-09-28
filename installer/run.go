@@ -18,6 +18,8 @@ import (
 
 const configFileName = "credential-provider-config.yaml"
 
+// defaultKubeletPath is the kubelet environment file of kubeadm's Debian
+// packages (kubeletEnvFiles).
 const defaultKubeletPath = "/etc/default/kubelet"
 
 // ownConfigPath is where patch and none mode write the provider config.
@@ -174,6 +176,7 @@ func runNone(cfg *config, rendered []byte, entry map[string]any) error {
 }
 
 // runPatch owns the config file and wires kubelet via a parse-merge of
+// the environment file its unit reads (kubeletEnvFile, ADR-0034), usually
 // /etc/default/kubelet, restarting kubelet when restart-relevant
 // content changed. The caller holds the node lock and the config locks
 // (lockPatchConfigs).
@@ -191,22 +194,28 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	envPath := cfg.hostPath(defaultKubeletPath)
+	// The environment file the kubelet unit takes KUBELET_EXTRA_ARGS from
+	// (ADR-0034).
+	envFile, err := cfg.kubeletEnvFile()
+	if err != nil {
+		return fmt.Errorf("mode patch: %w", err)
+	}
+	envPath := cfg.hostPath(envFile)
 	existingEnv, err := readHostFile(envPath)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("read %s: %w", defaultKubeletPath, err)
+		return fmt.Errorf("read %s: %w", envFile, err)
 	}
 	priorEnv := priorContent{existed: err == nil, data: existingEnv}
 	desiredEnv, err := mergeExtraArgs(existingEnv, cfg.HostBinDir, configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", envFile, err)
 	}
 	entryJSON, err := entryBytes(entry)
 	if err != nil {
 		return err
 	}
 	t := target{
-		mode: modePatch, binDir: cfg.HostBinDir, configFile: configPath,
+		mode: modePatch, binDir: cfg.HostBinDir, configFile: configPath, envFile: envFile,
 		entryHash: contentHash(entryJSON, desiredEnv),
 		fileHash:  contentHash(desiredConfig, desiredEnv),
 	}
@@ -234,19 +243,19 @@ func runPatch(cfg *config, rendered []byte, entry map[string]any) error {
 	var rb rollback
 	rb.step(func() error { return cfg.writeRecord(cfg.HostBinDir, *begun) })
 	rb.file(configPath, func() error { return restoreIn(dir, configFileName, priorConfig, 0o644) })
-	rb.file(defaultKubeletPath, func() error { return restoreHostFile(envPath, priorEnv, 0o644) })
+	rb.file(envFile, func() error { return restoreHostFile(envPath, priorEnv, 0o644) })
 
 	want := kubeletWiring{BinDir: cfg.HostBinDir, ConfigFile: configPath}
 	verify := func() error {
-		// The flags only reach kubelet if its unit actually sources
-		// /etc/default/kubelet; confirm on the live process.
+		// The flags only reach kubelet if its unit passes
+		// $KUBELET_EXTRA_ARGS on; confirm on the live process.
 		got, err := discoverKubelet(cfg.ProcRoot)
 		if err != nil {
 			return err
 		}
 		if got != want {
-			return fmt.Errorf("running kubelet has bin-dir=%q config=%q, want %q/%q — does the %s unit source %s?",
-				got.BinDir, got.ConfigFile, want.BinDir, want.ConfigFile, cfg.KubeletUnit, defaultKubeletPath)
+			return fmt.Errorf("running kubelet has bin-dir=%q config=%q, want %q/%q — does the %s unit pass $KUBELET_EXTRA_ARGS from %s on to kubelet?",
+				got.BinDir, got.ConfigFile, want.BinDir, want.ConfigFile, cfg.KubeletUnit, envFile)
 		}
 		return nil
 	}
@@ -771,7 +780,7 @@ func (c *config) statePath() string {
 }
 
 // rollback restores what a pass changed that decides how kubelet starts:
-// the provider config kubelet reads, /etc/default/kubelet in patch mode,
+// the provider config kubelet reads, the kubelet environment file in patch mode,
 // and the install's record (ADR-0033). Its steps run in the order they were
 // added, every one even when an earlier one failed.
 type rollback struct {

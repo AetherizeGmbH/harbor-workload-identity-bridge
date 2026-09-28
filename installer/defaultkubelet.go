@@ -15,10 +15,10 @@ import (
 // value the kubelet unit expands, unquoted, into kubelet's command line.
 const extraArgsKey = "KUBELET_EXTRA_ARGS"
 
-// mergeExtraArgs rewrites the KUBELET_EXTRA_ARGS assignment of an
-// /etc/default/kubelet file: existing args are preserved, stale
-// --image-credential-provider-* occurrences are stripped, and ours are
-// appended. Every other line round-trips verbatim. The pre-ADR-0021
+// mergeExtraArgs rewrites the KUBELET_EXTRA_ARGS assignment of a kubelet
+// environment file such as /etc/default/kubelet (kubeletEnvFile): existing
+// args are preserved, stale --image-credential-provider-* occurrences are
+// stripped, and ours are appended. Every other line round-trips verbatim. The pre-ADR-0021
 // script overwrote the whole file, clobbering operator-set args.
 //
 // The file is read as systemd reads an EnvironmentFile (parseEnvFile), so
@@ -63,15 +63,15 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 		extra = extra[:1]
 	}
 	if len(extra) > 1 {
-		return nil, fmt.Errorf("multiple KUBELET_EXTRA_ARGS lines in /etc/default/kubelet (lines %d and %d) — refusing to guess which one kubelet uses", extra[0].first+1, extra[1].first+1)
+		return nil, fmt.Errorf("multiple KUBELET_EXTRA_ARGS lines (lines %d and %d) — refusing to guess which one kubelet uses", extra[0].first+1, extra[1].first+1)
 	}
 	found := len(extra) == 1
 	for _, a := range extra {
 		if a.first != a.last {
-			return nil, fmt.Errorf("KUBELET_EXTRA_ARGS in /etc/default/kubelet continues over several lines (lines %d-%d), which the installer cannot rewrite safely; put it on one line, or add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", a.first+1, a.last+1)
+			return nil, fmt.Errorf("KUBELET_EXTRA_ARGS continues over several lines (lines %d-%d), which the installer cannot rewrite safely; put it on one line, or add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", a.first+1, a.last+1)
 		}
 		if a.afterContinuedComment {
-			return nil, fmt.Errorf("KUBELET_EXTRA_ARGS in /etc/default/kubelet (line %d) follows a comment line that ends in a backslash, which systemd before v254 reads as part of the comment; remove the backslash", a.first+1)
+			return nil, fmt.Errorf("KUBELET_EXTRA_ARGS (line %d) follows a comment line that ends in a backslash, which systemd before v254 reads as part of the comment; remove the backslash", a.first+1)
 		}
 		_, raw, _ := strings.Cut(lines[a.first], "=")
 		val, err := unquoteExtraArgs(strings.Trim(raw, envWhitespace))
@@ -85,7 +85,7 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 	// Appending a line, or the final newline the file lacks, must not
 	// change what the file's last line means.
 	if (!found || !bytes.HasSuffix(existing, []byte("\n"))) && openAtEnd(string(existing)) {
-		return nil, fmt.Errorf("the last line of /etc/default/kubelet ends inside a quoted value, after an escape, or in a comment continued with a backslash, so the installer cannot add to the file safely; fix that line")
+		return nil, fmt.Errorf("the last line of the file ends inside a quoted value, after an escape, or in a comment continued with a backslash, so the installer cannot add to the file safely; fix that line")
 	}
 	if appended >= 0 {
 		lines = append(lines[:appended], lines[appended+1:]...)
@@ -144,7 +144,7 @@ func unquoteExtraArgs(val string) (string, error) {
 		val = val[1 : n-1]
 	}
 	if strings.ContainsAny(val, "\"'\\$`") {
-		return "", fmt.Errorf("KUBELET_EXTRA_ARGS in /etc/default/kubelet contains quoting, escapes, or expansions (%q) the installer cannot rewrite safely; add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", val)
+		return "", fmt.Errorf("KUBELET_EXTRA_ARGS contains quoting, escapes, or expansions (%q) the installer cannot rewrite safely; add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", val)
 	}
 	return val, nil
 }
@@ -239,7 +239,7 @@ func parseEnvFile(content string) ([]envAssignment, error) {
 	}
 	for i := 0; i < len(content); i++ {
 		if content[i] == '\r' && (i+1 == len(content) || content[i+1] != '\n') {
-			return nil, fmt.Errorf("/etc/default/kubelet has a carriage return inside a line (byte %d), which systemd reads as a line break; the installer cannot rewrite the file safely", i)
+			return nil, fmt.Errorf("the file has a carriage return inside a line (byte %d), which systemd reads as a line break; the installer cannot rewrite the file safely", i)
 		}
 	}
 	const (

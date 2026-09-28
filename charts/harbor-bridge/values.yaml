@@ -345,9 +345,11 @@ plugin:
     #         and unknown fields are preserved) and drop the binary
     #         into the existing bin dir. Kubelet flags are not touched.
     # patch — own dirs (hostBinaryDir/hostConfigDir) plus a parse-merge
-    #         of /etc/default/kubelet's KUBELET_EXTRA_ARGS (operator-set
-    #         args are preserved). For kind and kubeadm nodes whose kubelet
-    #         unit sources /etc/default/kubelet.
+    #         of KUBELET_EXTRA_ARGS (operator-set args are preserved) in
+    #         the environment file the kubelet unit reads: /etc/default/kubelet
+    #         (kind, kubeadm's Debian packages) or /etc/sysconfig/kubelet
+    #         (kubeadm's RPM packages). A unit that reads neither is refused
+    #         before anything is written.
     #
     # auto/merge/patch need a systemd-managed kubelet. Distributions that
     # embed or supervise kubelet themselves (k3s, RKE2, Talos) are not

@@ -15,9 +15,9 @@ import (
 
 // Several installs of the chart (ADR-0029) run one installer each on every
 // node, possibly at the same moment. They share kubelet's one
-// credential-provider config, /etc/default/kubelet and the kubelet unit, so
-// every read-modify-write of those files and every kubelet restart runs
-// under an exclusive flock(2). The locks, always taken in this order:
+// credential-provider config, the kubelet environment file and the kubelet
+// unit, so every read-modify-write of those files and every kubelet restart
+// runs under an exclusive flock(2). The locks, always taken in this order:
 //
 //   - the node lock (nodeLockPath), a fixed node path that every install
 //     finds whatever its chart values. Every mode that may touch kubelet

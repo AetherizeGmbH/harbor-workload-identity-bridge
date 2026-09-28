@@ -235,8 +235,10 @@ helm install harbor-bridge \
 #    on managed nodes (EKS / GKE / AKS) whose node image already runs
 #    kubelet with --image-credential-provider-* flags, it MERGES our
 #    provider entry into the existing config (foreign providers are
-#    preserved); on self-managed nodes (kind, kubeadm) it PATCHES
-#    /etc/default/kubelet, preserving your KUBELET_EXTRA_ARGS. Either
+#    preserved); on self-managed nodes (kind, kubeadm) it PATCHES the
+#    environment file the kubelet unit reads (/etc/default/kubelet, or
+#    /etc/sysconfig/kubelet with RPM packages), preserving your
+#    KUBELET_EXTRA_ARGS. Either
 #    way kubelet restarts once per node when — and only when — the
 #    effective config content changed, and the installer verifies it
 #    came back healthy; running containers survive the restart.
@@ -335,7 +337,8 @@ clean a node:
    `<plugin.hostConfigDir>/credential-provider-config.yaml`). Kubelet
    refuses a config without providers: if it was the last entry, also
    remove the two `--image-credential-provider-*` flags (patch mode:
-   from `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`).
+   from `KUBELET_EXTRA_ARGS` in `/etc/default/kubelet`, or
+   `/etc/sysconfig/kubelet` with RPM packages).
 2. Restart kubelet (`systemctl restart kubelet`). Do this before you
    delete the binary: kubelet does not start while an entry's binary is
    missing.
@@ -347,7 +350,8 @@ clean a node:
    binary, executable, in kubelet's bin dir.
 4. Once the last install is gone from the node, also delete the backups
    of the shared files (`<provider config>.bak`; in patch mode
-   `/etc/default/kubelet.bak`) and the lock files:
+   `/etc/default/kubelet.bak` or `/etc/sysconfig/kubelet.bak`) and the
+   lock files:
    `/run/harbor-bridge-installer.lock` and a `<config>.lock` next to
    every provider config an installer edited or checked, also in a pass
    it refused: next to the cloud's config in merge mode, and in patch
@@ -363,7 +367,7 @@ The DaemonSet runs the `harbor-bridge-installer` binary on every node.
 | --- | --- | --- |
 | `auto` (default) | Reads the live kubelet command line: flags present → `merge`, absent → `patch` | Almost always the right choice |
 | `merge` | Injects our provider entry into the node's **existing** `CredentialProviderConfig` (JSON or YAML — EKS/GKE/AKS formats both work; foreign providers and unknown fields round-trip untouched) and drops the binary into the existing bin dir. Kubelet flags untouched. | Managed nodes (EKS AL2023, GKE, AKS) |
-| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of `/etc/default/kubelet` — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet that sources `/etc/default/kubelet`) |
+| `patch` | Own dirs (`plugin.hostBinaryDir`/`hostConfigDir`) plus a parse-merge of the environment file the kubelet unit reads (`/etc/default/kubelet`, or `/etc/sysconfig/kubelet` with RPM packages; ADR-0034) — operator-set `KUBELET_EXTRA_ARGS` are preserved | Self-managed nodes: kind, kubeadm (systemd kubelet whose unit reads one of the two files) |
 | `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | k3s/RKE2 (flags via their kubelet args), strict-privilege environments |
 | `plugin.enabled=false` | No DaemonSet at all; NOTES print the provider entry to install | Talos (system extension), baked node images |
 

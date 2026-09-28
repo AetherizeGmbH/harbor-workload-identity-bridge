@@ -50,6 +50,10 @@ type crashLoopUnit struct {
 
 func (u *crashLoopUnit) restart(string) error { return nil }
 
+func (u *crashLoopUnit) environment(string) (unitEnvironment, error) {
+	return unitEnvironment{}, nil
+}
+
 func (u *crashLoopUnit) status(string) (unitStatus, error) {
 	elapsed := time.Since(u.start)
 	if u.up == 0 {
@@ -143,6 +147,9 @@ type scriptedUnit struct{ st unitStatus }
 
 func (u *scriptedUnit) restart(string) error              { return nil }
 func (u *scriptedUnit) status(string) (unitStatus, error) { return u.st, nil }
+func (u *scriptedUnit) environment(string) (unitEnvironment, error) {
+	return unitEnvironment{}, nil
+}
 
 func TestSameProcess(t *testing.T) {
 	a := unitStatus{ActiveState: "active", MainPID: 10, NRestarts: 0}

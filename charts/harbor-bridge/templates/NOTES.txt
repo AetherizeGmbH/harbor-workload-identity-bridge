@@ -44,9 +44,11 @@ NEXT STEPS
      install.mode=auto: on each node the installer inspects kubelet. If kubelet
      already runs with --image-credential-provider-* flags (EKS / GKE / AKS node
      images) it MERGES our provider into that config; otherwise it PATCHES
-     /etc/default/kubelet. Kubelet is restarted once per node — only when the
-     effective config changed — and verified healthy afterwards. Running
-     containers are not affected by a kubelet restart.
+     the environment file the kubelet unit reads (/etc/default/kubelet, or
+     /etc/sysconfig/kubelet with RPM packages). Kubelet is restarted once
+     per node — only when the effective config changed — and verified
+     healthy afterwards. Running containers are not affected by a kubelet
+     restart.
 {{- else if eq .Values.plugin.install.mode "merge" }}
 
      install.mode=merge: the installer adds our provider to the credential-
@@ -57,8 +59,9 @@ NEXT STEPS
      install.mode=patch: the installer writes the plugin to
      {{ .Values.plugin.hostBinaryDir }}, its config to
      {{ .Values.plugin.hostConfigDir }}/credential-provider-config.yaml,
-     adds the two flags to KUBELET_EXTRA_ARGS in /etc/default/kubelet, and
-     restarts kubelet once per node when anything changed.
+     adds the two flags to KUBELET_EXTRA_ARGS in the environment file the
+     kubelet unit reads (/etc/default/kubelet, or /etc/sysconfig/kubelet with
+     RPM packages), and restarts kubelet once per node when anything changed.
 {{- else }}
 
      install.mode=none: the installer only copies files. KUBELET IS NOT TOUCHED —

@@ -445,8 +445,9 @@ container:
   container, a symlink planted before the pod starts is followed. Keep
   every release's `plugin.hostConfigDir` disjoint from every other
   release's directories (the bullet on the CA and mTLS files below).
-- in `patch` mode parse-merges `/etc/default/kubelet`, preserving
-  operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
+- in `patch` mode parse-merges the environment file the kubelet unit
+  reads, and only `/etc/default/kubelet` or `/etc/sysconfig/kubelet`
+  (ADR-0034), preserving operator-set `KUBELET_EXTRA_ARGS`; in `merge` mode it edits the
   node's existing `CredentialProviderConfig`, preserving foreign
   provider entries and unknown fields.
 - edits only the provider entry named `plugin.providerName` when several

@@ -21,6 +21,19 @@ type kubeletControl interface {
 	restart(unit string) error
 	// status returns what systemd reports about unit (unitStatus).
 	status(unit string) (unitStatus, error)
+	// environment returns where systemd takes unit's environment from
+	// (unitEnvironment).
+	environment(unit string) (unitEnvironment, error)
+}
+
+// unitEnvironment is where systemd takes a unit's environment from
+// (systemd.exec): its EnvironmentFile= files, read in order, a variable in
+// a later file overriding an earlier one, and its Environment= settings,
+// which every file overrides.
+type unitEnvironment struct {
+	Files []string
+	// Assignments is the Environment= property as systemctl prints it.
+	Assignments string
 }
 
 // unitStatus is what systemd reports about the kubelet unit.
@@ -89,6 +102,38 @@ func (c nsenterControl) status(unit string) (unitStatus, error) {
 		return unitStatus{}, fmt.Errorf("systemctl show %s: %w (output: %s)", unit, err, bytes.TrimSpace(out))
 	}
 	return parseUnitStatus(out)
+}
+
+func (c nsenterControl) environment(unit string) (unitEnvironment, error) {
+	if err := validUnitName(unit); err != nil {
+		return unitEnvironment{}, err
+	}
+	out, err := c.systemctl("show", "--property=EnvironmentFiles", "--property=Environment", unit)
+	if err != nil {
+		return unitEnvironment{}, fmt.Errorf("systemctl show %s: %w (output: %s)", unit, err, bytes.TrimSpace(out))
+	}
+	return parseUnitEnvironment(out), nil
+}
+
+// parseUnitEnvironment parses `systemctl show` output: one
+// "EnvironmentFiles=<path> (ignore_errors=yes|no)" line per file, in the
+// order systemd reads them, and one "Environment=" line.
+func parseUnitEnvironment(out []byte) unitEnvironment {
+	var env unitEnvironment
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if v, ok := strings.CutPrefix(line, "EnvironmentFiles="); ok {
+			if i := strings.LastIndex(v, " (ignore_errors="); i >= 0 {
+				v = v[:i]
+			}
+			if v != "" {
+				env.Files = append(env.Files, v)
+			}
+		} else if v, ok := strings.CutPrefix(line, "Environment="); ok {
+			env.Assignments = v
+		}
+	}
+	return env
 }
 
 // parseUnitStatus parses the Key=Value lines of `systemctl show`. It needs

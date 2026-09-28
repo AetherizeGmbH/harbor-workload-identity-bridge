@@ -14,8 +14,9 @@
 //   - merge: inject our provider entry into the node's existing
 //     CredentialProviderConfig and drop the binary into the existing
 //     bin dir. Foreign providers and unknown fields are preserved.
-//   - patch: own bin/config dirs + parse-merge of /etc/default/kubelet
-//     (KUBELET_EXTRA_ARGS), then restart kubelet.
+//   - patch: own bin/config dirs + parse-merge of KUBELET_EXTRA_ARGS in
+//     the environment file the kubelet unit reads (/etc/default/kubelet or
+//     /etc/sysconfig/kubelet, ADR-0034), then restart kubelet.
 //   - none:  copy files only; the operator owns the kubelet flags.
 //
 // Kubelet reads the credential-provider config once at startup but
@@ -202,7 +203,7 @@ func loadConfig(getenv func(string) string) (*config, error) {
 }
 
 // nodePathChars is the character set of node paths. The paths are written
-// unquoted into KUBELET_EXTRA_ARGS in /etc/default/kubelet (an
+// unquoted into KUBELET_EXTRA_ARGS in the kubelet environment file (an
 // EnvironmentFile) and into the provider config, where a space, quote or
 // "$" would split or expand them.
 var nodePathChars = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)

@@ -189,7 +189,7 @@ func TestRun_VerificationFailureDoesNotRestartKubeletOnEveryRetry(t *testing.T) 
 	env.kubelet.ignoreEnvFile = true
 	for pass := 1; pass <= 3; pass++ {
 		err := run(env.cfg)
-		if err == nil || !strings.Contains(err.Error(), "does the kubelet unit source") {
+		if err == nil || !strings.Contains(err.Error(), "does the kubelet unit pass") {
 			t.Fatalf("pass %d: got %v, want the verification failure", pass, err)
 		}
 		if pass > 1 && !strings.Contains(err.Error(), "already rejected") {
@@ -332,18 +332,21 @@ func TestValidateEntry(t *testing.T) {
 }
 
 func TestState_RejectsExactlyTheRecordedContent(t *testing.T) {
-	rejected := target{mode: modePatch, binDir: "/b", configFile: "/c", entryHash: "e", fileHash: "f"}
+	rejected := target{mode: modePatch, binDir: "/b", configFile: "/c", envFile: defaultKubeletPath, entryHash: "e", fileHash: "f"}
 	st := &state{Rejected: rejected.rejection("kubelet", "", "boom", time.Unix(0, 0))}
 	if r := st.rejects(rejected, "kubelet"); r == nil || r.Reason != "boom" || r.At != "1970-01-01T00:00:00Z" {
 		t.Fatalf("rejects = %+v", r)
 	}
-	for name, other := range map[string]target{
-		"mode":        {modeMerge, "/b", "/c", "e", "f"},
-		"bin dir":     {modePatch, "/b2", "/c", "e", "f"},
-		"config file": {modePatch, "/b", "/c2", "e", "f"},
-		"entry":       {modePatch, "/b", "/c", "e2", "f"},
-		"shared file": {modePatch, "/b", "/c", "e", "f2"},
+	for name, change := range map[string]func(*target){
+		"mode":        func(t *target) { t.mode = modeMerge },
+		"bin dir":     func(t *target) { t.binDir = "/b2" },
+		"config file": func(t *target) { t.configFile = "/c2" },
+		"env file":    func(t *target) { t.envFile = "/etc/sysconfig/kubelet" },
+		"entry":       func(t *target) { t.entryHash = "e2" },
+		"shared file": func(t *target) { t.fileHash = "f2" },
 	} {
+		other := rejected
+		change(&other)
 		if st.rejects(other, "kubelet") != nil {
 			t.Errorf("%s changed, still rejected", name)
 		}

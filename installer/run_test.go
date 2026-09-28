@@ -40,11 +40,35 @@ type fakeKubelet struct {
 	statusFn func() unitStatus
 	// pid is the main PID of the kubelet the last restart started.
 	pid int
-	// ignoreEnvFile models a unit that does not source /etc/default/kubelet.
+	// envFiles are the unit's EnvironmentFile= files in order; nil is
+	// kubeadm's Debian unit (kubeadmEnvFiles).
+	envFiles []string
+	// envAssignments is the unit's Environment= property.
+	envAssignments string
+	// ignoreEnvFile models a unit that reads its environment files but
+	// does not pass $KUBELET_EXTRA_ARGS on to kubelet.
 	ignoreEnvFile bool
 	// exe is the node path of the binary a restart starts kubelet from
 	// (/proc/<pid>/exe); "" leaves the fake process without an exe link.
 	exe string
+}
+
+// kubeadmEnvFiles are the environment files of kubeadm's Debian kubelet
+// unit (10-kubeadm.conf), which kind nodes use too.
+var kubeadmEnvFiles = []string{"/var/lib/kubelet/kubeadm-flags.env", defaultKubeletPath}
+
+func (f *fakeKubelet) unitEnvFiles() []string {
+	if f.envFiles == nil {
+		return kubeadmEnvFiles
+	}
+	return f.envFiles
+}
+
+func (f *fakeKubelet) environment(unit string) (unitEnvironment, error) {
+	if unit != "kubelet" {
+		f.t.Fatalf("unexpected unit %q", unit)
+	}
+	return unitEnvironment{Files: f.unitEnvFiles(), Assignments: f.envAssignments}, nil
 }
 
 const fakeKubeletPID = 321
@@ -60,20 +84,25 @@ func (f *fakeKubelet) restart(unit string) error {
 	f.pid = fakeKubeletPID + f.env.restarts
 	args := append([]string(nil), f.baseArgs...)
 	if !f.ignoreEnvFile {
-		if raw, err := os.ReadFile(f.env.cfg.hostPath(defaultKubeletPath)); err == nil {
-			// As systemd reads the EnvironmentFile: the last assignment wins.
+		// As systemd reads the unit's environment files: in order, the
+		// last assignment wins.
+		var extra []string
+		for _, file := range f.unitEnvFiles() {
+			raw, err := os.ReadFile(f.env.cfg.hostPath(file))
+			if err != nil {
+				continue
+			}
 			assignments, err := parseEnvFile(string(raw))
 			if err != nil {
-				f.t.Fatalf("systemd would not read %s as the test expects: %v", defaultKubeletPath, err)
+				f.t.Fatalf("systemd would not read %s as the test expects: %v", file, err)
 			}
-			var extra []string
 			for _, a := range assignments {
 				if a.key == extraArgsKey {
 					extra = splitArgs(a.value)
 				}
 			}
-			args = append(args, extra...)
 		}
+		args = append(args, extra...)
 	}
 	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args, exe: f.exe})
 	return nil
@@ -540,7 +569,7 @@ func TestLoadConfig_Validation(t *testing.T) {
 
 func TestStateRoundtripAndCorruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "installer-state.json")
-	want := target{mode: modePatch, binDir: "/b", configFile: "/c", entryHash: "e", fileHash: "f"}
+	want := target{mode: modePatch, binDir: "/b", configFile: "/c", envFile: "/etc/sysconfig/kubelet", entryHash: "e", fileHash: "f"}
 	if err := saveState(path, want.state()); err != nil {
 		t.Fatal(err)
 	}
@@ -572,10 +601,30 @@ func TestStateRoundtripAndCorruption(t *testing.T) {
 	if !got.matches(otherFile) {
 		t.Fatal("another install's change to the shared file must not count")
 	}
+	otherEnvFile := want
+	otherEnvFile.envFile = defaultKubeletPath
+	if got.matches(otherEnvFile) {
+		t.Fatal("matches must compare the environment file (ADR-0034)")
+	}
+
+	// A patch-mode record written before ADR-0034 has no envFile: patch
+	// mode then always edited /etc/default/kubelet.
+	for _, pre := range []*state{
+		{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f", EntryHash: "e"},
+		{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f"},
+	} {
+		deb, rpm := otherEnvFile, want
+		if pre.EntryHash != "" && (!pre.matches(deb) || pre.matches(rpm)) {
+			t.Fatalf("record %+v: matches /etc/default/kubelet %v, /etc/sysconfig/kubelet %v", pre, pre.matches(deb), pre.matches(rpm))
+		}
+		if pre.EntryHash == "" && (!pre.matchesLegacy(deb) || pre.matchesLegacy(rpm)) {
+			t.Fatalf("legacy record %+v: matches /etc/default/kubelet %v, /etc/sysconfig/kubelet %v", pre, pre.matchesLegacy(deb), pre.matchesLegacy(rpm))
+		}
+	}
 
 	// A record without entryHash is from an installer before ADR-0029 (or
 	// an older one after a rollback): it matches only the whole-file hash.
-	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", AppliedHash: "f"}
+	legacy := &state{Mode: modePatch, BinDir: "/b", ConfigFile: "/c", EnvFile: "/etc/sysconfig/kubelet", AppliedHash: "f"}
 	if err := saveState(path, legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +757,7 @@ func TestRun_PatchVerification_UnitIgnoresEnvFile(t *testing.T) {
 	env := newTestEnv(t, modePatch, []string{"/usr/bin/kubelet"})
 	env.kubelet.ignoreEnvFile = true
 	err := run(env.cfg)
-	if err == nil || !strings.Contains(err.Error(), "does the kubelet unit source") {
+	if err == nil || !strings.Contains(err.Error(), "does the kubelet unit pass") {
 		t.Fatalf("got %v, want an explanation that the flags did not reach kubelet", err)
 	}
 }
