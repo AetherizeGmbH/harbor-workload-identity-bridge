@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // The user and role ids are a multi-tenancy boundary (ADR-0018, ADR-0033):
@@ -92,18 +93,28 @@ func FuzzRenderMessage_WithholdsSecrets(f *testing.F) {
 	f.Add([]byte("rejected S3c\x00ret"), "text/plain", false, "S3cret")
 	f.Add([]byte("ends in S3c"), "text/plain", true, "S3cret")
 	f.Add([]byte(`[{"id":"a","message":"x"},{"id":"b","message":"y"}]`), "application/vnd.siesta-validation-errors-v1+json", false, "x; b: y")
+	// Bytes of the ellipsis that ends a shortened message (U+2026 is
+	// E2 80 A6) are the client's, not the server's.
+	f.Add([]byte(strings.Repeat("0", 600)), "", false, "\x80")
+	f.Add([]byte(strings.Repeat("0", 600)), "", false, "0\xe2")
+	f.Add([]byte(strings.Repeat("0", 600)), "", false, "0…")
 	f.Fuzz(func(t *testing.T, body []byte, contentType string, truncated bool, secret string) {
-		// A secret that the client's own text contains (the withheld
-		// notice, the ellipsis of a shortened message) can appear without
+		// A secret that the withheld notice contains can appear without
 		// being disclosed.
-		if secret == "" || strings.Contains(messageWithheld, secret) || strings.Contains(secret, "…") {
+		if secret == "" || strings.Contains(messageWithheld, secret) {
 			return
 		}
 		got := renderMessage(body, contentType, truncated, []string{secret})
 		if got == messageWithheld {
 			return
 		}
-		if strings.Contains(got, secret) || (sanitize(secret) != "" && strings.Contains(got, sanitize(secret))) {
+		// A shortened message is the server's text plus the client's
+		// ellipsis; only the server's text can disclose anything.
+		text := got
+		if utf8.RuneCountInString(got) == maxMessageLen+1 {
+			text = strings.TrimSuffix(got, "…")
+		}
+		if strings.Contains(text, secret) || (sanitize(secret) != "" && strings.Contains(text, sanitize(secret))) {
 			t.Fatalf("renderMessage(%q, %q) = %q holds the secret %q", body, contentType, got, secret)
 		}
 		if got != sanitize(got) && !strings.HasSuffix(got, "…") {
