@@ -19,6 +19,12 @@ render() {
     --namespace harbor-bridge-system "$@"
 }
 
+# notes renders like render, plus the NOTES (helm template leaves them out).
+notes() {
+  helm install harbor-bridge "${CHART_DIR}" --dry-run=client \
+    --namespace harbor-bridge-system "$@"
+}
+
 # Each case: (label, --set arg to clear the required field, expected
 # error substring). We render with values-complete.yaml as the base
 # and override the field-under-test to empty/null.
@@ -64,6 +70,21 @@ cases=(
   "plugin.install.stateDir equal to plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config|plugin.install.stateDir=\"/etc/kubernetes/credential-provider-config\" must not be plugin.hostConfigDir"
   "plugin.install.stateDir inside plugin.hostConfigDir|--set|plugin.install.stateDir=/etc/kubernetes/credential-provider-config/state|must not be plugin.hostConfigDir"
   "plugin.install.configFile inside plugin.hostConfigDir|--set|plugin.install.mode=merge,plugin.install.binDir=/etc/cp-bin,plugin.install.configFile=/etc/kubernetes/credential-provider-config/credential-provider-config.yaml|plugin.install.configFile=\"/etc/kubernetes/credential-provider-config/credential-provider-config.yaml\" must not be inside plugin.hostConfigDir"
+  "clusterName with consecutive hyphens|--set|clusterName=prod--eu|clusterName=\"prod--eu\" must not contain consecutive hyphens"
+  "harbor.url with credentials|--set|harbor.url=https://admin:s3cret@harbor.example.com|harbor.url must not contain \"@\""
+  "harbor.url with an @ after the host|--set|harbor.url=https://harbor.example.com/a@b|harbor.url must not contain \"@\""
+  "harbor.url without a scheme|--set|harbor.url=harbor.example.com|harbor.url must be an http:// or https:// URL with a host"
+  "harbor.url over plain http in upper case|--set|harbor.url=HTTP://harbor.example.com|uses plain http"
+  "bridge.oidcIssuer with credentials|--set|bridge.oidcIssuer=https://user:s3cret@kubernetes.default.svc.cluster.local|bridge.oidcIssuer must not contain \"@\""
+  "bridge.oidcIssuer empty|--set|bridge.oidcIssuer=|bridge.oidcIssuer must be an http:// or https:// URL with a host"
+  "bridge.oidcJWKSURL with an @ after the host|--set|bridge.oidcJWKSURL=https://jwks:s3cr/et@jwks.example.com/keys|bridge.oidcJWKSURL has an \"@\" after its host part"
+  "bridge.oidcJWKSURL without a host|--set|bridge.oidcJWKSURL=https://jwks:s3cret@/keys|bridge.oidcJWKSURL must be an http:// or https:// URL with a host"
+  "bridge.leaderElection not a boolean|--set|bridge.leaderElection=on|bridge.leaderElection must be true, false or null (null: on when bridge.replicas > 1), but it was read as the string on"
+  "bridge.leaderElection=false with several replicas|--set|bridge.leaderElection=false|bridge.leaderElection=false with bridge.replicas=2: every replica would run the reconciler and the janitor"
+  "bridge.harborAccessSelector value read as a boolean|--set|bridge.harborAccessSelector.eu=true|bridge.harborAccessSelector.eu must be a string, but it was read as the bool true"
+  "bridge.harborAccessSelector value read as a number|--set|bridge.harborAccessSelector.tier=1|bridge.harborAccessSelector.tier must be a string, but it was read as the int64 1"
+  "bridge.rateLimit.burst not a whole number|--set|bridge.rateLimit.burst=1.5|bridge.rateLimit.burst=1.5 must be a positive whole number"
+  "bridge.rateLimit.burst zero|--set|bridge.rateLimit.burst=0|bridge.rateLimit.burst=0 must be a positive whole number"
 )
 
 failed=0
@@ -204,6 +225,96 @@ if render -f "${COMPLETE}" --set 'plugin.matchImages={ghcr.io}' \
   echo "PASS  allowSelfMatchImages bypasses the chicken-and-egg guard"
 else
   echo "FAIL  allowSelfMatchImages bypasses the chicken-and-egg guard"
+  failed=$((failed+1))
+fi
+
+# A refused URL setting never repeats the credential it may carry, neither
+# in the error nor in the NOTES (they print harbor.url).
+leaked=""
+for setval in 'harbor.url=https://admin:s3cret@harbor.example.com' \
+              'bridge.oidcIssuer=https://admin:s3cret@kubernetes.default.svc.cluster.local' \
+              'bridge.oidcJWKSURL=https://jwks:s3cr/et@jwks.example.com/keys' \
+              'bridge.oidcJWKSURL=s3cret:pw@jwks.example.com/keys'; do
+  for cmd in render notes; do
+    out=$("${cmd}" -f "${COMPLETE}" --set "${setval}" 2>&1 || true)
+    if ! grep -qF 'it could hold a credential' <<<"${out}" || grep -q 's3cr' <<<"${out}"; then
+      leaked+=" ${cmd}:${setval%%=*}"
+    fi
+  done
+done
+if [ -z "${leaked}" ]; then
+  echo "PASS  refused URL settings never repeat their credentials"
+else
+  echo "FAIL  refused URL settings never repeat their credentials:${leaked}"
+  failed=$((failed+1))
+fi
+
+# bridge.oidcJWKSURL may carry user:password@ (net/http sends it as Basic
+# auth), and an @ written as %40 after the host stays allowed everywhere.
+if out=$(render -f "${COMPLETE}" --set 'bridge.oidcJWKSURL=https://jwks:pw@jwks.example.com/keys%40v1' \
+     --set 'harbor.url=https://harbor.example.com/a%40b' 2>&1) \
+   && grep -qF 'value: "https://jwks:pw@jwks.example.com/keys%40v1"' <<<"${out}" \
+   && grep -qF 'value: "https://harbor.example.com/a%40b"' <<<"${out}"; then
+  echo "PASS  bridge.oidcJWKSURL with credentials, and %40 after the host, render"
+else
+  echo "FAIL  bridge.oidcJWKSURL with credentials, and %40 after the host, render"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# The NOTES print harbor.url; the check above keeps credentials out of it.
+if out=$(notes -f "${COMPLETE}" 2>&1) \
+   && grep -qF 'Harbor URL   : https://harbor.example.com' <<<"${out}"; then
+  echo "PASS  NOTES print harbor.url"
+else
+  echo "FAIL  NOTES print harbor.url"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# One replica may run without leader election; true stays true.
+if out=$(render -f "${COMPLETE}" --set bridge.replicas=1,bridge.leaderElection=false 2>&1) \
+   && grep -q 'value: "false"' <<<"$(grep -A1 'name: BRIDGE_ENABLE_LEADER_ELECTION' <<<"${out}")" \
+   && out=$(render -f "${COMPLETE}" --set bridge.leaderElection=true 2>&1) \
+   && grep -q 'value: "true"' <<<"$(grep -A1 'name: BRIDGE_ENABLE_LEADER_ELECTION' <<<"${out}")"; then
+  echo "PASS  bridge.leaderElection=false with one replica, and true, render"
+else
+  echo "FAIL  bridge.leaderElection=false with one replica, and true, render"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# Unquoted label values in a values file are read as numbers or booleans:
+# refused instead of rendered as tier=%!s(float64=1). Quoted, they render
+# as written.
+printf 'bridge:\n  harborAccessSelector:\n    tier: 1\n' > "${TMP}/values-selector-number.yaml"
+out=$(render -f "${COMPLETE}" -f "${TMP}/values-selector-number.yaml" 2>&1 || true)
+if grep -qF 'bridge.harborAccessSelector.tier must be a string, but it was read as the float64 1' <<<"${out}"; then
+  echo "PASS  unquoted bridge.harborAccessSelector value in a values file"
+else
+  echo "FAIL  unquoted bridge.harborAccessSelector value in a values file"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+printf 'bridge:\n  harborAccessSelector:\n    tier: "1"\n    harbor.aetherize.io/eu: "true"\n' > "${TMP}/values-selector-strings.yaml"
+if out=$(render -f "${COMPLETE}" -f "${TMP}/values-selector-strings.yaml" 2>&1) \
+   && grep -qF 'value: "harbor.aetherize.io/eu=true,tier=1"' <<<"${out}"; then
+  echo "PASS  quoted bridge.harborAccessSelector values render as written"
+else
+  echo "FAIL  quoted bridge.harborAccessSelector values render as written"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# A values file reads numbers as float64; a burst of a million must still
+# render as the integer the bridge parses, not as 1e+06.
+printf 'bridge:\n  rateLimit:\n    burst: 1000000\n' > "${TMP}/values-burst.yaml"
+if out=$(render -f "${COMPLETE}" -f "${TMP}/values-burst.yaml" 2>&1) \
+   && grep -q 'value: "1000000"' <<<"$(grep -A1 'name: BRIDGE_RATE_LIMIT_BURST' <<<"${out}")"; then
+  echo "PASS  bridge.rateLimit.burst from a values file renders as an integer"
+else
+  echo "FAIL  bridge.rateLimit.burst from a values file renders as an integer"
+  grep -m 2 -A1 -E 'BRIDGE_RATE_LIMIT_BURST|Error' <<<"${out}" || true
   failed=$((failed+1))
 fi
 

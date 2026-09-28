@@ -10,6 +10,20 @@
 | In `auto` mode (the default), a changed `plugin.hostBinaryDir` or `plugin.hostConfigDir` moves kubelet to the new directories. Installers before this version merged into the files in the old directories instead, recorded `merge` mode in their state file, and ignored the new values for good; releases that share the directories now move together (ADR-0035) | Nothing for directory changes from now on. A node where an earlier installer already merged after such a change stays on the old directories, because the state file no longer shows them as this release's own (an operator could have set the same flags). To move such nodes, set the old `plugin.hostBinaryDir` and `plugin.hostConfigDir` again for one rollout, which records them as this release's patch-mode directories (one kubelet restart per node), then set the new values: kubelet moves once every release on the node has them. |
 | The chart and the installer refuse `plugin.install.binDir` and `plugin.install.configFile` with any `plugin.install.mode` but `merge` | They were silently ignored in `auto` (the default), `patch` and `none` mode: `auto` patched kubelet's flags or merged into the discovered config instead of the named files. If you set them, set `plugin.install.mode=merge` too, or clear them; otherwise `helm upgrade` fails at template time with `used only with plugin.install.mode=merge`. |
 
+### Unreleased: the chart refuses values the bridge cannot work with
+
+Each of these values used to render, and the install then failed at
+runtime: the bridge crash-looped, created no robot, or ran without the
+check the value was meant to switch on. `helm install` and `helm upgrade`
+now fail at template time with a message naming the value.
+
+| Change | What to do |
+| --- | --- |
+| The chart refuses at template time the values the bridge refuses at startup since "Harbor client hardening" (below): a `clusterName` with consecutive hyphens (`--`), a `user:password@` part in `harbor.url` or `bridge.oidcIssuer`, and a literal `@` after the host part of `harbor.url`, `bridge.oidcIssuer` or `bridge.oidcJWKSURL`. It also refuses a URL setting without an `http://` or `https://` scheme and a host, and counts `HTTP://` in `harbor.url` as plain http | What that section says. In `harbor.url` and `bridge.oidcIssuer` write an `@` that belongs to the path, query or fragment as `%40`: the chart refuses every literal `@` there. The error messages never repeat a URL. |
+| `bridge.leaderElection` must be `true`, `false` or unset, and `false` is refused with `bridge.replicas` above 1 | Leave it unset (on when `bridge.replicas > 1`) or set it to `true`. A string such as `on` left leader election off, and with election off every replica ran the reconciler and the janitor, which race on robot creation and password rotation (ADR-0025). |
+| `bridge.harborAccessSelector` values must be strings | Quote values that YAML or `--set` read as booleans or numbers (`"true"`, `"1"`), or pass them with `--set-string`. Unquoted, they rendered as `%!s(bool=true)` and the bridge refused to start. |
+| `bridge.rateLimit.burst` must be a positive whole number, and renders as an integer | Nothing for whole numbers: a burst of `1000000` or more from a values file now renders as `1000000` instead of `1e+06`, which the bridge refused. Replace a fraction or `0`. |
+
 ### Unreleased: HarborAccess tokenTTL syntax, required spec
 
 | Change | What to do |

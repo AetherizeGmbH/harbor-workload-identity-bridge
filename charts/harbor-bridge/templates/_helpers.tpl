@@ -112,6 +112,8 @@ errors surface during `helm install` with the message text intact.
 {{/*
 harborAccessSelector renders bridge.harborAccessSelector as a label
 selector string (sorted k=v pairs); the bridge validates the syntax.
+validateRequiredValues admits only string values: %s would render a
+boolean or number as %!s(bool=true).
 */}}
 {{- define "harbor-bridge.harborAccessSelector" -}}
 {{- $pairs := list -}}
@@ -148,14 +150,44 @@ harbor.aetherize.io/robot
 {{- if gt (len .Values.clusterName) 63 -}}
 {{- fail (printf "clusterName=%q exceeds 63 chars" .Values.clusterName) -}}
 {{- end -}}
+{{- if contains "--" .Values.clusterName -}}
+{{- fail (printf "clusterName=%q must not contain consecutive hyphens: it begins every Harbor robot name (bridge-<clusterName>.<namespace>.<serviceaccount>), and Harbor accepts only single separators, so the bridge could create no robot." .Values.clusterName) -}}
+{{- end -}}
 {{- if not .Values.harbor.url -}}
 {{- fail "harbor.url is REQUIRED. The bridge needs the Harbor base URL to manage robots." -}}
 {{- end -}}
-{{- if and (hasPrefix "http://" .Values.harbor.url) (not .Values.harbor.allowInsecureHTTP) -}}
+{{- include "harbor-bridge.validateURL" (list "harbor.url" .Values.harbor.url "the bridge authenticates to Harbor only with harbor.adminCredsSecret") -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "a token's iss claim never carries one, so no token would match") -}}
+{{- with .Values.bridge.oidcJWKSURL -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcJWKSURL" . "") -}}
+{{- end -}}
+{{- if and (hasPrefix "http://" (lower (trim .Values.harbor.url))) (not .Values.harbor.allowInsecureHTTP) -}}
 {{- fail "harbor.url uses plain http: the Harbor admin credentials and robot passwords would travel unencrypted. Use https (harbor.caSecret for a private CA), or set harbor.allowInsecureHTTP=true." -}}
 {{- end -}}
 {{- if not .Values.harbor.adminCredsSecret.name -}}
 {{- fail "harbor.adminCredsSecret.name is REQUIRED. Pre-create a Secret in the release namespace holding Harbor admin {username,password}." -}}
+{{- end -}}
+{{- range $k, $v := .Values.bridge.harborAccessSelector -}}
+{{- if not (kindIs "string" $v) -}}
+{{- fail (printf "bridge.harborAccessSelector.%s must be a string, but it was read as the %s %v: values files and --set read unquoted label values such as true or 1 as booleans or numbers, which do not render as the value you wrote. Quote the value in the values file or pass it with --set-string." $k (kindOf $v) $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $leaderElection := .Values.bridge.leaderElection -}}
+{{- if not (or (kindIs "invalid" $leaderElection) (kindIs "bool" $leaderElection)) -}}
+{{- fail (printf "bridge.leaderElection must be true, false or null (null: on when bridge.replicas > 1), but it was read as the %s %v." (kindOf $leaderElection) $leaderElection) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $leaderElection) (not $leaderElection) (gt (int .Values.bridge.replicas) 1) -}}
+{{- fail (printf "bridge.leaderElection=false with bridge.replicas=%v: every replica would run the reconciler and the janitor, which only the leader may run (ADR-0025). They race on robot creation and password rotation and can leave a robot Secret with a password Harbor has already replaced. Leave bridge.leaderElection unset (on when bridge.replicas > 1) or set it to true." .Values.bridge.replicas) -}}
+{{- end -}}
+{{- $burst := .Values.bridge.rateLimit.burst -}}
+{{- $burstOK := false -}}
+{{- if or (kindIs "float64" $burst) (kindIs "int64" $burst) (kindIs "int" $burst) -}}
+{{- $burstOK = and (eq (float64 (int64 $burst)) (float64 $burst)) (ge (int64 $burst) 1) -}}
+{{- else if kindIs "string" $burst -}}
+{{- $burstOK = regexMatch "^[1-9][0-9]*$" $burst -}}
+{{- end -}}
+{{- if not $burstOK -}}
+{{- fail (printf "bridge.rateLimit.burst=%v must be a positive whole number of requests; the bridge refuses to start otherwise." $burst) -}}
 {{- end -}}
 {{- if .Values.bridge.harborAccessSelector -}}
 {{- $instance := include "harbor-bridge.instance" . -}}
@@ -271,6 +303,33 @@ harbor.aetherize.io/robot
 {{- end -}}
 
 {{/*
+validateURL checks a URL setting of the bridge (bridge/controlplane/config.go
+requireURL) at template time: an http or https scheme and a host, no
+literal "@" after the host part (a "/", "?" or "#" inside a password ends
+the host early), and no "@" at all when the setting takes no
+user:password@ part. A non-empty third element is the reason it takes
+none: harbor.url and bridge.oidcIssuer take none, bridge.oidcJWKSURL may
+carry one (net/http sends it as Basic auth to the JWKS endpoint). Messages
+never repeat the value: it may hold a credential.
+Usage: include "harbor-bridge.validateURL" (list "<setting>" <value> "<reason or empty>")
+*/}}
+{{- define "harbor-bridge.validateURL" -}}
+{{- $name := index . 0 -}}
+{{- $url := index . 1 | toString | trim -}}
+{{- $noUserinfo := index . 2 -}}
+{{- $omitted := "The value is left out of this message: it could hold a credential." -}}
+{{- if and $noUserinfo (contains "@" $url) -}}
+{{- fail (printf "%s must not contain \"@\". A user:password@ part never takes effect (%s) and only ends up in logs; an \"@\" after the host part usually means a \"/\", \"?\" or \"#\" inside a password ended the host early. Write an \"@\" that belongs to the path, query or fragment as %%40. %s" $name $noUserinfo $omitted) -}}
+{{- end -}}
+{{- if not (regexMatch "^(?i:https?)://([^/?#]*@)?[^/?#@]+([/?#].*)?$" $url) -}}
+{{- fail (printf "%s must be an http:// or https:// URL with a host; the bridge refuses to start otherwise. %s" $name $omitted) -}}
+{{- end -}}
+{{- if regexMatch "^[^:]+://[^/?#]*[/?#].*@" $url -}}
+{{- fail (printf "%s has an \"@\" after its host part: a \"/\", \"?\" or \"#\" inside a user:password@ part ends the host early, and the credentials never reach the endpoint. Percent-encode them (%%2F, %%3F, %%23), and write an \"@\" that belongs to the path, query or fragment as %%40. %s" $name $omitted) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 registryHost extracts the registry host from an image repository
 string: the first path segment when it looks like a host (contains a
 dot or colon, or is "localhost"), else docker.io — mirroring the
@@ -313,6 +372,20 @@ Derived values that don't fit cleanly inline.
 {{- else -}}
 {{- $tag := .Values.plugin.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.plugin.image.repository $tag -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+rateLimitBurst renders bridge.rateLimit.burst as the integer the bridge
+parses (strconv.Atoi): a values file reads numbers as float64, and a
+float64 of 1000000 or more would otherwise render as 1e+06.
+validateRequiredValues admits only positive whole numbers.
+*/}}
+{{- define "harbor-bridge.rateLimitBurst" -}}
+{{- if kindIs "string" .Values.bridge.rateLimit.burst -}}
+{{- .Values.bridge.rateLimit.burst -}}
+{{- else -}}
+{{- int64 .Values.bridge.rateLimit.burst -}}
 {{- end -}}
 {{- end -}}
 

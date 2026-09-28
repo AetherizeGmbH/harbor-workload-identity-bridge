@@ -4,7 +4,8 @@
 # ====================================================================
 
 # Logical name for this cluster, used as the Harbor robot-name prefix
-# (ADR-0009 / ADR-0018). Must be a DNS label and distinct from every
+# (ADR-0009 / ADR-0018). Must be a DNS label without consecutive hyphens
+# ("--": Harbor refuses robot names with them) and distinct from every
 # other cluster sharing the same Harbor. The ownership prefix is
 # dot-terminated (`bridge-<clusterName>.`), so distinct names are
 # automatically collision-free — there is no longer any requirement to
@@ -15,7 +16,9 @@ clusterName: ""
 harbor:
   # Base URL of the Harbor instance the bridge manages robots in. Use
   # https: over plain http the admin credentials travel on every call and
-  # robot passwords come back in the responses.
+  # robot passwords come back in the responses. No user:password@ part
+  # (the chart refuses any "@"; write one in the path as %40): the bridge
+  # authenticates only with adminCredsSecret below.
   url: ""
 
   # Allow an http:// url anyway (e.g. an in-cluster Harbor reached over
@@ -80,6 +83,8 @@ bridge:
   replicas: 2
 
   # Leader election is auto-enabled when replicas > 1; explicit override.
+  # true or false, unquoted. false with replicas > 1 is refused: every
+  # replica would run the reconciler and the janitor (ADR-0025).
   leaderElection: null  # null = auto from replicas; true | false to force.
 
   image:
@@ -106,7 +111,11 @@ bridge:
   # apiserver's own JWKS endpoint, https://kubernetes.default.svc/openid/v1/jwks:
   # the keys come from inside the cluster (no internet egress needed, the
   # cluster CA + the bridge's token below authenticate it), and the
-  # issuer claim is still checked against oidcIssuer.
+  # issuer claim is still checked against oidcIssuer. Of the URL settings
+  # only this one may carry user:password@ (sent as Basic auth):
+  # percent-encode "/", "?", "#" and "@" inside it, and write an "@" after
+  # the host as %40 (the chart refuses a literal one there). oidcIssuer
+  # takes no "@" at all.
   oidcJWKSURL: ""
 
   # CA bundle used to verify the OIDC issuer's TLS cert. For the
@@ -148,7 +157,9 @@ bridge:
   # serves only the HarborAccess objects whose labels match this map
   # (ADR-0026). Empty = every HarborAccess. Bridges that share a Harbor
   # must use different clusterName values. The bridge only ever serves
-  # plugin.audience, whatever a CR names.
+  # plugin.audience, whatever a CR names. Label values must be strings:
+  # quote values YAML reads as booleans or numbers ("true", "1"), or pass
+  # them with --set-string; the chart refuses unquoted ones.
   # harborAccessSelector:
   #   harbor.aetherize.io/bridge: harbor-eu
   harborAccessSelector: {}
@@ -162,7 +173,7 @@ bridge:
   # Requests per second (and burst) the credential endpoint accepts from
   # one source IP before it answers 429. Kubelet calls through its node's
   # address and caches credentials per registry, so it stays far below.
-  # perSource: 0 disables the limit.
+  # perSource: 0 disables the limit. burst is a positive whole number.
   rateLimit:
     perSource: 20
     burst: 100
