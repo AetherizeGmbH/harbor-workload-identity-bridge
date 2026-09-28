@@ -6,6 +6,12 @@ Accepted. Supersedes the implicit claim about the `cacheKeyType` enum
 made in [ADR-0015](0015-plugin-duplicates-wire-types.md) §"Enum mismatch
 on cacheKeyType".
 
+**Corrected (see the ADR index):** `tokenAttributes.cacheType` keys no
+SA-token cache. With `tokenAttributes` set, kubelet keys cached credentials
+per ServiceAccount under either value, and `Token` only adds the token's
+hash; `cacheDuration`, not the token lifetime, bounds how often the plugin
+runs.
+
 ## Context
 
 The kubelet image-credential-provider API has two superficially similar

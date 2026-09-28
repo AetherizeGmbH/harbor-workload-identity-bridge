@@ -12,6 +12,12 @@ with `--` is refused), and the overflow path's disjointness from natural
 names also rests on dot-free SA names and the cut falling inside the SA
 name.
 
+It also supersedes the dash-joined Secret name of
+[ADR-0011](0011-robot-password-secret-storage.md). The Secret contract moved
+to `bridge/internal/robotsecret`, so the Secret-name test named below is now
+`TestName_DotDelimiterIsInjective` in
+`bridge/internal/robotsecret/robotsecret_test.go`.
+
 ## Context
 
 Two names encode workload identity in this system, and both were built by

@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended by [ADR-0025](0025-data-plane-serving.md):** every
+replica serves the credential endpoint, and `/metrics` moved off the
+credential listener; since 0.11.2 that listener serves only
+`POST /v1/credentials`. **Two statements below do not hold:** the chart
+supports only a fixed `service.nodePort` (default `31443`). With an empty value the
+default endpoint renders as `https://127.0.0.1:` without a port and the
+plugin dials port 443, so dynamic allocation needs `plugin.bridgeEndpoint`
+set by hand. mTLS is off by default, and a client certificate proves only
+that the configured client CA signed it (open decision O2, README).
 
 ## Context
 

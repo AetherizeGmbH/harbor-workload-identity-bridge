@@ -2,7 +2,29 @@
 
 ## Status
 
-Accepted
+Accepted. **Amended and in parts superseded; the code follows the later
+ADRs:**
+
+- Robots are named `bridge-<cluster>.<saNs>.<saName>`
+  ([ADR-0009](0009-multi-cluster-topology.md),
+  [ADR-0018](0018-dot-delimited-naming.md)), not `bridge-<namespace>-<sa>`.
+- The data plane mints no docker tokens: it hands the robot's Basic Auth
+  credentials to kubelet, so the password does leave the bridge
+  ([ADR-0013](0013-return-robot-basic-auth-credentials.md), which supersedes
+  ADR-0005).
+- The password rotates on the 24h schedule or when the robot Secret or the
+  robot is lost, never on a spec change; Harbor applies permission changes
+  to the existing robot
+  ([ADR-0023](0023-level-triggered-robot-lifecycle.md)).
+- Harbor robots carry no labels. The bridge recognises its robots by the
+  ownership prefix and the tokens in the robot description
+  ([ADR-0012](0012-robot-description-as-component-contract.md),
+  `bridge/controlplane/contract.go`) and reports a robot it does not own as
+  `RobotConflict`.
+- Deletion waits until Harbor confirms it (`DeletionBlocked`), the janitor
+  revokes orphaned robots (ADR-0023), and a refused HarborAccess has its
+  robot disabled
+  ([ADR-0030](0030-refused-harboraccess-suspends-its-robot.md)).
 
 ## Context
 

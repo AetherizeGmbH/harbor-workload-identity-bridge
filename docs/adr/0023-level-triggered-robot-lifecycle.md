@@ -6,6 +6,11 @@ Accepted. Amends ADR-0003 (when passwords rotate), ADR-0007/0013 (how long
 kubelet may cache), ADR-0012 (which robots the janitor considers), ADR-0014
 (where the robot prefix is handled).
 
+**Amended by [ADR-0030](0030-refused-harboraccess-suspends-its-robot.md):**
+a robot the bridge disabled for a refused HarborAccess (description token
+`suspended=true`) is the bridge's to re-enable; only a robot an
+administrator disabled stays disabled and reports `RobotDisabled`.
+
 ## Context
 
 A review of the robot lifecycle (audit 2026-07-06 findings C1, H1, H2, M1–M4,
