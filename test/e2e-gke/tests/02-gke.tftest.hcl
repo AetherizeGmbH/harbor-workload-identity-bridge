@@ -700,9 +700,9 @@ run "token_rejection" {
       sa=/var/run/secrets/kubernetes.io/serviceaccount
       ns=$(cat "$sa/namespace")
 
-      # The bridge's serving certificate, off the wire. The bridge install's
-      # issuer is selfSigned, so it is the CA cert-manager writes to ca.crt
-      # for the plugin; curl still checks that it names the Service host.
+      # The bridge's serving certificate, off the wire: the leaf, which curl
+      # takes as the trust anchor (a partial chain, curl's default with
+      # OpenSSL); curl still checks that it names the Service host.
       host=$${url#https://}; host=$${host%%/*}
       openssl s_client -connect "$host" -servername "$${host%:*}" </dev/null 2>/dev/null \
         | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
@@ -799,6 +799,120 @@ run "token_rejection" {
   }
 }
 
+# mTLS between plugin and bridge, end to end (details at bridge_mtls,
+# mtls_check and pull_pod_mtls of the kind harness).
+# (From here on the install module's outputs come from run.bridge_mtls.)
+run "bridge_mtls" {
+  command = apply
+  module {
+    source = "../e2e/modules/harbor-bridge-install"
+  }
+  variables {
+    kubeconfig            = run.gke.kubeconfig
+    cluster_name          = "gke-e2e"
+    harbor_url            = run.harbor.internal_api_url
+    harbor_admin_password = run.harbor.admin_password
+    audience              = "harbor-bridge"
+    oidc_issuer           = run.gke.oidc_issuer
+    oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
+    token_command         = "gcloud auth print-access-token"
+    match_images = [
+      "${run.gke.harbor_hostname}/your-project",
+      "${run.gke.harbor_hostname}/project-alpha",
+      "${run.gke.harbor_hostname}/project-beta",
+      "${run.gke.harbor_hostname}/project-gamma",
+      "${run.gke.harbor_hostname}/beta-1",
+      "${run.gke.harbor_hostname}/beta-2",
+      "${run.gke.harbor_hostname}/beta-3",
+      "${run.gke.harbor_hostname}/upgrade-only",
+    ]
+    bridge_image = run.push.image_refs.bridge
+    plugin_image = run.push.image_refs.plugin
+    mtls         = true
+  }
+}
+
+run "mtls_check" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "mtls-check"
+    namespace            = run.bridge_mtls.namespace
+    service_account_name = "default"
+    image                = run.push.image_tags.seed
+    image_pull_policy    = "IfNotPresent"
+    secret_volumes       = { (run.bridge_mtls.mtls_client_secret) = "/mtls" }
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_mtls.credentials_url}'
+      pods='${run.bridge_mtls.bridge_pods_host}'
+      want=${run.bridge_mtls.bridge_replicas}
+      host=$${url#https://}; host=$${host%%/*}
+      name=$${host%:*}; port=$${host##*:}
+      for f in tls.crt tls.key ca.crt; do test -s "/mtls/$f"; done
+
+      n=0; ips=""
+      for i in $(seq 1 20); do
+        ips=$(getent ahosts "$pods" | awk '$2 == "STREAM" {print $1}' | sort -u)
+        n=$(printf '%s\n' "$ips" | grep -c . || true)
+        [ "$n" = "$want" ] && break
+        sleep 3
+      done
+      if [ "$n" != "$want" ]; then
+        echo "$pods resolves to $n bridge pods ($(echo $ips)), want $want"; exit 1
+      fi
+
+      for ip in $ips; do
+        code=$(curl -sS -m 10 -o /tmp/response -w '%%{http_code}' --cacert /mtls/ca.crt \
+          --cert /mtls/tls.crt --key /mtls/tls.key --resolve "$name:$port:$ip" \
+          --data '{"image":"mtls-check"}' "$url") || code="no answer (curl exit $?)"
+        body=$(cat /tmp/response 2>/dev/null || true)
+        if [ "$code" != 401 ] || [ "$body" != "missing Bearer credential" ]; then
+          echo "bridge pod $ip, with the plugin's client certificate: $code ($body), want 401 missing Bearer credential"; exit 1
+        fi
+        echo "bridge pod $ip, with the plugin's client certificate: the bridge answered (401, no token)"
+
+        if out=$(curl -sS -m 10 -o /dev/null -w '%%{http_code}' --cacert /mtls/ca.crt \
+            --resolve "$name:$port:$ip" --data '{"image":"mtls-check"}' "$url" 2>&1); then
+          echo "bridge pod $ip, without a client certificate: answered HTTP $out, want a refused TLS handshake"; exit 1
+        fi
+        if ! printf '%s' "$out" | grep -Eq 'alert (certificate required|bad certificate|handshake failure)'; then
+          echo "bridge pod $ip, without a client certificate: failed, but not with a TLS alert: $out"; exit 1
+        fi
+        echo "bridge pod $ip, without a client certificate: TLS handshake refused"
+      done
+    SH
+    ]
+    timeout_seconds = 180
+    fail_message    = "bridge.mTLS on GKE: a bridge replica served a request without a client certificate, or refused the plugin's (see pod.log and bridge.log)"
+  }
+}
+
+run "pull_pod_mtls" {
+  command = apply
+  module {
+    source = "../e2e/modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.gke.kubeconfig
+    name                 = "pull-mtls-upgrade-only"
+    namespace            = "upgrade-ns"
+    service_account_name = "upgrade-runner"
+    image                = "${run.gke.harbor_hostname}/upgrade-only/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo upgrade-ns/upgrade-runner pulled upgrade-only over mTLS; exit 0"]
+    expect_bridge_log = [
+      ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"${run.gke.harbor_hostname}/upgrade-only/app:v1\"", "\"client_cert\":\"CN=harbor-bridge-plugin\""],
+    ]
+    timeout_seconds = 300
+    fail_message    = "bridge.mTLS on GKE: the pull failed with mTLS on, or the bridge did not log the plugin's client certificate for it (see pod.log and bridge.log)"
+  }
+}
+
 run "file_sleep" {
   command = apply
   module {
@@ -819,7 +933,7 @@ run "harbor_access_cascade" {
   variables {
     kubeconfig       = run.gke.kubeconfig
     phase            = "ns-cascade"
-    bridge_namespace = run.bridge_upgrade.namespace
+    bridge_namespace = run.bridge_mtls.namespace
     issuer           = run.gke.oidc_issuer
     audience         = "harbor-bridge"
   }
@@ -866,7 +980,7 @@ run "harbor_access_teardown" {
   variables {
     kubeconfig       = run.gke.kubeconfig
     phase            = "none"
-    bridge_namespace = run.bridge_upgrade.namespace
+    bridge_namespace = run.bridge_mtls.namespace
     issuer           = run.gke.oidc_issuer
     audience         = "harbor-bridge"
   }

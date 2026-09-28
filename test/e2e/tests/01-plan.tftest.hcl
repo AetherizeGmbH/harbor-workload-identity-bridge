@@ -66,6 +66,24 @@ run "defaults" {
     condition     = strcontains(kubectl_manifest.cluster_issuer.yaml_body, "name: harbor-bridge-ca")
     error_message = "default ClusterIssuer name should be harbor-bridge-ca"
   }
+  # A CA, not a selfSigned issuer: bridge.mTLS needs the serving and the
+  # client certificate signed by one CA (the bridge trusts its TLS
+  # Secret's ca.crt for client certificates).
+  assert {
+    condition = (
+      yamldecode(kubectl_manifest.cluster_issuer.yaml_body).spec == { ca = { secretName = "harbor-bridge-ca-root" } }
+      && yamldecode(kubectl_manifest.root_ca.yaml_body).metadata.namespace == "cert-manager"
+      && yamldecode(kubectl_manifest.root_ca.yaml_body).spec.isCA == true
+      && yamldecode(kubectl_manifest.root_ca.yaml_body).spec.secretName == "harbor-bridge-ca-root"
+      && yamldecode(kubectl_manifest.root_ca.yaml_body).spec.issuerRef.name == "harbor-bridge-ca-bootstrap"
+      && yamldecode(kubectl_manifest.bootstrap_issuer.yaml_body).spec == { selfSigned = {} }
+    )
+    error_message = "the ClusterIssuer must be a CA issuing from the root harbor-bridge-ca-root (in cert-manager's namespace), which the selfSigned bootstrap issuer signs"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.mTLS.enabled == false && output.mtls_client_secret == ""
+    error_message = "mTLS is off unless mtls is set"
+  }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).clusterName == "dev"
     error_message = "clusterName should be wired from var.cluster_name"
@@ -178,6 +196,39 @@ run "custom_issuer" {
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name == "prod-bridge-ca"
     error_message = "tls.issuerRef.name must match the ClusterIssuer name"
+  }
+  assert {
+    condition     = yamldecode(kubectl_manifest.cluster_issuer.yaml_body).spec.ca.secretName == yamldecode(kubectl_manifest.root_ca.yaml_body).spec.secretName
+    error_message = "the CA ClusterIssuer must issue from the root Certificate's Secret"
+  }
+}
+
+# ── mTLS (bridge_mtls stage) ─────────────────────────────────────────────────
+# The client certificate must come from the same CA issuer as the serving
+# certificate.
+run "mtls" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    mtls = true
+  }
+
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.mTLS.enabled == true
+    error_message = "mtls = true must enable bridge.mTLS"
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.bridge.values[0]).bridge.mTLS.clientIssuerRef.name == yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name
+      && yamldecode(helm_release.bridge.values[0]).bridge.mTLS.clientIssuerRef.kind == "ClusterIssuer"
+    )
+    error_message = "the plugin's client certificate must come from the issuer of the serving certificate"
+  }
+  assert {
+    condition     = output.mtls_client_secret == "harbor-bridge-plugin-mtls-client"
+    error_message = "mtls_client_secret should name the chart's plugin client-certificate Secret"
   }
 }
 

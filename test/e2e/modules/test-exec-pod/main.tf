@@ -122,6 +122,12 @@ variable "projected_token_audience" {
   description = "When set, kubelet projects a token of the pod's ServiceAccount for this audience to /var/run/secrets/tokens/token: bound to the pod, valid for 1h — a token the bridge accepts (ADR-0028), for checks that call the bridge the way the plugin does."
 }
 
+variable "secret_volumes" {
+  type        = map(string)
+  default     = {}
+  description = "Secrets in the job namespace to mount read-only, Secret name → mount path (e.g. the plugin's mTLS client certificate)."
+}
+
 variable "expect_bridge_log" {
   type        = list(list(string))
   default     = []
@@ -195,6 +201,24 @@ resource "kubernetes_job_v1" "this" {
               name       = "projected-token"
               mount_path = "/var/run/secrets/tokens"
               read_only  = true
+            }
+          }
+          dynamic "volume_mount" {
+            for_each = var.secret_volumes
+            content {
+              # A Secret name may hold dots; a volume name may not.
+              name       = "secret-${substr(sha1(volume_mount.key), 0, 12)}"
+              mount_path = volume_mount.value
+              read_only  = true
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.secret_volumes
+          content {
+            name = "secret-${substr(sha1(volume.key), 0, 12)}"
+            secret {
+              secret_name = volume.key
             }
           }
         }

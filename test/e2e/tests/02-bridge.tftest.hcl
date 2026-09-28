@@ -39,6 +39,10 @@
 #                             not just a data-plane 403)
 #  18. token_rejection      — ADR-0028: the bridge refuses a token bound to no
 #                             pod and one living 2h, serves a pod-bound 1h one
+#  18b. bridge_mtls         — helm upgrade turning bridge.mTLS on
+#  18c. mtls_check          — every replica serves a request carrying the
+#                             plugin's client certificate, refuses one without
+#  18d. pull_pod_mtls       — kubelet → plugin → bridge pulls over mTLS
 #  19. file_sleep (opt-in)  — pause for kubectl-poking a populated cluster
 #  19b. harbor_access_cascade — scenario phase "ns-cascade": the namespace
 #                             app-ns deleted with its HarborAccess in it;
@@ -52,12 +56,13 @@
 #                             (a Harbor that cannot be asked fails it)
 #
 # Teardown order. tofu test destroys the states in reverse order of the
-# LAST run that touched each. Stages 13, 19b and 20 re-use the
-# harbor_access state after bridge_upgrade, and stage 20 empties it, so at
-# cleanup time no HarborAccess (and no finalizer) is left for an
-# already-uninstalled bridge to release. Before this, bridge_upgrade (the
-# last run using the bridge state) made cleanup uninstall the bridge
-# FIRST, and deleting the CRs then hung on finalizers nobody could remove.
+# LAST run that touched each. Stages 19b and 20 re-use the harbor_access
+# state after bridge_mtls (18b, the last run using the bridge state), and
+# stage 20 empties it, so at cleanup time no HarborAccess (and no
+# finalizer) is left for an already-uninstalled bridge to release. Before
+# this, the last run using the bridge state made cleanup uninstall the
+# bridge FIRST, and deleting the CRs then hung on finalizers nobody could
+# remove.
 #
 # Multi-tenant / collision coverage:
 #   - team-a/svc-b → project-alpha and team/a-svc-b → project-beta collide
@@ -268,7 +273,8 @@ run "bridge_replicas" {
       host=$${url#https://}; host=$${host%%/*}
       name=$${host%:*}; port=$${host##*:}
 
-      # The serving certificate off the wire, as in token_rejection.
+      # The serving certificate off the wire, as in token_rejection: the
+      # leaf, which curl takes as the trust anchor (a partial chain).
       openssl s_client -connect "$host" -servername "$name" </dev/null 2>/dev/null \
         | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
       test -s /tmp/bridge-ca.crt
@@ -852,9 +858,10 @@ run "token_rejection" {
       ns=$(cat "$sa/namespace")
 
       # The bridge's serving certificate, off the wire like Harbor's in
-      # robot_push_test. The harness's issuer is selfSigned, so it is the
-      # CA cert-manager writes to ca.crt for the plugin; curl still checks
-      # that it names the Service host.
+      # robot_push_test. The bridge serves only its leaf (the harness's CA
+      # is not in the chain), and curl accepts the leaf itself as the
+      # trust anchor (a partial chain, curl's default with OpenSSL); it
+      # still checks that the certificate names the Service host.
       host=$${url#https://}; host=$${host%%/*}
       openssl s_client -connect "$host" -servername "$${host%:*}" </dev/null 2>/dev/null \
         | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > /tmp/bridge-ca.crt
@@ -952,6 +959,134 @@ run "token_rejection" {
   }
 }
 
+# ── mTLS between plugin and bridge (bridge.mTLS), end to end. Re-apply the
+# install with mTLS on: cert-manager issues the plugin's client
+# certificate from the harness's CA (the one that signs the serving
+# certificate since bridge_install, so no CA changes anywhere), the bridge
+# requires a client certificate that CA signed, and the plugin's
+# credential-provider config gains the client pair, so the installer
+# restarts kubelet (which also empties its credential cache). The install
+# waits until every bridge replica runs the new spec.
+# (From here on the install module's outputs come from run.bridge_mtls.)
+run "bridge_mtls" {
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    kubeconfig            = run.cluster.kubeconfig
+    cluster_name          = "dev"
+    harbor_url            = run.harbor.internal_api_url
+    harbor_admin_password = run.harbor.admin_password
+    audience              = "harbor-bridge"
+    match_images = [
+      "harbor.e2e:30843/your-project",
+      "harbor.e2e:30843/project-alpha",
+      "harbor.e2e:30843/project-beta",
+      "harbor.e2e:30843/project-gamma",
+      "harbor.e2e:30843/beta-1",
+      "harbor.e2e:30843/beta-2",
+      "harbor.e2e:30843/beta-3",
+      "harbor.e2e:30843/upgrade-only",
+    ]
+    bridge_image = run.build_images.image_refs.bridge
+    plugin_image = run.build_images.image_refs.plugin
+    mtls         = true
+  }
+}
+
+# Every bridge replica, at its own address (the headless Service of
+# bridge_replicas): with the plugin's client certificate the TLS handshake
+# succeeds and the bridge itself answers (401, no token sent); without it
+# the handshake is refused with a TLS alert and no HTTP answer at all. The
+# Job mounts the Secret cert-manager issued for the plugin; its ca.crt is
+# the CA that signed both certificates, so curl verifies the full chain.
+run "mtls_check" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "mtls-check"
+    namespace            = run.bridge_mtls.namespace
+    service_account_name = "default"
+    image                = "e2e-seed:e2e"
+    image_pull_policy    = "IfNotPresent"
+    secret_volumes       = { (run.bridge_mtls.mtls_client_secret) = "/mtls" }
+    command              = ["sh", "-c"]
+    args = [<<-SH
+      set -eu
+      url='${run.bridge_mtls.credentials_url}'
+      pods='${run.bridge_mtls.bridge_pods_host}'
+      want=${run.bridge_mtls.bridge_replicas}
+      host=$${url#https://}; host=$${host%%/*}
+      name=$${host%:*}; port=$${host##*:}
+      for f in tls.crt tls.key ca.crt; do test -s "/mtls/$f"; done
+
+      n=0; ips=""
+      for i in $(seq 1 20); do
+        ips=$(getent ahosts "$pods" | awk '$2 == "STREAM" {print $1}' | sort -u)
+        n=$(printf '%s\n' "$ips" | grep -c . || true)
+        [ "$n" = "$want" ] && break
+        sleep 3
+      done
+      if [ "$n" != "$want" ]; then
+        echo "$pods resolves to $n bridge pods ($(echo $ips)), want $want"; exit 1
+      fi
+
+      for ip in $ips; do
+        code=$(curl -sS -m 10 -o /tmp/response -w '%%{http_code}' --cacert /mtls/ca.crt \
+          --cert /mtls/tls.crt --key /mtls/tls.key --resolve "$name:$port:$ip" \
+          --data '{"image":"mtls-check"}' "$url") || code="no answer (curl exit $?)"
+        body=$(cat /tmp/response 2>/dev/null || true)
+        if [ "$code" != 401 ] || [ "$body" != "missing Bearer credential" ]; then
+          echo "bridge pod $ip, with the plugin's client certificate: $code ($body), want 401 missing Bearer credential"; exit 1
+        fi
+        echo "bridge pod $ip, with the plugin's client certificate: the bridge answered (401, no token)"
+
+        if out=$(curl -sS -m 10 -o /dev/null -w '%%{http_code}' --cacert /mtls/ca.crt \
+            --resolve "$name:$port:$ip" --data '{"image":"mtls-check"}' "$url" 2>&1); then
+          echo "bridge pod $ip, without a client certificate: answered HTTP $out, want a refused TLS handshake"; exit 1
+        fi
+        if ! printf '%s' "$out" | grep -Eq 'alert (certificate required|bad certificate|handshake failure)'; then
+          echo "bridge pod $ip, without a client certificate: failed, but not with a TLS alert: $out"; exit 1
+        fi
+        echo "bridge pod $ip, without a client certificate: TLS handshake refused"
+      done
+    SH
+    ]
+    timeout_seconds  = 180
+    fail_message     = "bridge.mTLS: a bridge replica served a request without a client certificate, or refused the plugin's (see pod.log and bridge.log)"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# kubelet → plugin → bridge under mTLS: the pull works, and the bridge's
+# audit line for it names the plugin's client certificate, so the
+# credential was issued over a connection that presented it (kubelet's
+# cache was emptied by the restart in bridge_mtls).
+run "pull_pod_mtls" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-mtls-upgrade-only"
+    namespace            = "upgrade-ns"
+    service_account_name = "upgrade-runner"
+    image                = "harbor.e2e:30843/upgrade-only/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo upgrade-ns/upgrade-runner pulled upgrade-only over mTLS; exit 0"]
+    expect_bridge_log = [
+      ["\"logger\":\"audit\"", "\"msg\":\"credential issued\"", "\"requested_image\":\"harbor.e2e:30843/upgrade-only/app:v1\"", "\"client_cert\":\"CN=harbor-bridge-plugin\""],
+    ]
+    timeout_seconds  = 300
+    fail_message     = "bridge.mTLS: the pull failed with mTLS on, or the bridge did not log the plugin's client certificate for it (see pod.log and bridge.log)"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
 # Pause-for-inspection on a fully populated cluster (before the teardown
 # stages empty it). Off by default; `make e2e-pause` turns it on.
 run "file_sleep" {
@@ -978,7 +1113,7 @@ run "harbor_access_cascade" {
   variables {
     kubeconfig       = run.cluster.kubeconfig
     phase            = "ns-cascade"
-    bridge_namespace = run.bridge_upgrade.namespace
+    bridge_namespace = run.bridge_mtls.namespace
     audience         = "harbor-bridge"
   }
 }
@@ -1033,7 +1168,7 @@ run "harbor_access_teardown" {
   variables {
     kubeconfig       = run.cluster.kubeconfig
     phase            = "none"
-    bridge_namespace = run.bridge_upgrade.namespace
+    bridge_namespace = run.bridge_mtls.namespace
     audience         = "harbor-bridge"
   }
 }

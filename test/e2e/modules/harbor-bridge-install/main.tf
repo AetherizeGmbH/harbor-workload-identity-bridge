@@ -132,7 +132,19 @@ variable "bridge_replicas" {
 variable "issuer_name" {
   type        = string
   default     = "harbor-bridge-ca"
-  description = "Name of the self-signed cert-manager ClusterIssuer created for the bridge's serving cert. Referenced by both the ClusterIssuer manifest and the chart's tls.issuerRef."
+  description = "Name of the CA ClusterIssuer created for the bridge's serving cert (and, with mtls, the plugin's client cert). Referenced by both the ClusterIssuer manifest and the chart's tls.issuerRef. Its root is <issuer_name>-root, signed by the selfSigned ClusterIssuer <issuer_name>-bootstrap."
+}
+
+variable "cert_manager_namespace" {
+  type        = string
+  default     = "cert-manager"
+  description = "Namespace cert-manager runs in: a ClusterIssuer's CA Secret must live in cert-manager's cluster resource namespace, which defaults to it."
+}
+
+variable "mtls" {
+  type        = bool
+  default     = false
+  description = "bridge.mTLS.enabled, with the client certificate issued by issuer_name — the CA that also signs the serving certificate, whose ca.crt the bridge trusts for client certificates."
 }
 
 # Resource requests/limits for the bridge Deployment container, wired into
@@ -206,6 +218,66 @@ resource "kubernetes_secret_v1" "admin" {
   type = "Opaque"
 }
 
+# The bridge's certificates come from a CA, not from a selfSigned issuer.
+# With bridge.mTLS the bridge trusts the ca.crt of its own TLS Secret for
+# client certificates, so the serving and the plugin's client certificate
+# must share an issuing CA (charts/harbor-bridge/templates/
+# bridge-certificate.yaml); a selfSigned issuer signs each certificate
+# with its own key. A selfSigned bootstrap issuer signs one root, and the
+# CA ClusterIssuer var.issuer_name issues from it: the production shape,
+# and every install already has it, so turning mTLS on (bridge_mtls)
+# changes no CA anywhere. The chart's Certificate waits for nothing, so
+# these wait until cert-manager reports each Ready.
+resource "kubectl_manifest" "bootstrap_issuer" {
+  yaml_body         = <<-YAML
+    apiVersion: cert-manager.io/v1
+    kind: ClusterIssuer
+    metadata:
+      name: ${var.issuer_name}-bootstrap
+    spec:
+      selfSigned: {}
+  YAML
+  server_side_apply = true
+  field_manager     = "tofu-e2e-harbor-bridge-install"
+  wait_for {
+    condition {
+      type   = "Ready"
+      status = "True"
+    }
+  }
+}
+
+resource "kubectl_manifest" "root_ca" {
+  yaml_body         = <<-YAML
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: ${var.issuer_name}-root
+      namespace: ${var.cert_manager_namespace}
+    spec:
+      isCA: true
+      commonName: ${var.issuer_name}-root
+      secretName: ${var.issuer_name}-root
+      duration: 2160h
+      privateKey:
+        algorithm: ECDSA
+        size: 256
+      issuerRef:
+        name: ${var.issuer_name}-bootstrap
+        kind: ClusterIssuer
+        group: cert-manager.io
+  YAML
+  server_side_apply = true
+  field_manager     = "tofu-e2e-harbor-bridge-install"
+  wait_for {
+    condition {
+      type   = "Ready"
+      status = "True"
+    }
+  }
+  depends_on = [kubectl_manifest.bootstrap_issuer]
+}
+
 resource "kubectl_manifest" "cluster_issuer" {
   yaml_body         = <<-YAML
     apiVersion: cert-manager.io/v1
@@ -213,10 +285,18 @@ resource "kubectl_manifest" "cluster_issuer" {
     metadata:
       name: ${var.issuer_name}
     spec:
-      selfSigned: {}
+      ca:
+        secretName: ${var.issuer_name}-root
   YAML
   server_side_apply = true
   field_manager     = "tofu-e2e-harbor-bridge-install"
+  wait_for {
+    condition {
+      type   = "Ready"
+      status = "True"
+    }
+  }
+  depends_on = [kubectl_manifest.root_ca]
 }
 
 # CRDs are installed automatically by helm from the chart's crds/
@@ -259,6 +339,13 @@ resource "helm_release" "bridge" {
       logLevel    = "debug"
       image       = var.bridge_image
       resources   = var.bridge_resources
+      mTLS = {
+        enabled = var.mtls
+        clientIssuerRef = {
+          name = var.issuer_name
+          kind = "ClusterIssuer"
+        }
+      }
     }
     tls = {
       enabled = true
@@ -365,6 +452,14 @@ output "namespace" {
 output "bridge_replicas" {
   value       = var.bridge_replicas
   description = "Bridge replicas the install waited for."
+}
+
+# The Secret holding the plugin's client certificate (tls.crt, tls.key and
+# the issuing CA as ca.crt) when mtls is on: the chart's
+# harbor-bridge.mTLSClientSecretName, in the release namespace (this
+# module leaves plugin.namespace empty).
+output "mtls_client_secret" {
+  value = var.mtls ? "${helm_release.bridge.name}-plugin-mtls-client" : ""
 }
 
 output "bridge_pods_host" {

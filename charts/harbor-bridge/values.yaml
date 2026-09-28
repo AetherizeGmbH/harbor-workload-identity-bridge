@@ -173,7 +173,12 @@ bridge:
   # without one.
   mTLS:
     enabled: false
-    # cert-manager Issuer used to sign client certs for plugin pods.
+    # cert-manager Issuer used to sign client certs for plugin pods. The
+    # bridge trusts the ca.crt of its own TLS Secret for client certs, so
+    # this must be a CA issuer whose CA is that ca.crt: the issuer in
+    # tls.issuerRef when it is a CA issuer, or the CA of existingSecret. A
+    # selfSigned issuer signs every certificate with its own key and cannot
+    # serve here (the e2e harness uses a selfSigned-bootstrapped CA).
     clientIssuerRef:
       name: ""
       kind: ClusterIssuer

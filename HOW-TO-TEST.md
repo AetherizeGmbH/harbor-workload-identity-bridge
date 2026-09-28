@@ -7,8 +7,9 @@ Two paths, pick by what you're doing.
   bridge chart, seeds private images, asserts the kubelet
   credential-provider chain by pulling them, and then checks the
   HarborAccess lifecycle (grant change, identity change, deletion)
-  against Harbor and that the bridge refuses ServiceAccount tokens not
-  bound to a pod or living longer than an hour. ~15 minutes
+  against Harbor, that the bridge refuses ServiceAccount tokens not
+  bound to a pod or living longer than an hour, and that with mTLS on
+  it refuses a connection without the plugin's client certificate. ~15 minutes
   start-to-finish. Use this for every change you'd otherwise want
   smoke-tested.
 
@@ -92,6 +93,9 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 16 | `pull_pod_revoked` | On the warmed node, where kubelet still caches the old robot's credential: the old ServiceAccount must get an authorization failure, so the robot was revoked in Harbor, not only refused by the bridge |
 | 17 | `robot_check_update` | Asks Harbor: the old robot is gone, the new one exists, the cluster's robots are exactly one per HarborAccess (the query stage 21 relies on), and the narrowed robot stores exactly its new grants |
 | 18 | `token_rejection` | [ADR-0028](docs/adr/0028-token-lifetime-cap-and-pod-binding.md): a Job running as `token-ns/token-check` mints three tokens through the TokenRequest API and sends each to the bridge's Service. Bound to its own pod for 1h: `200` with the robot's credentials. Bound to no pod: `401`. Bound to the pod for 2h: `401`. The Job first checks the claims the apiserver issued, and the bridge's audit log must show each decision with its category (`not_pod_bound`, `excessive_lifetime`) |
+| 18b | `bridge_mtls` | `helm upgrade` turning `bridge.mTLS` on. cert-manager issues the plugin's client certificate from the harness's CA, which has signed the serving certificate since stage 7; the new client pair in the credential-provider config makes the installer restart kubelet |
+| 18c | `mtls_check` | Every bridge replica, at its own address: with the plugin's client certificate the bridge answers (`401` for the missing token), without one the TLS handshake is refused |
+| 18d | `pull_pod_mtls` | kubelet → plugin → bridge pulls over mTLS; the bridge's audit line for the pull names the plugin's client certificate |
 | 19 | `file_sleep` | No-op unless `TF_VAR_pause_after_pull=true` (see below) |
 | 19b | `harbor_access_cascade` | Scenario phase `ns-cascade`: only the namespace `app-ns` is deleted, the way `kubectl delete namespace` does it. Its HarborAccess goes with it while the namespace is Terminating, and the namespace is gone only after the bridge released the finalizer |
 | 19c | `robot_check_cascade` | Asks Harbor: the robot of `app-ns/runner` is gone, every other robot of the cluster is still there |
@@ -200,10 +204,10 @@ cleanly. No orphan kind clusters.
 | [`test/e2e/modules/harbor`](test/e2e/modules/harbor) | Harbor chart + node IP / cert-extract helpers |
 | [`test/e2e/modules/containerd-registry-trust`](test/e2e/modules/containerd-registry-trust) | Pulls Harbor's cert off the wire, installs into containerd |
 | [`test/e2e/modules/coredns-cm`](test/e2e/modules/coredns-cm) | Patches CoreDNS `Corefile` for synthetic hostnames |
-| [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install; waits for every bridge replica, adds a headless Service over the bridge pods |
+| [`test/e2e/modules/harbor-bridge-install`](test/e2e/modules/harbor-bridge-install) | The chart install, with a cert-manager CA (a selfSigned bootstrap issuer signs its root) issuing the bridge's certificates, optionally mTLS; waits for every bridge replica, adds a headless Service over the bridge pods |
 | [`test/e2e/modules/k8s-yaml`](test/e2e/modules/k8s-yaml) | Apply YAML manifests (keyed by object identity) with optional `wait` |
 | [`test/e2e/modules/test-sleep`](test/e2e/modules/test-sleep) | The pause mechanism |
-| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log, and can mount a projected token for the bridge audience |
+| [`test/e2e/modules/test-exec-pod`](test/e2e/modules/test-exec-pod) | Pull / check Jobs; captures diagnostics on failure; can expect an authorization failure or lines in the bridge log, and can mount a projected token for the bridge audience or Secrets |
 | [`test/e2e/scripts/kubeconfig.sh`](test/e2e/scripts/kubeconfig.sh) | Sourced by every harness script that runs kubectl: a private kubeconfig file, so no credential (on GKE the operator's access token) is ever on a command line |
 | [`test/e2e/seed/Dockerfile`](test/e2e/seed/Dockerfile) | curl + crane + openssl + jq image used by the seed job |
 
