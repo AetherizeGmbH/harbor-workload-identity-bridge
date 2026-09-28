@@ -542,8 +542,11 @@ every NexusAccess after every edit until the reconciler has run.
   - theft of the Nexus admin credential (B4 for Nexus,
     admin-equivalent);
   - a leaked docker bearer token stays valid until its user is retired:
-    bounded by the rotation interval only because of decision c, and
-    only while the control plane can authenticate to Nexus;
+    bounded only because of decision c, and only while the control plane
+    can authenticate to Nexus. With note 4's grace the bound is
+    `PasswordRotationInterval + RotationSafetyMargin +
+    NexusUserRetireGrace` (24 h + 1 min + 5 min) after the user was
+    created, plus the reconcile latency;
   - remote lockout of the bridge's admin credential (3.94+): anyone who
     reaches Nexus's HTTP port (every developer with registry access,
     any pod that can reach it) and knows the admin username keeps it
@@ -907,17 +910,22 @@ The last column says whether `TestLive_AgainstNexus` checks the row.
 
 - A second registry is supported with the same identity model and the
   same rotation promise as Harbor, and for docker repositories the same
-  revocation guarantees, bounded by rotation (decision c) as long as the
-  control plane can authenticate to Nexus. The price: a second CRD, a
-  routing step in the data plane and a backend seam in the control
-  plane.
+  revocation guarantees, bounded by rotation and a 5-minute grace
+  (decision c, note 4) as long as the control plane can authenticate to
+  Nexus. The price: a second CRD, a routing step in the data plane and a
+  backend seam in the control plane.
 - Nexus user ids change at every rotation; the role id, the Secret name
-  and the NexusAccess stay. Each identity has one user, two for the
-  moment of a rotation.
+  and the NexusAccess stay. Each identity has one user, and two for up to
+  `NexusUserRetireGrace` (5 minutes) after each scheduled rotation (note
+  4); a forced rotation and a serviceAccountRef change delete the
+  previous user at once.
 - A docker bearer token leaked from a node stays valid until the next
-  rotation or deletion retires its user (at most `PasswordRotationInterval`
-  plus the margin while the admin credential works), not until its own
-  expiry, which Nexus does not have.
+  rotation or deletion retires its user, not until its own expiry, which
+  Nexus does not have: while the admin credential works, at most
+  `PasswordRotationInterval + RotationSafetyMargin + NexusUserRetireGrace`
+  (24 h + 1 min + 5 min) after the user was created, plus the reconcile
+  latency. The rotation happens once `rotation-not-before` plus the
+  margin has passed, and the replaced user is deleted after the grace.
 - Orphan API keys of retired users stay in Nexus's store until presented
   (then deleted) or purged; they grant nothing, because their user ids
   never exist again.
