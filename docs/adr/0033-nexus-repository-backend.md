@@ -22,10 +22,14 @@ bridge can manage over its REST API (`/service/rest`), is local users,
 roles, and the built-in repository-view privileges Nexus creates with
 every repository (`nx-repository-view-<format>-<repo>-<action>`).
 
-Sources: the nexus-public source at `release-3.96.3` (classes named below),
-the community OpenAPI spec of the REST API, Sonatype's documentation, and a
+Sources: the nexus-public source at `release-3.96.3` (classes named below)
+and, where behaviour changed between releases, at the tags named with it;
+the community OpenAPI spec of the REST API; Sonatype's documentation; and a
 local `sonatype/nexus3:3.76.1` container (the last release before the
 Community Edition's EULA gate; its `/v1/system/eula` answers 404). The
+nexus-public tree of 3.96.3 holds no implementation of the docker or OCI
+formats, so what those formats do on 3.77 and later cannot be read from
+source. The
 runtime checks are listed under "Verified at runtime"; everything else is
 from source or documentation and marked so.
 
@@ -37,23 +41,25 @@ The differences to Harbor that shape the design:
    does not revoke it. Neither does disabling the user (the token is
    refused while the user is disabled and valid again after re-enabling),
    and neither does deleting and re-creating the user under the same id:
-   the re-created user even gets the same token back. The key is dropped
-   only when it is presented while its user id does not exist
+   the re-created user even gets the same token back. The token realm
+   accepts a user whose status counts as active, which is `active` and
+   `changepassword` (`UserStatus.isActive`, `BearerTokenRealm`; for
+   `changepassword` verified). The key is dropped only when it is
+   presented while its user id does not exist
    (`BearerTokenRealm.doGetAuthenticationInfo` deletes it on
    `UserNotFoundException`), or by the orphaned-API-key purge task
    (`PurgeApiKeysTask`). Everything but the purge task was observed on
-   Nexus 3.76.1. In
-   the 3.96.3 source a status change away from `active` and a user
-   deletion post `UserPrincipalsExpired`, whose handler in
-   `ApiKeyServiceImpl` deletes the user's keys; on 3.76.1 neither had that
-   effect. Why is not known (one hypothesis: the event names the source
-   `default` while the key's principal carries the realm name
-   `NexusAuthenticatingRealm`). A leaked Harbor registry token is a JWT
-   that expires on its own (30 minutes by default) and a leaked robot
-   password dies at the next rotation. For a leaked Nexus bearer token no
-   expiry was found (not in the source read; at runtime it outlived every
-   test, minutes only), so nothing short of retiring its user id ends
-   it.
+   Nexus 3.76.1. In the 3.96.3 source a status change of a user whose
+   status counts as active to any other status, and a user deletion, post
+   `UserPrincipalsExpired`, whose handler in `ApiKeyServiceImpl` deletes
+   the user's keys; on 3.76.1 neither had that effect. Why is not known
+   (one hypothesis: the event names the source `default` while the key's
+   principal carries the realm name `NexusAuthenticatingRealm`). A leaked
+   Harbor registry token is a JWT that expires on its own (30 minutes by
+   default) and a leaked robot password dies at the next rotation. For a
+   leaked Nexus bearer token no expiry was found (not in the source read;
+   at runtime it outlived every test, minutes only), so nothing short of
+   retiring its user id ends it.
 2. **No user lookup by id.** `GET /v1/security/users?userId=<term>` matches
    every user whose id *begins* with the term, case-insensitively
    (`AbstractUserManager.matchesCriteria`; verified), without pagination.
@@ -64,15 +70,46 @@ The differences to Harbor that shape the design:
 4. **"Already exists" has no status of its own.** A duplicate role is 400
    (`RoleApiResource.ROLE_UNIQUE`), a duplicate user is 500
    (`DuplicateUserException`, text/plain; verified).
-5. **Nexus drops unknown roles on user create** instead of refusing
-   them (verified), and strips a repository's privileges from every role
-   when the repository is deleted, without restoring them when it is
-   re-created (verified).
-6. **Failed-login rate limiter.** Since 3.93 Nexus answers credentials that
-   failed three times with 429 and `Retry-After` (30 s, doubling up to
-   900 s), for Basic and token auth, in memory per node (documentation and
-   source; not verifiable on 3.76.1). Whether it keys on the user id or on
-   the client IP is not known.
+5. **Writes that succeed without doing what they say.**
+   - A user create naming a role that does not exist is not refused
+     (verified). The answer echoes the request, unknown role included
+     (`UserApiResource.createUser` returns the object it passed to
+     `DefaultSecuritySystem.addUser`). Nexus stores the role id with the
+     user (`UserManagerImpl` stores the ids unfiltered), hides it from
+     every read, and the user gains the role as soon as a role with that
+     id is created (verified). A user update naming an unknown role is
+     refused with 400 (verified).
+   - A role create naming a privilege that does not exist is refused with
+     400 (verified; `validateContainedRolesAndPrivileges` at
+     `release-3.90.5`, `release-3.91.0` and `release-3.96.3`). A role
+     update is refused the same way up to 3.90.x (verified on 3.76.1;
+     source up to `release-3.90.5`). From 3.91.0 on Nexus
+     removes the missing privileges, stores the rest and answers 204
+     (`SecurityConfigurationManagerImpl.validateAndCleanOrphanedPrivileges`,
+     source at `release-3.91.0` to `release-3.96.3`).
+   - Deleting a repository strips its privileges from every role without
+     restoring them when it is re-created, and deleting a role removes it
+     from every user without restoring it when the role is re-created
+     (both verified).
+6. **Failed-login rate limiter** (source; not verifiable on 3.76.1).
+   Since 3.93.0 Nexus counts failed logins in memory on each node
+   (`AuthRateLimiterServiceImpl`). The key is the username of Basic Auth,
+   or the SHA-256 of an API-key token; the client IP is only written to
+   the audit event (`NexusBasicHttpAuthenticationFilter`). The failure
+   that takes the count past `nexus.auth.ratelimit.max-attempts`
+   (default 3) is answered with 429 and `Retry-After` (30 s, doubling per
+   further failure up to `nexus.auth.ratelimit.max-delay-seconds`,
+   default 900 s). On 3.93 a correct password still succeeds and clears
+   the count. From 3.94.0 on a username past the limit gets 429 before
+   Nexus checks the password, so the correct password is refused too, and
+   each such request refreshes the entry's idle timer (Guava
+   `expireAfterAccess`). The count has no timestamp, so `Retry-After` is
+   not when requests succeed again: the block ends only after
+   max-delay-seconds without any request for that username, when an
+   administrator updates the user or changes its password
+   (`AuthRateLimiterResetListener`), or when Nexus restarts. Whether the
+   docker connector's logins pass through the same filter is not known
+   (the docker format's code is not in nexus-public 3.96.3).
 7. **Permissions.** Creating users and assigning roles needs
    `nexus:users:*` and `nexus:roles:*`; changing a password needs
    `nexus:*`, i.e. `nx-all` (`UserApiResource.changePassword`). Any
@@ -87,8 +124,16 @@ The differences to Harbor that shape the design:
    namespace `nexus` named `<ns>.<name>` (custom resource names may carry
    dots).
 10. **Formats.** Since 3.94 Nexus serves OCI repositories in a format of
-    its own (`nx-repository-view-oci-…`); 3.76.1 has no `oci` format
-    (`POST /v1/repositories/oci/hosted` is 404).
+    its own (Sonatype's release notes, not verified); 3.76.1 has no `oci`
+    format (`POST /v1/repositories/oci/hosted` is 404, verified).
+    According to the community OpenAPI spec (not
+    verified) OCI clients authenticate through a separate "OCI Bearer
+    Token Realm" (`OciAttributes.forceBasicAuth`), OCI repository names
+    must be lower-case, and, according to Sonatype's documentation (not
+    verified), its privileges are `nx-repository-view-oci-…`. Whether the
+    OCI realm's tokens expire, survive a password change or die with
+    their user is not known, and decision c rests on exactly that for
+    docker.
 11. **Licensing.** Community Edition 3.77 and later require accepting a
     EULA (`/v1/system/eula`) before use. Accepting it is a legal act of
     the operator. This project never accepts it on anyone's behalf.
@@ -125,7 +170,10 @@ spec:
   `name` with Nexus's repository pattern `^[a-zA-Z0-9-][a-zA-Z0-9_.-]*$`
   and `MaxLength=167` (so every derived privilege name stays within 200
   characters), which rejects `*`; `access` one of `pull`, `push`,
-  `pull,push`; `format` one of `docker`, `oci`, default `docker`.
+  `pull,push`; `format` an enum with the single value `docker`, the
+  default. `oci` is left out until its token realm has been analysed
+  (Context 10, question 8); keeping the field makes adding it later a
+  non-breaking change.
 - `metadata.name` at most 63 characters (CEL on the root, as HarborAccess:
   it becomes a label value).
 - Status mirrors HarborAccess: `user {userId, roleId, passwordSecretRef,
@@ -135,7 +183,8 @@ spec:
   `InvalidSpec`, `UserConflict`, `RoleConflict`, `UserDisabled`,
   `RepositoryNotFound`, `PasswordRejected` (the operator's password
   validator refused the generated password), `NexusError`,
-  `NexusAuthFailed`, `NexusRateLimited`, `DeletionBlocked`.
+  `NexusAuthFailed`, `NexusRateLimited`, `DeletionBlocked`. Whether
+  status should carry `userId` is question 9.
 - Finalizer `nexus.aetherize.io/user`, and with a selector
   `nexus.aetherize.io/user-<instance>` (ADR-0026;
   `BRIDGE_NEXUSACCESS_SELECTOR`).
@@ -168,8 +217,11 @@ one out; renaming it is a breaking change).
   the cut always falls inside the ServiceAccount name and the ADR-0031
   disjointness holds unconditionally (three dots versus two). The
   generation separator `_` occurs in no DNS label, so a user id splits
-  uniquely at its last `_`. Everything is lower-case: Nexus's search is
-  case-insensitive, the ownership check is not. Pinned by
+  uniquely at its last `_`; `ParseUserID` accepts exactly the ids of the
+  shape `UserID` builds (lower-case DNS labels within their limits, a
+  natural or truncated identity name, a 16-hex-digit generation), so the
+  janitor can use it as a filter. Everything is lower-case: Nexus's
+  search is case-insensitive, the ownership check is not. Pinned by
   `FuzzNexusName_Injective` and `naming_test.go`. Nexus accepts `--`, so
   unlike Harbor (ADR-0031) such identities get names.
 - Ownership markers, the ADR-0012 contract on Nexus objects: user
@@ -186,8 +238,12 @@ one out; renaming it is a breaking change).
   `read` a push fails); `pull,push` = `add`, `edit`, `read`. `browse` and
   `delete` are never granted. As with Harbor, a pusher declares
   `pull,push` (`nexus.RepositoryPrivileges`).
-- Order: create role, then user (Nexus would drop a missing role
-  silently); revoke user, then role. The janitor sweeps orphan roles.
+- Order: create role, then user; revoke user, then role. A user created
+  before its role would hold a hidden reference that takes effect only
+  when the role is created (Context 5). `CreateUser` returns the user as
+  read back, so the reconciler compares its roles with the requested one
+  and treats a missing role as not provisioned. The janitor sweeps orphan
+  roles.
 
 Alternatives: one user per identity without a role, holding the
 privileges directly (Nexus users hold roles, not privileges); one shared
@@ -214,14 +270,24 @@ decision is therefore:
 - The scheduled rotation keeps ADR-0023's promise: the Secret carries
   `rotation-not-before`, the data plane caps kubelet's cache duration at
   it, and the reconciler rotates only after it plus the safety margin.
+- Scheduled and forced rotation, and the deletion of previous
+  generations, do not depend on the grants: they continue while the
+  object is `RepositoryNotFound` (decision d). The leaked-token bound in
+  the Consequences needs that.
 - A user an administrator disabled or locked is not rotated (a new
   generation would undo the administrator's decision) and is reported as
-  `UserDisabled`; the bridge never re-enables it.
+  `UserDisabled`; the bridge never re-enables it. Its password and token
+  are refused meanwhile (verified). A user in status `changepassword`
+  counts as active: its password and token keep working (verified), so
+  it is rotated like an active user (`UserStatus.Active`), and its
+  replacement is created `active`.
 - Before creating a generation the reconciler records it in the Secret
   (a pending-generation annotation), so the janitor can tell a user
   being created from an orphan (`ApiUser` has no creation time).
 - Forced rotation (the Secret is missing, incomplete, or names a user
   that does not exist) follows the same path.
+- A rotation also escapes a rate-limiter block on the workload user
+  (Context 6): the new user id is a new key.
 
 Alternatives (runtime results on 3.76.1):
 
@@ -248,22 +314,59 @@ Alternatives (runtime results on 3.76.1):
   internal. Rejected.
 - **S4, user tokens**: Nexus Pro only.
 
-### d. A missing repository fails closed (maintainer may change before implementation)
+### d. A missing repository adds nothing and holds back no removal (maintainer may change before implementation)
 
-Before writing the role the reconciler checks each privilege with
+Every pass the reconciler checks each privilege of the spec with
 `GET /v1/security/privileges/{name}` (404 for a repository that does not
-exist in that format, verified; names are case-sensitive, verified). If
-any is missing: `Ready=False, reason=RepositoryNotFound` naming the
-repositories, no role write (Nexus would refuse it with 400, verified),
-and the data plane issues no credentials for that NexusAccess. The user
-and the role stay, so recovery needs no rotation; when the repository
-exists again the next pass restores the privilege Nexus stripped.
+exist in that format, verified; names are case-sensitive, verified; the
+client confirms a 404 against the built-in `nx-all`). If any is missing:
+
+- It writes the role with exactly the spec's privileges that exist. A
+  privilege the spec no longer names is therefore removed in the same
+  pass, even when the same edit names a repository that does not exist
+  (ADR-0023: a revocation by spec edit is a revocation), and nothing
+  missing is added. Nexus would refuse the full list with 400 before
+  3.91.0 and store it without the missing entries from 3.91.0 on
+  (Context 5).
+- `Ready=False, reason=RepositoryNotFound` names the repositories;
+  `observedGeneration` is not advanced.
+- The data plane issues no credentials for the NexusAccess. The
+  reconciler marks the Secret with a `grants-incomplete` annotation
+  (decision e) and removes it once every privilege is in the role; the
+  data plane refuses while it is present (decision f). The mark lives on
+  the Secret, not in the status: only the bridge writes Secrets in its
+  namespace, while RBAC may let users write `nexusaccesses/status`.
+- Rotation and the deletion of previous generations continue
+  (decision c).
+- Credentials already issued (kubelet caches up to `rotation-not-before`,
+  docker bearer tokens) keep access only to repositories that exist and
+  that the spec still names: the role is shared by every credential of
+  the identity.
+- When the repository exists again, the next pass writes the full list
+  (restoring a privilege Nexus stripped) and removes the mark.
+- A write that fails because a repository vanished between the check and
+  the write is `RepositoryNotFound` as well: before 3.91.0 a 400 that
+  stored nothing, after which the reconciler checks and writes again at
+  once, so a removal waits for one retry at most; from 3.91.0 on
+  `UpdateRole` reads the role back and returns `ErrPrivilegesDropped`
+  with the role already stored without the missing privilege.
 
 Why: a partial grant makes a typo or a deleted repository look Ready and
-silently changes what a workload may pull. Alternative: **partial grant**
-(grant the repositories that exist, report the rest in a separate
-condition, stay Ready). Kinder to availability: a deleted repository does
-not stop pulls from the others.
+silently changes what a workload may pull, and holding back the whole
+role write would hold back removals too. Alternatives: **partial grant**
+(the same role write, but stay Ready, keep serving and report the missing
+repositories in a separate condition): kinder to availability, a deleted
+repository does not stop new credentials for the others. **Freeze** (the
+first draft of this decision: no role write while anything is missing):
+rejected, because an edit that removed repository A and named a missing
+repository C left A granted to every existing password and bearer token.
+**Empty role** (write no privileges while anything is missing): the
+strictest, but it also cuts cached credentials off the repositories that
+exist, which safety does not require once the data plane issues nothing.
+A stronger data-plane gate (serve only when the Secret records the
+current `metadata.generation` as fully applied) would also close the
+seconds between a spec edit and the reconcile, at the price of refusing
+every NexusAccess after every edit until the reconciler has run.
 
 ### e. Robot Secret contract per kind (maintainer may change before implementation)
 
@@ -279,8 +382,9 @@ not stop pulls from the others.
   `bridge/controlplane/janitor.go` `sweepSecrets`), and so does the
   Harbor reconciler's Secret watch.
 - Keys `username` (the user id) and `password`; annotations
-  `rotation-not-before` (unchanged meaning) and the pending generation.
-  The contract lives in `bridge/internal/robotsecret` next to Harbor's.
+  `rotation-not-before` (unchanged meaning), the pending generation, and
+  `grants-incomplete` (decision d). The contract lives in
+  `bridge/internal/robotsecret` next to Harbor's.
 
 ### f. The data plane routes by registry host (maintainer may change before implementation)
 
@@ -288,15 +392,28 @@ not stop pulls from the others.
   prefix]`). The handler parses the requested image's reference and
   matches it segment-aware: the host and port exactly, the path prefix
   on `/` boundaries (`host/nexus` matches `host/nexus/img`, not
-  `host/nexus-old/img`). The longest match wins; identical entries in two
-  backends are refused at startup.
+  `host/nexus-old/img`).
 - Two backends must not share a `host[:port]`: kubelet caches per registry
   host (`cacheKeyType: Registry`, ADR-0016), so a shared host would serve
-  one backend's credentials for the other's images.
+  one backend's credentials for the other's images. Startup refuses such
+  a configuration. An image therefore matches the entries of at most one
+  backend; a path prefix only narrows which images of its host that
+  backend serves, and several entries of one backend may overlap (any
+  match selects it).
 - Only then does it look for that kind's objects that name the token's
   ServiceAccount and the bridge's audience. An image that matches no
   backend is refused (`no_backend`) when more than one backend is
   configured.
+- The check that the Secret holds the object's current identity
+  (ADR-0023, today `creds.username` against the one exact name
+  `HandlerConfig.RobotUsername` returns) becomes an identity comparison
+  for Nexus: the data plane accepts a Nexus Secret only when
+  `ParseUserID(username)` returns the NexusAccess's current
+  `IdentityName`, whatever the generation. An exact name cannot express
+  "this identity, any generation", and dropping the check would hand a
+  previous identity's password to the new one.
+- It refuses a Nexus Secret that carries `grants-incomplete`
+  (decision d).
 - With only Harbor configured the handler behaves exactly as today: no
   registry hosts needed, the image stays audit-only.
 - The plugin does not change. It already sends the image, and its wire
@@ -305,11 +422,18 @@ not stop pulls from the others.
 ### g. A backend seam in the control plane (maintainer may change before implementation)
 
 - An interface both backends implement, roughly: `Kind`,
-  `AccountName(identity)`, `Get`, `ListOwned(cluster)`,
-  `MissingGrants(grants)`, `Create(name, owner, grants) (account,
-  password)`, `Converge(account, owner, grants)`, `Rotate(account)
-  (account, password)`, `Retire(old account)` (Harbor: no-op; Nexus:
-  delete the previous generation after the Secret write), `Delete`.
+  `AccountName(identity)` (the stem: Harbor's robot name, Nexus's
+  identity name), `Get(identity, current)`, `ListOwned(cluster)`,
+  `MissingGrants(grants)`, `Create(identity, owner, grants) (account,
+  password)`, `Converge(account, owner, grants)`, `Rotate(identity,
+  current) (account, password)`, `Retire(identity, keep)` (Harbor: no-op;
+  Nexus: delete every generation of the identity but `keep` after the
+  Secret write), `Delete`.
+- `current` is the account the Secret names (its `username`, plus the
+  pending generation), an input rather than something derived from the
+  identity: several Nexus users of one identity can exist (two during a
+  rotation, orphans after a crash), and only the Secret says which one
+  is current.
 - Shared: identity naming rules, rotation scheduling, conditions,
   ownership checks, the janitor skeleton. One controller per CRD kind.
   A conformance test suite runs the same lifecycle cases against the
@@ -320,13 +444,15 @@ not stop pulls from the others.
 ### h. Chart (maintainer may change before implementation)
 
 - `nexus.enabled`, `nexus.url`, `nexus.adminCredsSecret`, `nexus.caSecret`,
-  `nexus.allowInsecureHTTP`, `nexus.registryHosts`, and
-  `harbor.registryHosts` (required once Nexus is enabled).
+  `nexus.allowInsecureHTTP`, `nexus.registryHosts`,
+  `nexus.rateLimitBackoff` (decision j), and `harbor.registryHosts`
+  (required once Nexus is enabled).
 - Env `BRIDGE_NEXUS_URL`, `BRIDGE_NEXUS_ADMIN_DIR`, `BRIDGE_NEXUS_CA_FILE`,
   `BRIDGE_NEXUS_ALLOW_INSECURE_HTTP`, `BRIDGE_NEXUS_REGISTRY_HOSTS`,
-  `BRIDGE_HARBOR_REGISTRY_HOSTS`, `BRIDGE_NEXUSACCESS_SELECTOR`. The
-  admin credentials are re-read per request (the Harbor client's
-  `WithCredentialSource`, #136); the Nexus client offers the same option.
+  `BRIDGE_NEXUS_RATE_LIMIT_BACKOFF`, `BRIDGE_HARBOR_REGISTRY_HOSTS`,
+  `BRIDGE_NEXUSACCESS_SELECTOR`. The admin credentials are re-read per
+  request (the Harbor client's `WithCredentialSource`, #136); the Nexus
+  client offers the same option.
 - RBAC for `nexusaccesses`, `nexusaccesses/status`,
   `nexusaccesses/finalizers`, and the CRD under `crds/`.
 - Template validation: every registry host is covered by
@@ -343,23 +469,30 @@ not stop pulls from the others.
   `make e2e-nexus`), with modules for Nexus, its seed (realms, anonymous
   off, hosted docker repositories) and a NexusAccess scenario.
 - Assertions include the ones this ADR rests on: the old bearer token is
-  refused after a rotation, a missing repository is `RepositoryNotFound`,
-  `DeletionBlocked` while Nexus is down, routing with both backends.
+  refused after a rotation; a missing repository is `RepositoryNotFound`
+  and the data plane refuses; an edit that removes repository A and names
+  a missing repository C revokes A at once for the existing password and
+  bearer token; a `RepositoryNotFound` object still rotates;
+  `DeletionBlocked` while Nexus is down; routing with both backends.
 - Community Edition 3.77 and later need the operator to accept the EULA
   themselves; the docs say so, the harness never does it. The e2e
-  therefore cannot cover 3.77+ (the rate limiter of 3.93+, the `oci`
-  format of 3.94+, any change to the token behaviour); see question 4.
+  therefore cannot cover 3.77+ (the rate limiter of 3.93+, the role
+  update of 3.91+, the `oci` format of 3.94+, any change to the token
+  behaviour); see question 4.
 - `TestLive_AgainstNexus` (`bridge/controlplane/nexus/client_live_test.go`)
   runs the client against a disposable Nexus when `NEXUS_LIVE_URL` is set
-  and pins the behaviour above, including the bearer-token checks.
+  and checks the rows marked in the last column of the table under
+  "Verified at runtime"; the other rows were checked by hand with `curl`
+  and `crane`.
 
 ### j. Security (maintainer may change before implementation)
 
 - The bridge's Nexus credential is admin-equivalent (Context 7). The
   client never needs `nx-all`: it creates, updates and deletes users and
-  roles and reads privileges (`nexus:users:*`, `nexus:roles:*`,
-  `nexus:privileges:read`); a dedicated role with just these is still
-  admin-equivalent and says so in the docs. The client deliberately has
+  roles and reads privileges. A role holding only `nx-users-all`,
+  `nx-roles-all` and `nx-privileges-read` suffices (verified:
+  `TestLive_AgainstNexus` runs every client call as such a user); it is
+  still admin-equivalent and the docs say so. The client deliberately has
   no change-password call: decision c does not need it, and it would
   need `nx-all`.
 - The client follows the Harbor client's hardening: 30 s per call
@@ -370,27 +503,65 @@ not stop pulls from the others.
   ids restricted to `[A-Za-z0-9._-]` before they enter a path, no
   logging, and an error message from Nexus that contains a credential or
   password of the request is withheld as a whole
-  (`FuzzRenderMessage_WithholdsSecrets`). The status endpoints get no
-  credentials (they need none, verified). A 404 never reads as "gone"
-  unless Nexus's own listing confirms it: `DeleteUser` and `DeleteRole`
-  re-list after a 404, and a 404 from a listing endpoint (a URL that does
-  not point at Nexus) is `ErrUnexpectedStatus`, not `ErrNotFound`, so a
-  misconfigured URL cannot release a finalizer while the user lives on.
+  (`renderMessage`, `FuzzRenderMessage_WithholdsSecrets`; that the client
+  passes the admin password and Basic token in is pinned by
+  `TestClient_ErrorsNeverCarryAdminCredentials`). The status endpoints
+  get no credentials (they need none, verified).
+- Writes are read back where Nexus's answer does not show the result:
+  `CreateUser` returns the user as `GetUser` reads it (the create's
+  answer echoes the request, Context 5), and `UpdateRole` reads the role
+  back and reports privileges Nexus 3.91+ dropped
+  (`ErrPrivilegesDropped`).
+- A 404 never reads as "gone" unless Nexus confirms it: `DeleteUser`,
+  `UpdateUser`, `GetRole`, `UpdateRole` and `DeleteRole` re-list after a
+  404, `GetPrivilege` asks the same endpoint for the built-in `nx-all`,
+  and a 404 from a listing endpoint or for `nx-all` (a URL that does not
+  point at Nexus) is `ErrUnexpectedStatus`, not `ErrNotFound`. A
+  misconfigured URL therefore cannot release a finalizer while the user
+  or role lives on, nor report `RepositoryNotFound` for a URL problem.
 - 429: the client never retries; it returns `ErrRateLimited` with the
-  parsed `Retry-After` (seconds or HTTP date). The reconciler waits at
-  least that long (`NexusRateLimited`), capped by its resync interval,
-  never hot.
+  parsed `Retry-After` (seconds or HTTP date). Because `Retry-After` is
+  not the recovery time and every request during a 3.94+ block extends
+  it (Context 6), a 429 on the admin credential makes the Nexus
+  controller stop every call made with that credential for
+  `BRIDGE_NEXUS_RATE_LIMIT_BACKOFF` (default 15 minutes, Nexus's default
+  max-delay-seconds; an operator who raised
+  `nexus.auth.ratelimit.max-delay-seconds` raises it as well), counted
+  from the last 429, without probing. Meanwhile every NexusAccess shows
+  `NexusRateLimited` and a metric counts the blocked state, so operators
+  can alert on it. An administrator's update of the bridge's admin user
+  (or a Nexus restart) lifts the block early; the backoff cannot see
+  that, and restarting the bridge ends its wait.
 - Threat model additions, open until the maintainer rates them:
-  theft of the Nexus admin credential (B4 for Nexus, admin-equivalent);
-  a leaked docker bearer token stays valid until its user is retired
-  (bounded by the rotation interval only because of decision c); a
-  NexusAccess author grants any repository (T8's twin); Nexus's
-  `nx-anonymous` role or the DefaultRole realm widens every bridge
-  user's rights beyond the spec, which the bridge cannot see from the
-  user; the failed-login rate limiter lets stale credentials on one node
-  lock out that node's pulls if it keys on the client IP; Nexus's
-  in-memory limiter state is per node, so HA Nexus multiplies the
-  allowance.
+  - theft of the Nexus admin credential (B4 for Nexus,
+    admin-equivalent);
+  - a leaked docker bearer token stays valid until its user is retired:
+    bounded by the rotation interval only because of decision c, and
+    only while the control plane can authenticate to Nexus;
+  - remote lockout of the bridge's admin credential (3.94+): anyone who
+    reaches Nexus's HTTP port (every developer with registry access,
+    any pod that can reach it) and knows the admin username keeps it
+    blocked with four wrong passwords, and any request within
+    max-delay-seconds of the previous one keeps it blocked. Rotation,
+    the deletion of previous generations and of deleted NexusAccess
+    objects' users (revocation, `DeletionBlocked`) then stop, and the
+    leaked-token bound above is suspended. Mitigation: a dedicated admin account with
+    a long random username (never `admin`), kept only in the admin
+    credential Secret; the `NexusRateLimited` alert; limiting who can
+    reach Nexus's REST API;
+  - the same lockout of a workload identity's user id denies that
+    identity's pulls on every node, not only on one (the key is the
+    username), if the docker connector's logins pass through the limiter
+    (not known, Context 6). The id carries a random 64-bit generation,
+    so only readers of the NexusAccess status (`status.user.userId`,
+    question 9) or of the Secret can target it, and the next rotation
+    escapes the block;
+  - a NexusAccess author grants any repository (T8's twin);
+  - Nexus's `nx-anonymous` role or the DefaultRole realm widens every
+    bridge user's rights beyond the spec, which the bridge cannot see
+    from the user;
+  - Nexus's in-memory limiter state is per node, so HA Nexus multiplies
+    the allowance of wrong passwords.
 
 ### k. Open questions for the maintainer
 
@@ -400,78 +571,104 @@ not stop pulls from the others.
    task, or accepting S1/S3 with the token-survival risk documented. The
    new-id rotation makes the Nexus user id change daily, which operators
    see in Nexus's audit log.
-3. **Missing repository**: fail closed or partial grant (decision d).
+3. **Missing repository**: add nothing and hold back no removal while the
+   data plane refuses (decision d), partial grant, or empty role.
 4. **EULA**: whether a maintainer accepts the Community Edition EULA for a
-   manual verification run of 3.77+ (the rate limiter's key, the `oci`
-   format, whether 3.96 revokes tokens on delete). A legal decision this
-   ADR does not make.
+   manual verification run of 3.77+ (the rate limiter's behaviour at
+   runtime, whether the docker connector's logins count against it, the
+   role update of 3.91+, the `oci` format and its token realm, whether
+   3.96 revokes tokens on delete). A legal decision this ADR does not
+   make.
 5. **Credential self-check**: should the bridge verify the stored password
    by authenticating as the user? An administrator's password change is
    otherwise invisible until pulls fail, but every failed check counts
-   against the rate limiter.
+   against the rate limiter, and from 3.94 on the fourth failed check
+   blocks the user.
 6. **Community Edition limits**: CE caps `/repository/*` requests at
    100,000 a day and components at 40,000 (documentation). Whether docker
    connector traffic counts is not verified; the docs should warn.
 7. **Harbor optional**: whether a bridge may run with Nexus only
    (`harbor.url` is required today).
+8. **OCI format**: `oci` is added once its token realm has been analysed
+   (Context 10): whether its tokens expire, survive a password change or
+   a delete and re-create, and die with their user id. It needs 3.94+,
+   so question 4 first.
+9. **Status user id**: `status.user.userId` maps Nexus's audit log to
+   NexusAccess objects, but tells every reader of the object which
+   username to lock out (decision j). Keep it, or leave it to the Secret.
 
 ## Verified at runtime
 
 Nexus `sonatype/nexus3:3.76.1` in a local container bound to 127.0.0.1,
 2026-09-28, `curl` and `crane` against the REST API and a hosted docker
 repository with an HTTP connector, `DockerToken` realm active, anonymous
-access off; removed afterwards.
+access off; removed afterwards. The review of this ADR repeated the
+rows marked (r) in a fresh container of the same image the same day.
+The last column says whether `TestLive_AgainstNexus` checks the row.
 
-| Behaviour | Result |
-| --- | --- |
-| Duplicate user id on create | 500, text/plain `DuplicateUserException: User … already exists.` |
-| Duplicate role id on create | 400, `Role '…' already exists, use a unique roleId.` |
-| Role update with body id ≠ path id | 409 |
-| Role create/update with a privilege that does not exist | 400 |
-| User update with an unknown role | 400, validation list `[{"id":"roles","message":…}]` |
-| User update with body id ≠ path id | 400 |
-| User create with an unknown role | 200, the role is dropped |
-| User create without roles / without e-mail | 400 each |
-| Two users with the same e-mail | allowed |
-| User id of 200 / 201 characters | 200 / 500 |
-| `--`, `_` and a trailing `.json`/`.xml` in user ids | accepted; PUT and DELETE address the right user |
-| `GET /v1/security/users?userId=bridge-rt.` | also returns `BRIDGE-RT.ns.upper`: case-insensitive prefix |
-| `DELETE …/users/{id}?realm=NexusAuthenticatingRealm` of a missing user | 404 |
-| Deleting a role | removes it from every user |
-| Deleting a repository | strips its privileges from every role; re-creating it does not restore them |
-| `GET /v1/security/privileges/{name}` | 200 for an existing repository, 404 otherwise; names case-sensitive |
-| `change-password` | 204 with text/plain, 415 with application/json |
-| Request without credentials / wrong password | 403 / 401 |
-| `/v1/status`, `/v1/status/writable` without credentials | 200 |
-| Bearer token after password change | still valid; `/v2/token` returns the same token |
-| Bearer token while disabled or locked / after re-enabling | 401 / valid again |
-| Bearer token after delete and re-create under the same id | still valid (0 s, 10 s and 30 s gap); the new user gets the same token |
-| Bearer token presented while its user is absent | 401, and stays 401 after re-creation |
-| Bearer token after replacing the user under a new id | old token 401, new token 200 |
-| Least privilege (crane) | pull, tag list, catalog: `read`; push: `add`+`edit`+`read`; `add`+`browse`+`read` cannot push |
-| Generated passwords (`GeneratePassword`) | authenticate for the REST API and `/v2/token` |
-| `oci` format / EULA endpoint | absent (404) on 3.76.1 |
+| Behaviour | Result | Live test |
+| --- | --- | --- |
+| Duplicate user id on create | 500, text/plain `DuplicateUserException: User … already exists.` | yes |
+| Duplicate role id on create | 400, `Role '…' already exists, use a unique roleId.` | yes |
+| Role update with body id ≠ path id | 409 | no |
+| Role create with a privilege that does not exist | 400 | yes |
+| Role update with a privilege that does not exist | 400, nothing stored (r); 3.91.0+ stores the role without it and answers 204 (source only) | yes |
+| User update with an unknown role | 400, validation list `[{"id":"roles","message":…}]` | yes |
+| User update with body id ≠ path id | 400 | no |
+| User create with an unknown role (r) | 200; the answer echoes the request; reads hide the role; the user gains it once a role with that id is created | all but the echo |
+| User create without roles / without e-mail | 400 each | no |
+| Two users with the same e-mail | allowed | yes |
+| User id of 200 / 201 characters | 200 / 500 | yes |
+| `--`, `_` and a trailing `.json`/`.xml` in user ids | accepted; PUT and DELETE address the right user | `_` only |
+| `GET /v1/security/users?userId=bridge-rt.` | also returns `BRIDGE-RT.ns.upper`: case-insensitive prefix | no (only the client's filter) |
+| `DELETE …/users/{id}?realm=NexusAuthenticatingRealm` of a missing user | 404 | no |
+| 404 for a missing user (PUT, DELETE), role (GET, PUT, DELETE) or privilege (GET) (r) | JSON `{"id":"*","message":"\"… not found.\""}` | 404 only |
+| Deleting a role (r) | removes it from every user; re-creating it does not give it back | first half |
+| Deleting a repository | strips its privileges from every role; re-creating it does not restore them | no |
+| `GET /v1/security/privileges/{name}` | 200 for an existing repository, 404 otherwise; names case-sensitive | yes |
+| `GET /v1/security/privileges/nx-all` (r) | 200, `readOnly: true` | 200 only |
+| `change-password` | 204 with text/plain, 415 with application/json | no |
+| Request without credentials / wrong password | 403 / 401 | yes |
+| `/v1/status`, `/v1/status/writable` without credentials | 200 | yes |
+| Admin role of `nx-users-all`, `nx-roles-all`, `nx-privileges-read` only (r) | every client call succeeds | yes |
+| Bearer token after password change | still valid; `/v2/token` returns the same token | no |
+| User in status `changepassword` (r) | Basic Auth, `/v2/token` (same token) and the existing bearer token keep working | yes |
+| Bearer token while disabled or locked / after re-enabling | 401 / valid again | disabled only |
+| Bearer token after delete and re-create under the same id | still valid (0 s, 10 s and 30 s gap); the new user gets the same token | 0 s only |
+| Bearer token presented while its user is absent | 401, and stays 401 after re-creation; the re-created user gets a new token | yes |
+| Bearer token after replacing the user under a new id | old token 401, new token 200 | yes |
+| Least privilege (crane) | pull, tag list, catalog: `read`; push: `add`+`edit`+`read`; `add`+`browse`+`read` cannot push | no |
+| Generated passwords (`GeneratePassword`) | authenticate for the REST API and `/v2/token` | yes |
+| `oci` format / EULA endpoint | absent (404) on 3.76.1 | no |
 
-`TestLive_AgainstNexus` repeats the client-relevant rows and the
-bearer-token rows; it passed against this container.
+`TestLive_AgainstNexus` passed against both containers.
 
 ## Consequences
 
-- A second registry is supported with the same identity model, the same
-  rotation promise and the same revocation guarantees as Harbor, at the
-  price of a second CRD, a routing step in the data plane and a
-  backend seam in the control plane.
+- A second registry is supported with the same identity model and the
+  same rotation promise as Harbor, and for docker repositories the same
+  revocation guarantees, bounded by rotation (decision c) as long as the
+  control plane can authenticate to Nexus. The price: a second CRD, a
+  routing step in the data plane and a backend seam in the control
+  plane.
 - Nexus user ids change at every rotation; the role id, the Secret name
   and the NexusAccess stay. Each identity has one user, two for the
   moment of a rotation.
 - A docker bearer token leaked from a node stays valid until the next
   rotation or deletion retires its user (at most `PasswordRotationInterval`
-  plus the margin), not until its own expiry, which Nexus does not have.
+  plus the margin while the admin credential works), not until its own
+  expiry, which Nexus does not have.
 - Orphan API keys of retired users stay in Nexus's store until presented
   (then deleted) or purged; they grant nothing, because their user ids
   never exist again.
-- The bridge holds an admin-equivalent Nexus credential; SECURITY.md and
-  the threat model must say so.
+- A missing repository never widens a grant and never holds back a
+  removal; it stops new credentials for that NexusAccess until it exists
+  again or leaves the spec.
+- The bridge holds an admin-equivalent Nexus credential whose username
+  must not be guessable: from Nexus 3.94 on anyone who can reach Nexus
+  and knows it can suspend rotation and revocation. SECURITY.md and the
+  threat model must say so.
+- `oci` repositories are not supported until question 8 is answered.
 - The e2e covers only pre-3.77 releases unless an operator accepts the
   EULA; behaviour specific to later releases stays unverified.
 - A Harbor-only installation sees no change.
