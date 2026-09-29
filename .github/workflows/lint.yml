@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
         # Match e2e.yml's pin: same major fmt rules, no laptop/CI drift.
-        with: { tofu_version: 1.12.0 }
+        with: { tofu_version: v1.12.6 }
       - run: tofu fmt -check -recursive test/e2e test/e2e-gke || (echo "run 'tofu fmt -recursive test/e2e test/e2e-gke' locally" && exit 1)
 
   yamllint:
