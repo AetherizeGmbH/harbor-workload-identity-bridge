@@ -11,15 +11,15 @@ toolchain go1.27.1
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/go-logr/logr v1.4.4
 	github.com/go-openapi/runtime v0.33.2
-	github.com/go-openapi/strfmt v0.27.1
+	github.com/go-openapi/strfmt v0.27.2
 	github.com/goharbor/go-client v0.213.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/prometheus/client_golang v1.24.1
 	go.uber.org/zap v1.28.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
 	k8s.io/client-go v0.37.1
