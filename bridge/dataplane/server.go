@@ -262,14 +262,14 @@ func (s *Server) Start(ctx context.Context) error {
 		logger.Info("shutting down data-plane server", "timeout", s.cfg.ShutdownTimeout)
 		if err := s.srv.Shutdown(shutCtx); err != nil {
 			// Drain the listener goroutine so we don't leak it on the
-			// way out, even when Shutdown errors.
-			<-errCh
-			return fmt.Errorf("server: shutdown: %w", err)
+			// way out, even when Shutdown errors, and keep a serve error
+			// it may hold next to the shutdown error.
+			return errors.Join(fmt.Errorf("server: shutdown: %w", err), <-errCh)
 		}
-		// Drain the goroutine — ServeTLS returns ErrServerClosed which
-		// our select arm treats as a clean exit.
-		<-errCh
-		return nil
+		// Drain the goroutine: ServeTLS returns ErrServerClosed, which it
+		// sends as nil. A serve error that came in before Shutdown is
+		// returned instead of dropped.
+		return <-errCh
 	case err := <-errCh:
 		// Listener died on its own (bind error after Serve started,
 		// TLS handshake setup failure, etc.). Return so the manager
