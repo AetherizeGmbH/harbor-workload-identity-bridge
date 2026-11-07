@@ -12,7 +12,7 @@ injects our provider entry into the cloud's existing
 e2e cannot exercise this path — kind nodes have no pre-existing
 credential-provider wiring, so `auto` always resolves to `patch`
 there. Merge mode needs a real managed cluster, and GKE is the first
-target (README roadmap item 1).
+target (item 1 of docs/roadmap.md).
 
 Constraints that shape the harness:
 
@@ -82,7 +82,7 @@ Load-bearing assertions, in order:
    stage).
 4. **Diagnostics** — dump the discovered config path/format and the
    installer logs into test output, so runtime findings feed back into
-   this ADR and the README.
+   this ADR and docs/platforms.md.
 
 ## Consequences
 

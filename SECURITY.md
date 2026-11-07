@@ -210,7 +210,7 @@ the HarborAccess as soon as it is marked for deletion.
 
 The CR can be gone while a robot survives only when someone removes the
 finalizer by hand, the escape hatch for a Harbor that is gone for good
-(README, "Uninstalling"). The robot's password then stays valid until
+(docs/operations.md, "Uninstalling"). The robot's password then stays valid until
 the janitor's next successful sweep (every 5 minutes, and only while
 Harbor is reachable); delete the robot in Harbor yourself to close that
 window. With a selector, the janitor, not the finalizer, revokes the
@@ -708,7 +708,7 @@ their own RBAC.
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
 | `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
-| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once, and the data plane serves no robot Secret (`503`, `reason=secret_for_previous_identity`). An empty Harbor `robot_name_prefix` cannot be matched: an empty value selects `robot$` (open decision, README) |
+| `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once, and the data plane serves no robot Secret (`503`, `reason=secret_for_previous_identity`). An empty Harbor `robot_name_prefix` cannot be matched: an empty value selects `robot$` (open decision, docs/roadmap.md) |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
 ## Audit log shape

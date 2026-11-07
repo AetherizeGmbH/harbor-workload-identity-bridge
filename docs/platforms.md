@@ -58,8 +58,8 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   `*.json` file of the directory at every start, and no installer pass removes
   a file planted there.
 - Several releases of the chart on one cluster (one per bridge) each need their
-  own `plugin.providerName` and share kubelet's config and bin dir (README,
-  "Several installs per cluster"; ADR-0029).
+  own `plugin.providerName` and share kubelet's config and bin dir ([operations.md](operations.md#several-installs-per-cluster-adr-0029);
+  ADR-0029).
 
 ## Managed clouds: what to expect
 

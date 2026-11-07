@@ -102,7 +102,7 @@ A bridge is configured with one OIDC issuer (its cluster's). If a `HarborAccess`
 
 - The same workload pattern (same SA name in the same namespace) running across N clusters produces N robots in Harbor. No deduplication. Operators must size Harbor and audit-log retention with this in mind.
 - Per-cluster Harbor admin credentials are recommended for blast-radius reasons; clusters that share a credential trade isolation for setup simplicity.
-- Operator error changing `clusterName` between bridge restarts orphans the bridge's old robots (they belong to the previous `clusterName`). The new bridge will not adopt them — by design, per decision 3. Cleanup is manual and documented in `README.md`.
+- Operator error changing `clusterName` between bridge restarts orphans the bridge's old robots (they belong to the previous `clusterName`). The new bridge will not adopt them — by design, per decision 3. Cleanup is manual and documented in `docs/operations.md` ("Changing clusterName").
 
 **Forward implications:**
 
