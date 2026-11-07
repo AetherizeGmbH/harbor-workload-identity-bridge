@@ -31,9 +31,13 @@ jobs:
           # (go1.26) used to build golangci-lint is lower than the targeted
           # Go version"). The targeted version includes the `toolchain`
           # directive, so a toolchain bump (Renovate gomod PRs) needs a
-          # linter built with at least that Go. v2.13.x is built with
-          # go1.27.0. Renovate's github-actions manager bumps this.
-          version: v2.13.2
+          # linter built with at least that Go. v2.15.0 is built with
+          # go1.27.0. Go 1.27.2 also changed the export data format (V5,
+          # golang/go#81188): golangci-lint reads it from v2.14.0 on
+          # (golang.org/x/tools v0.50.0); older releases fail with "could
+          # not load export data". Renovate's github-actions manager bumps
+          # this.
+          version: v2.15.0
           args: --timeout=5m
 
   gofmt:

@@ -6,12 +6,15 @@ go 1.26.0
 // GO-2026-5037 (crypto/x509 hostname parsing DoS), GO-2026-5038 (mime
 // quadratic header decode DoS) and GO-2026-5039 (net/textproto error
 // escaping) — all reachable from the bridge's OIDC/x509 paths. See
-// AUDIT.md F11.
-toolchain go1.27.1
+// AUDIT.md F11. go1.27.3 adds the fixes govulncheck reports as called
+// from our code for go1.27.1: GO-2026-6809 (crypto/x509, fixed in
+// go1.27.3) and GO-2026-6603/6604/6605/6607/6608/6610/6611/6612/6613/6617
+// (net/http, http2, crypto/tls, net/textproto, os; fixed in go1.27.2).
+toolchain go1.27.3
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/go-logr/logr v1.4.4
 	github.com/go-openapi/runtime v0.33.2
 	github.com/go-openapi/strfmt v0.27.1
@@ -79,12 +82,12 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
