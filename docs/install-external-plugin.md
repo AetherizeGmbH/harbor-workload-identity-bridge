@@ -44,8 +44,8 @@ A second bridge on the same cluster (ADR-0026) needs a copy of the binary
 under a name of its own, for example `harbor-bridge-eu`, and its own entry of
 that name next to the first one: one entry per bridge, with disjoint
 `matchImages` (ADR-0029). Where the nodes can run the chart's DaemonSet,
-`plugin.providerName` does this for you (README, "Several installs per
-cluster").
+`plugin.providerName` does this for you ([Several installs per
+cluster](operations.md#several-installs-per-cluster-adr-0029)).
 
 ## 3. Give kubelet the provider entry
 
