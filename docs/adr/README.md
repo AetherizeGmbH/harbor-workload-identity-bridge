@@ -20,7 +20,7 @@
 | 0016 | [`cacheKeyType` in the credential-provider response is `Registry`, not `ServiceAccount`](0016-credential-provider-cache-key-type.md) | Accepted (supersedes the enum claim in 0015; `tokenAttributes.cacheType` is no SA-token cache: with `tokenAttributes` set kubelet keys cached credentials per ServiceAccount under either value, `Token` only adds the token's hash; and `cacheDuration`, not the token lifetime, bounds plugin runs) |
 | 0017 | [The chart provisions audience-scoped RBAC for kubelet token requests](0017-chart-provisions-audience-rbac.md) | Accepted |
 | 0018 | [Dot-delimited robot and Secret names for collision-free identity mapping](0018-dot-delimited-naming.md) | Accepted (supersedes 0009 naming scheme and 0011 Secret name; Harbor-validity and truncation claims amended by 0031) |
-| 0019 | [Code conventions and CI quality gates](0019-code-conventions-and-ci-quality-gates.md) | Accepted |
+| 0019 | [Code conventions and CI quality gates](0019-code-conventions-and-ci-quality-gates.md) | Accepted (vulnerability checks on pull requests amended by 0036) |
 | 0020 | [Harbor compatibility is tested, not asserted](0020-harbor-compatibility-matrix.md) | Accepted (GetByID removed and UpdatePermissions replaced by Update, 0023) |
 | 0021 | [Node installer: Go binary with auto/merge/patch/none modes](0021-node-installer-modes.md) | Accepted |
 | 0022 | [GKE e2e harness for merge-mode installation](0022-gke-e2e-harness.md) | Accepted (never run yet) |
@@ -37,5 +37,6 @@
 | 0033 | [The installer rolls back a kubelet restart that does not verify](0033-installer-rollback-of-a-rejected-restart.md) | Accepted (refines 0021, 0029) |
 | 0034 | [Patch mode edits the environment file the kubelet unit reads](0034-patch-mode-edits-the-environment-file-kubelet-reads.md) | Accepted (refines 0021) |
 | 0035 | [Auto mode moves shared directories once every install is ready](0035-auto-mode-moves-shared-directories-when-every-install-is-ready.md) | Accepted (refines 0021, 0029) |
+| 0036 | [Vulnerability checks fail a pull request for what it adds](0036-vulnerability-checks-fail-a-pull-request-for-what-it-adds.md) | Accepted (amends 0019) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.
