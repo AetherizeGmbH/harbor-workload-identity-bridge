@@ -24,8 +24,17 @@ on:
 # actions/checkout requires. All branch creation, PR opening, issue
 # management, and check-run reading happens via the App identity, which
 # is also what makes PR-triggered workflows (lint, test, e2e) actually
-# fire on Renovate PRs — events from a non-GITHUB_TOKEN identity are
+# fire on Renovate PRs: events from a non-GITHUB_TOKEN identity are
 # not subject to GitHub's recursion-prevention suppression.
+#
+# Automerge: Renovate merges a PR itself on a later run, once every
+# check on it is green (platformAutomerge is off in renovate.json).
+#
+# This workflow fails instead of staying green when Renovate cannot do
+# its job. From 2026-09-24 to 2026-11 every run stopped at the first
+# branch status it had to set (the App lacked "Commit statuses: write",
+# which minimumReleaseAge needs), logged that only at DEBUG, and exited
+# 0: no PR was opened or merged for six weeks while the runs were green.
 permissions:
   contents: read
 
@@ -41,18 +50,39 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # The token asks for exactly the permissions Renovate uses here
+      # (docs.renovatebot.com/modules/platform/github, "Running as a
+      # GitHub App"). GitHub refuses the token (422) when the App
+      # installation lacks one of them, so a missing permission fails
+      # this step instead of failing silently inside Renovate.
+      #   statuses: write          renovate/stability-days (minimumReleaseAge)
+      #   vulnerability-alerts     Dependabot alerts (vulnerabilityAlerts)
+      #   workflows: write         updates to .github/workflows/*
+      #   checks: read             branch status before automerge
       - name: Mint Renovate App installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           app-id: ${{ secrets.RENOVATE_APP_ID }}
           private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-statuses: write
+          permission-checks: read
+          permission-workflows: write
+          permission-vulnerability-alerts: read
       - uses: renovatebot/github-action@9fea9f0fbf80401026d11d03911d62b1f70fef1f # v46.3.3
         with:
           configurationFile: renovate.json
           token: ${{ steps.app-token.outputs.token }}
         env:
           LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
+          # Exit non-zero (3-8) when the repository run ends in an error
+          # state, e.g. 6 for repository-changed; without it Renovate
+          # exits 0 and the action reports success. Experimental since
+          # Renovate 44.77.0. Logged ERRORs already exit 1.
+          RENOVATE_EXIT_CODE_FOR_ERRORS: "true"
           RENOVATE_DRY_RUN: ${{ inputs.dryRun == 'true' && 'full' || '' }}
           # The action defaults to onboarding-style PRs; this repo opts in:
           RENOVATE_REPOSITORIES: ${{ github.repository }}

@@ -9,7 +9,7 @@
     ":disableRateLimiting"
   ],
   "timezone": "Europe/Berlin",
-  "platformAutomerge": true,
+  "platformAutomerge": false,
   "platformCommit": "enabled",
   "automergeStrategy": "squash",
   "labels": ["dependencies"],
@@ -69,8 +69,9 @@
       "pinDigests": true
     },
     {
-      "description": "golangci/golangci-lint is the binary version (with: version: vX.Y.Z) read by golangci-lint-action, not a Git ref. It cannot be digest-pinned; the action only accepts a release tag string.",
-      "matchPackageNames": ["golangci/golangci-lint"],
+      "description": "Tool versions that the github-actions manager reads from `with:` inputs (depType uses-with: golangci-lint-action `version`, azure/setup-helm `version`, helm/kind-action `version`, setup-opentofu `tofu_version`) are release tags the action downloads, not Git refs, so they cannot carry a digest. Without this rule the digest-pinning rule above makes Renovate plan a pin it cannot write: the branch fails with `update failure` (renovate/kind, renovate/pin-dependencies since 2026-09).",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
       "pinDigests": false
     },
     {
@@ -78,8 +79,15 @@
       "matchPackageNames": ["/^k8s\\.io//", "/^sigs\\.k8s\\.io//"],
       "groupName": "Kubernetes Go modules",
       "groupSlug": "k8s-gomod"
-    }
-,
+    },
+    {
+      "description": "`// indirect` modules in go.mod: the gomod manager disables them by default, and Dependabot raises no alerts for them here, so a vulnerable indirect module (golang.org/x/net v0.58.0 in 2026-10) stayed until a direct bump happened to raise it. Enabled in a group of their own, so an indirect bump that breaks the build holds back only this group.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "enabled": true,
+      "groupName": "Go indirect modules",
+      "groupSlug": "gomod-indirect"
+    },
     {
       "description": "The kind CLI and the kindest/node image move together: the harness creates the cluster with the CLI, and a node image newer than the CLI supports fails in kubeadm init (kindest/node v1.37 needs kind v0.33+).",
       "matchPackageNames": ["kindest/node", "kubernetes-sigs/kind"],
