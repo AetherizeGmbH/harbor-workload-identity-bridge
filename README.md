@@ -22,8 +22,9 @@ Read [MIGRATION.md](MIGRATION.md) before you upgrade.
 ## Why
 
 Without this project, every namespace that pulls from a private Harbor needs an
-`imagePullSecret` with a long-lived robot password. Every pod in that namespace
-can read the password, and a rotation has to touch every namespace.
+`imagePullSecret` with a long-lived robot password. Anyone who can start a pod
+in that namespace can mount the Secret and read the password, and a rotation
+has to touch every namespace.
 
 Cloud registries avoid this with kubelet credential providers
 ([KEP-4412](https://github.com/kubernetes/enhancements/issues/4412)): kubelet
