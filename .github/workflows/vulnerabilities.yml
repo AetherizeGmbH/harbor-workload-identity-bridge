@@ -1,0 +1,167 @@
+name: vulnerabilities
+
+# govulncheck and Trivy, the two scanners whose findings change without a
+# change to this repository: an advisory published today flags code that
+# was clean yesterday (ADR-0036).
+#
+#   pull_request  fails only for findings the pull request adds. Findings
+#                 its base commit has too are warnings. Otherwise one new
+#                 advisory blocks every pull request, including the
+#                 Renovate updates that fix it.
+#   push, daily   fails for every finding on main. The daily run is what
+#                 reports an advisory against unchanged code; GitHub
+#                 mails a failed scheduled run to the last person who
+#                 changed the cron line.
+#
+# The job names are the required checks of the main ruleset: keep them.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vulnerabilities-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Go's official vuln scanner. Unlike Trivy it does call-graph
+      # reachability (only code we call counts) and covers the stdlib,
+      # so it complements, not duplicates, the Trivy scan. The Makefile
+      # pins the version (Renovate bumps it).
+      #
+      # Each tree is scanned with the Go of its own go.mod `toolchain`
+      # line (GOTOOLCHAIN): govulncheck reports the stdlib of the Go that
+      # runs it, and a pull request that changes the toolchain must be
+      # compared against the stdlib main builds with. Without a toolchain
+      # line GOTOOLCHAIN is empty, which means Go's default.
+      - name: Scan this revision
+        run: |
+          GOTOOLCHAIN="$(awk '$1 == "toolchain" { print $2 }' go.mod)" \
+            make -s govulncheck GOVULNCHECK_ARGS="-format json" > "$RUNNER_TEMP/head.json"
+      # Checked out after the scan above, so that scan never sees it.
+      - name: Check out the base commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .vulngate-base
+          persist-credentials: false
+      - name: Scan the base commit
+        if: github.event_name == 'pull_request'
+        run: |
+          GOTOOLCHAIN="$(awk '$1 == "toolchain" { print $2 }' .vulngate-base/go.mod)" \
+            make -s govulncheck GOVULNCHECK_ARGS="-format json -C .vulngate-base" > "$RUNNER_TEMP/base.json"
+      - name: Decide
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          base=()
+          if [ "$EVENT" = pull_request ]; then base=(--base "$RUNNER_TEMP/base.json"); fi
+          python3 -B hack/vuln-gate.py govulncheck "$RUNNER_TEMP/head.json" "${base[@]}"
+
+  trivy:
+    name: Trivy code scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to publish the SARIF report to the repo's Security tab
+      # (code scanning). Free for this public repo; no GHAS needed.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Filesystem (repo) scan: dependency vulns (go.mod/go.sum, npm
+      # lockfile), misconfigurations (Dockerfiles, Helm charts, OpenTofu)
+      # and leaked secrets. Trivy runs as its upstream image, pinned by
+      # digest (the same index is published on Docker Hub, ghcr.io and ECR
+      # Public, and cosign-signed by aquasecurity/trivy's release workflow).
+      # Renovate's github-actions manager bumps tag and digest together;
+      # Docker Hub is used because the aquasecurity org's IP allow list
+      # blocks Renovate's GitHub lookups.
+      #   --severity: the report, and so the SARIF, holds exactly the
+      #     findings the check decides on (HIGH/CRITICAL), so the Security
+      #     tab and the check agree.
+      #   --ignore-unfixed: vulns without an upstream fix cannot be acted
+      #     on and must not block PRs.
+      #   --ignorefile: accepted misconfigurations (e.g. the privileged
+      #     node-installer DaemonSet), each path-scoped and justified. Trivy
+      #     does not auto-load the .yaml form.
+      # The scan writes JSON and exits 0 on findings; hack/vuln-gate.py
+      # decides. Trivy still exits non-zero when the scan itself fails.
+      - name: Scan this revision
+        uses: docker://aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+        with:
+          args: >-
+            fs
+            --scanners vuln,secret,misconfig
+            --severity CRITICAL,HIGH
+            --ignore-unfixed
+            --ignorefile .trivyignore.yaml
+            --format json
+            --output trivy-head.json
+            .
+
+      - name: Convert the report to SARIF
+        uses: docker://aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+        with:
+          args: convert --format sarif --output trivy-results.sarif trivy-head.json
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      # The base commit goes into a directory the head scan above did not
+      # see. Its own ignore file applies: a pull request that drops an
+      # accepted finding's ignore entry adds that finding.
+      - name: Check out the base commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .vulngate-base
+          persist-credentials: false
+
+      - name: Scan the base commit
+        if: github.event_name == 'pull_request'
+        uses: docker://aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+        with:
+          args: >-
+            fs
+            --scanners vuln,secret,misconfig
+            --severity CRITICAL,HIGH
+            --ignore-unfixed
+            --ignorefile .vulngate-base/.trivyignore.yaml
+            --format json
+            --output trivy-base.json
+            .vulngate-base
+
+      - name: Decide
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          base=()
+          if [ "$EVENT" = pull_request ]; then base=(--base trivy-base.json --base-prefix .vulngate-base/); fi
+          python3 -B hack/vuln-gate.py trivy trivy-head.json "${base[@]}"
