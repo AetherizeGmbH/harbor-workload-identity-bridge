@@ -168,7 +168,8 @@ NEXT STEPS
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
 {{- if .Values.plugin.enabled }}
      `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
-     and its files on the nodes; README "Uninstalling" shows how to remove them.
+     and its files on the nodes. To remove them, see "Uninstalling" in
+     https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/blob/main/docs/operations.md
 {{- end }}
 
 {{- if not .Values.tls.enabled }}

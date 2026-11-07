@@ -212,7 +212,7 @@ func TestRun_AutoMovesSharedDirectoriesWhenEveryInstallChangesThem(t *testing.T)
 
 // TestRun_AutoMovesOnceTheOtherInstallLeft: the install that kept kubelet on
 // the old directories is uninstalled (its entry, binary and record removed,
-// as README describes). The next pass moves kubelet. The merge fallback
+// as docs/operations.md describes). The next pass moves kubelet. The merge fallback
 // recorded merge mode and never tried again.
 func TestRun_AutoMovesOnceTheOtherInstallLeft(t *testing.T) {
 	a, b := sharedPatchInstalls(t)

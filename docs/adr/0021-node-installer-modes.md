@@ -170,7 +170,7 @@ cloud-provider config files. Enforced by
   restart (state file on `/var/lib` may also be gone; the resulting
   restart is on a node that is still cordon-free but empty, which is
   harmless).
-- Bottlerocket is explicitly unsupported; the README says so.
+- Bottlerocket is explicitly unsupported; docs/platforms.md says so.
 - One more binary in the plugin image (still alpine-based — `nsenter`
   comes from the image).
 

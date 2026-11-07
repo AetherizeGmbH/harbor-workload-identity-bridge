@@ -6,7 +6,7 @@
 > [SECURITY.md](../SECURITY.md) or [MIGRATION.md](../MIGRATION.md), those
 > win. Later phases (Harbor compatibility matrix, node installer,
 > lifecycle hardening, the 2026-09 security review) are summarised in the
-> README's "Status and roadmap"; releases are in
+> [roadmap](roadmap.md); releases are in
 > [CHANGELOG.md](../CHANGELOG.md). *Superseded* notes below mark
 > statements the code no longer matches; they are not exhaustive.
 >

@@ -10,7 +10,7 @@ supports only a fixed `service.nodePort` (default `31443`). With an empty value 
 default endpoint renders as `https://127.0.0.1:` without a port and the
 plugin dials port 443, so dynamic allocation needs `plugin.bridgeEndpoint`
 set by hand. mTLS is off by default, and a client certificate proves only
-that the configured client CA signed it (open decision O2, README).
+that the configured client CA signed it (open decision O2, docs/roadmap.md).
 
 ## Context
 

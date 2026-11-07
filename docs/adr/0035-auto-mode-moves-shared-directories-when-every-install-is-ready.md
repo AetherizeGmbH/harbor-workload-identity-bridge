@@ -69,7 +69,7 @@ and moves kubelet with all of them.
   or changed too. Its pod succeeds; the log says why kubelet did not move.
 - The new directories hold this install's files before kubelet uses them,
   also after a change that is never completed; the files in the old
-  directories stay after a move, as before (README, "Uninstalling").
+  directories stay after a move, as before (docs/operations.md, "Uninstalling").
 - A state file that records merge mode on the old directories, written by
   an earlier installer's merge fallback after a directory change, is not
   taken for the install's own: the flags could also be an operator's.
