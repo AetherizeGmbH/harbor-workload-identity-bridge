@@ -2,7 +2,7 @@
 
 Reference for running the chart beyond the [quickstart](../README.md#quickstart): how the
 plugin DaemonSet wires kubelet, several installs on one cluster, bootstrap
-ordering, and a complete uninstall. Supported node platforms are in
+ordering, a change of `clusterName`, and a complete uninstall. Supported node platforms are in
 [platforms.md](platforms.md).
 
 ## Node install modes and upgrades (ADR-0021)
@@ -230,6 +230,35 @@ pulls by the same ServiceAccount on that node until it expires.
 `plugin.defaultCacheDuration` does not set it: kubelet uses that value
 only for a plugin response without a cache duration, and the plugin
 always sends one.
+
+## Changing clusterName
+
+A bridge owns only the robots whose names start with
+`bridge-<clusterName>.` and whose Harbor description names the same cluster
+([ADR-0009](adr/0009-multi-cluster-topology.md),
+[ADR-0018](adr/0018-dot-delimited-naming.md)). After a change of
+`clusterName`, the bridge treats the robots of the old name as the robots of
+another cluster:
+
+- On its next pass over each `HarborAccess`, it creates a robot with the new
+  name and writes that robot's credentials into the existing robot Secret.
+  The bridge passes over every object when it starts. Until the write, it
+  answers credential requests for that `HarborAccess` with `503`
+  (`secret_for_previous_identity` in the audit log), because the Secret
+  still holds a robot of the old name. Credentials that kubelet has cached
+  still serve pulls in that time.
+- It never rotates, disables or deletes a robot of the old name. Each old
+  robot keeps its last password, and Harbor accepts that password until
+  someone deletes the robot.
+
+Delete the old robots by hand:
+
+1. Wait until every `HarborAccess` this bridge serves shows `Ready` `True` and a
+   `Robot` that starts with `robot$bridge-<new clusterName>.`:
+   `kubectl get harboraccess -n <bridge namespace>`.
+2. In Harbor, delete every robot whose name starts with
+   `robot$bridge-<old clusterName>.`. Do this only when no other bridge
+   that uses the same Harbor runs with the old `clusterName`.
 
 ## Uninstalling
 
