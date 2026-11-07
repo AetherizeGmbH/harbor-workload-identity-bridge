@@ -63,9 +63,12 @@ fmt: ## Run gofmt
 vet: ## Run go vet
 	go vet ./...
 
+# GOVULNCHECK_ARGS: extra flags, e.g. "-format json -C <dir>" (CI, ADR-0036).
+GOVULNCHECK_ARGS ?=
+
 .PHONY: govulncheck
 govulncheck: $(GOVULNCHECK) ## Report known vulnerabilities reachable from our code (Go's official scanner)
-	$(GOVULNCHECK) ./...
+	$(GOVULNCHECK) $(GOVULNCHECK_ARGS) ./...
 
 .PHONY: build
 build: ## Build the bridge binary into bin/bridge

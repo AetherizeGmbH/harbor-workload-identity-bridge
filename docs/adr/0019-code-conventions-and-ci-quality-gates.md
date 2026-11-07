@@ -85,14 +85,16 @@ is written and checked*.
 - **Source scanning** runs on every PR and gates merge:
   - **Trivy** filesystem scan (`vuln,secret,misconfig`) — fails on
     `CRITICAL,HIGH` (with `ignore-unfixed: true`), uploads SARIF to the Security
-    tab (`.github/workflows/trivy.yml`). Accepted misconfigurations (e.g. the
+    tab (`.github/workflows/vulnerabilities.yml`; trivy.yml before
+    ADR-0036). Accepted misconfigurations (e.g. the
     privileged node-installer DaemonSet) are risk-accepted in
     `.trivyignore.yaml`, each entry **path-scoped and justified** — that file is
     the single audited surface for "we know, and here's why it's fine", not a
     mute button. Trivy does not auto-load the `.yaml` ignore form, so the
-    workflow passes it via `trivyignores:` explicitly.
+    workflow passes it with `--ignorefile` explicitly.
   - **govulncheck** — Go's reachability-aware vuln scanner; only fails on vulns
-    actually reachable in the call graph (`.github/workflows/test.yml`).
+    actually reachable in the call graph (`.github/workflows/vulnerabilities.yml`;
+    test.yml before ADR-0036).
   - **CodeQL** — dataflow SAST for Go (`.github/workflows/codeql.yml`).
   - **OpenSSF Scorecard** — supply-chain posture on the default branch
     (`.github/workflows/scorecard.yml`).
