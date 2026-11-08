@@ -57,12 +57,18 @@
 #                             tofu waits for each finalizer
 #  21. robot_check_teardown — Harbor itself: not one robot of this cluster left
 #                             (a Harbor that cannot be asked fails it)
-#  22. node_uninstall       — ADR-0039: helm uninstall; its pre-delete hook has
-#                             every node remove the plugin before Helm deletes
-#                             the release
-#  23. node_uninstall_check — every node: no entry, flags, binary, record, CA,
-#                             mTLS or state file left (nor their .bak), kubelet
-#                             active without credential providers
+#  21b. second_install      — a second release (ADR-0029): its own provider
+#                             name, namespace, NodePort, audience, selector
+#  22. node_uninstall       — ADR-0039: helm uninstall of the first release; its
+#                             pre-delete hook has every node remove the plugin
+#                             before Helm deletes the release
+#  23. node_uninstall_check — every node: nothing of the first release left
+#                             (nor its .bak copies), the second release's entry,
+#                             files and kubelet flags kept, kubelet active
+#  24. second_uninstall     — helm uninstall of the second release
+#  25. second_uninstall_check — every node: nothing of either release left,
+#                             no flags, kubelet active without credential
+#                             providers
 #
 # Teardown order. tofu test destroys the states in reverse order of the
 # LAST run that touched each. Stages 19b and 20 re-use the harbor_access
@@ -71,7 +77,11 @@
 # finalizer) is left for an already-uninstalled bridge to release. Before
 # this, the last run using the bridge state made cleanup uninstall the
 # bridge FIRST, and deleting the CRs then hung on finalizers nobody could
-# remove.
+# remove. The uninstall stages (21b to 25) touch only states of their own:
+# the second release's (21b), whose release stage 24 removes, and the
+# helm-uninstall and node-check modules, which hold nothing to destroy. The
+# helm provider drops a release it finds gone, and helm_release sets
+# disable_webhooks, so a cleanup after a failure runs no pre-delete hook.
 #
 # Multi-tenant / collision coverage:
 #   - team-a/svc-b → project-alpha and team/a-svc-b → project-beta collide
@@ -1258,15 +1268,34 @@ run "robot_check_teardown" {
   }
 }
 
-# ── ADR-0039: node-side uninstall. Every HarborAccess is gone (stage 20),
-# so nothing waits for the bridge's finalizers. helm uninstall runs the
-# chart's pre-delete hook: it switches the plugin DaemonSet to
-# INSTALL_ACTION=remove, every node's installer takes the provider entry,
-# the kubelet flags (the last patch install on kind) and the files off the
-# node and restarts kubelet, and the hook waits for every node's report
-# before Helm deletes the release. The run has a module of its own, so the
-# bridge state keeps bridge_mtls as its last run and the teardown order
-# above stays; the helm provider then finds the release gone and drops it.
+# ── ADR-0039: node-side uninstall, with a second release on the nodes
+# (ADR-0029). Every HarborAccess is gone (stage 20), so nothing waits for
+# either bridge's finalizers. The second release has its own provider
+# name, namespace, NodePort, audience, selector and clusterName; on kind
+# its installer adds its entry to the chart-owned config the first release
+# wired kubelet to. Its module wraps harbor-bridge-install for a state of
+# its own.
+run "second_install" {
+  command = apply
+  module {
+    source = "./modules/harbor-bridge-install-second"
+  }
+  variables {
+    kubeconfig            = run.cluster.kubeconfig
+    harbor_url            = run.harbor.internal_api_url
+    harbor_admin_password = run.harbor.admin_password
+    bridge_image          = run.build_images.image_refs.bridge
+    plugin_image          = run.build_images.image_refs.plugin
+  }
+}
+
+# helm uninstall of the first release runs the chart's pre-delete hook: it
+# switches the plugin DaemonSet to INSTALL_ACTION=remove, every node's
+# installer takes the first release's entry and files off the node and
+# restarts kubelet, and the hook waits for every node's report before Helm
+# deletes the release. The run has a module of its own, so the bridge
+# state keeps bridge_mtls as its last run and the teardown order above
+# stays; the helm provider then finds the release gone and drops it.
 run "node_uninstall" {
   command = apply
   module {
@@ -1280,11 +1309,12 @@ run "node_uninstall" {
   }
 }
 
-# On every node: nothing of the install left (bridge_mtls turned mTLS on, so
-# the client pair was there), the flags gone from /etc/default/kubelet and
-# from the running kubelet, which is active; the node lock stays (lock
-# files are never removed, ADR-0039 decision 2.2). In the cluster: every
-# node Ready, the DaemonSet and the hook's objects gone.
+# On every node: nothing of the first release left (bridge_mtls turned mTLS
+# on, so its client pair was there); the second release's entry, binary
+# and record stay, and so do the kubelet flags it needs, in
+# /etc/default/kubelet and on the running kubelet, which is active. In the
+# cluster: every node Ready, the first DaemonSet and its hook's objects
+# gone.
 run "node_uninstall_check" {
   command = apply
   module {
@@ -1298,10 +1328,82 @@ run "node_uninstall_check" {
       set -eu
       bin=/etc/kubernetes/credential-provider
       cfg=/etc/kubernetes/credential-provider-config
+      second=${run.second_install.release}
       for f in $bin/harbor-bridge-plugin $bin/harbor-bridge-plugin.entry \
-               $cfg/credential-provider-config.yaml $cfg/harbor-bridge-ca.crt \
-               $cfg/harbor-bridge-client.crt $cfg/harbor-bridge-client.key \
+               $cfg/harbor-bridge-ca.crt $cfg/harbor-bridge-client.crt $cfg/harbor-bridge-client.key \
                /var/lib/harbor-bridge/installer-state.json; do
+        for p in "$f" "$f.bak"; do
+          if [ -e "$p" ] || [ -L "$p" ]; then echo "left behind: $p"; exit 1; fi
+        done
+      done
+      for f in $bin/$second $bin/$second.entry $cfg/$second.ca.crt $cfg/credential-provider-config.yaml; do
+        [ -f "$f" ] || { echo "the second release lost $f"; exit 1; }
+      done
+      # The removal writes the remaining entry with the YAML encoder, which
+      # leaves the name unquoted; the chart's rendered config quotes it.
+      if grep -Eq 'name: "?harbor-bridge-plugin"?$' $cfg/credential-provider-config.yaml \
+         || ! grep -Eq "name: \"?$second\"?$" $cfg/credential-provider-config.yaml; then
+        echo "the chart-owned config does not hold exactly the second release's entry:"; cat $cfg/credential-provider-config.yaml; exit 1
+      fi
+      grep -q -- "--image-credential-provider-config=$cfg/credential-provider-config.yaml" /etc/default/kubelet \
+        || { echo "the flags the second release needs are gone:"; cat /etc/default/kubelet; exit 1; }
+      systemctl is-active --quiet kubelet || { echo "kubelet is not active"; systemctl status kubelet --no-pager; exit 1; }
+      pid=$(systemctl show --property=MainPID --value kubelet)
+      tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q -- --image-credential-provider-config \
+        || { echo "kubelet runs without the flags:"; tr '\0' ' ' < "/proc/$pid/cmdline"; exit 1; }
+      echo "harbor-bridge-plugin removed; $second kept; kubelet $pid active"
+    SH
+    cluster_script = <<-SH
+      set -eu
+      k wait --for=condition=Ready node --all --timeout=120s
+      if k -n ${run.bridge_mtls.namespace} get daemonset ${run.bridge_mtls.release}-plugin >/dev/null 2>&1; then
+        echo "the plugin DaemonSet is still there"; exit 1
+      fi
+      left=$(k -n ${run.bridge_mtls.namespace} get jobs,serviceaccounts,roles,rolebindings -l app.kubernetes.io/component=plugin-uninstall -o name)
+      if [ -n "$left" ]; then echo "hook objects left: $left"; exit 1; fi
+      k -n ${run.second_install.namespace} get daemonset ${run.second_install.release}-plugin
+    SH
+    fail_message   = "ADR-0039 regression: uninstalling one release left its plugin on a node, took the other release's entry, files or kubelet flags, or left kubelet down"
+  }
+}
+
+# The last release leaves: helm-uninstall again (the same module source,
+# so its state replaces the first uninstall's resource, which has nothing
+# to undo), and then nothing of either release is on the nodes.
+run "second_uninstall" {
+  command = apply
+  module {
+    source = "./modules/helm-uninstall"
+  }
+  variables {
+    kubeconfig = run.cluster.kubeconfig
+    release    = run.second_install.release
+    namespace  = run.second_install.namespace
+    node_names = run.cluster.node_names
+  }
+}
+
+# On every node: nothing of either release left, the flags gone from
+# /etc/default/kubelet and from the running kubelet, which is active; the
+# node lock stays (lock files are never removed, ADR-0039 decision 2.2).
+run "second_uninstall_check" {
+  command = apply
+  module {
+    source = "./modules/node-check"
+  }
+  variables {
+    kubeconfig     = run.cluster.kubeconfig
+    name           = "second-uninstall-check"
+    node_names     = run.cluster.node_names
+    node_script    = <<-SH
+      set -eu
+      bin=/etc/kubernetes/credential-provider
+      cfg=/etc/kubernetes/credential-provider-config
+      second=${run.second_install.release}
+      for f in $bin/harbor-bridge-plugin $bin/harbor-bridge-plugin.entry $bin/$second $bin/$second.entry \
+               $cfg/credential-provider-config.yaml $cfg/harbor-bridge-ca.crt $cfg/$second.ca.crt \
+               $cfg/harbor-bridge-client.crt $cfg/harbor-bridge-client.key \
+               /var/lib/harbor-bridge/installer-state.json /var/lib/harbor-bridge/$second.installer-state.json; do
         for p in "$f" "$f.bak"; do
           if [ -e "$p" ] || [ -L "$p" ]; then echo "left behind: $p"; exit 1; fi
         done
@@ -1315,17 +1417,17 @@ run "node_uninstall_check" {
         echo "kubelet still runs with the flags:"; tr '\0' ' ' < "/proc/$pid/cmdline"; exit 1
       fi
       [ -e /run/harbor-bridge-installer.lock ] || { echo "the node lock file is gone"; exit 1; }
-      echo "nothing of harbor-bridge-plugin left; kubelet $pid active without credential providers"
+      echo "nothing of either release left; kubelet $pid active without credential providers"
     SH
     cluster_script = <<-SH
       set -eu
       k wait --for=condition=Ready node --all --timeout=120s
-      if k -n ${run.bridge_mtls.namespace} get daemonset ${run.bridge_mtls.release}-plugin >/dev/null 2>&1; then
-        echo "the plugin DaemonSet is still there"; exit 1
+      if k -n ${run.second_install.namespace} get daemonset ${run.second_install.release}-plugin >/dev/null 2>&1; then
+        echo "the second plugin DaemonSet is still there"; exit 1
       fi
-      left=$(k -n ${run.bridge_mtls.namespace} get jobs,serviceaccounts,roles,rolebindings -l app.kubernetes.io/component=plugin-uninstall -o name)
+      left=$(k -n ${run.second_install.namespace} get jobs,serviceaccounts,roles,rolebindings -l app.kubernetes.io/component=plugin-uninstall -o name)
       if [ -n "$left" ]; then echo "hook objects left: $left"; exit 1; fi
     SH
-    fail_message   = "ADR-0039 regression: helm uninstall left the plugin on a node, or left kubelet down or wired"
+    fail_message   = "ADR-0039 regression: helm uninstall of the last release left the plugin on a node, or left kubelet down or wired"
   }
 }
