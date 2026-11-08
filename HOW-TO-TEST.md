@@ -392,7 +392,10 @@ expires within an hour), sets `BRIDGE_TLS_CERT_FILE` and
 `127.0.0.1:8443`, `BRIDGE_HEALTH_ADDR` `127.0.0.1:8081`,
 `BRIDGE_METRICS_ADDR` `127.0.0.1:8080`; set any of them to override), and
 refuses to start if `BRIDGE_OIDC_ISSUER` looks cluster-internal but
-`BRIDGE_OIDC_JWKS_URL` is unset.
+`BRIDGE_OIDC_JWKS_URL` is unset. It also refuses to start without
+`BRIDGE_OIDC_ISSUER`: in the cluster an empty issuer means the bridge reads
+it from `https://kubernetes.default.svc` (ADR-0044), which does not resolve
+on your laptop.
 
 **Checkpoint 1.** A successful start prints (JSON-formatted):
 
@@ -557,8 +560,9 @@ the bridge used to emit the kubelet-invalid `"ServiceAccount"`.
 | --- | --- | --- |
 | `dial tcp: lookup kubernetes.default.svc.cluster.local: no such host` at bridge startup | `BRIDGE_OIDC_JWKS_URL` not set | Start `make proxy` and set `BRIDGE_OIDC_JWKS_URL=http://127.0.0.1:8001/openid/v1/jwks`. |
 | `oidc: fetch the token signing keys from … connection refused` at bridge startup | `make proxy` is not running | Start it; the bridge fetches the keys before it serves. |
+| `BRIDGE_OIDC_ISSUER is empty, so the bridge reads the ServiceAccount token issuer from the apiserver, and that failed` at bridge startup | Off-cluster: `BRIDGE_OIDC_ISSUER` not set. In the cluster: the bridge may not get `/.well-known/openid-configuration` (`403`), or the apiserver serves no discovery document (an issuer that is not an https URL) | Off-cluster, set it as in Phase 1. In the cluster, check the bridge's ClusterRole (the chart grants the rule), or set `bridge.oidcIssuer` (ADR-0044). |
 | Reconciler logs `create robot: NOT_FOUND: project "X" not found` and the CR is `Ready=False` | Harbor project from `spec.permissions[].project` doesn't exist | Create the project in Harbor; the next reconcile recovers. |
-| Bridge returns `401 invalid token` from `/v1/credentials` | SA token's `iss` claim ≠ `BRIDGE_OIDC_ISSUER` | Re-print the issuer with `kubectl get --raw /.well-known/openid-configuration` and align both env var + `trustPolicy.issuer`. |
+| Bridge returns `401 invalid token` from `/v1/credentials` | SA token's `iss` claim ≠ `BRIDGE_OIDC_ISSUER` | Re-print the issuer with `kubectl get --raw /.well-known/openid-configuration` and align both env var + `trustPolicy.issuer`. In the cluster, leave `bridge.oidcIssuer` empty: the bridge then reads the issuer the apiserver writes into its tokens and logs it at startup. |
 | `401 invalid token`, audit line `category=not_pod_bound` or `category=excessive_lifetime` | Token minted without `--bound-object-kind=Pod`, or with a `--duration` above `BRIDGE_TOKEN_MAX_LIFETIME` | Mint it as in Phase 3. `BRIDGE_REQUIRE_POD_BOUND_TOKEN=false` accepts unbound tokens, but weakens the bridge; keep it to local development. |
 | `/v1/credentials` returns `403 no matching HarborAccess` | SA subject mismatch OR audience mismatch | Compare `kubectl get sa image-puller -n test-pull` subject to CR's `serviceAccountRef`. Compare token's `--audience` to `trustPolicy.audience`. |
 | `/v1/credentials` returns `503 credentials not yet available` | Robot Secret hasn't materialised | `kubectl get harboraccess -n harbor-bridge-system test-access -o yaml` until `Ready=True`. |

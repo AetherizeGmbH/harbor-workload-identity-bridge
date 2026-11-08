@@ -37,6 +37,15 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
   credential provider; beta and on by default from 1.34).
 - `ServiceAccountNodeAudienceRestriction` (on by default since 1.32) — the chart
   creates the RBAC that lets kubelets request tokens for `plugin.audience`.
+- The apiserver serves its OIDC discovery document and its keys
+  (`/.well-known/openid-configuration`, `/openid/v1/jwks`;
+  ServiceAccountIssuerDiscovery, stable since 1.21). It does whenever its
+  `--service-account-issuer` is an https URL without query and fragment.
+  With `bridge.oidcIssuer` empty (the default) the bridge reads the issuer
+  and the keys from `https://kubernetes.default.svc` at startup and logs the
+  issuer (ADR-0044), so no platform needs `bridge.oidcIssuer` or
+  `bridge.oidcJWKSURL`. If the bridge exits because it cannot read the
+  document, set both ([Token issuer](#managed-clouds-what-to-expect)).
 - Each node must reach the bridge. Default: the bridge NodePort on the node's
   own loopback (`https://127.0.0.1:31443`). On dataplanes that do not route
   loopback NodePorts set `plugin.bridgeEndpoint: "https://$(NODE_IP):31443"`
@@ -85,6 +94,28 @@ on by default, can make kubelet accept what it rejected. If kubelet does not
 come back on the restored files either, the node stays `NotReady` and
 `kubectl logs` cannot reach it: run `journalctl -u kubelet` on the node; the
 `.bak` copy next to each restored file holds the content kubelet rejected.
+
+**Token issuer.** Managed clusters sign ServiceAccount tokens with a cloud
+issuer URL: GKE
+`https://container.googleapis.com/v1/projects/<project>/locations/<location>/clusters/<name>`,
+EKS `https://oidc.eks.<region>.amazonaws.com/id/<id>`, AKS with its OIDC
+issuer `https://<region>.oic.prod-aks.azure.com/<tenant>/<uuid>/` (with the
+trailing slash). The bridge reads that value from the in-cluster apiserver,
+so a HarborAccess must name exactly what
+`kubectl get --raw /.well-known/openid-configuration | jq -r .issuer` prints.
+Kubernetes serves the document there on every cluster with an https issuer;
+GKE, EKS and AKS document their issuers and public discovery endpoints, but
+not the in-cluster ones. Verified on kind only (CI e2e); the GKE harness
+reads the issuer this way but has not run yet. AKS clusters without the
+OIDC issuer feature (on by default for new clusters from Kubernetes 1.34)
+are untested. Where the bridge cannot read the document, set the issuer
+and fetch the keys from the in-cluster apiserver:
+
+```yaml
+bridge:
+  oidcIssuer: <the issuer the tokens carry>
+  oidcJWKSURL: https://kubernetes.default.svc/openid/v1/jwks
+```
 
 **Node replacement and reboots.** New or reimaged nodes run the DaemonSet and
 converge the same way. If a platform resets the provider config at boot (GKE COS

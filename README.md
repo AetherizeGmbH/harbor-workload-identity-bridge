@@ -103,6 +103,10 @@ what the design protects against and what it does not.
      `plugin.matchImages` to registry hosts (`harbor.example.com` or
      `host:port`). Kubelet does not support globs in the path:
      `harbor.example.com/*` never matches.
+   - The bridge reads the cluster's ServiceAccount token issuer and signing
+     keys from the Kubernetes API server, on kind and kubeadm as on GKE, EKS
+     and AKS. `bridge.oidcIssuer` sets the issuer instead
+     ([docs/platforms.md](docs/platforms.md#managed-clouds-what-to-expect)).
    - The chart creates a CA for the release with cert-manager. It signs the
      bridge's TLS certificate, which the plugin verifies on every node, and
      with `bridge.mTLS` the plugin's client certificate.
