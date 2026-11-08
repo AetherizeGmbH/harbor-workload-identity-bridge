@@ -79,7 +79,7 @@ Frozen with the rest of this log: use the current sources listed at the top.
 | `BRIDGE_FORCE_LOCAL_VALIDATION` | no | Default `true`. The `false` path returns 501 — reserved for post-Harbor-OIDC-migration. |
 | `BRIDGE_LOG_LEVEL` | no | One of `debug`, `info`, `warn`, `error`. Default `info`. |
 
-*Superseded:* the bridge reads many more variables, among them the required `BRIDGE_AUDIENCE` (ADR-0026) and `BRIDGE_OIDC_JWKS_URL`, `BRIDGE_OIDC_CA_FILE`, `BRIDGE_OIDC_TOKEN_FILE`, `BRIDGE_HARBOR_ROBOT_PREFIX`, `BRIDGE_HARBOR_CA_FILE`, `BRIDGE_HARBOR_ALLOW_INSECURE_HTTP`, `BRIDGE_HARBORACCESS_SELECTOR`, `BRIDGE_INSTANCE`, `BRIDGE_TOKEN_MAX_LIFETIME` and `BRIDGE_REQUIRE_POD_BOUND_TOKEN` (`config.go`), plus the listener, TLS, leader-election, rate-limit and shutdown settings in `main.go`. The `BRIDGE_OIDC_ISSUER` example is not the chart default, `https://kubernetes.default.svc.cluster.local`.
+*Superseded:* the bridge reads many more variables, among them the required `BRIDGE_AUDIENCE` (ADR-0026) and `BRIDGE_OIDC_JWKS_URL`, `BRIDGE_OIDC_CA_FILE`, `BRIDGE_OIDC_TOKEN_FILE`, `BRIDGE_HARBOR_ROBOT_PREFIX`, `BRIDGE_HARBOR_CA_FILE`, `BRIDGE_HARBOR_ALLOW_INSECURE_HTTP`, `BRIDGE_HARBORACCESS_SELECTOR`, `BRIDGE_INSTANCE`, `BRIDGE_TOKEN_MAX_LIFETIME` and `BRIDGE_REQUIRE_POD_BOUND_TOKEN` (`config.go`), plus the listener, TLS, leader-election, rate-limit and shutdown settings in `main.go`. `BRIDGE_OIDC_ISSUER` is optional since ADR-0044: empty, the bridge reads the issuer from the in-cluster apiserver (the chart default); a set value is the kubeadm/kind issuer `https://kubernetes.default.svc.cluster.local` on those clusters, not the example above.
 
 ### Names and limits
 

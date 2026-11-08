@@ -166,9 +166,16 @@ NEXT STEPS
        {{ include "harbor-bridge.plugin.audience" . }}
 
      spec.trustPolicy.issuer is optional (ADR-0043): leave it out to trust
-     the bridge's issuer, or set it to exactly:
+     the bridge's issuer.
+{{- if .Values.bridge.oidcIssuer }} If you set it, it must be exactly:
 
        {{ .Values.bridge.oidcIssuer }}
+{{- else }} If you set it, it must be the cluster's ServiceAccount
+     token issuer byte for byte. The bridge reads that from the apiserver at
+     startup and logs it (bridge.oidcIssuer is empty, ADR-0044). Print it:
+
+       kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
+{{- end }}
 
   4. Uninstalling: delete your HarborAccess objects BEFORE `helm uninstall`.
      Each carries a finalizer that revokes its Harbor robot; without the

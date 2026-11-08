@@ -1,5 +1,15 @@
 ## Chart value migrations
 
+### 0.19.0: an empty `bridge.oidcIssuer` means the issuer the apiserver names (ADR-0044)
+
+| Change | What to do |
+| --- | --- |
+| `bridge.oidcIssuer` defaults to `""` (was `https://kubernetes.default.svc.cluster.local`). The bridge then reads the issuer at startup from the in-cluster apiserver (`https://kubernetes.default.svc/.well-known/openid-configuration`) and the signing keys from its `/openid/v1/jwks`, logs the issuer (`read the ServiceAccount token issuer from the apiserver`), and exits when it cannot read them. A release that never set `bridge.oidcIssuer` reads the issuer after an upgrade without `--reuse-values` | kind and kubeadm: nothing, the apiserver names the same issuer. Elsewhere such a release refused every token before; now every HarborAccess must name the issuer the bridge read, or it reports `IssuerMismatch`. Print it with `kubectl get --raw /.well-known/openid-configuration \| jq -r .issuer`. If the bridge exits with `BRIDGE_OIDC_ISSUER is empty, so the bridge reads the ServiceAccount token issuer from the apiserver, and that failed`, check that its ClusterRole allows `get` on `/.well-known/openid-configuration` (the chart's does), or set `bridge.oidcIssuer` |
+| A set `bridge.oidcIssuer` works as before | Nothing. On GKE, EKS or AKS you may remove `bridge.oidcIssuer` and `bridge.oidcJWKSURL` (`https://kubernetes.default.svc/openid/v1/jwks`): the bridge then reads the same issuer and keys itself. Check that the issuer it logs is the one your HarborAccess objects name |
+| `helm upgrade --reuse-values` renders with the previous chart's values, so a release that never set `bridge.oidcIssuer` keeps `https://kubernetes.default.svc.cluster.local` | Nothing, or `--set bridge.oidcIssuer=` to have the bridge read the issuer. `--reset-then-reuse-values` gets the new default |
+| `BRIDGE_OIDC_ISSUER` may be empty for a bridge run without the chart | Off-cluster, keep setting it: `kubernetes.default.svc` does not resolve there, and `make run-local` requires it |
+| A `bridge.oidcIssuer` (`BRIDGE_OIDC_ISSUER`) that URL parsing changes, such as one with an upper-case scheme (`HTTPS://…`), is refused at startup and by the chart. Before, the bridge compared it in its parsed form and rejected every token, whose `iss` claim carries the issuer as written | Write the issuer exactly as `kubectl get --raw /.well-known/openid-configuration \| jq -r .issuer` prints it, or leave `bridge.oidcIssuer` empty |
+
 ### 0.18.0: `trustPolicy.issuer` is optional (ADR-0043)
 
 | Change | What to do |

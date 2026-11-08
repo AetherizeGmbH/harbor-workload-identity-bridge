@@ -147,11 +147,11 @@
           }
         },
         "oidcIssuer": {
-          "description": "Issuer of the ServiceAccount tokens the bridge validates. It must match the cluster's issuer.",
+          "description": "Issuer of the ServiceAccount tokens the bridge validates. Empty: the bridge reads it from the in-cluster apiserver's discovery document (ADR-0044). A set value must equal the cluster's issuer byte for byte.",
           "type": "string"
         },
         "oidcJWKSURL": {
-          "description": "Where the bridge fetches the token signing keys. Empty uses OIDC discovery at bridge.oidcIssuer.",
+          "description": "Where the bridge fetches the token signing keys. Empty: the in-cluster apiserver's /openid/v1/jwks while bridge.oidcIssuer is empty, else OIDC discovery at bridge.oidcIssuer.",
           "type": "string"
         },
         "oidcCAFile": {

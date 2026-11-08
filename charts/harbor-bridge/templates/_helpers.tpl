@@ -194,12 +194,22 @@ harbor.aetherize.io/robot
 {{- fail "harbor.url is REQUIRED. The bridge needs the Harbor base URL to manage robots." -}}
 {{- end -}}
 {{- include "harbor-bridge.validateURL" (list "harbor.url" .Values.harbor.url "a user:password@ part never takes effect (the bridge authenticates to Harbor only with harbor.adminCredsSecret) and only ends up in logs") -}}
-{{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "a user:password@ part never takes effect (a token's iss claim never carries one, so no token would match) and only ends up in logs") -}}
+{{- /* An empty bridge.oidcIssuer means: the bridge reads the issuer from the
+       in-cluster apiserver (ADR-0044). */ -}}
+{{- with .Values.bridge.oidcIssuer -}}
+{{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" . "a user:password@ part never takes effect (a token's iss claim never carries one, so no token would match) and only ends up in logs") -}}
+{{- /* The bridge compares the issuer as URL parsing writes it back, which
+       lower-cases the scheme, and refuses an issuer that parsing changes
+       (bridge/controlplane/config.go). */ -}}
+{{- if not (regexMatch "^https?://" (trim (toString .))) -}}
+{{- fail "bridge.oidcIssuer must start with a lower-case http:// or https://: the bridge compares the issuer byte for byte with each token's iss claim, after URL parsing, which writes the scheme in lower case, so it refuses any other spelling at startup." -}}
+{{- end -}}
+{{- end -}}
 {{- with .Values.bridge.oidcJWKSURL -}}
 {{- include "harbor-bridge.validateURL" (list "bridge.oidcJWKSURL" . "a user:password@ part here would be stored in plain text in the bridge Deployment and the Helm release. For a JWKS endpoint that needs credentials, leave bridge.oidcJWKSURL empty and set BRIDGE_OIDC_JWKS_URL through bridge.extraEnv from a Secret (valueFrom.secretKeyRef)") -}}
 {{- include "harbor-bridge.requireTLSUnlessLoopback" (list "bridge.oidcJWKSURL" . "the token signing keys") -}}
 {{- end -}}
-{{- /* The bridge fetches from the issuer only for OIDC discovery, when no
+{{- /* The bridge fetches from a set issuer only for OIDC discovery, when no
        JWKS URL is set (bridge.oidcJWKSURL, or BRIDGE_OIDC_JWKS_URL in
        bridge.extraEnv). Otherwise the issuer is only compared with each
        token's iss claim, and plain http is harmless. */}}
@@ -209,7 +219,7 @@ harbor.aetherize.io/robot
 {{- $jwksFromEnv = true -}}
 {{- end -}}
 {{- end -}}
-{{- if not (or .Values.bridge.oidcJWKSURL $jwksFromEnv) -}}
+{{- if and .Values.bridge.oidcIssuer (not (or .Values.bridge.oidcJWKSURL $jwksFromEnv)) -}}
 {{- include "harbor-bridge.requireTLSUnlessLoopback" (list "bridge.oidcIssuer" .Values.bridge.oidcIssuer "the discovery document that names the token signing keys (no JWKS URL is set)") -}}
 {{- end -}}
 {{- if and (hasPrefix "http://" (lower (trim .Values.harbor.url))) (not .Values.harbor.allowInsecureHTTP) -}}

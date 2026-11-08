@@ -133,14 +133,14 @@ variable "plugin_image" {
 
 variable "oidc_issuer" {
   type        = string
-  default     = "https://kubernetes.default.svc.cluster.local"
-  description = "bridge.oidcIssuer — the cluster's ServiceAccount token issuer (kind: the in-cluster default; GKE: the container.googleapis.com URL)."
+  default     = ""
+  description = "bridge.oidcIssuer — the cluster's ServiceAccount token issuer. Empty (the chart default): the bridge reads it from the in-cluster apiserver (ADR-0044)."
 }
 
 variable "oidc_jwks_url" {
   type        = string
   default     = ""
-  description = "bridge.oidcJWKSURL — set to https://kubernetes.default.svc/openid/v1/jwks when the issuer is not the in-cluster apiserver."
+  description = "bridge.oidcJWKSURL — with oidc_issuer set to an issuer that is not the in-cluster apiserver, https://kubernetes.default.svc/openid/v1/jwks. Empty with oidc_issuer empty: the apiserver's own key endpoint."
 }
 
 variable "token_command" {

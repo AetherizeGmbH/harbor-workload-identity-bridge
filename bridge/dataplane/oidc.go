@@ -112,18 +112,27 @@ type Config struct {
 	// "https://kubernetes.default.svc.cluster.local".
 	Issuer string
 
-	// JWKSURL is the URL to fetch the JSON Web Key Set from. When empty
-	// (the in-cluster default), the validator runs OIDC discovery
-	// against Issuer and uses whichever jwks_uri the discovery response
-	// reports. When set, the validator skips discovery entirely and
-	// fetches JWKS directly from this URL. The Issuer field is still
-	// the expected iss claim of incoming tokens; only the *transport*
-	// is overridden. Use this when the bridge runs outside the cluster
-	// (local dev via `kubectl proxy`) or behind a network topology
-	// where the cluster-internal URLs do not resolve. Every URL the keys
-	// come through (JWKSURL, or Issuer and the discovered jwks_uri) must
-	// be https, or http to a loopback host.
+	// JWKSURL is the URL to fetch the JSON Web Key Set from. When empty,
+	// the validator runs OIDC discovery against Issuer and uses whichever
+	// jwks_uri the discovery response reports. When set, the validator
+	// skips discovery entirely and fetches JWKS directly from this URL.
+	// The Issuer field is still the expected iss claim of incoming
+	// tokens; only the *transport* is overridden. The bridge sets it to
+	// the in-cluster apiserver's key endpoint when it read the issuer
+	// from there (IssuerDiscovery.JWKSURL, ADR-0044), and to
+	// BRIDGE_OIDC_JWKS_URL when that is set, e.g. outside the cluster
+	// (local dev via `kubectl proxy`). Every URL the keys come through
+	// (JWKSURL, or Issuer and the discovered jwks_uri) must be https, or
+	// http to a loopback host.
 	JWKSURL string
+
+	// SigningAlgs, with JWKSURL, are the algorithms the issuer's discovery
+	// document advertises (IssuerDiscovery.SigningAlgs, ADR-0044). The
+	// verifier accepts those the key set can verify, or RS256 when there
+	// are none of them. Empty with JWKSURL accepts every algorithm the key
+	// set can verify. Without JWKSURL the algorithms come from the
+	// document discovery reads at Issuer, and SigningAlgs is not used.
+	SigningAlgs []string
 
 	// HTTPClient is used for OIDC discovery and JWKS fetching. Pass a
 	// client with a custom transport for httptest, mTLS, or audit
@@ -190,12 +199,17 @@ func NewValidator(ctx context.Context, cfg Config) (Validator, error) {
 			return nil, fmt.Errorf("oidc: JWKS URL %q: %w", jwksURL, err)
 		}
 		allowIfAPIServer(u)
-		// No discovery document names the issuer's algorithms, so accept
-		// every one the key set verifies: an apiserver with an ECDSA
-		// signing key issues ES256/384/512 tokens. go-jose binds the
-		// algorithm to the key's type, so this admits no algorithm
-		// confusion; HS* and none are not in the list.
-		algs = algNames(jwtSigningAlgs)
+		if len(cfg.SigningAlgs) > 0 {
+			// The apiserver's discovery document named them (ADR-0044).
+			algs = supportedAlgs(cfg.SigningAlgs)
+		} else {
+			// No discovery document names the issuer's algorithms, so
+			// accept every one the key set verifies: an apiserver with an
+			// ECDSA signing key issues ES256/384/512 tokens. go-jose binds
+			// the algorithm to the key's type, so this admits no algorithm
+			// confusion; HS* and none are not in the list.
+			algs = algNames(jwtSigningAlgs)
+		}
 	} else {
 		// Discovery names the JWKS: whoever can rewrite the document can
 		// substitute the keys.

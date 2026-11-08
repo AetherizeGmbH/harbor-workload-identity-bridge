@@ -88,11 +88,23 @@ fails signature verification at cluster A's bridge. Clusters that share
 a signing key (for example cloned control-plane key material) are not
 separated by this check.
 
-The bridge also enforces the `iss` claim against the configured issuer
-(`BRIDGE_OIDC_ISSUER`). That check separates only clusters whose issuers
-differ: the chart default and the kubeadm/kind default,
-`https://kubernetes.default.svc.cluster.local`, are the same string on
-every such cluster.
+The bridge also enforces the `iss` claim against its issuer: the one in
+`BRIDGE_OIDC_ISSUER` (chart: `bridge.oidcIssuer`), or, when that is empty
+(the chart default), the one the in-cluster apiserver's discovery document
+names ([ADR-0044](docs/adr/0044-bridge-discovers-the-issuer.md)). That
+check separates only clusters whose issuers differ: the kubeadm/kind
+issuer, `https://kubernetes.default.svc.cluster.local`, is the same string
+on every such cluster.
+
+Reading the issuer from the apiserver adds no trust anchor. The bridge
+reads `https://kubernetes.default.svc/.well-known/openid-configuration`
+once at startup, over TLS verified with the cluster CA
+(`bridge.oidcCAFile`), with its own token, following no redirects: the
+same apiserver, over the same path, that serves the signing keys
+(`/openid/v1/jwks`). Whoever could change that document could already
+substitute the keys. The issuer must be an https URL without credentials,
+query or fragment, or the bridge does not start. The startup log names
+the issuer the bridge read.
 
 The audience (`aud`) claim must carry the one audience the bridge
 serves (`plugin.audience`, [ADR-0026](docs/adr/0026-audience-pinning-and-harboraccess-selector.md)),
@@ -707,7 +719,7 @@ their own RBAC.
 | --- | --- | --- |
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
 | Harbor transport (`harbor.url`) | https required, no redirects followed | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http. Point `harbor.url` at the address Harbor's API answers on directly: the bridge refuses redirects, which would re-send the admin credentials to a target on the same host (in clear text if it is http://) |
-| OIDC transport (`bridge.oidcIssuer` for discovery, `bridge.oidcJWKSURL`, the discovered `jwks_uri`) | https required | Plain http is refused at startup except to a loopback host (`127.0.0.1`, `::1`, `localhost`, i.e. `kubectl proxy` in local development): the signing keys decide every credential, and anyone on a plain-http path could substitute them |
+| OIDC transport (the in-cluster apiserver with an empty `bridge.oidcIssuer`; else `bridge.oidcIssuer` for discovery, `bridge.oidcJWKSURL`, the discovered `jwks_uri`) | https required | Plain http is refused at startup except to a loopback host (`127.0.0.1`, `::1`, `localhost`, i.e. `kubectl proxy` in local development): the signing keys decide every credential, and anyone on a plain-http path could substitute them |
 | TLS between plugin and bridge | required (HTTPS) | Add mTLS (`bridge.mTLS.enabled`, `BRIDGE_TLS_CLIENT_CA_FILE`); each cluster's plugin authenticates with a client cert. The bridge accepts any client cert its CA signed. Keep the chart's release CA (empty `tls.issuerRef.name`, ADR-0042): with cert-manager's defaults only who may create Certificates or CertificateRequests, or read Secrets, in the release namespace can get one. With a shared ClusterIssuer anyone who may create Certificates that use it can (O2) |
 | `tokenTTL` | per-CR, 5m–24h, a Go duration (`30m`, `1h`; no days) | Use 1h or less unless you have a measured pull-rate problem |
 | `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
@@ -804,7 +816,8 @@ than by offset, so a robot deleted by someone else during the walk
 cannot hide another one (`TestClient_List_ConcurrentDeleteHidesNoRobot`).
 
 OIDC discovery and JWKS fetches follow no redirects and are bounded
-(30s for discovery, 10s for a JWKS fetch). The bridge's own
+(30s for discovery, 10s for a JWKS fetch; the document the bridge reads
+its issuer from to 64 KiB). The bridge's own
 ServiceAccount token, which the apiserver requires for them, is sent
 only over https to the in-cluster apiserver and to the jwks_uri its
 discovery names: anywhere else it could be replayed against the
@@ -817,7 +830,8 @@ background, and while the apiserver is slow or unreachable, or answers
 with no public key, the last keys fetched stay in use, including a key
 the issuer has since rotated out. The bridge fetches the keys once at
 startup and exits if it cannot, so a wrong `bridge.oidcJWKSURL`, CA or
-RBAC stops the rollout instead of denying every request. A token signed
+RBAC stops the rollout instead of denying every request. The same holds
+for reading the issuer from the apiserver. A token signed
 by a key the bridge does not hold, while it cannot fetch the current
 keys, is answered `503` and counted as `reason=keys_unavailable`, not as
 an invalid token.

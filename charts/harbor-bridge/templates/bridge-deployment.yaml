@@ -85,8 +85,10 @@ spec:
               value: {{ .Values.clusterName | quote }}
             - name: BRIDGE_NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            {{- with .Values.bridge.oidcIssuer }}
             - name: BRIDGE_OIDC_ISSUER
-              value: {{ .Values.bridge.oidcIssuer | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             # The only token audience the bridge serves (ADR-0026).
             - name: BRIDGE_AUDIENCE
               value: {{ include "harbor-bridge.plugin.audience" . | quote }}
@@ -113,9 +115,10 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             - name: BRIDGE_OIDC_CA_FILE
-              # In-cluster: the OIDC issuer is the apiserver and its
-              # cert is signed by the cluster CA. The projected SA
-              # volume always carries the cluster CA at this path.
+              # In-cluster: the bridge reads the issuer's discovery
+              # document and the keys from the apiserver, whose cert is
+              # signed by the cluster CA. The projected SA volume always
+              # carries the cluster CA at this path.
               # Override via .Values.bridge.oidcCAFile to point at a
               # custom CA bundle (e.g. mTLS apiserver topologies).
               value: {{ .Values.bridge.oidcCAFile | quote }}

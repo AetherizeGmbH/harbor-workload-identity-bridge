@@ -111,21 +111,25 @@ bridge:
     pullPolicy: IfNotPresent
 
   # Service-account-token issuer the bridge validates incoming SA
-  # tokens against. Match the cluster's actual issuer (find it with
-  # `kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`).
-  # Managed clouds use their own issuer URL (GKE:
-  # https://container.googleapis.com/v1/projects/…/clusters/…, EKS:
-  # https://oidc.eks.<region>.amazonaws.com/id/…) — set it, and set
-  # oidcJWKSURL below. No "@" (write one in the path as %40). With
-  # oidcJWKSURL empty the bridge fetches the discovery document from here,
-  # so it must be https (plain http only to 127.0.0.1, ::1 or localhost;
-  # the chart refuses anything else).
-  oidcIssuer: https://kubernetes.default.svc.cluster.local
+  # tokens against. Empty (the default): the bridge reads it at startup
+  # from the in-cluster apiserver's discovery document,
+  # https://kubernetes.default.svc/.well-known/openid-configuration, and
+  # logs it (ADR-0044). That works on kind, kubeadm and managed clouds
+  # (GKE, EKS, AKS) alike, wherever the apiserver serves the document;
+  # `kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`
+  # prints the same value. Set it only when the apiserver does not serve
+  # the document or you want another issuer; a set value must equal the
+  # issuer in the tokens byte for byte. No "@" (write one in the path as
+  # %40). With oidcJWKSURL empty the bridge fetches the discovery
+  # document from a set issuer, so it must be https (plain http only to
+  # 127.0.0.1, ::1 or localhost; the chart refuses anything else).
+  oidcIssuer: ""
 
-  # Where the bridge fetches the token-signing keys. Empty = OIDC
-  # discovery at oidcIssuer (right when the issuer IS the in-cluster
-  # apiserver). When the issuer is a cloud URL, set this to the
-  # apiserver's own JWKS endpoint, https://kubernetes.default.svc/openid/v1/jwks:
+  # Where the bridge fetches the token-signing keys. Empty: from the
+  # in-cluster apiserver's https://kubernetes.default.svc/openid/v1/jwks
+  # while oidcIssuer is empty, else by OIDC discovery at oidcIssuer (right
+  # when that issuer IS the in-cluster apiserver). With oidcIssuer set to
+  # a cloud URL, set this to https://kubernetes.default.svc/openid/v1/jwks:
   # the keys come from inside the cluster (no internet egress needed, the
   # cluster CA + the bridge's token below authenticate it), and the
   # issuer claim is still checked against oidcIssuer. https (plain http

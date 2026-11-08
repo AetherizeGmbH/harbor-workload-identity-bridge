@@ -21,8 +21,11 @@
 #     DaemonSet (whose AR-hosted image pull is also the pre-install smoke
 #     test of GKE's own credential provider);
 #   - the ServiceAccount token issuer is GKE's container.googleapis.com
-#     URL, read from the cluster's discovery document; the bridge fetches
-#     the signing keys from the in-cluster apiserver (oidc_jwks_url);
+#     URL. The bridge reads it, and the signing keys, from the in-cluster
+#     apiserver (no bridge.oidcIssuer or bridge.oidcJWKSURL, ADR-0044); the
+#     HarborAccess objects name the issuer the gke module read from the
+#     cluster's discovery document, so a bridge that read another one
+#     reports IssuerMismatch and the pulls fail;
 #   - no kubelet journal in the failure diagnostics (no node access);
 #   - the bridge namespace gets a ResourceQuota for system-node-critical
 #     pods (critical_pods_quota): GKE admits the plugin pods of that
@@ -173,8 +176,6 @@ run "bridge_install" {
     harbor_url            = run.harbor.internal_api_url
     harbor_admin_password = run.harbor.admin_password
     audience              = "harbor-bridge"
-    oidc_issuer           = run.gke.oidc_issuer
-    oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
     token_command         = "gcloud auth print-access-token"
     # GKE admits the plugin's system-node-critical pods only with a quota.
     # bridge_upgrade shares this state and must pass the same value, or it
@@ -473,8 +474,6 @@ run "bridge_upgrade" {
     harbor_url            = run.harbor.internal_api_url
     harbor_admin_password = run.harbor.admin_password
     audience              = "harbor-bridge"
-    oidc_issuer           = run.gke.oidc_issuer
-    oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
     token_command         = "gcloud auth print-access-token"
     critical_pods_quota   = true # as in bridge_install (same state)
     match_images = [
@@ -829,8 +828,6 @@ run "bridge_mtls" {
     harbor_url            = run.harbor.internal_api_url
     harbor_admin_password = run.harbor.admin_password
     audience              = "harbor-bridge"
-    oidc_issuer           = run.gke.oidc_issuer
-    oidc_jwks_url         = "https://kubernetes.default.svc/openid/v1/jwks"
     token_command         = "gcloud auth print-access-token"
     match_images = [
       "${run.gke.harbor_hostname}/your-project",

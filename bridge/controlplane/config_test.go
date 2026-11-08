@@ -102,6 +102,86 @@ func TestLoadFromEnv_AppliesDefaults(t *testing.T) {
 	}
 }
 
+// ADR-0044: an empty BRIDGE_OIDC_ISSUER is not a configuration error. It
+// leaves OIDCIssuer nil for bridge/cmd to fill from the apiserver's
+// discovery document. A set value is still checked.
+func TestLoadFromEnv_EmptyIssuerMeansDiscovery(t *testing.T) {
+	base := map[string]string{
+		EnvClusterName:    "prod",
+		EnvNamespace:      "harbor-bridge-system",
+		EnvHarborURL:      "https://harbor.example.com",
+		EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		EnvAudience:       "harbor-bridge-prod",
+	}
+	for name, issuer := range map[string]*string{"unset": nil, "empty": new(""), "blank": new("  ")} {
+		t.Run(name, func(t *testing.T) {
+			clearAllEnv(t)
+			setEnv(t, base)
+			if issuer != nil {
+				t.Setenv(EnvOIDCIssuer, *issuer)
+			}
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("LoadFromEnv: %v", err)
+			}
+			if cfg.OIDCIssuer != nil {
+				t.Fatalf("OIDCIssuer = %s, want nil (read from the apiserver later)", cfg.OIDCIssuer)
+			}
+			if got := cfg.Sanitized()[EnvOIDCIssuer]; got != "" {
+				t.Errorf("Sanitized()[%s] = %q, want empty", EnvOIDCIssuer, got)
+			}
+		})
+	}
+	for _, tc := range []struct{ issuer, want string }{
+		{"kubernetes.default.svc", "must use http or https"},
+		{"https://", "must include a host"},
+		{"https://admin:s3cret@kubernetes.default.svc", "must not contain credentials"},
+		// Parsing would change this, and the bridge compares
+		// OIDCIssuer.String() with each token's iss claim.
+		{"HTTPS://kubernetes.default.svc", `reads back as "https://kubernetes.default.svc"`},
+	} {
+		t.Run("set "+tc.issuer, func(t *testing.T) {
+			clearAllEnv(t)
+			setEnv(t, base)
+			t.Setenv(EnvOIDCIssuer, tc.issuer)
+			_, err := LoadFromEnv()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A set BRIDGE_OIDC_ISSUER that URL parsing leaves unchanged is kept as
+// written, a trailing slash and an escaped @ included (AKS issuers end in a
+// slash).
+func TestLoadFromEnv_IssuerKeptAsWritten(t *testing.T) {
+	for _, issuer := range []string{
+		"https://kubernetes.default.svc.cluster.local",
+		"https://eastus.oic.prod-aks.azure.com/tenant/cluster/",
+		"https://issuer.example.com/a%40b",
+	} {
+		t.Run(issuer, func(t *testing.T) {
+			clearAllEnv(t)
+			setEnv(t, map[string]string{
+				EnvClusterName:    "prod",
+				EnvNamespace:      "harbor-bridge-system",
+				EnvHarborURL:      "https://harbor.example.com",
+				EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+				EnvAudience:       "harbor-bridge-prod",
+				EnvOIDCIssuer:     issuer,
+			})
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("LoadFromEnv: %v", err)
+			}
+			if got := cfg.OIDCIssuer.String(); got != issuer {
+				t.Fatalf("OIDCIssuer = %q, want %q", got, issuer)
+			}
+		})
+	}
+}
+
 // An unset BRIDGE_HARBOR_ROBOT_PREFIX keeps Harbor's default prefix. A set
 // but empty one selects an empty prefix, for a Harbor whose
 // robot_name_prefix is empty; before, it fell back to robot$ and every

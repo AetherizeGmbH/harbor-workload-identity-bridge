@@ -584,8 +584,6 @@ spec:
               value: "prod-eu-west"
             - name: BRIDGE_NAMESPACE
               value: "harbor-bridge-system"
-            - name: BRIDGE_OIDC_ISSUER
-              value: "https://kubernetes.default.svc.cluster.local"
             # The only token audience the bridge serves (ADR-0026).
             - name: BRIDGE_AUDIENCE
               value: "harbor-bridge-prod-eu-west"
@@ -602,9 +600,10 @@ spec:
             - name: BRIDGE_RATE_LIMIT_BURST
               value: "100"
             - name: BRIDGE_OIDC_CA_FILE
-              # In-cluster: the OIDC issuer is the apiserver and its
-              # cert is signed by the cluster CA. The projected SA
-              # volume always carries the cluster CA at this path.
+              # In-cluster: the bridge reads the issuer's discovery
+              # document and the keys from the apiserver, whose cert is
+              # signed by the cluster CA. The projected SA volume always
+              # carries the cluster CA at this path.
               # Override via .Values.bridge.oidcCAFile to point at a
               # custom CA bundle (e.g. mTLS apiserver topologies).
               value: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"

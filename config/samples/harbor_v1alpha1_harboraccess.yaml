@@ -17,8 +17,9 @@ spec:
     # default harbor-bridge-<clusterName>.
     audience: harbor-bridge-prod
     # Optional (ADR-0043): without it the object trusts the bridge's issuer
-    # (bridge.oidcIssuer). Set it, byte for byte, to have the object refused
-    # on a cluster with another issuer; find your cluster's with
+    # (bridge.oidcIssuer, or the one the bridge reads from the apiserver
+    # when that is empty, ADR-0044). Set it, byte for byte, to have the
+    # object refused on a cluster with another issuer; find your cluster's with
     # kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
     # issuer: https://kubernetes.default.svc.cluster.local
   permissions:
