@@ -56,6 +56,12 @@ jobs:
         with: { node-version: 22 }
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.3.0 }  # semantic-release prepareCmd regenerates chart goldens
+      # verifyReleaseCmd runs govulncheck before a release is tagged (ADR-0040).
+      # No cache: this job holds a token that can push to main.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
       # semantic-release and its plugins come from package-lock.json: exact
       # versions, integrity hashes, and the same install that `make
       # verify-release-notes` (test.yml) exercises on every PR. Floating

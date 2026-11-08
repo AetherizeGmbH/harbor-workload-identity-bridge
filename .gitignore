@@ -39,3 +39,6 @@ test/e2e-gke/**/.diag/
 # committed: CI installs exactly it with `npm ci`.
 node_modules/
 npm-debug.log
+
+# Python bytecode from running the hack/ tests without -B
+__pycache__/
