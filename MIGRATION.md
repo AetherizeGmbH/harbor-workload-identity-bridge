@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### 0.12.1: an empty `harbor.robotNamePrefix` is an empty prefix
+
+| Change | What to do |
+| --- | --- |
+| `harbor.robotNamePrefix: ""` (`BRIDGE_HARBOR_ROBOT_PREFIX` set but empty) now means a Harbor whose `robot_name_prefix` is empty. Before, it selected `robot$`, and such a Harbor failed with `HarborError`. A missing key still renders `robot$` | Nothing if you keep the default or set your Harbor's prefix. If you set `""` for a Harbor that uses `robot$`, set `robot$` before you upgrade: with `""` the bridge refuses Harbor's robots (`HarborError` that names the prefix) and the data plane stops serving the existing robot Secrets (`503`) |
+
 ### 0.12.0: the plugin exits non-zero on a refusal (ADR-0037)
 
 | Change | What to do |

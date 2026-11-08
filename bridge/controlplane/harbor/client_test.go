@@ -424,8 +424,9 @@ func TestClient_GetByName_FilteringWorks(t *testing.T) {
 // internal name (so comparisons against RobotName work) while keeping the
 // on-wire form for Basic Auth and updates.
 func TestClient_ReadPathsStripRobotPrefix(t *testing.T) {
-	for _, prefix := range []string{"robot$", "robot_"} {
-		t.Run(prefix, func(t *testing.T) {
+	// "" is a Harbor whose robot_name_prefix is empty.
+	for _, prefix := range []string{"robot$", "robot_", ""} {
+		t.Run("prefix="+prefix, func(t *testing.T) {
 			fake := newFakeHarbor(t)
 			fake.prefix = prefix
 			srv := fake.server()
@@ -470,6 +471,7 @@ func TestClient_RobotPrefixMismatchFailsClosed(t *testing.T) {
 		{"robot$", "robot"},  // one prefix is a prefix of the other
 		{"robot", "robot$"},
 		{"robotx$", "robot"}, // the rest of Harbor's prefix is no valid name start
+		{"robot$", ""},       // an empty prefix configured for a Harbor that uses robot$
 	} {
 		t.Run(tc.harbor+"/"+tc.bridge, func(t *testing.T) {
 			fake := newFakeHarbor(t)

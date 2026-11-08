@@ -650,6 +650,20 @@ explicit endpoint then.
 {{- end -}}
 
 {{/*
+robotNamePrefix is harbor.robotNamePrefix. The bridge reads an empty value
+as an empty prefix, so a missing key must render Harbor's default:
+`helm upgrade --reuse-values` from a chart before 0.4.0 keeps values
+without the key, and `quote` would turn the missing value into "".
+*/}}
+{{- define "harbor-bridge.harbor.robotNamePrefix" -}}
+{{- if kindIs "invalid" .Values.harbor.robotNamePrefix -}}
+robot$
+{{- else -}}
+{{- .Values.harbor.robotNamePrefix | toString -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 priorityClassName is plugin.priorityClassName. A missing key renders the
 default: `helm upgrade --reuse-values` renders with the previous chart's
 values, which predate the key. "" omits the field.

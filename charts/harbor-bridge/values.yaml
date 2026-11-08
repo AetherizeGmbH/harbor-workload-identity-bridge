@@ -48,7 +48,8 @@ harbor:
   # Harbor stores robot names without it and reports them with it; the
   # bridge must know it to recognise its own robots. Change it only if the
   # Harbor administrator changed the setting (a common change, because
-  # "$" in a username trips up shells and some registry clients).
+  # "$" in a username trips up shells and some registry clients). "" is
+  # a Harbor whose robot_name_prefix is empty.
   robotNamePrefix: "robot$"
 
 tls:

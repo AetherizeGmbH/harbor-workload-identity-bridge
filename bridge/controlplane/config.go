@@ -135,7 +135,8 @@ type Config struct {
 	// Harbor stores robot names without it and reports them with it; the
 	// Harbor client strips it on read paths (ADR-0023). Set it when the
 	// Harbor administrator changed the prefix — otherwise the Harbor client
-	// fails every read with ErrRobotPrefixMismatch.
+	// fails every read with ErrRobotPrefixMismatch. It may be empty, for a
+	// Harbor whose robot_name_prefix is empty.
 	HarborRobotPrefix string
 
 	// ForceLocalValidation gates whether the data plane performs full local
@@ -320,8 +321,11 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s is required", EnvHarborAdminDir))
 	}
 
-	if raw := strings.TrimSpace(os.Getenv(EnvHarborRobotPrefix)); raw != "" {
-		cfg.HarborRobotPrefix = raw
+	// An unset variable keeps Harbor's default prefix. A set but empty one
+	// is a Harbor whose robot_name_prefix is empty; the chart keeps robot$
+	// for a missing harbor.robotNamePrefix.
+	if raw, ok := os.LookupEnv(EnvHarborRobotPrefix); ok {
+		cfg.HarborRobotPrefix = strings.TrimSpace(raw)
 	}
 
 	if raw := os.Getenv(EnvForceLocalValidation); raw != "" {
