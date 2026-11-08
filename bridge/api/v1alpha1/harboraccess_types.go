@@ -21,9 +21,9 @@ import (
 type TrustPolicy struct {
 	// Issuer is the OIDC issuer expected on incoming service-account tokens.
 	// Optional: without it, the HarborAccess trusts the issuer of the bridge
-	// that serves it (ADR-0043). A set value must equal the bridge's
-	// configured issuer byte for byte (chart: bridge.oidcIssuer, default
-	// https://kubernetes.default.svc.cluster.local), which is the cluster's
+	// that serves it (ADR-0043). A set value must equal the bridge's issuer
+	// byte for byte: chart value bridge.oidcIssuer, or by default the issuer
+	// the bridge reads from the apiserver (ADR-0044), which is the cluster's
 	// service-account issuer as printed by
 	// kubectl get --raw /.well-known/openid-configuration; set it to have
 	// the object refused on a cluster with another issuer.

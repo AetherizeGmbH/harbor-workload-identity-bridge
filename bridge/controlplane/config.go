@@ -87,6 +87,11 @@ type Config struct {
 	// plane validates inbound SA tokens against this issuer; the control
 	// plane uses it to detect HarborAccess CRs whose trustPolicy.issuer
 	// disagrees with the cluster the bridge is running in.
+	//
+	// LoadFromEnv leaves it nil when BRIDGE_OIDC_ISSUER is empty. bridge/cmd
+	// then reads the issuer from the in-cluster apiserver's discovery
+	// document and sets it here before either plane starts (ADR-0044), so
+	// both planes see one issuer.
 	OIDCIssuer *url.URL
 
 	// OIDCJWKSURL, when non-nil, overrides where the data plane fetches
@@ -268,15 +273,18 @@ func LoadFromEnv() (*Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q must match %s", EnvNamespace, cfg.Namespace, clusterNamePattern))
 	}
 
-	if v, err := requireURL(os.Getenv(EnvOIDCIssuer), EnvOIDCIssuer); err != nil {
-		errs = append(errs, err)
-	} else if v.User != nil {
-		// The issuer is compared with each token's iss claim and each
-		// HarborAccess's trustPolicy.issuer, neither of which carries
-		// credentials: no token could ever match.
-		errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): a token's iss claim never carries them, so no token would match", EnvOIDCIssuer))
-	} else {
-		cfg.OIDCIssuer = v
+	// Empty: bridge/cmd reads the issuer from the apiserver (ADR-0044).
+	if raw := strings.TrimSpace(os.Getenv(EnvOIDCIssuer)); raw != "" {
+		if v, err := requireURL(raw, EnvOIDCIssuer); err != nil {
+			errs = append(errs, err)
+		} else if v.User != nil {
+			// The issuer is compared with each token's iss claim and each
+			// HarborAccess's trustPolicy.issuer, neither of which carries
+			// credentials: no token could ever match.
+			errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): a token's iss claim never carries them, so no token would match", EnvOIDCIssuer))
+		} else {
+			cfg.OIDCIssuer = v
+		}
 	}
 
 	if raw := strings.TrimSpace(os.Getenv(EnvOIDCJWKSURL)); raw != "" {

@@ -16,9 +16,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -117,13 +119,37 @@ func run() error {
 	logger := newLogger(cfg.LogLevel)
 	ctrl.SetLogger(logger)
 	setupLog := logger.WithName("setup")
+	startupCtx := ctrl.SetupSignalHandler()
+
+	// In-cluster the bridge reads the discovery document and the keys
+	// from the apiserver: that needs the cluster CA in trust AND an
+	// authenticated caller (the apiserver gates
+	// /.well-known/openid-configuration behind system:authenticated by
+	// default). The client sends the token only to the in-cluster
+	// apiserver, re-reads it per request (kubelet rotates it), bounds
+	// every fetch and follows no redirects.
+	oidcClient, err := dataplane.NewOIDCHTTPClient(cfg.OIDCCAFile, cfg.OIDCTokenFile)
+	if err != nil {
+		return fmt.Errorf("build oidc http client: %w", err)
+	}
+	// Without BRIDGE_OIDC_ISSUER the issuer comes from the apiserver
+	// (ADR-0044). It is set in cfg before anything reads it: the config
+	// log, the validator, the reconciler and the data plane.
+	discovery, err := discoverIssuer(startupCtx, cfg, oidcClient, dataplane.InClusterAPIServerURL)
+	if err != nil {
+		return err
+	}
+	if discovery != nil {
+		setupLog.Info("read the ServiceAccount token issuer from the apiserver", "issuer", discovery.Issuer,
+			"from", discovery.DocumentURL, "algorithms", discovery.SigningAlgs)
+	}
 
 	for k, v := range cfg.Sanitized() {
 		setupLog.Info("config", "key", k, "value", v)
 	}
 	// Built here so the startup warnings describe the token policy the
 	// validator actually receives in step 7 (ADR-0028).
-	validatorCfg := validatorConfig(cfg)
+	validatorCfg := validatorConfig(cfg, discovery)
 	logWeakTokenValidation(setupLog, validatorCfg)
 
 	// Step 2: build the scheme. clientgo gives us the core resources;
@@ -188,24 +214,15 @@ func run() error {
 		return fmt.Errorf("add janitor: %w", err)
 	}
 
-	// Step 7: OIDC Validator. Discovery runs synchronously here so a
-	// misconfigured BRIDGE_OIDC_ISSUER fails at startup, not on the
-	// first kubelet request. When BRIDGE_OIDC_JWKS_URL is set, discovery
-	// is skipped in favour of that URL — see config.go for the local-dev
-	// rationale. validatorCfg (step 1) already holds the issuer, the JWKS
-	// URL and the token policy; only the HTTP client is added here.
-	startupCtx := ctrl.SetupSignalHandler()
-	// In-cluster the OIDC issuer is the apiserver: discovery and JWKS
-	// fetch need the cluster CA in trust AND an authenticated caller
-	// (the apiserver gates /.well-known/openid-configuration behind
-	// system:authenticated by default). The client sends the token only
-	// to the in-cluster apiserver, re-reads it per request (kubelet
-	// rotates it), bounds every fetch and follows no redirects.
-	httpClient, err := dataplane.NewOIDCHTTPClient(cfg.OIDCCAFile, cfg.OIDCTokenFile)
-	if err != nil {
-		return fmt.Errorf("build oidc http client: %w", err)
-	}
-	validatorCfg.HTTPClient = httpClient
+	// Step 7: OIDC Validator. It fetches the keys synchronously here (and
+	// runs discovery at a set BRIDGE_OIDC_ISSUER without a JWKS URL), so
+	// a misconfigured issuer, JWKS URL, CA or RBAC fails at startup, not
+	// on the first kubelet request. When BRIDGE_OIDC_JWKS_URL is set,
+	// discovery is skipped in favour of that URL — see config.go for the
+	// local-dev rationale. validatorCfg (step 1) already holds the
+	// issuer, the JWKS URL, the algorithms and the token policy; only the
+	// HTTP client is added here.
+	validatorCfg.HTTPClient = oidcClient
 	validator, err := dataplane.NewValidator(startupCtx, validatorCfg)
 	if err != nil {
 		return fmt.Errorf("build oidc validator: %w", err)
@@ -338,15 +355,49 @@ func credentialMux(credentials http.Handler) http.Handler {
 	return mux
 }
 
+// discoverIssuer reads the issuer from the discovery document of the
+// apiserver at apiServer when BRIDGE_OIDC_ISSUER is empty (ADR-0044), and
+// makes it the bridge's issuer: cfg.OIDCIssuer, which the validator, the
+// reconciler and the data plane read. With a set issuer it changes nothing
+// and returns no discovery.
+func discoverIssuer(ctx context.Context, cfg *controlplane.Config, client *http.Client, apiServer string) (*dataplane.IssuerDiscovery, error) {
+	if cfg.OIDCIssuer != nil {
+		return nil, nil
+	}
+	d, err := dataplane.DiscoverIssuer(ctx, client, apiServer)
+	if err != nil {
+		return nil, fmt.Errorf("%s is empty, so the bridge reads the ServiceAccount token issuer from the apiserver, and that failed: %w. "+
+			"The bridge needs get on the non-resource URL /.well-known/openid-configuration (the chart's ClusterRole grants it) "+
+			"and must reach the apiserver with the CA in %s and the token in %s. Otherwise set the issuer: chart value bridge.oidcIssuer, "+
+			"or %s outside the cluster (`kubectl get --raw /.well-known/openid-configuration | jq -r .issuer` prints it)",
+			controlplane.EnvOIDCIssuer, err, controlplane.EnvOIDCCAFile, controlplane.EnvOIDCTokenFile, controlplane.EnvOIDCIssuer)
+	}
+	u, err := url.Parse(d.Issuer)
+	if err != nil {
+		// DiscoverIssuer parsed it already.
+		return nil, fmt.Errorf("issuer read from %s: %w", d.DocumentURL, err)
+	}
+	cfg.OIDCIssuer = u
+	return d, nil
+}
+
 // validatorConfig maps the bridge config onto the validator's, all but the
 // HTTP client. BRIDGE_REQUIRE_POD_BOUND_TOKEN and AllowNonPodBoundTokens
 // mean opposite things (the validator's zero value is the strict one), so
-// the mapping lives here, under test (ADR-0028).
-func validatorConfig(cfg *controlplane.Config) dataplane.Config {
+// the mapping lives here, under test (ADR-0028). discovery is the
+// apiserver's document when the bridge read its issuer there (ADR-0044):
+// the keys then come from the apiserver's own key endpoint unless
+// BRIDGE_OIDC_JWKS_URL names another, and the algorithms from the
+// document.
+func validatorConfig(cfg *controlplane.Config, discovery *dataplane.IssuerDiscovery) dataplane.Config {
 	vc := dataplane.Config{
 		Issuer:                 cfg.OIDCIssuer.String(),
 		MaxTokenLifetime:       cfg.TokenMaxLifetime,
 		AllowNonPodBoundTokens: !cfg.RequirePodBoundToken,
+	}
+	if discovery != nil {
+		vc.JWKSURL = discovery.JWKSURL
+		vc.SigningAlgs = discovery.SigningAlgs
 	}
 	if cfg.OIDCJWKSURL != nil {
 		vc.JWKSURL = cfg.OIDCJWKSURL.String()

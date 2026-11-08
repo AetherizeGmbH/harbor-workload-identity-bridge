@@ -6,13 +6,17 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,10 +90,166 @@ func TestValidatorConfig_TokenPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadFromEnv: %v", err)
 			}
-			if got := validatorConfig(cfg); got != tt.want {
+			if got := validatorConfig(cfg, nil); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("validatorConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// setBridgeEnv sets the variables LoadFromEnv requires, except the
+// issuer, plus extra; an empty value counts as unset.
+func setBridgeEnv(t *testing.T, extra map[string]string) {
+	t.Helper()
+	for k, v := range map[string]string{
+		controlplane.EnvClusterName:    "prod",
+		controlplane.EnvNamespace:      "harbor-bridge-system",
+		controlplane.EnvOIDCIssuer:     "",
+		controlplane.EnvOIDCJWKSURL:    "",
+		controlplane.EnvHarborURL:      "https://harbor.example.com",
+		controlplane.EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+		controlplane.EnvAudience:       "harbor-bridge-prod",
+	} {
+		t.Setenv(k, v)
+	}
+	for k, v := range extra {
+		t.Setenv(k, v)
+	}
+}
+
+// fakeAPIServer serves a discovery document on an httptest TLS server and
+// counts the requests for it. It returns the server and a bridge OIDC
+// client that trusts it.
+func fakeAPIServer(t *testing.T, status int, doc map[string]any) (*httptest.Server, *http.Client, *atomic.Int32) {
+	t.Helper()
+	var requests atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(doc)
+	}))
+	t.Cleanup(srv.Close)
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := dataplane.NewOIDCHTTPClient(caFile, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, client, &requests
+}
+
+// ADR-0044: without BRIDGE_OIDC_ISSUER the bridge reads the issuer from
+// the apiserver and makes it the issuer of both planes (cfg.OIDCIssuer,
+// which the reconciler's IssuerMismatch check and the startup log read)
+// and of the validator, whose keys then come from the apiserver's own key
+// endpoint unless BRIDGE_OIDC_JWKS_URL names another.
+func TestDiscoverIssuer_EmptyIssuerReadsTheAPIServer(t *testing.T) {
+	const issuer = "https://container.googleapis.com/v1/projects/p/locations/europe-west3/clusters/c"
+	for _, tc := range []struct {
+		name, jwksURL, wantJWKS string
+	}{
+		{name: "keys from the apiserver"},
+		{name: "JWKS URL override", jwksURL: "https://127.0.0.1:8001/openid/v1/jwks", wantJWKS: "https://127.0.0.1:8001/openid/v1/jwks"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, client, requests := fakeAPIServer(t, http.StatusOK, map[string]any{
+				"issuer":                                issuer,
+				"jwks_uri":                              issuer + "/jwks",
+				"id_token_signing_alg_values_supported": []string{"ES256"},
+			})
+			setBridgeEnv(t, map[string]string{controlplane.EnvOIDCJWKSURL: tc.jwksURL})
+			cfg, err := controlplane.LoadFromEnv()
+			if err != nil {
+				t.Fatalf("LoadFromEnv without an issuer: %v", err)
+			}
+			if cfg.OIDCIssuer != nil {
+				t.Fatalf("OIDCIssuer = %s before discovery, want nil", cfg.OIDCIssuer)
+			}
+
+			d, err := discoverIssuer(context.Background(), cfg, client, srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d == nil || requests.Load() != 1 {
+				t.Fatalf("discovery = %+v after %d requests, want one read of the document", d, requests.Load())
+			}
+			if cfg.OIDCIssuer == nil || cfg.OIDCIssuer.String() != issuer {
+				t.Fatalf("cfg.OIDCIssuer = %v, want %s", cfg.OIDCIssuer, issuer)
+			}
+			if got := cfg.Sanitized()[controlplane.EnvOIDCIssuer]; got != issuer {
+				t.Errorf("startup log shows issuer %q, want %q", got, issuer)
+			}
+			wantJWKS := tc.wantJWKS
+			if wantJWKS == "" {
+				wantJWKS = srv.URL + "/openid/v1/jwks"
+			}
+			want := dataplane.Config{
+				Issuer:           issuer,
+				JWKSURL:          wantJWKS,
+				SigningAlgs:      []string{"ES256"},
+				MaxTokenLifetime: time.Hour,
+			}
+			if got := validatorConfig(cfg, d); !reflect.DeepEqual(got, want) {
+				t.Errorf("validatorConfig() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// A set issuer works as before: nothing is read from the apiserver.
+func TestDiscoverIssuer_SetIssuerIsKept(t *testing.T) {
+	const issuer = "https://kubernetes.default.svc.cluster.local"
+	srv, client, requests := fakeAPIServer(t, http.StatusOK, map[string]any{"issuer": "https://other.example"})
+	setBridgeEnv(t, map[string]string{controlplane.EnvOIDCIssuer: issuer})
+	cfg, err := controlplane.LoadFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := discoverIssuer(context.Background(), cfg, client, srv.URL)
+	if err != nil || d != nil {
+		t.Fatalf("discoverIssuer = %+v, %v; want nothing", d, err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("%d requests to the apiserver, want none", n)
+	}
+	if cfg.OIDCIssuer.String() != issuer {
+		t.Fatalf("cfg.OIDCIssuer = %s, want %s", cfg.OIDCIssuer, issuer)
+	}
+	want := dataplane.Config{Issuer: issuer, MaxTokenLifetime: time.Hour}
+	if got := validatorConfig(cfg, d); !reflect.DeepEqual(got, want) {
+		t.Errorf("validatorConfig() = %+v, want %+v", got, want)
+	}
+}
+
+// A failed read stops the bridge with an error that says what to do, and
+// leaves no issuer behind.
+func TestDiscoverIssuer_FailureNamesTheFix(t *testing.T) {
+	srv, client, _ := fakeAPIServer(t, http.StatusForbidden, map[string]any{"kind": "Status", "reason": "Forbidden"})
+	setBridgeEnv(t, nil)
+	cfg, err := controlplane.LoadFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = discoverIssuer(context.Background(), cfg, client, srv.URL)
+	if err == nil {
+		t.Fatal("discoverIssuer succeeded on a 403")
+	}
+	for _, want := range []string{
+		"BRIDGE_OIDC_ISSUER is empty", "403 Forbidden", "/.well-known/openid-configuration",
+		"ClusterRole", "bridge.oidcIssuer", "kubectl get --raw /.well-known/openid-configuration",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not contain %q: %v", want, err)
+		}
+	}
+	if cfg.OIDCIssuer != nil {
+		t.Errorf("cfg.OIDCIssuer = %s after a failed read, want nil", cfg.OIDCIssuer)
 	}
 }
 

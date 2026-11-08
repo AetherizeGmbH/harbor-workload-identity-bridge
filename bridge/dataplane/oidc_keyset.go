@@ -41,7 +41,8 @@ const (
 
 // jwtSigningAlgs are the asymmetric algorithms the key set parses. The
 // verifier enforces its configured list before it calls the key set: the
-// algorithms discovery advertises, or all of these with a JWKS URL.
+// algorithms discovery advertises (at the issuer, or in the apiserver's
+// document with Config.SigningAlgs), or all of these with a JWKS URL alone.
 var jwtSigningAlgs = []jose.SignatureAlgorithm{
 	jose.RS256, jose.RS384, jose.RS512,
 	jose.ES256, jose.ES384, jose.ES512,
