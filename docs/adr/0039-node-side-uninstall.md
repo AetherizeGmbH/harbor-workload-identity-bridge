@@ -136,9 +136,18 @@ Read in the Helm source, v3.20.0 and v4.2.3:
       in an install pass. A refused pass leaves the node as it found it,
       with kubelet running.
    2. *Locks.* The same locks as an install pass: the node lock for the
-      whole pass (all modes but none), the config lock of each config
-      before it reads it, and the lock of the config kubelet reads until the
-      pass ends. It never removes a lock file.
+      whole pass (all modes but none), and the config lock of each config
+      before it reads it, held while the pass edits that config. The lock of
+      the config kubelet reads is held from before the pass reads it until
+      kubelet's restart is verified or rolled back (rule 7): no other
+      installer changes that file between what the pass read and what a
+      rollback writes back. After that the pass releases it and takes the
+      locks of the configs kubelet does not read one at a time; it never
+      takes a lock it already holds. It never removes a lock file. (The
+      first version of this rule said "until the pass ends"; the code
+      releases the lock after the verified restart, which is all the rule
+      needs, and a later lock of the same file by the same pass would
+      otherwise wait for itself.)
    3. *Order.* First the pass changes what kubelet reads at its next
       start: its entry leaves kubelet's config, or, for the last patch
       install, the flags go (3.1). Then kubelet restarts and the restart is
@@ -149,7 +158,10 @@ Read in the Helm source, v3.20.0 and v4.2.3:
    4. *Never an empty config.* When dropping this install's entry would
       leave the config kubelet reads without providers, the flags that
       point kubelet at it must go in the same pass. The pass removes flags
-      only in the case of 3.1. In every other case it refuses.
+      only in the case of 3.1. In every other case it refuses. It also
+      refuses, and restarts nothing, when the config kubelet reads is
+      missing: kubelet does not start while its flag names a missing
+      file.
    5. *Which entries stay.* In a cloud's config every entry stays except
       this install's bridge entry. An entry of this name without
       `HARBOR_BRIDGE_ENDPOINT` is not this install's and stays, as merge
@@ -193,20 +205,29 @@ Read in the Helm source, v3.20.0 and v4.2.3:
 3. **What a removal changes, per mode.** The pass takes the mode from the
    state file and from the running kubelet's wiring (discovery), and the
    configured mode only to tell none mode apart.
-   1. *patch, last install on its directories.* Kubelet's config holds no
-      other entry that stays. The pass requires that its state records a
-      verified patch-mode restart onto exactly the running wiring, that the
-      unit still takes `KUBELET_EXTRA_ARGS` from the recorded environment
-      file (`kubeletEnvFile`), and that this assignment holds exactly the
-      two flags with these paths. It removes both flags and keeps every
-      other argument and every other line. An assignment left empty stays
-      as `KUBELET_EXTRA_ARGS=""`, which kubelet reads the same as no
-      assignment. It restarts kubelet and verifies that it no longer runs
-      with these flags; flags from another source may then take effect
-      (kubelet takes the last occurrence, discover.go:207-217), which the
+   1. *patch, last install on its directories.* Kubelet's config holds no other
+      entry that stays. The pass requires that this install set the flags: its
+      state, or the state of one of its earlier names (decision 6), records a
+      verified patch-mode restart onto exactly the running wiring, or the
+      running wiring is this install's own (`plugin.hostBinaryDir` and the
+      chart-owned config there) and no state was saved, because the install pass
+      was stopped before its verified restart (a `helm install` followed at once
+      by `helm uninstall`). The last case is safe: only a patch-mode pass of the
+      chart writes flags that name these directories, and every other install
+      that uses them has its entry in this config, vouched by its record, so
+      when this install's entry is the last one no install depends on the flags;
+      with the flags kept, the empty config would stop kubelet at its next
+      start. It also requires that the unit takes `KUBELET_EXTRA_ARGS` from the
+      recorded environment file (`kubeletEnvFile`) when a state records one, and
+      that this assignment holds exactly the two flags with these paths. It
+      removes both flags and keeps every other argument and every other line. An
+      assignment left empty stays as `KUBELET_EXTRA_ARGS=""`, which kubelet
+      reads the same as no assignment. It restarts kubelet and verifies that it
+      no longer runs with these flags; flags from another source may then take
+      effect (kubelet takes the last occurrence, discover.go:207-217), which the
       verification accepts as long as kubelet stays up. Only then is the
-      chart-owned config one kubelet does not read (3.7), and it goes with
-      its `.bak`. A rollback therefore restores only the environment file.
+      chart-owned config one kubelet does not read (3.7), and it goes with its
+      `.bak`. A rollback therefore restores only the environment file.
    2. *patch, other installs remain.* It drops its entry, keeps the
       entries of the others, keeps the flags, restarts kubelet and
       verifies that the wiring did not change. The last install to leave
@@ -214,7 +235,13 @@ Read in the Helm source, v3.20.0 and v4.2.3:
    3. *patch, flags not yet live.* When the environment file names other
       directories than the running kubelet, an install pass died between
       writing the flags and restarting kubelet. The pass refuses: the
-      config kubelet reads at its next start is not the one it runs. When
+      config kubelet reads at its next start is not the one it runs. It
+      checks this whenever its state records patch mode, and whatever the
+      state says whenever the flags name this install's own directories
+      (its own, its state's, an earlier name's): the first install pass of
+      a node that died before its verified restart saved no state, and a
+      removal that went on would delete the config and binary the flags
+      point at. When
       the file holds no flags any more while kubelet still runs with the
       ones the state records, an earlier removal pass of this install died
       before its restart; this pass restarts kubelet, as in 2.8.
@@ -222,17 +249,31 @@ Read in the Helm source, v3.20.0 and v4.2.3:
       to the cloud, restarts kubelet, verifies, and then deletes its binary
       and record from kubelet's bin dir. When its entry is the only one, it
       refuses: merge mode never creates that file, and the flags are not
-      the installer's to remove.
+      the installer's to remove. With the merge-mode overrides
+      (`plugin.install.binDir` and `configFile`) the pass takes them for
+      kubelet's wiring, as the install pass does without discovery, and
+      verifies only that kubelet stays up after its restart.
    5. *merge into a chart-owned config* (a record names it, ADR-0029). As
       3.2. When its entry is the last one, it refuses unless 3.1 applies.
+      Such an install cannot remove the flags the patch install set, so it
+      must leave first: the install that set the flags refuses to leave
+      while the config it wired holds an entry whose install's state
+      records merge mode onto that config, and its error says to uninstall
+      that install first. An install whose state is in another
+      `plugin.install.stateDir` is not seen; the order then is the
+      operator's (docs/operations.md, "Uninstalling").
    6. *auto* resolves through the state file as above. Without a state
-      file it handles the entries as in 3.2 and 3.4 and never removes
-      flags.
+      file it handles the entries as in 3.2 and 3.4, and removes the flags
+      only when they name its own directories (3.1).
    7. *Configs kubelet does not read.* This install's own chart-owned config
       when kubelet reads another one, the config of the directories the
       state file records, and a chart-owned config this install's record
       names: in each, under its lock, it drops its entry and deletes the
-      file when no entry is left. These need no restart. This covers the
+      file when no entry is left, if it is a chart-owned config. A cloud's
+      config is never written without providers: kubelet refuses one if its
+      flags ever point there again, so the entry stays there, and the
+      binary and record it needs stay too, reported as kept. These need no
+      restart. This covers the
       files ADR-0035 staged and those left in earlier directories. It looks
       for its binary and record in kubelet's bin dir, in
       `plugin.hostBinaryDir` and in the bin dir of the state file.
@@ -338,10 +379,17 @@ Read in the Helm source, v3.20.0 and v4.2.3:
    (siblings named P are not kept, and P's entry leaves a cloud's config),
    with one kubelet restart, and P's files after the verified restart, as
    in decision 2. In none mode M's entry keeps the config non-empty, so P's
-   entry goes, P's record is reduced to no entries and P's binary stays
-   (3.8). P's binary goes only while kubelet's config holds no entry of
-   that name: the pass may not have written the config kubelet reads (a
-   mode change together with the rename). A removal pass also removes
+   entry goes, P's record is reduced to no entries, and P's binary, CA and
+   mTLS files stay: kubelet runs P's entry until someone restarts it, and
+   that entry reads them on every pull (3.8). P's binary goes only after
+   P's entry left every config on the node the installer knows: kubelet's
+   (which the pass wrote, or P's files stay), this install's chart-owned
+   config, the config P's state records, the configs P's records name and
+   the merge-mode override, each under its lock as in 3.7. A cloud's
+   config among them that would be left without providers keeps P's entry,
+   and P's binary and record stay. Kubelet may read such a config again: a
+   rename together with a mode change leaves the cloud's flags in place,
+   and kubelet runs them once the patch flags go. A removal pass also removes
    such names P, and counts P's state file for the flags of decision 3.1:
    the release set them under that name. A record without a release,
    written before this ADR, belongs to no release: a release must run this

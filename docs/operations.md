@@ -316,6 +316,23 @@ install's provider entry and files off the node:
   configured provider's binary is missing. Remove the flags (or the entry)
   yourself, restart kubelet, then delete the binary and its record.
 
+**Order of the uninstalls.** On nodes where one release wired kubelet in
+patch mode and another release, with other directories, merged its entry
+into that release's chart-owned config (auto mode finds kubelet wired and
+merges), uninstall the merging release first. It cannot remove the kubelet
+flags the patch-mode release set, so it could never leave once it is the
+last entry. The patch-mode release therefore refuses to leave first; its
+error names the release to uninstall first. Releases that share the same
+directories in patch mode can leave in any order.
+
+A `helm uninstall` right after `helm install`, while an install pass was
+still restarting kubelet, works too: when kubelet runs with flags that name
+this release's own directories and no state file was saved yet, the
+removal takes the flags as this release's. When the flags are in kubelet's
+environment file but kubelet does not run them yet, the removal refuses;
+restart kubelet on the node and run `helm uninstall` again. It also refuses
+when the config kubelet reads is missing.
+
 Where what kubelet reads changed, the installer restarts kubelet and
 verifies that it comes back, as an install does; a restart that does not
 verify is rolled back (ADR-0033). Only then do the binary, its record, the
@@ -386,7 +403,11 @@ ADR-0039). The installer knows the old name from the record it wrote under
 it, which names the release, so the release must have run a version with
 ADR-0039 once before the rename; a rename in the same upgrade leaves the
 old entry and files, which the next rename or the uninstall then removes.
-In none mode the old binary stays, as above.
+The old binary goes only after the old entry left every config on the node
+the installer knows, a cloud's config included; a cloud's config that would
+be left without providers keeps the old entry, and the old binary and
+record stay. In none mode the old binary, CA and mTLS files stay: kubelet
+runs the old entry until someone restarts it.
 
 ### Cleaning a node by hand
 
