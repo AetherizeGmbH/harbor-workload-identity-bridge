@@ -201,6 +201,31 @@ func TestMetrics_NoMetrics_HandlerStillWorks(t *testing.T) {
 	}
 }
 
+// A wrong method or path is counted under bridge_unrouted_requests_total
+// and nowhere in bridge_credential_issuances_total, whose results sum to
+// the credential requests.
+func TestMetrics_UnroutedRequests(t *testing.T) {
+	fx, _, reg := metricsFixture(t)
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, CredentialsPath, nil),
+		httptest.NewRequest(http.MethodPut, "/other", nil),
+		httptest.NewRequest(http.MethodPost, "/v1/other", nil),
+	} {
+		fx.Handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if got := counter(t, reg, "bridge_unrouted_requests_total", map[string]string{"reason": UnroutedMethodNotAllowed}); got != 2 {
+		t.Errorf("unrouted{method_not_allowed} = %v, want 2", got)
+	}
+	if got := counter(t, reg, "bridge_unrouted_requests_total", map[string]string{"reason": UnroutedNotFound}); got != 1 {
+		t.Errorf("unrouted{not_found} = %v, want 1", got)
+	}
+	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited} {
+		if got := counter(t, reg, "bridge_credential_issuances_total", map[string]string{"result": r}); got != 0 {
+			t.Errorf("issuances{%s} = %v, want 0", r, got)
+		}
+	}
+}
+
 // Every series exists as zero before the first request, so rate() on a
 // never-incremented series needs no special case in dashboards.
 func TestNewMetrics_SeriesExistBeforeTheFirstRequest(t *testing.T) {
@@ -225,6 +250,7 @@ func TestNewMetrics_SeriesExistBeforeTheFirstRequest(t *testing.T) {
 		"bridge_harboraccess_lookup_failures_total",
 		"bridge_robot_secret_missing_total",
 		"bridge_credential_issuance_duration_seconds",
+		"bridge_unrouted_requests_total",
 	} {
 		if _, ok := labels[name]; !ok {
 			t.Errorf("series %s missing", name)
@@ -234,6 +260,7 @@ func TestNewMetrics_SeriesExistBeforeTheFirstRequest(t *testing.T) {
 		"bridge_credential_issuances_total": {ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited},
 		"bridge_oidc_validation_failures_total": {OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed,
 			OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonKeysUnavailable, OIDCReasonOther},
+		"bridge_unrouted_requests_total": {UnroutedMethodNotAllowed, UnroutedNotFound},
 	} {
 		for _, v := range values {
 			if !labels[name][v] {

@@ -22,6 +22,13 @@ const (
 	ResultRateLimited  = "rate_limited"
 )
 
+// Label values for bridge_unrouted_requests_total{reason}: requests the
+// credential listener answers before it counts them as an issuance.
+const (
+	UnroutedMethodNotAllowed = "method_not_allowed"
+	UnroutedNotFound         = "not_found"
+)
+
 // Label values for bridge_oidc_validation_failures_total{reason}, also
 // the audit line's category for invalid_token (keys_unavailable is a
 // "credential unavailable" line instead). go-oidc/v3 returns error
@@ -53,6 +60,10 @@ type Metrics struct {
 	HarborAccessLookupFailures prometheus.Counter
 	RobotSecretMissing         prometheus.Counter
 	IssuanceDuration           prometheus.Histogram
+	// UnroutedRequests counts requests with another method than POST or
+	// another path than CredentialsPath. They are not issuances, so they
+	// stay out of Issuances, whose results sum to the credential requests.
+	UnroutedRequests *prometheus.CounterVec
 }
 
 // NewMetrics constructs the metric collectors and registers them on reg.
@@ -83,6 +94,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help:    "End-to-end credential-issuance latency, including OIDC validation and Kubernetes API calls.",
 			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12), // 1ms .. ~4s
 		}),
+		UnroutedRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "bridge_unrouted_requests_total",
+			Help: "Requests to the credential listener with another method than POST (405) or another path than /v1/credentials (404), labelled by reason.",
+		}, []string{"reason"}),
 	}
 	reg.MustRegister(
 		m.Issuances,
@@ -90,12 +105,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.HarborAccessLookupFailures,
 		m.RobotSecretMissing,
 		m.IssuanceDuration,
+		m.UnroutedRequests,
 	)
 	// Touch every label value so the time series exist as zero before the
 	// first request. Without this, dashboards using rate() on a never-yet-
 	// incremented series have to special-case missing data.
 	for _, r := range []string{ResultOK, ResultUnauthorized, ResultForbidden, ResultUnavailable, ResultBadRequest, ResultServerError, ResultRateLimited} {
 		m.Issuances.WithLabelValues(r)
+	}
+	for _, r := range []string{UnroutedMethodNotAllowed, UnroutedNotFound} {
+		m.UnroutedRequests.WithLabelValues(r)
 	}
 	for _, r := range []string{OIDCReasonExpired, OIDCReasonBadSignature, OIDCReasonWrongIssuer, OIDCReasonMalformed, OIDCReasonExcessiveLifetime, OIDCReasonNotPodBound, OIDCReasonKeysUnavailable, OIDCReasonOther} {
 		m.OIDCValidationFailures.WithLabelValues(r)
