@@ -419,7 +419,6 @@ spec:
     namespace: test-pull
     name: image-puller
   trustPolicy:
-    issuer: https://kubernetes.default.svc.cluster.local
     audience: harbor-bridge
   permissions:
     - project: your-project

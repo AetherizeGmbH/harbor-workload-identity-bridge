@@ -44,5 +44,6 @@
 | 0040 | [A release stops on a called vulnerability that has a fix](0040-a-release-stops-on-a-called-vulnerability-with-a-fix.md) | Accepted (amends 0036) |
 | 0041 | [The chart derives the audience and matchImages from the required values](0041-chart-derives-audience-and-match-images.md) | Accepted (refines 0021, 0026) |
 | 0042 | [The chart creates a CA for the release when no issuer is named](0042-chart-creates-a-release-ca.md) | Accepted (refines 0008) |
+| 0043 | [`trustPolicy.issuer` is optional and means the bridge's issuer](0043-trust-policy-issuer-is-optional.md) | Accepted (refines 0004, 0006) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted. **Refined by
+[ADR-0043](0043-trust-policy-issuer-is-optional.md):** `trustPolicy.issuer`
+is optional and then means the bridge's issuer.
 
 ## Context
 

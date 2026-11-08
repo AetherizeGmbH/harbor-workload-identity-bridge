@@ -165,7 +165,8 @@ NEXT STEPS
 
        {{ include "harbor-bridge.plugin.audience" . }}
 
-     and its spec.trustPolicy.issuer must equal (byte for byte):
+     spec.trustPolicy.issuer is optional (ADR-0043): leave it out to trust
+     the bridge's issuer, or set it to exactly:
 
        {{ .Values.bridge.oidcIssuer }}
 

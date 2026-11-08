@@ -239,6 +239,42 @@ func TestEnvtest_CRDRequiresSpec(t *testing.T) {
 	}
 }
 
+// trustPolicy.issuer is optional (ADR-0043): the apiserver admits an
+// object without it, and still refuses a set value that is not an http(s)
+// URL, the empty string included.
+func TestEnvtest_CRDIssuerIsOptional(t *testing.T) {
+	cfg := setupEnvtest(t)
+	ctx := context.Background()
+	k8s, err := client.New(cfg, client.Options{Scheme: testScheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensureNamespaces(t, k8s, testNS)
+
+	without := rawHarborAccess(t, testNS, "no-issuer", "1h")
+	unstructured.RemoveNestedField(without.Object, "spec", "trustPolicy", "issuer")
+	if err := k8s.Create(ctx, without); err != nil {
+		t.Fatalf("create without trustPolicy.issuer: %v", err)
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: "no-issuer"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.TrustPolicy.Issuer != "" || got.Spec.TrustPolicy.Audience == "" {
+		t.Errorf("stored trustPolicy = %+v, want an audience and no issuer", got.Spec.TrustPolicy)
+	}
+
+	for i, issuer := range []string{"", "kubernetes.default.svc", "ftp://issuer.example.com"} {
+		ha := rawHarborAccess(t, testNS, fmt.Sprintf("bad-issuer-%d", i), "1h")
+		if err := unstructured.SetNestedField(ha.Object, issuer, "spec", "trustPolicy", "issuer"); err != nil {
+			t.Fatal(err)
+		}
+		if err := k8s.Create(ctx, ha); !apierrors.IsInvalid(err) {
+			t.Errorf("trustPolicy.issuer %q: err = %v, want an Invalid admission error", issuer, err)
+		}
+	}
+}
+
 // HarborAccess objects stored under the old CRD with tokenTTL "1d", or
 // without spec, stay in etcd after the upgrade. They must not take the
 // bridge down: the controller's cache syncs, other HarborAccess objects

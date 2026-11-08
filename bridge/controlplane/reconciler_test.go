@@ -435,6 +435,28 @@ func TestReconcile_IssuerMismatch(t *testing.T) {
 	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionFalse, ReasonIssuerMismatch)
 }
 
+// TestReconcile_WithoutIssuer: a HarborAccess without trustPolicy.issuer
+// trusts the bridge's issuer (ADR-0043) and is served like one that names it.
+func TestReconcile_WithoutIssuer(t *testing.T) {
+	ha := newHarborAccess()
+	ha.Spec.TrustPolicy.Issuer = ""
+	mh := newMockHarbor()
+	r := newReconciler(t, mh, fixedClock{time.Now()}, ha)
+
+	if _, err := r.Reconcile(context.Background(), reqFor(ha)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(mh.createCalls) != 1 {
+		t.Errorf("create calls = %d, want 1", len(mh.createCalls))
+	}
+	got := &harborv1alpha1.HarborAccess{}
+	if err := r.Get(context.Background(), reqFor(ha).NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, got, harborv1alpha1.ConditionReady, metav1.ConditionTrue, ReasonReconcileSucceeded)
+}
+
 func TestReconcile_AdoptionDiscipline_RefusesForeignDescription(t *testing.T) {
 	ha := newHarborAccess()
 	mh := newMockHarbor()

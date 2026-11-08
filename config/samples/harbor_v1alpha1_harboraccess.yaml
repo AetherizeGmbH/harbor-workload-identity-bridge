@@ -1,8 +1,8 @@
 # Sample HarborAccess granting the flux-system source-controller ServiceAccount
 # pull access to the "production" and "shared-base-images" Harbor projects.
 #
-# The issuer and the audience must equal the bridge's bridge.oidcIssuer and
-# plugin.audience; the chart's NOTES print both.
+# The audience must equal the bridge's audience (plugin.audience, default
+# harbor-bridge-<clusterName>); the chart's NOTES print it.
 apiVersion: harbor.aetherize.io/v1alpha1
 kind: HarborAccess
 metadata:
@@ -13,13 +13,14 @@ spec:
     namespace: flux-system
     name: source-controller
   trustPolicy:
-    # Must equal the bridge's bridge.oidcIssuer byte for byte. This is the
-    # chart default and the kubeadm/kind issuer; find your cluster's with
-    # kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
-    issuer: https://kubernetes.default.svc.cluster.local
-    # Must equal the bridge's plugin.audience (ADR-0026); convention:
-    # harbor-bridge-<clusterName>.
+    # Must equal the bridge's audience (ADR-0026): plugin.audience, by
+    # default harbor-bridge-<clusterName>.
     audience: harbor-bridge-prod
+    # Optional (ADR-0043): without it the object trusts the bridge's issuer
+    # (bridge.oidcIssuer). Set it, byte for byte, to have the object refused
+    # on a cluster with another issuer; find your cluster's with
+    # kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
+    # issuer: https://kubernetes.default.svc.cluster.local
   permissions:
     - project: production
       action: pull
