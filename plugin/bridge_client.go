@@ -18,10 +18,9 @@ import (
 	"time"
 )
 
-// Sentinel errors the main loop reacts to. errBridgeRefused triggers the
-// empty-auth response (kubelet retries on next pull, no caching);
-// errBridgeUnavailable propagates as a non-zero exit so kubelet retries
-// via its own backoff.
+// Sentinel errors. Both end in a non-zero exit, which kubelet logs and
+// does not cache, so the next pull asks again. errBridgeRefused (401/403)
+// gets a pointer to the bridge's audit log (ADR-0037).
 var (
 	errBridgeRefused     = errors.New("bridge refused credentials")
 	errBridgeUnavailable = errors.New("bridge unavailable")

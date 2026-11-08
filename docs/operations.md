@@ -180,7 +180,9 @@ service:
   in order until a pull succeeds (read in the kubelet source; see
   ADR-0029). Overlapping patterns still pull, but every pull calls each
   matching bridge, and a bridge without a HarborAccess for the pod
-  answers 403 and logs a denial each time.
+  answers 403 and logs a denial each time; its plugin then exits non-zero,
+  so kubelet logs an error for that provider on every such pull
+  (ADR-0037).
 - **Concurrent rollouts are safe.** The installers serialise on
   `/run/harbor-bridge-installer.lock` and on a `.lock` file next to the
   provider config, and each restarts kubelet only for changes to its own

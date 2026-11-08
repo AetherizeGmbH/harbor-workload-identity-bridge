@@ -17,7 +17,10 @@
 #   9. pull_pod*            — one Job per scenario; success = end-to-end works.
 #                             pull_pod_cross_tenant / _before_grant: an
 #                             identity is refused on a project it was not
-#                             granted (Harbor decides, not the bridge)
+#                             granted (Harbor decides, not the bridge).
+#                             pull_pod_no_grant: the bridge refuses an
+#                             identity without a HarborAccess, and kubelet
+#                             logs the reason (ADR-0037)
 #  10. robot_push_test      — the minted pull,push robot really can push
 #  11. bridge_upgrade       — helm upgrade widening matchImages; the installer
 #                             must restart kubelet (ADR-0021) …
@@ -427,6 +430,36 @@ run "pull_pod_before_grant" {
     expect_pull_failure  = true
     fail_message         = "tenant isolation broken: test-pull/image-puller could pull project-gamma before any HarborAccess granted it, or the pull failed for a reason other than authorization"
     node_log_command     = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# A ServiceAccount that no HarborAccess names, here the bridge decides: it
+# refuses test-pull/default (403), and the plugin exits non-zero, so
+# kubelet logs the bridge's reason next to the image (ADR-0037). The pull
+# then goes out without credentials, and Harbor refuses it because
+# project-alpha is private.
+run "pull_pod_no_grant" {
+  command = apply
+  module {
+    source = "./modules/test-exec-pod"
+  }
+  variables {
+    kubeconfig           = run.cluster.kubeconfig
+    name                 = "pull-no-grant"
+    namespace            = "test-pull"
+    service_account_name = "default"
+    image                = "harbor.e2e:30843/project-alpha/app:v1"
+    command              = ["sh", "-c"]
+    args                 = ["echo SHOULD NOT RUN; exit 0"]
+    timeout_seconds      = 240
+    expect_pull_failure  = true
+    expect_node_log = [
+      "harbor.e2e:30843/project-alpha/app",
+      "bridge refused credentials: 403",
+      "no matching HarborAccess",
+    ]
+    fail_message     = "test-pull/default has no HarborAccess: the bridge must refuse it and kubelet must log the plugin's reason (ADR-0037), or the pull failed for a reason other than authorization"
+    node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
   }
 }
 

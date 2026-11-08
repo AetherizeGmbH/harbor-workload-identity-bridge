@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### 0.12.0: the plugin exits non-zero on a refusal (ADR-0037)
+
+| Change | What to do |
+| --- | --- |
+| On `401` or `403` from the bridge the plugin exits 1 with the bridge's reason on stderr, which kubelet writes to its log next to the image. Before, it exited 0 with empty credentials and the reason was lost. The pull itself behaves as before: no credentials from this provider, nothing cached, a new try on the next pull | Nothing. If you alert on kubelet's `kubelet_credential_provider_plugin_errors_total`, it now also counts pulls by ServiceAccounts that no HarborAccess grants. The kubelet log line tells a refusal (`bridge refused credentials`) from an unreachable bridge (`bridge unavailable`) |
+
 ### 0.11.5: the chart refuses values the bridge cannot work with
 
 Each of these values used to render, and the install then failed at
