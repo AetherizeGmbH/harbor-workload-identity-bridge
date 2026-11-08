@@ -20,19 +20,32 @@ import (
 // (see docs/adr/0004-trust-policy-as-crd-field.md).
 type TrustPolicy struct {
 	// Issuer is the OIDC issuer expected on incoming service-account tokens.
-	// It must equal the bridge's configured issuer byte for byte (chart:
-	// bridge.oidcIssuer, default https://kubernetes.default.svc.cluster.local),
-	// which is the cluster's service-account issuer as printed by
-	// kubectl get --raw /.well-known/openid-configuration.
+	// Optional: without it, the HarborAccess trusts the issuer of the bridge
+	// that serves it (ADR-0043). A set value must equal the bridge's
+	// configured issuer byte for byte (chart: bridge.oidcIssuer, default
+	// https://kubernetes.default.svc.cluster.local), which is the cluster's
+	// service-account issuer as printed by
+	// kubectl get --raw /.well-known/openid-configuration; set it to have
+	// the object refused on a cluster with another issuer.
+	// +optional
 	// +kubebuilder:validation:Pattern=`^https?://.+`
-	// +kubebuilder:validation:MinLength=1
-	Issuer string `json:"issuer"`
+	Issuer string `json:"issuer,omitempty"`
 
 	// Audience must appear in the aud claim of incoming SA tokens. It must equal
 	// the one audience the bridge serves (chart: plugin.audience), which is the
 	// serviceAccountTokenAudience of the kubelet credential-provider entry.
 	// +kubebuilder:validation:MinLength=1
 	Audience string `json:"audience"`
+}
+
+// IssuerOr returns the issuer this trust policy expects: Issuer, or
+// bridgeIssuer, the issuer the bridge validates tokens of, when Issuer is
+// empty (ADR-0043). The reconciler and the data plane both resolve it here.
+func (tp TrustPolicy) IssuerOr(bridgeIssuer string) string {
+	if tp.Issuer == "" {
+		return bridgeIssuer
+	}
+	return tp.Issuer
 }
 
 // HarborAction is the permission granted on a Harbor project.

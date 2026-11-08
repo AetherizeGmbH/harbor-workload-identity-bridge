@@ -224,6 +224,7 @@ func run() error {
 			BridgeNamespace:      cfg.Namespace,
 			ForceLocalValidation: cfg.ForceLocalValidation,
 			Audience:             cfg.Audience,
+			Issuer:               cfg.OIDCIssuer.String(),
 			RobotUsername:        robotUsername(cfg),
 		},
 		Metrics: metrics,

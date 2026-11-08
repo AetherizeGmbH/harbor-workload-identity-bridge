@@ -138,7 +138,6 @@ what the design protects against and what it does not.
        namespace: flux-system
        name: source-controller
      trustPolicy:
-       issuer: https://kubernetes.default.svc.cluster.local
        audience: harbor-bridge-prod-eu-west
      permissions:
        - project: production

@@ -67,8 +67,9 @@ variable "bridge_namespace" {
 }
 
 variable "issuer" {
-  type    = string
-  default = "https://kubernetes.default.svc.cluster.local"
+  type        = string
+  default     = ""
+  description = "trustPolicy.issuer of every HarborAccess. Empty leaves it out: the objects trust the bridge's issuer (ADR-0043), which the kind harness tests; the GKE harness sets GKE's issuer."
 }
 
 variable "audience" {
@@ -214,7 +215,7 @@ locals {
         metadata   = { name = ha.name, namespace = ha.namespace }
         spec = {
           serviceAccountRef = ha.sa
-          trustPolicy       = { issuer = var.issuer, audience = var.audience }
+          trustPolicy       = merge({ audience = var.audience }, var.issuer != "" ? { issuer = var.issuer } : {})
           permissions       = ha.permissions
           # Canonical metav1.Duration form: "1h" would be re-serialised to
           # "1h0m0s" and trip kubernetes_manifest's consistency check.

@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### 0.18.0: `trustPolicy.issuer` is optional (ADR-0043)
+
+| Change | What to do |
+| --- | --- |
+| A HarborAccess may leave out `spec.trustPolicy.issuer`. It then trusts the issuer of the bridge that serves it (`bridge.oidcIssuer`). A set value must still equal that issuer byte for byte, and the CRD still refuses an empty string or a value that is not an `http(s)://` URL | Nothing for existing objects. To use objects without the issuer, apply the new CRD: Helm does not upgrade CRDs from `crds/`, so run `kubectl apply -f charts/harbor-bridge/crds/`. Until then the API server refuses such objects (`spec.trustPolicy.issuer: Required value`). Keep the issuer in objects that should be refused on a cluster with another issuer |
+
 ### 0.16.0: `plugin.audience` and `plugin.matchImages` may be empty (ADR-0041)
 
 | Change | What to do |

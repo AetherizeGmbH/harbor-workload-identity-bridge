@@ -238,11 +238,11 @@ func (r *Reconciler) reconcileNormal(ctx context.Context, ha *harborv1alpha1.Har
 	}
 
 	// 1. Issuer match — refuse early if the CR was applied to the wrong
-	// cluster.
-	if ha.Spec.TrustPolicy.Issuer != r.Config.OIDCIssuer.String() {
+	// cluster. A CR without an issuer trusts this bridge's (ADR-0043).
+	if clusterIssuer := r.Config.OIDCIssuer.String(); ha.Spec.TrustPolicy.IssuerOr(clusterIssuer) != clusterIssuer {
 		return r.refuse(ctx, ha, ReasonIssuerMismatch,
-			fmt.Sprintf("CR trustPolicy.issuer %q does not match cluster issuer %q",
-				ha.Spec.TrustPolicy.Issuer, r.Config.OIDCIssuer.String()))
+			fmt.Sprintf("CR trustPolicy.issuer %q does not match cluster issuer %q; remove trustPolicy.issuer to trust the bridge's issuer",
+				ha.Spec.TrustPolicy.Issuer, clusterIssuer))
 	}
 
 	// The bridge serves one audience (ADR-0026). Another audience would

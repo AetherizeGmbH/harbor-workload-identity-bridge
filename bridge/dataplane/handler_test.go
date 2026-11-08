@@ -418,10 +418,11 @@ func TestFindHarborAccess_ListsByIndexedSubjectWithoutDeepCopy(t *testing.T) {
 }
 
 func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
-	// The CRD enforces MinLength=1 on trustPolicy.{audience,issuer}, but the
-	// data plane must not depend on that. A CR that somehow carries an
-	// empty audience must NOT match a token whose aud claim is (or
-	// contains) the empty string, and likewise for issuer.
+	// The CRD enforces MinLength=1 on trustPolicy.audience, but the data
+	// plane must not depend on that. A CR that somehow carries an empty
+	// audience must NOT match a token whose aud claim is (or contains) the
+	// empty string. An empty issuer means the bridge's (ADR-0043); this
+	// handler's config leaves that unset, so it must match nothing either.
 	base := func() *harborv1alpha1.HarborAccess {
 		return &harborv1alpha1.HarborAccess{
 			ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: hTestBridgeNS},
@@ -472,6 +473,53 @@ func TestFindHarborAccess_EmptyAudienceOrIssuer_NeverMatches(t *testing.T) {
 			}
 			if matched != nil {
 				t.Fatalf("empty audience/issuer must not match; got CR %s/%s", matched.Namespace, matched.Name)
+			}
+		})
+	}
+}
+
+// TestFindHarborAccess_WithoutIssuer: a CR without trustPolicy.issuer
+// trusts the bridge's issuer (ADR-0043). It matches a token of that issuer,
+// never one of another issuer, and nothing while the bridge's issuer is
+// unset (fail closed).
+func TestFindHarborAccess_WithoutIssuer(t *testing.T) {
+	const bridgeIssuer = "https://kubernetes.default.svc"
+	cases := map[string]struct {
+		configIssuer, claimsIssuer string
+		match                      bool
+	}{
+		"token of the bridge's issuer":     {bridgeIssuer, bridgeIssuer, true},
+		"token of another issuer":          {bridgeIssuer, "https://attacker.example.com", false},
+		"empty token issuer":               {bridgeIssuer, "", false},
+		"bridge issuer unset, empty token": {"", "", false},
+		"bridge issuer unset":              {"", bridgeIssuer, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cr := &harborv1alpha1.HarborAccess{
+				ObjectMeta: metav1.ObjectMeta{Name: "no-issuer", Namespace: hTestBridgeNS},
+				Spec: harborv1alpha1.HarborAccessSpec{
+					ServiceAccountRef: harborv1alpha1.ServiceAccountRef{
+						Namespace: "flux-system", Name: "source-controller",
+					},
+					TrustPolicy: harborv1alpha1.TrustPolicy{Audience: hTestAudience},
+					Permissions: []harborv1alpha1.ProjectPermission{{Project: "p", Action: "pull"}},
+				},
+			}
+			cfg := testHandlerConfig()
+			cfg.Issuer = tc.configIssuer
+			h := &Handler{
+				K8sClient: newFakeClientBuilder().WithObjects(cr).Build(),
+				Validator: &stubValidator{},
+				Config:    cfg,
+			}
+			claims := &Claims{Subject: hTestSubject, Audience: []string{hTestAudience}, Issuer: tc.claimsIssuer}
+			matched, _, _, err := h.findHarborAccess(context.Background(), claims)
+			if err != nil {
+				t.Fatalf("findHarborAccess: %v", err)
+			}
+			if got := matched != nil; got != tc.match {
+				t.Fatalf("matched = %v, want %v", got, tc.match)
 			}
 		})
 	}

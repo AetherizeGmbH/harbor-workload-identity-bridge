@@ -88,6 +88,11 @@ type HandlerConfig struct {
 	// serves nothing.
 	Audience string
 
+	// Issuer is the issuer the Validator pins tokens to
+	// (BRIDGE_OIDC_ISSUER). A HarborAccess without trustPolicy.issuer
+	// trusts this one (ADR-0043); empty matches no such HarborAccess.
+	Issuer string
+
 	// RobotUsername returns the username the control plane stores in the
 	// robot Secret of the given ServiceAccount: the Harbor robot prefix
 	// plus the robot name (ADR-0018). A Secret holding another username is
@@ -470,14 +475,15 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 	var matches, deletingMatches []match
 	for i := range list.Items {
 		ha := &list.Items[i]
-		// Defense-in-depth: a CR with an empty audience or issuer must
-		// never match. The CRD enforces MinLength=1 on both
-		// trustPolicy.audience and trustPolicy.issuer, but the data plane is
-		// the security boundary and must not rely solely on CRD validation
-		// (a CR applied with --validate=false, or a future API revision that
-		// relaxes the marker, would otherwise let an empty trustPolicy.audience
-		// match a token carrying aud:"" — a silent auth bypass).
-		if ha.Spec.TrustPolicy.Audience == "" || ha.Spec.TrustPolicy.Issuer == "" {
+		// Defense-in-depth: a CR with an empty audience must never match.
+		// The CRD enforces MinLength=1 on trustPolicy.audience, but the data
+		// plane is the security boundary and must not rely solely on CRD
+		// validation (a CR applied with --validate=false, or a future API
+		// revision that relaxes the marker, would otherwise let an empty
+		// trustPolicy.audience match a token carrying aud:"" — a silent auth
+		// bypass). An empty trustPolicy.issuer is allowed: it means the
+		// bridge's issuer (ADR-0043), resolved below, and never "any".
+		if ha.Spec.TrustPolicy.Audience == "" {
 			continue
 		}
 		// The bridge serves exactly one audience (ADR-0026). The reconciler
@@ -496,9 +502,11 @@ func (h *Handler) findHarborAccess(ctx context.Context, claims *Claims) (matched
 		// configured issuer, and the reconciler refuses to provision a robot
 		// for a CR whose trustPolicy.issuer disagrees with the cluster
 		// issuer. Re-checking here means a CR is never matched against a
-		// token from an issuer it did not declare, even if those upstream
-		// invariants regress.
-		if ha.Spec.TrustPolicy.Issuer != claims.Issuer {
+		// token from an issuer it did not declare (or, without one, from
+		// another issuer than the bridge's), even if those upstream
+		// invariants regress. An unset configured issuer resolves to ""
+		// for such a CR and matches nothing (fail closed).
+		if issuer := ha.Spec.TrustPolicy.IssuerOr(h.Config.Issuer); issuer == "" || issuer != claims.Issuer {
 			continue
 		}
 		for _, aud := range claims.Audience {
