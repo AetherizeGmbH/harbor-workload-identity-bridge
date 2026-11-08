@@ -1,3 +1,9 @@
+## [0.19.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.18.0...v0.19.0) (2026-11-08)
+
+### Features
+
+* **bridge:** read the issuer from the apiserver when none is set ([#165](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/165)) ([75e92af](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/75e92afa2c155aba8ff19849dc99222d657f5884))
+
 ## [0.18.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.17.0...v0.18.0) (2026-11-08)
 
 ### Features
