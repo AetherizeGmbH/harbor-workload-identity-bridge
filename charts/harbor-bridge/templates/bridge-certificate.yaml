@@ -1,8 +1,10 @@
 {{- if .Values.tls.enabled }}
 {{/*
-cert-manager Certificate for the bridge's serving cert. The CA from
-the same chain is plumbed to plugin pods via the same Secret (ca.crt
-key) so kubelet nodes can verify the bridge's cert.
+cert-manager Certificate for the bridge's serving cert, from
+tls.issuerRef or, when that names no issuer, from the CA the chart
+creates for the release (release-ca.yaml, ADR-0042). The CA from the
+same chain is plumbed to plugin pods via the same Secret (ca.crt key)
+so kubelet nodes can verify the bridge's cert.
 
 The bridge reloads the rotated pair from the mounted Secret on its own
 (no restart); the plugin DaemonSet's sync container copies the rotated
@@ -41,17 +43,16 @@ spec:
   usages:
     - server auth
   issuerRef:
-    name: {{ .Values.tls.issuerRef.name }}
-    kind: {{ .Values.tls.issuerRef.kind }}
-    group: cert-manager.io
+    {{- include "harbor-bridge.tls.issuerRef" . | nindent 4 }}
 {{- end }}
 {{- if and .Values.bridge.mTLS.enabled .Values.plugin.enabled }}
 ---
 {{/*
 Client cert the plugin presents to the bridge. Issued by
-bridge.mTLS.clientIssuerRef, independently of who provides the serving
-cert (tls.enabled): the bridge trusts the ca.crt of its TLS Secret for
-client certs, so that CA must be the client issuer's.
+bridge.mTLS.clientIssuerRef, or by the release CA when that names no
+issuer (ADR-0042), independently of who provides the serving cert
+(tls.enabled): the bridge trusts the ca.crt of its TLS Secret for client
+certs, so that CA must be the client issuer's.
 */}}
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -72,7 +73,5 @@ spec:
   usages:
     - client auth
   issuerRef:
-    name: {{ .Values.bridge.mTLS.clientIssuerRef.name }}
-    kind: {{ .Values.bridge.mTLS.clientIssuerRef.kind }}
-    group: cert-manager.io
+    {{- include "harbor-bridge.mTLS.clientIssuerRef" . | nindent 4 }}
 {{- end }}

@@ -56,6 +56,10 @@ harbor:
   # a Harbor whose robot_name_prefix is empty.
   robotNamePrefix: "robot$"
 
+# ====================================================================
+# DEFAULTED VALUES — override as needed
+# ====================================================================
+
 tls:
   # The bridge ALWAYS serves TLS and the plugin ALWAYS verifies it; this
   # switch only chooses who provides the serving certificate.
@@ -71,13 +75,18 @@ tls:
   # cert-manager issuer that signs the bridge's serving cert. The CA
   # from the same chain is plumbed to the plugin DaemonSet so kubelet
   # nodes trust the bridge's cert.
+  # Empty name: the chart creates a CA for the release in the release
+  # namespace (ADR-0042): an Issuer <fullname>-selfsigned, a CA
+  # Certificate and Secret <fullname>-ca (10 years, the key kept on
+  # renewal) and an Issuer <fullname>-ca that signs the serving cert
+  # and, with bridge.mTLS, the plugin's client cert. Renewals of the
+  # serving cert then keep the CA the nodes pin; a selfSigned issuer here
+  # would change it with every renewal (every 75 days).
+  # Required with plugin.namespace: the plugin namespace gets the CA
+  # through trust-manager (ADR-0027).
   issuerRef:
     name: ""
     kind: ClusterIssuer  # ClusterIssuer | Issuer
-
-# ====================================================================
-# DEFAULTED VALUES — override as needed
-# ====================================================================
 
 # Override the chart name used in labels / the release-derived object
 # names (standard Helm convention).
@@ -203,7 +212,12 @@ bridge:
     # this must be a CA issuer whose CA is that ca.crt: the issuer in
     # tls.issuerRef when it is a CA issuer, or the CA of existingSecret. A
     # selfSigned issuer signs every certificate with its own key and cannot
-    # serve here (the e2e harness uses a selfSigned-bootstrapped CA).
+    # serve here.
+    # Empty name: the release CA's Issuer when tls.issuerRef.name is empty
+    # too (ADR-0042). With cert-manager's defaults, only who may create
+    # Certificates or CertificateRequests, or read Secrets, in the release
+    # namespace can then get a client cert the bridge accepts. Required
+    # otherwise, with the chart's plugin (plugin.enabled).
     clientIssuerRef:
       name: ""
       kind: ClusterIssuer
@@ -254,6 +268,7 @@ plugin:
   # Security "restricted". It requires trust-manager: the bridge CA reaches
   # the plugin namespace through a trust-manager Bundle (caBundle below),
   # never through the bridge, which gets no access to that namespace.
+  # It also requires tls.issuerRef.name (no CA for the release, ADR-0042).
   namespace: ""
   # Create plugin.namespace (labelled pod-security enforce=privileged).
   # false = the namespace must exist.

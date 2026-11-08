@@ -292,15 +292,28 @@ harbor.aetherize.io/robot
 {{- fail (printf "plugin.providerName=%q must be a DNS label (lower-case letters, digits and -, at most 63 characters): it names the kubelet credential-provider entry and the plugin binary on every node. Keep the default harbor-bridge-plugin unless you run several installs per cluster; then give each its own name, e.g. harbor-bridge-eu (ADR-0029)." $providerName) -}}
 {{- end -}}
 {{- if .Values.tls.enabled -}}
-{{- if not .Values.tls.issuerRef.name -}}
-{{- fail "tls.issuerRef.name is REQUIRED when tls.enabled=true. Provide a cert-manager (Cluster)Issuer." -}}
+{{- if and (include "harbor-bridge.releaseCA" .) .Values.plugin.enabled (include "harbor-bridge.plugin.split" .) -}}
+{{- fail "tls.issuerRef.name is REQUIRED when plugin.namespace is set. Without it the chart creates a CA for the release in the release namespace (ADR-0042), but the plugin namespace gets the bridge CA only through trust-manager, from plugin.caBundle.source in trust-manager's trust namespace, and with bridge.mTLS a namespaced Issuer cannot sign the plugin's client certificate in the plugin namespace (ADR-0027). Name a cert-manager CA ClusterIssuer whose CA plugin.caBundle.source holds." -}}
 {{- end -}}
 {{- else if not .Values.tls.existingSecret -}}
 {{- fail "tls.existingSecret is REQUIRED when tls.enabled=false. The bridge always serves TLS and the plugin always verifies it: name a Secret in the release namespace with tls.crt, tls.key and ca.crt." -}}
 {{- end -}}
-{{- if .Values.bridge.mTLS.enabled -}}
-{{- if not .Values.bridge.mTLS.clientIssuerRef.name -}}
-{{- fail "bridge.mTLS.clientIssuerRef.name is REQUIRED when bridge.mTLS.enabled=true." -}}
+{{- /* The chart issues the plugin's client certificate only for its own
+       plugin; the release CA signs it when no issuer is named. */}}
+{{- if and .Values.bridge.mTLS.enabled .Values.plugin.enabled (not (include "harbor-bridge.mTLS.clientIssuerName" .)) (not (include "harbor-bridge.releaseCA" .)) -}}
+{{- fail (printf "bridge.mTLS.clientIssuerRef.name is REQUIRED when bridge.mTLS.enabled=true and %s provides the serving certificate: the bridge accepts only client certificates from the CA in ca.crt of its TLS Secret, so name a CA issuer whose CA that is (a selfSigned issuer cannot work). Or leave tls.issuerRef.name empty: then the CA the chart creates for the release signs both certificates (ADR-0042)." (ternary "tls.issuerRef.name" "tls.existingSecret" .Values.tls.enabled)) -}}
+{{- end -}}
+{{- /* cert-manager writes these Secrets into the release namespace, over a
+       Secret of the operator's with the same name. */}}
+{{- if .Values.tls.enabled -}}
+{{- $written := list (include "harbor-bridge.tlsSecretName" .) -}}
+{{- if include "harbor-bridge.releaseCA" . -}}
+{{- $written = append $written (include "harbor-bridge.releaseCA.name" .) -}}
+{{- end -}}
+{{- range $k, $v := dict "harbor.adminCredsSecret.name" .Values.harbor.adminCredsSecret.name "harbor.caSecret.name" (dig "caSecret" "name" "" .Values.harbor) -}}
+{{- if has (toString $v) $written -}}
+{{- fail (printf "%s=%q names a Secret that cert-manager writes for this release (one of %s: the serving certificate and, without tls.issuerRef.name, the CA the chart creates for the release, ADR-0042). cert-manager would overwrite your Secret. Rename it, or the release." $k (toString $v) (join ", " $written)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if hasKey .Values.plugin "patchKubelet" -}}
@@ -535,6 +548,63 @@ trusts: chart-managed (cert-manager) or operator-provided.
 {{- else -}}
 {{- .Values.tls.existingSecret -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+releaseCA is "true" when the chart creates a CA for the release
+(release-ca.yaml, ADR-0042): it requests the serving certificate
+(tls.enabled) and tls.issuerRef names no issuer. releaseCA.name names
+the CA's Certificate, its Secret and the Issuer that signs from it;
+releaseCA.selfSignedName the Issuer that signs the CA itself. The
+serving certificate's Secret is <fullname>-tls.
+*/}}
+{{- define "harbor-bridge.releaseCA" -}}
+{{- if and .Values.tls.enabled (not (dig "issuerRef" "name" "" .Values.tls)) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "harbor-bridge.releaseCA.name" -}}
+{{- printf "%s-ca" (include "harbor-bridge.bridge.fullname" .) -}}
+{{- end -}}
+
+{{- define "harbor-bridge.releaseCA.selfSignedName" -}}
+{{- printf "%s-selfsigned" (include "harbor-bridge.bridge.fullname" .) -}}
+{{- end -}}
+
+{{/*
+tls.issuerRef is the issuerRef of the serving certificate: the release
+CA's Issuer, or tls.issuerRef.
+*/}}
+{{- define "harbor-bridge.tls.issuerRef" -}}
+{{- if include "harbor-bridge.releaseCA" . -}}
+name: {{ include "harbor-bridge.releaseCA.name" . }}
+kind: Issuer
+{{- else -}}
+name: {{ .Values.tls.issuerRef.name }}
+kind: {{ .Values.tls.issuerRef.kind }}
+{{- end }}
+group: cert-manager.io
+{{- end -}}
+
+{{/*
+mTLS.clientIssuerRef is the issuerRef of the plugin's client certificate:
+bridge.mTLS.clientIssuerRef, or the release CA's Issuer when that names no
+issuer (ADR-0042). The Issuer is in the release namespace, so this needs
+the plugin there: validateRequiredValues refuses the release CA with
+plugin.namespace, and an empty name without the release CA.
+*/}}
+{{- define "harbor-bridge.mTLS.clientIssuerName" -}}
+{{- dig "mTLS" "clientIssuerRef" "name" "" .Values.bridge -}}
+{{- end -}}
+
+{{- define "harbor-bridge.mTLS.clientIssuerRef" -}}
+{{- with include "harbor-bridge.mTLS.clientIssuerName" . -}}
+name: {{ . }}
+kind: {{ dig "mTLS" "clientIssuerRef" "kind" "ClusterIssuer" $.Values.bridge }}
+{{- else -}}
+name: {{ include "harbor-bridge.releaseCA.name" . }}
+kind: Issuer
+{{- end }}
+group: cert-manager.io
 {{- end -}}
 
 {{/*

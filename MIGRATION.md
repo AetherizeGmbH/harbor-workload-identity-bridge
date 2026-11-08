@@ -1,5 +1,13 @@
 ## Chart value migrations
 
+### 0.17.0: an empty `tls.issuerRef.name` means a CA for the release (ADR-0042)
+
+| Change | What to do |
+| --- | --- |
+| `tls.issuerRef.name` may be empty. The chart then creates a CA for the release in the release namespace: an Issuer `<fullname>-selfsigned`, a CA Certificate and Secret `<fullname>-ca` (10 years, the key kept on renewal) and an Issuer `<fullname>-ca`, which signs the serving certificate. `tls.issuerRef.name` was required before | Nothing: your values name an issuer, and it stays in use. To switch to the release CA, clear `tls.issuerRef.name` (and, with mTLS, `bridge.mTLS.clientIssuerRef.name`). That changes the CA once: the bridge serves a certificate from the new CA as soon as its mounted Secret has it, and the plugin on each node trusts the new CA after its next sync pass (every 60 s, once kubelet has updated the Secret in the plugin pod). In between, a pull that needs the plugin can fail on that node; with mTLS, the new client certificate takes the same path. With `plugin.namespace` the name stays required |
+| With `bridge.mTLS` and an empty `bridge.mTLS.clientIssuerRef.name`, the release CA's Issuer signs the plugin's client certificate. With a named `tls.issuerRef.name` or `tls.enabled=false`, `bridge.mTLS.clientIssuerRef.name` is still required, now only with the chart's plugin (`plugin.enabled`) | Nothing |
+| The chart refuses `harbor.adminCredsSecret.name` and `harbor.caSecret.name` that name `<fullname>-tls` or, with the release CA, `<fullname>-ca`: cert-manager writes these Secrets | Rename your Secret if the upgrade fails with "names a Secret that cert-manager writes for this release" |
+
 ### 0.16.0: `plugin.audience` and `plugin.matchImages` may be empty (ADR-0041)
 
 | Change | What to do |
