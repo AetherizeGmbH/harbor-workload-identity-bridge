@@ -5,10 +5,13 @@
 Accepted. **Extended by later ADRs; two statements below do not match the
 chart:**
 
-- The chart's default issuer is
+- The chart's default issuer was
   `https://kubernetes.default.svc.cluster.local` (`bridge.oidcIssuer`), the
-  issuer kubeadm and kind write into their tokens. It must equal the
-  cluster's issuer byte for byte.
+  issuer kubeadm and kind write into their tokens. Since
+  [ADR-0044](0044-bridge-discovers-the-issuer.md) the default is empty: the
+  bridge reads the issuer from the in-cluster apiserver's discovery
+  document and the keys from its `/openid/v1/jwks`. A set issuer must equal
+  the cluster's issuer byte for byte.
 - The chart does not bind the issuer-discovery role. Since 0.12.2 the
   bridge's own ClusterRole holds that role's rules (`get` on the OIDC
   discovery and JWKS URLs), so the bridge does not depend on Kubernetes'
