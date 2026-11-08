@@ -164,7 +164,10 @@ run-local-tls: ## Create or renew run-local's self-signed cert in .gen/run-local
 	echo "run-local-tls: new self-signed cert $$dir/tls.crt (valid 7 days)"
 
 .PHONY: run-local
-run-local: run-local-tls ## Run the bridge against $KUBECONFIG with the self-signed cert from run-local-tls
+# run-local binds 127.0.0.1 only: the bridge it runs holds real robot passwords,
+# and its certificate names only localhost and 127.0.0.1. Set BRIDGE_LISTEN_ADDR,
+# BRIDGE_HEALTH_ADDR or BRIDGE_METRICS_ADDR (e.g. :8443) to listen elsewhere.
+run-local: run-local-tls ## Run the bridge against $KUBECONFIG on 127.0.0.1 with the self-signed cert from run-local-tls
 	@test -n "$$BRIDGE_CLUSTER_NAME" || (echo "set BRIDGE_CLUSTER_NAME" && exit 1)
 	@test -n "$$BRIDGE_NAMESPACE" || (echo "set BRIDGE_NAMESPACE" && exit 1)
 	@test -n "$$BRIDGE_OIDC_ISSUER" || (echo "set BRIDGE_OIDC_ISSUER" && exit 1)
@@ -183,8 +186,9 @@ run-local: run-local-tls ## Run the bridge against $KUBECONFIG with the self-sig
 	@echo "serving $(RUN_LOCAL_TLS_DIR)/tls.crt (the plugin's HARBOR_BRIDGE_CA_BUNDLE)"
 	BRIDGE_TLS_CERT_FILE=$(RUN_LOCAL_TLS_DIR)/tls.crt \
 	BRIDGE_TLS_KEY_FILE=$(RUN_LOCAL_TLS_DIR)/tls.key \
-	BRIDGE_LISTEN_ADDR=:8443 \
-	BRIDGE_HEALTH_ADDR=:8081 \
+	BRIDGE_LISTEN_ADDR="$${BRIDGE_LISTEN_ADDR:-127.0.0.1:8443}" \
+	BRIDGE_HEALTH_ADDR="$${BRIDGE_HEALTH_ADDR:-127.0.0.1:8081}" \
+	BRIDGE_METRICS_ADDR="$${BRIDGE_METRICS_ADDR:-127.0.0.1:8080}" \
 	go run ./bridge/cmd
 
 .PHONY: verify-package-isolation
