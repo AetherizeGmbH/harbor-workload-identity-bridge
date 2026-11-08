@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### 0.16.0: `plugin.audience` and `plugin.matchImages` may be empty (ADR-0041)
+
+| Change | What to do |
+| --- | --- |
+| An empty `plugin.audience` means `harbor-bridge-<clusterName>`. An empty `plugin.matchImages` means the host and port of `harbor.url`, without port 443 for https and 80 for http. Both values were required before | Nothing: your values set both. If you later remove `plugin.audience` from your values, check that `harbor-bridge-<clusterName>` is the audience your HarborAccess objects name (`helm upgrade` prints the audience); otherwise they report `AudienceMismatch`. With the derived audience, a change of `clusterName` changes the audience too (docs/operations.md, "Changing clusterName") |
+
 ### 0.15.0: `helm uninstall` removes the plugin from the nodes (ADR-0039)
 
 | Change | What to do |

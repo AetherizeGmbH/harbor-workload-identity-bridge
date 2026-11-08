@@ -272,10 +272,13 @@ plugin:
         name: ""
         key: ca.crt
 
-  # ─── REQUIRED (when plugin.enabled) ─────────────────────────────────
+  # ─── DERIVED WHEN EMPTY (ADR-0041) ───────────────────────────────────
   # Image patterns (kubelet glob format) for which kubelet should call
-  # this plugin. REQUIRED — an empty list means kubelet never invokes
-  # the plugin and image pulls silently fall back to anonymous.
+  # this plugin. Empty means the host (and port) of harbor.url, without
+  # the scheme's default port: https://harbor.example.com gives
+  # ["harbor.example.com"]. Set it when the pods pull under another name
+  # than harbor.url (an internal URL, a proxy), or to match only some
+  # projects (literal path prefixes, "harbor.example.com/production").
   # Kubelet's matchImages supports globs in the DOMAIN only — not in
   # the port or path. So `harbor.example.com/*` is a literal `/*`
   # path prefix and won't match `harbor.example.com/library/img:tag`.
@@ -290,9 +293,13 @@ plugin:
 
   # Audience the kubelet projects the SA token with. Must match
   # spec.trustPolicy.audience on every HarborAccess CR served by this
-  # bridge. Pick one string per cluster; embedding the cluster name is
-  # a defensible default ("harbor-bridge-<cluster>"). REQUIRED even when
-  # plugin.enabled=false: kubelet needs RBAC to mint tokens for it.
+  # bridge. Empty means harbor-bridge-<clusterName> (ADR-0041): one string
+  # per cluster, so a token for one cluster's bridge does not work on
+  # another cluster that uses the same Harbor. Used even when
+  # plugin.enabled=false: kubelet needs RBAC to mint tokens for it. Set it
+  # when two releases on one cluster share a clusterName (each on its own
+  # Harbor), and before a change of clusterName to keep the audience every
+  # HarborAccess names (docs/operations.md, Changing clusterName).
   audience: ""
 
   # ─── DEFAULTED ──────────────────────────────────────────────────────

@@ -104,16 +104,17 @@ what the design protects against and what it does not.
      --set clusterName=prod-eu-west \
      --set harbor.url=https://harbor.example.com \
      --set harbor.adminCredsSecret.name=harbor-admin \
-     --set plugin.audience=harbor-bridge-prod-eu-west \
-     --set 'plugin.matchImages={harbor.example.com}' \
      --set tls.issuerRef.name=harbor-bridge-ca
    ```
 
-   - `plugin.audience` is the audience of the tokens kubelet sends to the
-     bridge. Every `HarborAccess` must name the same value. Put the cluster
-     name into it, so that a token from one cluster does not work on another
-     cluster that uses the same Harbor.
-   - `plugin.matchImages` takes registry hosts (`harbor.example.com` or
+   - The tokens kubelet sends to the bridge have the audience
+     `harbor-bridge-<clusterName>`, here `harbor-bridge-prod-eu-west`. Every
+     `HarborAccess` must name it. The cluster name in it keeps a token from
+     one cluster from working on another cluster that uses the same Harbor.
+     `plugin.audience` sets another value.
+   - Kubelet calls the plugin for images from the host of `harbor.url`, here
+     `harbor.example.com`. If your pods pull under another name, set
+     `plugin.matchImages` to registry hosts (`harbor.example.com` or
      `host:port`). Kubelet does not support globs in the path:
      `harbor.example.com/*` never matches.
    - The plugin DaemonSet configures kubelet on every node and restarts
@@ -122,7 +123,8 @@ what the design protects against and what it does not.
      install modes, and [docs/platforms.md](docs/platforms.md) lists what
      happens on kind, kubeadm, GKE, EKS, AKS, Talos, k3s and RKE2.
 
-4. Create a `HarborAccess`. Its `audience` must be the `plugin.audience` value.
+4. Create a `HarborAccess`. Its `audience` must be the audience from step 3.
+   `helm install` prints it.
 
    ```bash
    kubectl apply -f - <<'YAML'

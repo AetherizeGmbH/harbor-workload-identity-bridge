@@ -40,7 +40,7 @@ data:
       - name: {{ include "harbor-bridge.plugin.providerNameYAML" . }}
         apiVersion: credentialprovider.kubelet.k8s.io/v1
         matchImages:
-          {{- range .Values.plugin.matchImages }}
+          {{- range include "harbor-bridge.plugin.matchImages" . | fromJsonArray }}
           - {{ . | quote }}
           {{- end }}
         defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
@@ -71,7 +71,7 @@ data:
             value: {{ include "harbor-bridge.plugin.hostFile" (list . "client.key") | quote }}
           {{- end }}
         tokenAttributes:
-          serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
+          serviceAccountTokenAudience: {{ include "harbor-bridge.plugin.audience" . | quote }}
           requireServiceAccount: true
           # See KEP-4412: this makes the SA token + UID part of the
           # cache key so each pod gets its own credential.
