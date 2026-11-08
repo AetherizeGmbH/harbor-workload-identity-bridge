@@ -787,8 +787,8 @@ metadata:
   name: harbor-bridge-ca
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.15.0
-    app.kubernetes.io/version: "0.15.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.16.0
+    app.kubernetes.io/version: "0.16.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -819,8 +819,8 @@ metadata:
   name: harbor-bridge-selfsigned
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.15.0
-    app.kubernetes.io/version: "0.15.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.16.0
+    app.kubernetes.io/version: "0.16.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -837,8 +837,8 @@ metadata:
   name: harbor-bridge-ca
   namespace: harbor-bridge-system
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.15.0
-    app.kubernetes.io/version: "0.15.0"
+    helm.sh/chart: harbor-workload-identity-bridge-0.16.0
+    app.kubernetes.io/version: "0.16.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
