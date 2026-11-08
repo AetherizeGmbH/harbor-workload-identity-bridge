@@ -9,7 +9,8 @@
 #   5. coredns_rewrite      — harbor.e2e resolvable cluster-wide
 #   6. seed_image           — create the scenario projects, push the test
 #                             image into each, and WAIT until that finished
-#   7. bridge_install       — our chart (2 bridge replicas, like the default);
+#   7. bridge_install       — our chart (2 bridge replicas, like the default,
+#                             and the chart's CA for the release, ADR-0042);
 #                             waits until every replica is Ready
 #   8. harbor_access        — scenario phase "initial" (modules/harbor-access-scenario)
 #  8b. bridge_replicas      — every bridge replica, asked at its own address,
@@ -58,7 +59,8 @@
 #  21. robot_check_teardown — Harbor itself: not one robot of this cluster left
 #                             (a Harbor that cannot be asked fails it)
 #  21b. second_install      — a second release (ADR-0029): its own provider
-#                             name, namespace, NodePort, audience, selector
+#                             name, namespace, NodePort, audience, selector,
+#                             and a named CA ClusterIssuer (tls.issuerRef)
 #  22. node_uninstall       — ADR-0039: helm uninstall of the first release; its
 #                             pre-delete hook has every node remove the plugin
 #                             before Helm deletes the release
@@ -1010,12 +1012,12 @@ run "token_rejection" {
 
 # ── mTLS between plugin and bridge (bridge.mTLS), end to end. Re-apply the
 # install with mTLS on: cert-manager issues the plugin's client
-# certificate from the harness's CA (the one that signs the serving
-# certificate since bridge_install, so no CA changes anywhere), the bridge
-# requires a client certificate that CA signed, and the plugin's
-# credential-provider config gains the client pair, so the installer
-# restarts kubelet (which also empties its credential cache). The install
-# waits until every bridge replica runs the new spec.
+# certificate from the chart's CA for the release (ADR-0042; the one that
+# signs the serving certificate since bridge_install, so no CA changes
+# anywhere), the bridge requires a client certificate that CA signed, and
+# the plugin's credential-provider config gains the client pair, so the
+# installer restarts kubelet (which also empties its credential cache).
+# The install waits until every bridge replica runs the new spec.
 # (From here on the install module's outputs come from run.bridge_mtls.)
 run "bridge_mtls" {
   module {
@@ -1271,10 +1273,11 @@ run "robot_check_teardown" {
 # ── ADR-0039: node-side uninstall, with a second release on the nodes
 # (ADR-0029). Every HarborAccess is gone (stage 20), so nothing waits for
 # either bridge's finalizers. The second release has its own provider
-# name, namespace, NodePort, audience, selector and clusterName; on kind
-# its installer adds its entry to the chart-owned config the first release
-# wired kubelet to. Its module wraps harbor-bridge-install for a state of
-# its own.
+# name, namespace, NodePort, audience, selector and clusterName, and a
+# named CA ClusterIssuer instead of the chart's CA for the release, so the
+# tls.issuerRef path is installed too; on kind its installer adds its
+# entry to the chart-owned config the first release wired kubelet to. Its
+# module wraps harbor-bridge-install for a state of its own.
 run "second_install" {
   command = apply
   module {

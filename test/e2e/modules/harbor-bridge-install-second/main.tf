@@ -83,7 +83,9 @@ module "install" {
   bridge_image           = var.bridge_image
   plugin_image           = var.plugin_image
   bridge_replicas        = 1
-  issuer_name            = "${var.name}-ca"
+  # A named CA ClusterIssuer: the first release runs on the chart's CA for
+  # the release (ADR-0042), so this one keeps the tls.issuerRef path covered.
+  issuer_name = "${var.name}-ca"
 }
 
 output "namespace" {

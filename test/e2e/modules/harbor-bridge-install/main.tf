@@ -163,20 +163,20 @@ variable "critical_pods_quota" {
 
 variable "issuer_name" {
   type        = string
-  default     = "harbor-bridge-ca"
-  description = "Name of the CA ClusterIssuer created for the bridge's serving cert (and, with mtls, the plugin's client cert). Referenced by both the ClusterIssuer manifest and the chart's tls.issuerRef. Its root is <issuer_name>-root, signed by the selfSigned ClusterIssuer <issuer_name>-bootstrap."
+  default     = ""
+  description = "Empty (the default): the chart creates a CA for the release (ADR-0042), which signs the bridge's serving cert and, with mtls, the plugin's client cert; the module sets neither tls.issuerRef nor bridge.mTLS.clientIssuerRef. Otherwise the name of a CA ClusterIssuer this module creates for both certs and names in both values. Its root is <issuer_name>-root, signed by the selfSigned ClusterIssuer <issuer_name>-bootstrap."
 }
 
 variable "cert_manager_namespace" {
   type        = string
   default     = "cert-manager"
-  description = "Namespace cert-manager runs in: a ClusterIssuer's CA Secret must live in cert-manager's cluster resource namespace, which defaults to it."
+  description = "Namespace cert-manager runs in: a ClusterIssuer's CA Secret must live in cert-manager's cluster resource namespace, which defaults to it. Used only with issuer_name."
 }
 
 variable "mtls" {
   type        = bool
   default     = false
-  description = "bridge.mTLS.enabled, with the client certificate issued by issuer_name — the CA that also signs the serving certificate, whose ca.crt the bridge trusts for client certificates."
+  description = "bridge.mTLS.enabled, with the client certificate issued by the CA that also signs the serving certificate (the release CA, or issuer_name), whose ca.crt the bridge trusts for client certificates."
 }
 
 # Resource requests/limits for the bridge Deployment container, wired into
@@ -255,12 +255,16 @@ resource "kubernetes_secret_v1" "admin" {
 # client certificates, so the serving and the plugin's client certificate
 # must share an issuing CA (charts/harbor-bridge/templates/
 # bridge-certificate.yaml); a selfSigned issuer signs each certificate
-# with its own key. A selfSigned bootstrap issuer signs one root, and the
-# CA ClusterIssuer var.issuer_name issues from it: the production shape,
-# and every install already has it, so turning mTLS on (bridge_mtls)
-# changes no CA anywhere. The chart's Certificate waits for nothing, so
-# these wait until cert-manager reports each Ready.
+# with its own key. By default (issuer_name empty) the chart creates that
+# CA for the release (ADR-0042), the path a first install takes. With
+# issuer_name, a selfSigned bootstrap issuer signs one root, and the CA
+# ClusterIssuer var.issuer_name issues from it: a named, shared issuer.
+# Either way every install already has its CA, so turning mTLS on
+# (bridge_mtls) changes no CA anywhere. The chart's Certificate waits for
+# nothing, so these wait until cert-manager reports each Ready.
 resource "kubectl_manifest" "bootstrap_issuer" {
+  count = var.issuer_name != "" ? 1 : 0
+
   yaml_body         = <<-YAML
     apiVersion: cert-manager.io/v1
     kind: ClusterIssuer
@@ -280,6 +284,8 @@ resource "kubectl_manifest" "bootstrap_issuer" {
 }
 
 resource "kubectl_manifest" "root_ca" {
+  count = var.issuer_name != "" ? 1 : 0
+
   yaml_body         = <<-YAML
     apiVersion: cert-manager.io/v1
     kind: Certificate
@@ -311,6 +317,8 @@ resource "kubectl_manifest" "root_ca" {
 }
 
 resource "kubectl_manifest" "cluster_issuer" {
+  count = var.issuer_name != "" ? 1 : 0
+
   yaml_body         = <<-YAML
     apiVersion: cert-manager.io/v1
     kind: ClusterIssuer
@@ -399,21 +407,16 @@ resource "helm_release" "bridge" {
       logLevel    = "debug"
       image       = var.bridge_image
       resources   = var.bridge_resources
-      mTLS = {
-        enabled = var.mtls
-        clientIssuerRef = {
-          name = var.issuer_name
-          kind = "ClusterIssuer"
-        }
-      }
+      # Without issuer_name the release CA signs the client certificate too.
+      mTLS = merge(
+        { enabled = var.mtls },
+        var.issuer_name != "" ? { clientIssuerRef = { name = var.issuer_name, kind = "ClusterIssuer" } } : {},
+      )
     }, length(var.harbor_access_selector) > 0 ? { harborAccessSelector = var.harbor_access_selector } : {})
-    tls = {
-      enabled = true
-      issuerRef = {
-        name = var.issuer_name
-        kind = "ClusterIssuer"
-      }
-    }
+    tls = merge(
+      { enabled = true },
+      var.issuer_name != "" ? { issuerRef = { name = var.issuer_name, kind = "ClusterIssuer" } } : {},
+    )
   }, var.node_port > 0 ? { service = { nodePort = var.node_port } } : {}))]
 
   depends_on = [
