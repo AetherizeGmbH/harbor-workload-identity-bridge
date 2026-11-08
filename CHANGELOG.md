@@ -1,3 +1,9 @@
+## [0.13.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.4...v0.13.0) (2026-11-08)
+
+### Features
+
+* **chart:** reject values keys the chart does not know ([#158](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/158)) ([7619488](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/7619488c383478e5412a8b73b31ab446891fc8f4))
+
 ## [0.12.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.3...v0.12.4) (2026-11-08)
 
 ### Bug Fixes
