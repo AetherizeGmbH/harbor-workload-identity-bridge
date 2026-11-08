@@ -88,7 +88,9 @@ func newCachedKeySet(url string, client *http.Client) *cachedKeySet {
 
 // VerifySignature implements oidc.KeySet.
 func (k *cachedKeySet) VerifySignature(ctx context.Context, raw string) ([]byte, error) {
-	jws, err := jose.ParseSigned(raw, jwtSigningAlgs)
+	// A JWT is a JWS in compact serialization (RFC 7519, section 7.2);
+	// ParseSigned would also take the JSON serialization.
+	jws, err := jose.ParseSignedCompact(raw, jwtSigningAlgs)
 	if err != nil {
 		return nil, fmt.Errorf("malformed jwt: %w", err)
 	}

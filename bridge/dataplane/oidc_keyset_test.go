@@ -422,6 +422,24 @@ func TestCachedKeySet_HeldKeyWithAWrongSignatureStaysABadSignature(t *testing.T)
 	}
 }
 
+// A JWT is a JWS in compact serialization (RFC 7519, section 7.2). The same
+// signature in the JWS JSON serialization must not verify.
+func TestCachedKeySet_RefusesTheJSONSerialization(t *testing.T) {
+	fi, _, ks, _ := keySetFixture(t, 3*time.Second)
+	compact := fi.signToken(t, fi.standardClaims())
+	if _, err := ks.VerifySignature(context.Background(), compact); err != nil {
+		t.Fatalf("compact token: %v", err)
+	}
+	parts := strings.Split(compact, ".")
+	flattened, err := json.Marshal(map[string]string{"protected": parts[0], "payload": parts[1], "signature": parts[2]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ks.VerifySignature(context.Background(), string(flattened)); err == nil {
+		t.Fatal("the JSON serialization of a valid token verified")
+	}
+}
+
 // The JWKS response is capped at maxJWKSSize.
 func TestCachedKeySet_BoundsTheJWKSSize(t *testing.T) {
 	fi := newFixtureIssuer(t)
