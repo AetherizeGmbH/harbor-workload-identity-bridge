@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,9 @@ func TestRun_HostWithPort(t *testing.T) {
 	}
 }
 
-func TestRun_BridgeRefused_WritesEmptyAuth(t *testing.T) {
+// A refusal must reach kubelet's log: kubelet reads the plugin's stderr only
+// after a non-zero exit (ADR-0037).
+func TestRun_BridgeRefused_FailsWithReason(t *testing.T) {
 	req := credentialProviderRequest{
 		APIVersion:          credentialProviderAPIVersion,
 		Kind:                requestKind,
@@ -109,25 +112,21 @@ func TestRun_BridgeRefused_WritesEmptyAuth(t *testing.T) {
 		ServiceAccountToken: "tok",
 	}
 	body, _ := json.Marshal(req)
-	fetcher := &fakeFetcher{err: errBridgeRefused}
+	reason := "403 no matching HarborAccess for the requesting service account and audience"
+	fetcher := &fakeFetcher{err: fmt.Errorf("%w: %s", errBridgeRefused, reason)}
 
 	var stdout bytes.Buffer
-	if err := run(bytes.NewReader(body), &stdout, fetcher); err != nil {
-		t.Fatalf("run: %v", err)
+	err := run(bytes.NewReader(body), &stdout, fetcher)
+	if !errors.Is(err, errBridgeRefused) {
+		t.Fatalf("run error = %v, want errBridgeRefused", err)
 	}
-
-	var resp credentialProviderResponse
-	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
-		t.Fatalf("decode stdout: %v", err)
+	for _, want := range []string{reason, "audit log", `"credential denied"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
 	}
-	if resp.CacheKeyType != cacheKeyTypeImage {
-		t.Errorf("CacheKeyType = %q, want Image (no caching of refusal)", resp.CacheKeyType)
-	}
-	if resp.CacheDuration != "0s" {
-		t.Errorf("CacheDuration = %q, want 0s", resp.CacheDuration)
-	}
-	if len(resp.Auth) != 0 {
-		t.Errorf("Auth must be empty on bridge refusal; got %v", resp.Auth)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout must stay empty on a refusal; got %q", stdout.String())
 	}
 }
 

@@ -13,7 +13,7 @@
 // Behaviour summary (the original table is in docs/PHASES.md, Phase 4, a
 // historical build log; bridge_client.go is authoritative):
 //   - 200          → translate response, emit CredentialProviderResponse on stdout
-//   - 401 / 403    → empty auth map, cacheKeyType=Image, cacheDuration=0
+//   - 401 / 403    → exits non-zero with the bridge's reason (ADR-0037)
 //   - 503          → retry once after 1s; second 503 exits non-zero
 //   - other 5xx    → exits non-zero
 //   - network err  → exits non-zero
@@ -22,8 +22,9 @@
 // error it logs, which names the image ("Failed getting credential from
 // external registry credential provider" on 1.34; "Failed to provide
 // credentials for image", with the pod and ServiceAccount, from 1.35), and
-// goes on without this plugin's credentials; it creates no Event. After
-// exit 0 kubelet reads no stderr at all.
+// goes on without this plugin's credentials; it caches nothing, asks again
+// on the next pull and creates no Event. After exit 0 kubelet reads no
+// stderr at all.
 package main
 
 import (
@@ -52,8 +53,6 @@ const (
 	credentialProviderAPIVersion = "credentialprovider.kubelet.k8s.io/v1"
 	requestKind                  = "CredentialProviderRequest"
 	responseKind                 = "CredentialProviderResponse"
-
-	cacheKeyTypeImage = "Image"
 )
 
 type credentialProviderRequest struct {
@@ -123,14 +122,14 @@ func run(stdin io.Reader, stdout io.Writer, fetcher bridgeFetcher) error {
 	}
 
 	resp, err := fetcher.fetch(req.Image, req.ServiceAccountToken)
-	switch {
-	case errors.Is(err, errBridgeRefused):
-		// The bridge rejected the SA token (401) or refused to authorize
-		// it (403). Emit an empty auth map with no caching so kubelet
-		// retries on the next pull — the operator may be mid-applying
-		// the HarborAccess CR.
-		return writeRefusedResponse(stdout, req.Image)
-	case err != nil:
+	if errors.Is(err, errBridgeRefused) {
+		// The bridge rejected the SA token (401) or no HarborAccess grants
+		// it (403). Exit non-zero (ADR-0037): kubelet then logs this error
+		// with the image and the pod, caches nothing and asks again on the
+		// next pull, when the HarborAccess may exist.
+		return fmt.Errorf("%w; the bridge's audit log (%q) names the reason", err, "credential denied")
+	}
+	if err != nil {
 		return err
 	}
 
@@ -178,21 +177,6 @@ func writeOKResponse(w io.Writer, r *bridgeResponse, image string) error {
 			host: {Username: r.Username, Password: r.Password},
 		},
 	}
-	return json.NewEncoder(w).Encode(out)
-}
-
-func writeRefusedResponse(w io.Writer, image string) error {
-	out := credentialProviderResponse{
-		APIVersion:    credentialProviderAPIVersion,
-		Kind:          responseKind,
-		CacheKeyType:  cacheKeyTypeImage,
-		CacheDuration: time.Duration(0).String(),
-		Auth:          map[string]authConfig{},
-	}
-	// Kubelet discards stderr when the plugin exits 0, so this line shows
-	// only when the plugin is run by hand. The bridge's audit log records
-	// every refusal with its reason.
-	fmt.Fprintf(os.Stderr, "harbor-bridge-plugin: bridge refused credentials for %s; returning empty auth (no cache)\n", image)
 	return json.NewEncoder(w).Encode(out)
 }
 

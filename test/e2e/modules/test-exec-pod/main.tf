@@ -141,6 +141,17 @@ variable "expect_bridge_log" {
   }
 }
 
+variable "expect_node_log" {
+  type        = list(string)
+  default     = []
+  description = "With expect_pull_failure: after the authorization failure, one line of the kubelet log of the pod's node (node_log_command, polled for up to 30s) must hold every string, compared literally. Lets a check assert what kubelet logged about the pull, such as the plugin's reason for a refusal (ADR-0037)."
+
+  validation {
+    condition     = alltrue([for s in var.expect_node_log : s != "" && !strcontains(s, "\t") && !strcontains(s, "\n")])
+    error_message = "The expect_node_log strings must be non-empty and contain no tab or newline."
+  }
+}
+
 locals {
   ns      = coalesce(var.namespace, var.name)
   use_sa  = var.service_account_name != ""
@@ -269,6 +280,10 @@ resource "null_resource" "wait" {
       condition     = !(var.expect_pull_failure && length(var.expect_bridge_log) > 0)
       error_message = "expect_bridge_log is checked after a successful Job; it cannot be combined with expect_pull_failure."
     }
+    precondition {
+      condition     = length(var.expect_node_log) == 0 || (var.expect_pull_failure && var.node_log_command != "")
+      error_message = "expect_node_log is checked after an expected pull failure, in the output of node_log_command; it needs both."
+    }
   }
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
@@ -304,6 +319,26 @@ resource "null_resource" "wait" {
         return 1
       }
 
+      # Succeeds when one line of the kubelet log of node $1 holds every
+      # EXPECT_NODE_LOG string (tab-separated). Polls for up to 30s: the
+      # journal can trail the pull event a moment.
+      node_log_matches() {
+        local logs matched p i
+        local -a parts
+        [ -n "$EXPECT_NODE_LOG" ] || return 0
+        IFS=$'\t' read -r -a parts <<< "$EXPECT_NODE_LOG"
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          logs="$(bash -c "$${NODE_LOG_COMMAND//\{node\}/$1}" 2>/dev/null || true)"
+          matched="$logs"
+          for p in "$${parts[@]}"; do
+            matched="$(grep -F -- "$p" <<< "$matched" || true)"
+          done
+          if [ -n "$matched" ]; then return 0; fi
+          sleep 3
+        done
+        return 1
+      }
+
       deadline=$(( $(date +%s) + TIMEOUT ))
       while [ "$(date +%s)" -lt "$deadline" ]; do
         ok="$(k -n "$NS" get job "$JOB" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
@@ -318,7 +353,10 @@ resource "null_resource" "wait" {
             msgs="$(k -n "$NS" get events --field-selector "involvedObject.name=$pod,reason=Failed" -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)"
             if printf '%s' "$msgs" | grep -q 'Failed to pull image'; then
               if printf '%s' "$msgs" | grep -Eqi '401|403|unauthori[sz]ed|forbidden|denied|insufficient_scope'; then
-                exit 0
+                node="$(k -n "$NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+                if node_log_matches "$node"; then exit 0; fi
+                FAIL_MESSAGE="the pull failed with an authorization error, but no kubelet log line on node $${node:-?} holds every one of [$${EXPECT_NODE_LOG//$'\t'/ + }]: $FAIL_MESSAGE"
+                break
               fi
               FAIL_MESSAGE="pull failed, but not with an authorization error: $FAIL_MESSAGE"
               break
@@ -374,6 +412,7 @@ resource "null_resource" "wait" {
       NODE_LOG_COMMAND    = var.node_log_command
       EXPECT_PULL_FAILURE = tostring(var.expect_pull_failure)
       EXPECT_BRIDGE_LOG   = join("\n", [for e in var.expect_bridge_log : join("\t", e)])
+      EXPECT_NODE_LOG     = join("\t", var.expect_node_log)
     }
   }
 }

@@ -38,5 +38,6 @@
 | 0034 | [Patch mode edits the environment file the kubelet unit reads](0034-patch-mode-edits-the-environment-file-kubelet-reads.md) | Accepted (refines 0021) |
 | 0035 | [Auto mode moves shared directories once every install is ready](0035-auto-mode-moves-shared-directories-when-every-install-is-ready.md) | Accepted (refines 0021, 0029) |
 | 0036 | [Vulnerability checks fail a pull request for what it adds](0036-vulnerability-checks-fail-a-pull-request-for-what-it-adds.md) | Accepted (amends 0019) |
+| 0037 | [The plugin exits non-zero when the bridge refuses](0037-plugin-exits-non-zero-on-a-refusal.md) | Accepted |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.
