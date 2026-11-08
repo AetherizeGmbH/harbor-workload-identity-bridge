@@ -1,3 +1,9 @@
+## [0.15.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.14.0...v0.15.0) (2026-11-08)
+
+### Features
+
+* remove the plugin from the nodes at helm uninstall ([#160](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/160)) ([a322f70](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/a322f7010345c41d0812b45c3b9d70c3a899c8a2))
+
 ## [0.14.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.13.0...v0.14.0) (2026-11-08)
 
 ### Features
