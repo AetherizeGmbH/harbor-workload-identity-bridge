@@ -1,3 +1,7 @@
+# values.schema.json lists every key of this file (ADR-0038). Helm refuses
+# a key it does not list, such as a misspelt one, and names it. A key added
+# here needs an entry there.
+
 # ====================================================================
 # REQUIRED VALUES
 # These have no default. Install fails if they are unset or empty.

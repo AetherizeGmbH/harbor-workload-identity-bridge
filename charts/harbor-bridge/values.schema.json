@@ -1,0 +1,526 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "ADR-0038. Every object whose keys the chart defines refuses unknown keys, so a misspelt key fails helm install, upgrade, template and lint with a message naming it. Maps whose keys you choose stay open. A key with no type is checked by the templates, whose message is more precise. values.yaml explains every key.",
+  "title": "harbor-workload-identity-bridge values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "global": {
+      "description": "Values Helm shares with subcharts, set by umbrella charts. This chart reads none of them.",
+      "type": "object"
+    },
+    "clusterName": {
+      "description": "Required. Name of this cluster and prefix of its Harbor robot names: a DNS label without consecutive hyphens, distinct for every cluster that shares the Harbor.",
+      "type": "string"
+    },
+    "harbor": {
+      "description": "The Harbor instance the bridge manages robots in.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "Required. Base URL of Harbor, https and without a user:password@ part.",
+          "type": "string"
+        },
+        "allowInsecureHTTP": {
+          "description": "Allow an http:// harbor.url anyway, e.g. for an in-cluster Harbor in a test cluster.",
+          "type": "boolean"
+        },
+        "caSecret": {
+          "description": "Existing Secret in the release namespace with the CA that signs Harbor's certificate.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "Name of the Secret. Empty uses the system trust store.",
+              "type": "string"
+            },
+            "key": {
+              "description": "Key of the CA certificate in the Secret.",
+              "type": "string"
+            }
+          }
+        },
+        "adminCredsSecret": {
+          "description": "Existing Secret in the release namespace with the Harbor admin credentials. The chart does not create it.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "Required. Name of the Secret.",
+              "type": "string"
+            },
+            "keys": {
+              "description": "Key names in the Secret.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "username": {
+                  "description": "Key that holds the user name.",
+                  "type": "string"
+                },
+                "password": {
+                  "description": "Key that holds the password.",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "robotNamePrefix": {
+          "description": "Harbor's robot_name_prefix setting. Change it only if the Harbor administrator changed that setting.",
+          "type": ["string", "integer"]
+        }
+      }
+    },
+    "tls": {
+      "description": "The bridge's serving certificate. The bridge always serves TLS and the plugin always verifies it.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "true: cert-manager issues the certificate (tls.issuerRef). false: you provide it in tls.existingSecret.",
+          "type": "boolean"
+        },
+        "existingSecret": {
+          "description": "Secret in the release namespace with tls.crt, tls.key and ca.crt. Required when tls.enabled is false.",
+          "type": "string"
+        },
+        "issuerRef": {
+          "description": "cert-manager issuer that signs the serving certificate.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "Name of the issuer. Required when tls.enabled is true.",
+              "type": "string"
+            },
+            "kind": {
+              "description": "Kind of the issuer, ClusterIssuer or Issuer.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "nameOverride": {
+      "description": "Overrides the chart name in labels.",
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "description": "Overrides the release name in object names.",
+      "type": "string"
+    },
+    "bridge": {
+      "description": "The bridge Deployment: the controller and the credential endpoint.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {
+          "description": "Number of bridge replicas. Leader election is on when it is above 1.",
+          "type": ["integer", "string"]
+        },
+        "leaderElection": {
+          "description": "true or false to force leader election, unset for on when bridge.replicas > 1. false with more than one replica is refused."
+        },
+        "image": {
+          "description": "The bridge container image.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "description": "Image repository.",
+              "type": "string"
+            },
+            "tag": {
+              "description": "Image tag. Empty uses the chart's appVersion.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "Pin the image by digest (sha256:...). When set, tag is ignored.",
+              "type": "string"
+            },
+            "pullPolicy": {
+              "description": "Image pull policy.",
+              "type": "string"
+            }
+          }
+        },
+        "oidcIssuer": {
+          "description": "Issuer of the ServiceAccount tokens the bridge validates. It must match the cluster's issuer.",
+          "type": "string"
+        },
+        "oidcJWKSURL": {
+          "description": "Where the bridge fetches the token signing keys. Empty uses OIDC discovery at bridge.oidcIssuer.",
+          "type": "string"
+        },
+        "oidcCAFile": {
+          "description": "CA bundle that verifies the TLS certificate of the OIDC issuer.",
+          "type": "string"
+        },
+        "oidcTokenFile": {
+          "description": "The bridge's own ServiceAccount token, sent on discovery and JWKS requests to the in-cluster apiserver. Empty disables it.",
+          "type": "string"
+        },
+        "forceLocalValidation": {
+          "description": "Reserved for native OIDC trust policies in Harbor. Keep true.",
+          "type": ["boolean", "string"]
+        },
+        "tokenValidation": {
+          "description": "Which ServiceAccount tokens the credential endpoint accepts (ADR-0028).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxLifetime": {
+              "description": "Longest lifetime (exp - iat) of an accepted token, a Go duration such as 1h."
+            },
+            "requirePodBinding": {
+              "description": "Refuse tokens without the kubernetes.io pod claim. false weakens the bridge."
+            }
+          }
+        },
+        "logLevel": {
+          "description": "Log level: debug, info, warn or error.",
+          "type": "string"
+        },
+        "harborAccessSelector": {
+          "description": "Labels a HarborAccess must carry for this bridge to serve it (ADR-0026). Empty serves every HarborAccess. Values must be strings.",
+          "type": "object"
+        },
+        "instance": {
+          "description": "Names this bridge among several, in its finalizer harbor.aetherize.io/robot-<instance>. Empty uses the release name.",
+          "type": ["string", "integer"]
+        },
+        "rateLimit": {
+          "description": "Limit of the credential endpoint per source IP.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "perSource": {
+              "description": "Requests per second from one source IP. 0 disables the limit.",
+              "type": ["number", "string"]
+            },
+            "burst": {
+              "description": "Burst of requests from one source IP, a positive whole number.",
+              "type": ["number", "string"]
+            }
+          }
+        },
+        "mTLS": {
+          "description": "mTLS between plugin and bridge, on top of the token validation (ADR-0008).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Require a client certificate from the plugin.",
+              "type": "boolean"
+            },
+            "clientIssuerRef": {
+              "description": "cert-manager CA issuer that signs the plugin's client certificates. Its CA must be the ca.crt of the bridge's TLS Secret.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "description": "Name of the issuer. Required when bridge.mTLS.enabled is true.",
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "Kind of the issuer, ClusterIssuer or Issuer.",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "description": "Resource requests and limits of the bridge container.",
+          "type": "object"
+        },
+        "podDisruptionBudget": {
+          "description": "Keeps a bridge replica serving through voluntary disruptions. Rendered only when bridge.replicas > 1.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render the PodDisruptionBudget.",
+              "type": "boolean"
+            },
+            "maxUnavailable": {
+              "description": "Bridge pods that may be unavailable at once, a number or a percentage.",
+              "type": ["integer", "string"]
+            }
+          }
+        },
+        "podAnnotations": {
+          "description": "Extra annotations of the bridge pods.",
+          "type": "object"
+        },
+        "podLabels": {
+          "description": "Extra labels of the bridge pods.",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "description": "Node selector of the bridge pods. Keys you add are merged with kubernetes.io/os: linux; drop that one with kubernetes.io/os: null.",
+          "type": "object"
+        },
+        "tolerations": {
+          "description": "Tolerations of the bridge pods.",
+          "type": "array"
+        },
+        "affinity": {
+          "description": "Extra affinity of the bridge pods, next to the chart's soft pod anti-affinity.",
+          "type": "object"
+        },
+        "extraEnv": {
+          "description": "Extra environment variables of the bridge container, as Kubernetes EnvVar objects.",
+          "type": "array"
+        },
+        "extraEnvFrom": {
+          "description": "Extra envFrom sources of the bridge container.",
+          "type": "array"
+        }
+      }
+    },
+    "plugin": {
+      "description": "The kubelet credential-provider plugin and the DaemonSet that installs it on every node.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Deploy the node installer DaemonSet. false when the nodes get the plugin by other means (docs/install-external-plugin.md).",
+          "type": "boolean"
+        },
+        "namespace": {
+          "description": "Namespace of the plugin DaemonSet and its objects (ADR-0027). Empty uses the release namespace.",
+          "type": "string"
+        },
+        "createNamespace": {
+          "description": "Create plugin.namespace. false means the namespace must exist.",
+          "type": "boolean"
+        },
+        "caBundle": {
+          "description": "With plugin.namespace only: where trust-manager gets the CA that signs the bridge's serving certificate.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "description": "Exactly one of secret or configMap, in trust-manager's trust namespace.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "secret": {
+                  "description": "A Secret holding the CA.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "description": "Name of the Secret.",
+                      "type": ["string", "integer"]
+                    },
+                    "key": {
+                      "description": "Key of the CA in the Secret.",
+                      "type": ["string", "integer"]
+                    }
+                  }
+                },
+                "configMap": {
+                  "description": "A ConfigMap holding the CA.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "description": "Name of the ConfigMap.",
+                      "type": ["string", "integer"]
+                    },
+                    "key": {
+                      "description": "Key of the CA in the ConfigMap.",
+                      "type": ["string", "integer"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "matchImages": {
+          "description": "Required when plugin.enabled is true. Images for which kubelet calls the plugin, as host[:port][/path] with globs only in the host.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "audience": {
+          "description": "Required. Audience of the ServiceAccount token kubelet sends. It must match spec.trustPolicy.audience of every HarborAccess.",
+          "type": ["string", "integer"]
+        },
+        "audienceRBAC": {
+          "description": "RBAC that lets every kubelet request tokens for plugin.audience (ADR-0017).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": {
+              "description": "Create the ClusterRole and ClusterRoleBinding. Disable only if you provide your own RBAC.",
+              "type": "boolean"
+            }
+          }
+        },
+        "image": {
+          "description": "The plugin image, which also carries the node installer.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "description": "Image repository.",
+              "type": "string"
+            },
+            "tag": {
+              "description": "Image tag. Empty uses the chart's appVersion.",
+              "type": "string"
+            },
+            "digest": {
+              "description": "Pin the image by digest (sha256:...); kubelet runs this binary as root on every node. When set, tag is ignored.",
+              "type": "string"
+            },
+            "pullPolicy": {
+              "description": "Image pull policy.",
+              "type": "string"
+            }
+          }
+        },
+        "providerName": {
+          "description": "Name of the kubelet provider entry and the plugin binary, a DNS label as a string. Change it only to run several installs per cluster (ADR-0029)."
+        },
+        "hostBinaryDir": {
+          "description": "Node directory of the plugin binary in patch and none mode.",
+          "type": "string"
+        },
+        "hostConfigDir": {
+          "description": "Node directory of the bridge CA and the mTLS client pair, and of the provider config in patch and none mode.",
+          "type": "string"
+        },
+        "install": {
+          "description": "How the installer wires the plugin into kubelet (ADR-0021).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "auto, merge, patch or none.",
+              "type": "string"
+            },
+            "binDir": {
+              "description": "Merge mode only: kubelet's credential-provider bin dir. Empty uses the one kubelet's flags name.",
+              "type": "string"
+            },
+            "configFile": {
+              "description": "Merge mode only: kubelet's credential-provider config file. Empty uses the one kubelet's flags name.",
+              "type": "string"
+            },
+            "kubeletUnit": {
+              "description": "Systemd unit the installer restarts.",
+              "type": "string"
+            },
+            "stateDir": {
+              "description": "Node directory of the installer's state file. Not plugin.hostConfigDir or a directory inside it.",
+              "type": "string"
+            }
+          }
+        },
+        "bridgeEndpoint": {
+          "description": "URL the plugin calls the bridge at. Empty uses https://127.0.0.1:<service.nodePort>; the installer replaces a literal $(NODE_IP).",
+          "type": "string"
+        },
+        "allowSelfMatchImages": {
+          "description": "Allow plugin.matchImages to name the registry of the chart's own images (air-gapped mirrors).",
+          "type": "boolean"
+        },
+        "defaultCacheDuration": {
+          "description": "Required field of the kubelet provider entry, unused while the plugin answers. A Go duration such as 1h.",
+          "type": ["string", "number"]
+        },
+        "resources": {
+          "description": "Resource requests and limits of the installer containers.",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "description": "Extra annotations of the plugin pods.",
+          "type": "object"
+        },
+        "podLabels": {
+          "description": "Extra labels of the plugin pods.",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "description": "Node selector of the plugin pods. Keys you add are merged with kubernetes.io/os: linux; drop that one with kubernetes.io/os: null.",
+          "type": "object"
+        },
+        "tolerations": {
+          "description": "Tolerations of the plugin pods. The default tolerates every taint, so kubelet on every node gets the plugin.",
+          "type": "array"
+        },
+        "priorityClassName": {
+          "description": "PriorityClass of the plugin pods, as a string. \"\" leaves the field out."
+        },
+        "patchKubelet": {
+          "description": "Removed (ADR-0021). The chart refuses it with a message; use plugin.install.mode instead."
+        }
+      }
+    },
+    "service": {
+      "description": "The bridge Service (ADR-0008).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "Service type. The plugin's default endpoint needs NodePort or LoadBalancer.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Service port of the credential endpoint.",
+          "type": ["integer", "string"]
+        },
+        "nodePort": {
+          "description": "Node port the plugin's default endpoint calls. null lets the apiserver pick one, which needs plugin.bridgeEndpoint.",
+          "type": ["integer", "string", "null"]
+        }
+      }
+    },
+    "metrics": {
+      "description": "Prometheus metrics, plain HTTP on the pod network only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Serve /metrics and render the metrics Service.",
+          "type": "boolean"
+        },
+        "port": {
+          "description": "Port of the metrics listener.",
+          "type": ["integer", "string"]
+        },
+        "serviceMonitor": {
+          "description": "A Prometheus Operator ServiceMonitor for the metrics Service.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render the ServiceMonitor.",
+              "type": "boolean"
+            },
+            "interval": {
+              "description": "Scrape interval.",
+              "type": "string"
+            },
+            "scrapeTimeout": {
+              "description": "Scrape timeout.",
+              "type": "string"
+            },
+            "labels": {
+              "description": "Extra labels of the ServiceMonitor.",
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

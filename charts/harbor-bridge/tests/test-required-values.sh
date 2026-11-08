@@ -118,6 +118,12 @@ cases=(
   "service.nodePort null with the default endpoint|--set|service.nodePort=null|service.nodePort=null must be a fixed port while plugin.bridgeEndpoint is empty"
   "service.nodePort not a port with the default endpoint|--set|service.nodePort=70000|service.nodePort=70000 must be a fixed port"
   "plugin.priorityClassName not a string|--set|plugin.priorityClassName=true|plugin.priorityClassName must be a string (a PriorityClass name, or \"\" to leave it out), but it was read as the bool true"
+  # ADR-0038: values.schema.json refuses keys the chart does not know and
+  # names them, instead of ignoring them (bridge.mTLS.enable left mTLS off).
+  "schema: misspelt bridge.mTLS.enabled|--set|bridge.mTLS.enable=true|at '/bridge/mTLS': additional properties 'enable' not allowed"
+  "schema: unknown top-level key|--set|clusterNmae=prod-eu-west|at '': additional properties 'clusterNmae' not allowed"
+  "schema: misspelt key in plugin.install|--set|plugin.install.mod=none|at '/plugin/install': additional properties 'mod' not allowed"
+  "schema: boolean switch given as a string|--set-string|plugin.enabled=false|at '/plugin/enabled': got string, want boolean"
 )
 
 failed=0
@@ -133,6 +139,43 @@ for case in "${cases[@]}"; do
     failed=$((failed+1))
   fi
 done
+
+# ADR-0038: the schema leaves open what the chart passes through and what
+# Helm owns. global (set by umbrella charts) and the keys of pass-through
+# maps render; each of these renders exactly the key it was given.
+if out=$(render -f "${COMPLETE}" --set global.foo=bar \
+     --set 'bridge.podAnnotations.example\.com/any-key=a' \
+     --set 'plugin.podLabels.any-label=b' \
+     --set 'bridge.resources.limits.example\.com/gpu=1' \
+     --set 'bridge.harborAccessSelector.example\.com/bridge=eu' 2>&1) \
+   && grep -qxF '        example.com/any-key: a' <<<"${out}" \
+   && grep -qxF '        any-label: b' <<<"${out}" \
+   && grep -qxF '              example.com/gpu: 1' <<<"${out}" \
+   && grep -qF 'value: "example.com/bridge=eu"' <<<"${out}"; then
+  echo "PASS  schema: global and keys of pass-through maps render"
+else
+  echo "FAIL  schema: global and keys of pass-through maps render"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# ADR-0038: a tombstone stays allowed by the schema, so the template's own
+# message, which names the replacement, still shows. An old values file
+# holds it as false.
+tombstone_message() {
+  out=$(render -f "${COMPLETE}" "$@" 2>&1 || true)
+  grep -qF 'plugin.patchKubelet was removed (ADR-0021). Use plugin.install.mode' <<<"${out}" \
+    && ! grep -qF 'specifications of the schema' <<<"${out}"
+}
+printf 'plugin:\n  patchKubelet: false\n' > "${TMP}/values-patchkubelet.yaml"
+if tombstone_message --set plugin.patchKubelet=true \
+   && tombstone_message -f "${TMP}/values-patchkubelet.yaml"; then
+  echo "PASS  schema: plugin.patchKubelet fails with the tombstone's message, not the schema's"
+else
+  echo "FAIL  schema: plugin.patchKubelet fails with the tombstone's message, not the schema's"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
 
 # plugin.matchImages defaults to [] which is "set" but empty; clearing via
 # --set doesn't reproduce the empty-list path. Use a values overlay.

@@ -1,5 +1,16 @@
 ## Chart value migrations
 
+### 0.13.0: the chart rejects values keys it does not know (ADR-0038)
+
+The chart now has a values schema (`values.schema.json`). Helm checks your
+values against it before it renders anything, on `helm install`, `helm
+upgrade`, `helm template` and `helm lint`.
+
+| Change | What to do |
+| --- | --- |
+| A values key the chart does not know fails with its path and name, for example `- at '/bridge/mTLS': additional properties 'enable' not allowed`. Such keys used to be ignored, and the default applied: `bridge.mTLS.enable: true` installed without mTLS. This includes the values a release has stored, so `helm upgrade --reuse-values` (and `--reset-then-reuse-values`) fails while they hold such a key, for example a typo from an earlier install. `global` and the maps you fill with your own keys stay open: the `podAnnotations`, `podLabels`, `nodeSelector`, `tolerations` and `resources` of `bridge` and `plugin`, `bridge.affinity`, `bridge.extraEnv`, `bridge.extraEnvFrom`, `bridge.harborAccessSelector` and `metrics.serviceMonitor.labels` | Delete the key, or correct its spelling (values.yaml lists every key). The key never had an effect. With `--reuse-values`, `--set <key>=null` does not remove it: save the stored values with `helm get values <release> -o yaml > values.yaml`, delete the key there, and upgrade with `-f values.yaml` instead of `--reuse-values`. `plugin.patchKubelet` still fails with its own message (see "`plugin.patchKubelet` → `plugin.install.mode`" below). |
+| The schema also checks the type of each value. Values of the wrong type that used to render now fail with their path: a boolean switch written as a string (`enabled: "false"`, or `--set-string plugin.enabled=false`, counted as on), a number as an image tag (`tag: 1.0` rendered `:%!s(float64=1)`) or as a Secret, issuer or file name, a list where the chart expects a map | Write `true` and `false` without quotes. Quote a tag or name that YAML reads as a number (`tag: "1.0"`), or pass it with `--set-string`. Replicas, ports, `bridge.podDisruptionBudget.maxUnavailable`, `bridge.rateLimit` and `plugin.defaultCacheDuration` still take strings, and `plugin.audience` and `bridge.instance` still take whole numbers. |
+
 ### 0.12.3: `BRIDGE_INSTANCE` without a selector
 
 | Change | What to do |
