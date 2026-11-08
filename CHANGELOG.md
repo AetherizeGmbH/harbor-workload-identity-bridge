@@ -1,3 +1,9 @@
+## [0.12.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.0...v0.12.1) (2026-11-08)
+
+### Bug Fixes
+
+* **bridge:** support a Harbor whose robot_name_prefix is empty ([#153](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/153)) ([244b97c](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/244b97c253b78b63905931ab71eafcf4711b4e4e))
+
 ## [0.12.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.6...v0.12.0) (2026-11-08)
 
 ### Features
