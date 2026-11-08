@@ -24,6 +24,7 @@ test/e2e/**/terraform.tfstate*
 test/e2e/**/errored_test.tfstate
 test/e2e/**/.tofu-sleep*
 test/e2e/**/.diag/
+test/e2e/**/.timings/
 test/e2e/diag-last/
 
 # OpenTofu / GKE e2e (ADR-0022)

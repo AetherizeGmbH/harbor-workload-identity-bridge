@@ -81,10 +81,12 @@ resource "null_resource" "uninstall" {
       rm -rf "$DIAG"; mkdir -p "$DIAG"
       # How long helm uninstall takes, hook included, against the chart's
       # plugin.uninstall.timeoutSeconds (270 s): in the CI job summary
-      # (GITHUB_STEP_SUMMARY, when set) and in the diagnostics.
+      # (GITHUB_STEP_SUMMARY, when set), in $TIMINGS (CI uploads it from
+      # every run) and in the diagnostics.
       timing() {
         local line="helm uninstall $RELEASE: $1 after $(( SECONDS - start )) s ($(wc -w <<<"$NODES" | tr -d ' ') nodes)"
         echo "$line" > "$DIAG/timing.txt"
+        mkdir -p "$(dirname "$TIMINGS")" && echo "$line" >> "$TIMINGS"
         if [ -n "$${GITHUB_STEP_SUMMARY:-}" ]; then echo "- $line" >> "$GITHUB_STEP_SUMMARY"; fi
       }
       start=$SECONDS
@@ -118,6 +120,7 @@ resource "null_resource" "uninstall" {
       TIMEOUT        = var.timeout
       NODES          = join(" ", var.node_names)
       DIAG           = abspath("${path.cwd}/.diag/${var.diag_name != "" ? var.diag_name : "${var.release}-uninstall"}")
+      TIMINGS        = abspath("${path.cwd}/.timings/uninstall.txt")
     }
   }
 }

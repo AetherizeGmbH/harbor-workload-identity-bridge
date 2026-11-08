@@ -87,3 +87,14 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+      # How long each helm uninstall took (modules/helm-uninstall), from
+      # passing runs too: the data for plugin.uninstall.timeoutSeconds.
+      - name: Upload e2e timings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-timings
+          path: test/e2e/.timings/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 30
