@@ -86,6 +86,9 @@ module "install" {
   # A named CA ClusterIssuer: the first release runs on the chart's CA for
   # the release (ADR-0042), so this one keeps the tls.issuerRef path covered.
   issuer_name = "${var.name}-ca"
+  # A set issuer (kind's): the first release reads it from the apiserver
+  # (ADR-0044), so this one keeps OIDC discovery at a set issuer covered.
+  oidc_issuer = "https://kubernetes.default.svc.cluster.local"
 }
 
 output "namespace" {

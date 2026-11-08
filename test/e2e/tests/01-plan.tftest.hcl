@@ -130,8 +130,8 @@ run "defaults" {
     error_message = "bridge_pods_host should name the headless Service in the release namespace"
   }
   assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).bridge.oidcIssuer == "https://kubernetes.default.svc.cluster.local" && yamldecode(helm_release.bridge.values[0]).bridge.oidcJWKSURL == ""
-    error_message = "the kind defaults must keep in-cluster OIDC discovery"
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.oidcIssuer == "" && yamldecode(helm_release.bridge.values[0]).bridge.oidcJWKSURL == ""
+    error_message = "by default the bridge must read the issuer and the keys from the in-cluster apiserver (ADR-0044)"
   }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.logLevel == "debug"
@@ -241,6 +241,27 @@ run "second_release" {
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.harborAccessSelector["harbor.aetherize.io/bridge"] == "second"
     error_message = "harbor_access_selector should reach bridge.harborAccessSelector"
+  }
+}
+
+# A set issuer and JWKS URL reach the chart as written (the second release
+# and the GKE harness's overrides).
+run "explicit_issuer" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    oidc_issuer   = "https://kubernetes.default.svc.cluster.local"
+    oidc_jwks_url = "https://kubernetes.default.svc/openid/v1/jwks"
+  }
+
+  assert {
+    condition = (
+      yamldecode(helm_release.bridge.values[0]).bridge.oidcIssuer == "https://kubernetes.default.svc.cluster.local"
+      && yamldecode(helm_release.bridge.values[0]).bridge.oidcJWKSURL == "https://kubernetes.default.svc/openid/v1/jwks"
+    )
+    error_message = "oidc_issuer and oidc_jwks_url should reach bridge.oidcIssuer and bridge.oidcJWKSURL"
   }
 }
 
