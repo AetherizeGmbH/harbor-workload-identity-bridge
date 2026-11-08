@@ -869,14 +869,15 @@ limits today.
 
 - [ ] **Vulnerability gate at release time.** `release-images.yml` pushes
   and signs each image right after the build; its Trivy job only generates
-  the SBOM. `govulncheck` (`test.yml`) and the Trivy filesystem scan
-  (`trivy.yml`) run on pull requests and pushes to `main`, not on the
-  release artefacts. *Options:* `govulncheck -mode=binary` on the built
+  the SBOM. `govulncheck` and the Trivy filesystem scan
+  (`vulnerabilities.yml`) run on pull requests, pushes to `main` and once a
+  day, not on the release artefacts. *Options:* `govulncheck -mode=binary` on the built
   binaries, or a Trivy image scan with a severity gate, before the images
   are pushed and signed; that can block a release on a vulnerability
   disclosed after the merge. *Limits now:* a vulnerability disclosed
-  between the last push and the release is published and signed without a
-  check.
+  less than a day before the release is published and signed without a
+  check; one disclosed earlier is red in the daily scan of `main`, which
+  does not stop the release.
 - [ ] **`make run-local` listens on all interfaces.** It sets
   `BRIDGE_LISTEN_ADDR=:8443` and `BRIDGE_HEALTH_ADDR=:8081`, and metrics
   default to `:8080`, so anyone on the developer's network can reach the
