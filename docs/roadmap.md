@@ -104,13 +104,6 @@ limits today.
   NodePort (SECURITY.md). *Limits now:* a caller on the node network can
   hold up new pulls on one node; kubelet's cached credentials still cover
   recent ones.
-- [ ] **Uncounted wrong-method and wrong-path requests.** The credential
-  listener answers `405` and `404` before it counts or logs anything
-  (`bridge/dataplane/handler.go`). *Options:* a new
-  `bridge_credential_issuances_total` result value, which changes the
-  metrics contract (sums over all results), or a counter of its own.
-  *Limits now:* scans of the NodePort with other paths or methods leave no
-  trace in the bridge.
 
 ### Control plane and chart
 
