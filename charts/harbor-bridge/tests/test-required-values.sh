@@ -124,6 +124,15 @@ cases=(
   "schema: unknown top-level key|--set|clusterNmae=prod-eu-west|at '': additional properties 'clusterNmae' not allowed"
   "schema: misspelt key in plugin.install|--set|plugin.install.mod=none|at '/plugin/install': additional properties 'mod' not allowed"
   "schema: boolean switch given as a string|--set-string|plugin.enabled=false|at '/plugin/enabled': got string, want boolean"
+  # ADR-0039: node-side uninstall settings.
+  "plugin.install.action enum|--set|plugin.install.action=uninstall|plugin.install.action=\"uninstall\" is invalid. Must be install or remove"
+  "plugin.uninstall.maxUnavailable zero|--set|plugin.uninstall.maxUnavailable=0|plugin.uninstall.maxUnavailable=\"0\" must be a whole number of at least 1 or a percentage"
+  "plugin.uninstall.maxUnavailable over 100%|--set|plugin.uninstall.maxUnavailable=101%|plugin.uninstall.maxUnavailable=\"101%\" must be a whole number"
+  "plugin.uninstall.maxUnavailable a fraction|--set|plugin.uninstall.maxUnavailable=2.5|plugin.uninstall.maxUnavailable=\"2.5\" must be a whole number"
+  "plugin.uninstall.timeoutSeconds zero|--set|plugin.uninstall.timeoutSeconds=0|plugin.uninstall.timeoutSeconds=\"0\" must be a whole number of seconds"
+  "schema: plugin.uninstall.timeoutSeconds as a string|--set-string|plugin.uninstall.timeoutSeconds=270|at '/plugin/uninstall/timeoutSeconds': got string, want integer"
+  "schema: plugin.uninstall.enabled as a string|--set-string|plugin.uninstall.enabled=false|at '/plugin/uninstall/enabled': got string, want boolean"
+  "schema: misspelt key in plugin.uninstall|--set|plugin.uninstall.enable=false|at '/plugin/uninstall': additional properties 'enable' not allowed"
 )
 
 failed=0
@@ -560,12 +569,13 @@ else
 fi
 
 # Both workloads select Linux nodes by default; keys a user adds are merged
-# with it, and it can be dropped explicitly.
+# with it, and it can be dropped explicitly. The uninstall hook's Job
+# (ADR-0039) schedules like the bridge.
 if out=$(render -f "${COMPLETE}" --set plugin.nodeSelector.pool=infra --set bridge.nodeSelector.pool=infra 2>&1) \
-   && [ "$(grep -cxF '        kubernetes.io/os: linux' <<<"${out}")" -eq 2 ] \
-   && [ "$(grep -cxF '        pool: infra' <<<"${out}")" -eq 2 ] \
+   && [ "$(grep -cxF '        kubernetes.io/os: linux' <<<"${out}")" -eq 3 ] \
+   && [ "$(grep -cxF '        pool: infra' <<<"${out}")" -eq 3 ] \
    && out=$(render -f "${COMPLETE}" --set 'plugin.nodeSelector.kubernetes\.io/os=null' 2>&1) \
-   && [ "$(grep -cxF '        kubernetes.io/os: linux' <<<"${out}")" -eq 1 ]; then
+   && [ "$(grep -cxF '        kubernetes.io/os: linux' <<<"${out}")" -eq 2 ]; then
   echo "PASS  Linux nodeSelector merged with user keys, and removable"
 else
   echo "FAIL  Linux nodeSelector merged with user keys, and removable"
@@ -712,6 +722,59 @@ if [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set bridge
   echo "PASS  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
 else
   echo "FAIL  a missing bridge.tokenValidation renders the defaults (--reuse-values)"
+  failed=$((failed+1))
+fi
+
+# ADR-0039: the DaemonSet always renders INSTALL_ACTION (so that a helm
+# upgrade sets back what the uninstall hook changed) and RELEASE_ID, in
+# both containers; plugin.install.action=remove renders remove.
+out=$(render -f "${COMPLETE}" 2>&1 || true)
+if [ "$(grep -cxF '              value: "install"' <<<"${out}")" -eq 2 ] \
+   && [ "$(grep -cxF '              value: "harbor-bridge-system/harbor-bridge"' <<<"${out}")" -eq 2 ] \
+   && out=$(render -f "${COMPLETE}" --set plugin.install.action=remove 2>&1) \
+   && [ "$(grep -cxF '              value: "remove"' <<<"${out}")" -eq 2 ]; then
+  echo "PASS  INSTALL_ACTION and RELEASE_ID render in both plugin containers"
+else
+  echo "FAIL  INSTALL_ACTION and RELEASE_ID render in both plugin containers"
+  failed=$((failed+1))
+fi
+
+# The pre-delete hook: its objects are hooks, its pod does not match the
+# DaemonSet's selector (the hook lists those pods), and its settings reach
+# the Job. plugin.uninstall.enabled=false and plugin.enabled=false render
+# none of it.
+out=$(render -f "${COMPLETE}" --set plugin.uninstall.maxUnavailable=3,plugin.uninstall.timeoutSeconds=600 2>&1 || true)
+job=$(doc_with 'kind: Job' || true)
+if [ "$(grep -cxF '    helm.sh/hook: pre-delete' <<<"${out}")" -eq 4 ] \
+   && grep -qxF '  activeDeadlineSeconds: 630' <<<"${job}" \
+   && grep -qxF '              value: "3"' <<<"${job}" \
+   && grep -qxF '              value: "600"' <<<"${job}" \
+   && grep -qxF '        app.kubernetes.io/component: plugin-uninstall' <<<"${job}" \
+   && ! grep -qF 'component: plugin$' <<<"${job}" \
+   && ! grep -qF 'privileged' <<<"${job}"; then
+  echo "PASS  the pre-delete hook renders with its settings"
+else
+  echo "FAIL  the pre-delete hook renders with its settings"
+  head -3 <<<"      got: ${job:-${out}}"
+  failed=$((failed+1))
+fi
+for setval in plugin.uninstall.enabled=false plugin.enabled=false; do
+  out=$(render -f "${COMPLETE}" --set "${setval}" 2>&1 || true)
+  if grep -qF 'helm.sh/hook' <<<"${out}" || grep -qF 'plugin-uninstall' <<<"${out}"; then
+    echo "FAIL  ${setval} renders no uninstall hook"
+    failed=$((failed+1))
+  else
+    echo "PASS  ${setval} renders no uninstall hook"
+  fi
+done
+
+# `helm upgrade --reuse-values` from a release before ADR-0039 keeps values
+# without plugin.install.action and plugin.uninstall; the render must equal
+# the default one.
+if [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set plugin.install.action=null,plugin.uninstall=null 2>&1)" ]; then
+  echo "PASS  missing plugin.install.action and plugin.uninstall render the defaults (--reuse-values)"
+else
+  echo "FAIL  missing plugin.install.action and plugin.uninstall render the defaults (--reuse-values)"
   failed=$((failed+1))
 fi
 

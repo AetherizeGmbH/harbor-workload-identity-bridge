@@ -422,6 +422,29 @@
             "stateDir": {
               "description": "Node directory of the installer's state file. Not plugin.hostConfigDir or a directory inside it.",
               "type": "string"
+            },
+            "action": {
+              "description": "install wires the plugin into kubelet on every node; remove takes this install's entry and files off every node again (ADR-0039).",
+              "type": "string"
+            }
+          }
+        },
+        "uninstall": {
+          "description": "What helm uninstall does on the nodes: a pre-delete hook Job that has every node remove this install's entry and files (ADR-0039).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render the pre-delete hook; false leaves the nodes as they are at helm uninstall.",
+              "type": "boolean"
+            },
+            "maxUnavailable": {
+              "description": "Nodes that remove at once: a number, or a percentage of the nodes rounded up, plus the nodes whose plugin pod is down already.",
+              "type": ["integer", "string"]
+            },
+            "timeoutSeconds": {
+              "description": "How long the hook waits for every node, in seconds; keep it below helm uninstall --timeout.",
+              "type": "integer"
             }
           }
         },

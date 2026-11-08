@@ -166,9 +166,16 @@ NEXT STEPS
      (and "harbor.aetherize.io/robot", on objects that still carry it from
      before the selector){{ end }} and delete the leftover
      bridge-{{ .Values.clusterName }}.* robots in Harbor.
-{{- if .Values.plugin.enabled }}
-     `helm uninstall` leaves the kubelet provider entry {{ include "harbor-bridge.plugin.providerName" . }}
-     and its files on the nodes. To remove them, see "Uninstalling" in
+{{- if and .Values.plugin.enabled (eq (include "harbor-bridge.plugin.uninstallEnabled" .) "true") }}
+     `helm uninstall` first has every node remove the kubelet provider entry
+     {{ include "harbor-bridge.plugin.providerName" . }} and its files (a pre-delete hook, ADR-0039){{ if eq .Values.plugin.install.mode "none" }};
+     in none mode the nodes keep the plugin binary{{ end }}. If a node fails,
+     the uninstall stops and running it again continues; see "Uninstalling" in
+     https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/blob/main/docs/operations.md
+{{- else if .Values.plugin.enabled }}
+     plugin.uninstall.enabled=false: `helm uninstall` leaves the kubelet
+     provider entry {{ include "harbor-bridge.plugin.providerName" . }} and its files on the nodes. To remove them, see
+     "Uninstalling" in
      https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/blob/main/docs/operations.md
 {{- end }}
 

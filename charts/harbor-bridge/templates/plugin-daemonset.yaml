@@ -10,6 +10,11 @@ hash idempotency; a helm upgrade changing matchImages/audience
 converges without operator action, a no-op re-roll never restarts
 kubelet).
 
+With plugin.install.action=remove, or after the uninstall hook switched
+the DaemonSet to it (plugin-uninstall-hook.yaml), the init container
+instead takes this install's entry and files off the node and the sync
+container idles (ADR-0039).
+
 The long-running container is the same installer in --sync mode: it
 re-copies the CA/mTLS files to the host when cert-manager rotates
 them (kubelet updates the Secret volume in place; the plugin re-reads
@@ -196,6 +201,12 @@ same addressing works without a host-root mount.
 {{- define "harbor-bridge.plugin.installerEnv" -}}
 - name: INSTALL_MODE
   value: {{ .Values.plugin.install.mode | quote }}
+{{- /* Always rendered, also as "install": a helm upgrade then sets back what
+       the uninstall hook changed (ADR-0039). */}}
+- name: INSTALL_ACTION
+  value: {{ include "harbor-bridge.plugin.installAction" . | quote }}
+- name: RELEASE_ID
+  value: {{ include "harbor-bridge.releaseId" . | quote }}
 - name: HOST_ROOT
   value: /host
 - name: HOST_BIN_DIR

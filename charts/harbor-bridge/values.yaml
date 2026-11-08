@@ -426,6 +426,33 @@ plugin:
     # hostConfigDir or a directory inside it (the chart refuses that): the
     # state file decides about kubelet restarts.
     stateDir: /var/lib/harbor-bridge
+    # What the installer does on every node (ADR-0039). install wires the
+    # plugin into kubelet. remove takes this install's provider entry and
+    # files off every node again, restarts kubelet where what it reads
+    # changed, and leaves the pods idle. Use remove for an uninstall with a
+    # tool that does not run Helm hooks, and before plugin.enabled=false,
+    # which removes nothing by itself: set it, wait for
+    # `kubectl rollout status daemonset/<release>-plugin`, then go on.
+    action: install
+
+  # What `helm uninstall` does on the nodes (ADR-0039). With enabled, a
+  # pre-delete hook Job switches the DaemonSet to install.action=remove and
+  # waits until every node has removed this install's entry and files;
+  # only then does Helm delete the release. The Job fails as soon as one
+  # node reports a failed removal, and after timeoutSeconds; the release
+  # then stays installed, the other nodes keep removing, and running
+  # `helm uninstall` again continues (docs/operations.md, Uninstalling).
+  # In none mode the nodes keep the plugin binary. `helm uninstall
+  # --no-hooks` skips the hook and removes nothing on the nodes.
+  uninstall:
+    enabled: true
+    # Nodes that remove at once: a number, or a percentage of the nodes,
+    # rounded up. The hook adds the nodes whose plugin pod is down already.
+    maxUnavailable: 25%
+    # How long the hook waits for every node. Keep it below `helm
+    # uninstall --timeout` (5m by default), so that the hook, not Helm,
+    # reports which nodes did not finish.
+    timeoutSeconds: 270
 
   # URL the on-node plugin uses to reach the bridge. Empty renders the
   # ADR-0008 default: https://127.0.0.1:<service.nodePort> (node-local
