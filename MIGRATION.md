@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### 0.12.2: the bridge's ClusterRole grants OIDC discovery
+
+| Change | What to do |
+| --- | --- |
+| The bridge's ClusterRole also allows `get` on `/.well-known/openid-configuration` and `/openid/v1/jwks`, the rules of Kubernetes' `system:service-account-issuer-discovery` role | Nothing. On a cluster that removed Kubernetes' default binding of that role, the bridge now starts without a binding of its own; one you created for it can stay or go |
+
 ### 0.12.1: an empty `harbor.robotNamePrefix` is an empty prefix
 
 | Change | What to do |

@@ -80,6 +80,17 @@ rules:
   - apiGroups: [harbor.aetherize.io]
     resources: [harboraccesses/finalizers]
     verbs: [update]
+  # OIDC discovery and the token signing keys (ADR-0006): the rules of
+  # Kubernetes' system:service-account-issuer-discovery role. Kubernetes
+  # binds that role to every ServiceAccount by default, but a cluster
+  # admin may remove the binding; without these rules the bridge then
+  # cannot fetch the keys and exits at startup.
+  - nonResourceURLs:
+      - /.well-known/openid-configuration
+      - /.well-known/openid-configuration/
+      - /openid/v1/jwks
+      - /openid/v1/jwks/
+    verbs: [get]
 
 ---
 # Source: harbor-workload-identity-bridge/templates/audience-rbac.yaml
