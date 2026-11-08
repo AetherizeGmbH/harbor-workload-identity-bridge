@@ -11,7 +11,7 @@ LOCALBIN ?= $(PROJECT_DIR)/bin
 
 # Matches the controller-gen.kubebuilder.io/version stamped in the CRDs.
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
-CONTROLLER_GEN_VERSION ?= v0.21.0
+CONTROLLER_GEN_VERSION ?= v0.23.0
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
 
 # renovate: datasource=go depName=golang.org/x/vuln
@@ -19,7 +19,7 @@ GOVULNCHECK_VERSION ?= v1.8.0
 GOVULNCHECK ?= $(LOCALBIN)/govulncheck-$(GOVULNCHECK_VERSION)
 
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
-SETUP_ENVTEST_VERSION ?= v0.25.1
+SETUP_ENVTEST_VERSION ?= v0.25.2
 SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
 
 # go-install-tool installs package $(2) at version $(3) as file $(1). `go
