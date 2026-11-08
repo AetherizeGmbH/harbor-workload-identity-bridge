@@ -160,5 +160,3 @@ limits today.
   uninstall or `plugin.providerName` rename needs the manual steps on every
   node; until then kubelet runs a plugin that fails for its `matchImages`.
 
-### Release and development
-
