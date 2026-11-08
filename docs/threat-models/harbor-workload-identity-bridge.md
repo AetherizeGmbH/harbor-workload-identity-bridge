@@ -175,9 +175,12 @@ Open items (not accepted; tracked):
 - ~~**O5** Configurable plugin provider names, so several chart-managed
   plugins can coexist on a node (ADR-0026).~~ Closed by ADR-0029
   (2026-09-27): implemented as `plugin.providerName`, mitigations in T17.
-  `helm uninstall` still leaves an install's provider entry and files on
-  the nodes, as it always did; removing them is manual
-  (docs/operations.md, "Uninstalling").
+  Since ADR-0039 `helm uninstall` removes an install's provider entry and
+  files from the nodes through a pre-delete hook, whose ServiceAccount may
+  patch the plugin DaemonSet while the hooks run (SECURITY.md, "Privilege
+  of the install DaemonSet"); in none mode the binary stays, and nodes the
+  hook does not reach need the manual steps (docs/operations.md,
+  "Uninstalling").
 - **O6** Chart-owned config in reach of the sync containers (T17): every
   release's sync container can write `plugin.hostConfigDir`, which holds
   kubelet's chart-owned config and, with several releases, every

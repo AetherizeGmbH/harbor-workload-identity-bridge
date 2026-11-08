@@ -341,8 +341,9 @@ plugin:
   # install's other node files: <hostConfigDir>/<name>.ca.crt (and
   # .client.crt/.client.key with mTLS) and
   # <install.stateDir>/<name>.installer-state.json. Renaming an
-  # existing install leaves the old entry and files on the nodes
-  # (docs/operations.md, "Several installs per cluster").
+  # existing install removes the old entry and files from the nodes in the
+  # pass that installs the new name, once the release has run a chart
+  # with ADR-0039 (docs/operations.md, "Uninstalling").
   providerName: harbor-bridge-plugin
 
   # Where on each node the plugin binary and config are written in

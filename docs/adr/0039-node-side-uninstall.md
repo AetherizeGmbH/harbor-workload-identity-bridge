@@ -161,10 +161,12 @@ Read in the Helm source, v3.20.0 and v4.2.3:
    6. *Only own files.* The pass deletes `<bin dir>/<name>` only when this
       install's record is next to it, the name is the default name, or the
       file has the bytes of the plugin in the image: the rule of
-      `checkBinaryOwnership` (run.go:1069-1090). It removes regular files
-      only (`removeRegularIn`). It deletes the binary before the record, so
-      a binary is never left without the record that makes it this
-      install's.
+      `checkBinaryOwnership` (run.go:1069-1090). It never deletes
+      `<kubelet's bin dir>/<name>` while kubelet's config holds an entry of
+      this name that is not a bridge entry: kubelet runs that file for it.
+      It removes regular files only (`removeRegularIn`). It deletes the
+      binary before the record, so a binary is never left without the
+      record that makes it this install's.
    7. *Restart, verify, roll back.* As in ADR-0033. The pass checks that
       kubelet can start with the new config (`checkKubeletCanStart`),
       writes it, restarts kubelet and waits until one kubelet process stays
@@ -325,12 +327,16 @@ Read in the Helm source, v3.20.0 and v4.2.3:
    with one kubelet restart, and P's files after the verified restart, as
    in decision 2. In none mode M's entry keeps the config non-empty, so P's
    entry goes, P's record is reduced to no entries and P's binary stays
-   (3.8). A removal pass also removes such names P. A record without a
-   release, written before this ADR, belongs to no release: a release must
-   run this version once before a rename removes the old name. When two
-   releases swap their names, each name's record names the release that
-   wrote it last, so neither pass removes the other's entry. This lands
-   after decisions 1 to 5.
+   (3.8). P's binary goes only while kubelet's config holds no entry of
+   that name: the pass may not have written the config kubelet reads (a
+   mode change together with the rename). A removal pass also removes
+   such names P, and counts P's state file for the flags of decision 3.1:
+   the release set them under that name. A record without a release,
+   written before this ADR, belongs to no release: a release must run this
+   version once before a rename removes the old name. When two releases
+   swap their names, each name's record names the release that wrote it
+   last, so neither pass removes the other's entry. Earlier names do not
+   block a patch-mode move (ADR-0035) either.
 
 ## Consequences
 
@@ -372,8 +378,9 @@ Read in the Helm source, v3.20.0 and v4.2.3:
   node. Whoever can create pods or tokens in that namespace has that
   already (values.yaml:250-253). Helm deletes the RBAC after the hooks ran,
   also when the Job failed (hooks.go:141); an interrupted `helm` leaves it
-  until the next attempt. SECURITY.md and the threat model need this.
-  Trivy may flag the Role.
+  until the next attempt. SECURITY.md and the threat model say so.
+  Trivy's misconfiguration scan of the rendered goldens at HIGH and
+  CRITICAL finds nothing new in the Role or the Job.
 - Tools that do not run Helm's pre-delete hooks (not checked for Argo CD
   or Flux) need the two-step uninstall.
 - Nodes the DaemonSet no longer runs on (a changed node selector or

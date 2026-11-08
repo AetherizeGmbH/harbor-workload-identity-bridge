@@ -30,7 +30,7 @@
 | 0026 | [One bridge serves one audience and a selected set of HarborAccess objects](0026-audience-pinning-and-harboraccess-selector.md) | Accepted (extends 0006, 0010, 0017, 0023; "no robot" for a refused object that had one amended by 0030; finalizer placement and release amended by 0032; one plugin per node refined by 0029) |
 | 0027 | [The plugin DaemonSet can run in its own namespace](0027-optional-plugin-namespace.md) | Accepted (extends 0021, 0024) |
 | 0028 | [Token lifetime cap and pod binding](0028-token-lifetime-cap-and-pod-binding.md) | Accepted (extends 0006, 0010) |
-| 0029 | [Configurable plugin provider name](0029-configurable-plugin-provider-name.md) | Accepted (refines 0021, 0026) |
+| 0029 | [Configurable plugin provider name](0029-configurable-plugin-provider-name.md) | Accepted (refines 0021, 0026; "helm uninstall removes nothing on the nodes" replaced by 0039) |
 | 0030 | [A refused HarborAccess suspends its robot](0030-refused-harboraccess-suspends-its-robot.md) | Accepted (supersedes part of 0009 §6, amends 0023, 0026; Harbor lookup limited by 0032) |
 | 0031 | [Robot names Harbor refuses, and what keeps truncated names apart](0031-robot-name-validity-and-truncation.md) | Accepted (amends 0018) |
 | 0032 | [A bridge sets its finalizer right before the robot and releases only what it set](0032-finalizer-ownership.md) | Accepted (amends 0026, 0030; chart sets `BRIDGE_INSTANCE` without a selector since 0.12.3) |

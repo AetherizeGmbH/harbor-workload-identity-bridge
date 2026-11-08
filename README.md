@@ -153,9 +153,10 @@ After a few seconds Harbor has a robot
 
 Delete all `HarborAccess` objects before you run `helm uninstall`. Each object
 has a finalizer, and only a running bridge can remove it and delete the Harbor
-robot. `helm uninstall` leaves the plugin and its kubelet configuration on the
-nodes; [docs/operations.md](docs/operations.md#uninstalling) has the steps to
-remove them.
+robot. `helm uninstall` then has every node remove the plugin and its kubelet
+configuration before it deletes the release (ADR-0039); in `none` mode the
+nodes keep the plugin binary. [docs/operations.md](docs/operations.md#uninstalling)
+says what to do when a node fails, and how to clean a node by hand.
 
 ## Documentation
 

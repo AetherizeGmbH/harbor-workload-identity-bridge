@@ -18,6 +18,10 @@ The DaemonSet runs the `harbor-bridge-installer` binary on every node.
 | `none` | Files only; you own the kubelet flags. No hostPID, no privileged container, no host-root mount | k3s/RKE2 (flags via their kubelet args), strict-privilege environments |
 | `plugin.enabled=false` | No DaemonSet at all; NOTES print the provider entry to install | Talos (system extension), baked node images |
 
+`plugin.install.action=remove` turns every pod of the DaemonSet into a
+removal of this install from its node; `helm uninstall` does that through a
+pre-delete hook (ADR-0039, see [Uninstalling](#uninstalling)).
+
 Kubelet reads the credential-provider config **once at boot** (no hot
 reload), but execs the plugin *binary* per pull. The installer therefore
 restarts kubelet exactly when the effective config content (or the
@@ -213,8 +217,10 @@ service:
   executable, a repeated name, or a name kubelet refuses. A refused pass
   changes no config, binary, record, CA, mTLS or state file; only lock
   files (see [Uninstalling](#uninstalling)) may be new.
-- Removing one release, or renaming its provider, leaves its entry on
-  the nodes: see [Uninstalling](#uninstalling).
+- `helm uninstall` of one release removes only its entry and files from
+  the nodes, and keeps the other releases' entries and the flags they
+  need; renaming its provider removes the old name (see
+  [Uninstalling](#uninstalling), ADR-0039).
 
 ## Bootstrap ordering
 
@@ -290,17 +296,93 @@ selector, the finalizer stays (upgrade first: the bridge releases it from
 refused objects it still selects). Remove such finalizers by hand once the
 objects are served under the new settings.
 
-`helm uninstall` removes nothing on the nodes. The provider entry named
-`plugin.providerName` stays in kubelet's credential-provider config, and
-the plugin binary with its record (`<providerName>.entry`), the CA (and
-mTLS) files, the state file, the lock files and the `.bak` copies the installer keeps of every file it
-replaced stay on disk. Kubelet keeps running the plugin for its
+### The nodes (ADR-0039)
+
+`helm uninstall` removes the plugin from the nodes before it deletes the
+release. A pre-delete hook Job switches the plugin DaemonSet to
+`plugin.install.action=remove`, and the installer on every node takes this
+install's provider entry and files off the node:
+
+- **patch** (kind, kubeadm): the entry leaves the chart-owned config. When
+  it was the last entry, the two `--image-credential-provider-*` flags go
+  from `KUBELET_EXTRA_ARGS` (every other argument stays; an assignment left
+  empty stays as `KUBELET_EXTRA_ARGS=""`) and the chart-owned config is
+  deleted. Other installs' entries and the flags they need stay.
+- **merge** (EKS, GKE, AKS): the entry leaves the cloud's config; the
+  cloud's providers and the flags stay.
+- **none**: the entry leaves the chart-owned config only when another
+  install's entry stays in it. The binary stays: the installer cannot see
+  which config kubelet reads, and kubelet does not start while a
+  configured provider's binary is missing. Remove the flags (or the entry)
+  yourself, restart kubelet, then delete the binary and its record.
+
+Where what kubelet reads changed, the installer restarts kubelet and
+verifies that it comes back, as an install does; a restart that does not
+verify is rolled back (ADR-0033). Only then do the binary, its record, the
+CA and mTLS files and the state file go, each with its `.bak` copy. The
+lock files stay (other installers may hold them; `/run` is cleared at
+boot), and so do the `.bak` copies of the shared files: kubelet's config
+and, in patch mode, `/etc/default/kubelet.bak` or
+`/etc/sysconfig/kubelet.bak`. They hold the content before the removal,
+with this install's entry and flags, so restoring one needs the plugin
+binary, which is gone.
+
+The hook removes at most `plugin.uninstall.maxUnavailable` nodes at once
+(25% of them, rounded up, plus the nodes whose plugin pod is down already),
+which takes about four kubelet restarts, and waits at most
+`plugin.uninstall.timeoutSeconds` (270 s, below Helm's default
+`--timeout` of 5 minutes). Helm prints the hook's log, one line per node.
+
+When a node cannot remove the plugin, the hook fails as soon as that node
+reports, and names it and the installer's error; at its deadline it lists
+every node that did not report (a NotReady or unreachable node never
+does). Helm then stops: the release stays installed, the bridge keeps
+running, and the DaemonSet stays in the removal action, so the other nodes
+keep removing. Then:
+
+- Fix the node and run `helm uninstall` again. It continues where the last
+  run stopped; nodes that are done have nothing left to remove.
+- Or give up on that node: `helm uninstall --no-hooks` deletes the release
+  without the hook, and you clean that node by hand (below). Delete the
+  failed Job too if its namespace stays: `kubectl -n <plugin namespace>
+  delete job <release>-plugin-uninstall`.
+- Or keep the plugin: `helm upgrade` with the same values sets
+  `plugin.install.action` back to `install`, and every node installs again.
+  A release installed with Helm 4's server-side apply needs `helm upgrade
+  --force-conflicts`, because the hook changed fields that Helm owns.
+
+A removal that kubelet rejected is not tried again on the same kubelet
+(ADR-0033); the hook's error says so and names the node.
+
+`plugin.uninstall.enabled=false` renders no hook: `helm uninstall` then
+leaves the nodes as they are. So does `helm uninstall --no-hooks`, and a
+tool that does not run Helm's pre-delete hooks. For those, uninstall in two
+steps: `helm upgrade --reuse-values --set plugin.install.action=remove`,
+wait for `kubectl -n <plugin namespace> rollout status
+daemonset/<release>-plugin`, then uninstall. The same two steps clean the
+nodes before `plugin.enabled=false`, which removes nothing by itself: the
+plugin may then come from elsewhere under the same name.
+
+Renaming `plugin.providerName` removes the old name from every node in the
+pass that installs the new one, with one kubelet restart (decision 6 of
+ADR-0039). The installer knows the old name from the record it wrote under
+it, which names the release, so the release must have run a version with
+ADR-0039 once before the rename; a rename in the same upgrade leaves the
+old entry and files, which the next rename or the uninstall then removes.
+In none mode the old binary stays, as above.
+
+### Cleaning a node by hand
+
+Nodes that the hook did not reach (after `--no-hooks`, a node that was
+unreachable, a node the DaemonSet no longer selects, a release from before
+ADR-0039) keep the provider entry named `plugin.providerName` in kubelet's
+credential-provider config, and the plugin binary with its record
+(`<providerName>.entry`), the CA (and mTLS) files, the state file, the lock
+files and the `.bak` copies. Kubelet keeps running the plugin for its
 `matchImages`; with the bridge gone the plugin fails and adds no
 credentials, so those pulls go ahead with whatever other credentials
 apply (a later service on the same NodePort would also need a
-certificate from the pinned CA to receive a token). Renaming
-`plugin.providerName` leaves the old entry behind in the same way. To
-clean a node:
+certificate from the pinned CA to receive a token). To clean such a node:
 
 1. Remove the entry from the config kubelet reads
    (`--image-credential-provider-config`; in patch and none mode

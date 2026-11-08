@@ -607,6 +607,18 @@ Operator choices:
   host-root compromise. `plugin.install.mode: none` has no `hostPID`.
 - The DaemonSet pods get no ServiceAccount token (they never call the
   Kubernetes API).
+- At `helm uninstall`, a pre-delete hook Job (ADR-0039) may `get` and
+  `patch` the plugin DaemonSet, by name, and `list` pods in the plugin
+  namespace: it switches the DaemonSet to `INSTALL_ACTION=remove`. Patching
+  a privileged DaemonSet's pod template is root on every node, which
+  whoever can create pods or ServiceAccount tokens in that namespace has
+  already. The Role, its binding and the ServiceAccount exist only while
+  the hooks run (Helm deletes them after the hooks, also when the Job
+  failed; an interrupted `helm` leaves them until the next attempt). The
+  Job itself is unprivileged (Pod Security "restricted"), sends its token
+  only to the in-cluster API server, never through a proxy and never
+  after a redirect, and its binary uses the standard library only.
+  `plugin.uninstall.enabled=false` renders none of it.
 - `plugin.enabled: false` removes the DaemonSet entirely, for nodes
   that get the plugin out of band ([docs/install-external-plugin.md](docs/install-external-plugin.md)).
 

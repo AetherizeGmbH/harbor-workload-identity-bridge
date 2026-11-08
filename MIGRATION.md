@@ -1,5 +1,14 @@
 ## Chart value migrations
 
+### Next release: `helm uninstall` removes the plugin from the nodes (ADR-0039)
+
+| Change | What to do |
+| --- | --- |
+| `helm uninstall` runs a pre-delete hook Job that switches the plugin DaemonSet to `plugin.install.action=remove` and waits until every node removed this install's provider entry and files, and in patch mode the kubelet flags when it was the last install; kubelet restarts once per node where what it reads changed. The Job fails as soon as one node reports a failed removal, and after `plugin.uninstall.timeoutSeconds` (270); the release then stays installed and running `helm uninstall` again continues. In none mode the nodes keep the plugin binary | Upgrade the chart and the plugin image together: the hook binary is in the plugin image, and an older image's installer ignores the removal action, which the hook reports. To keep the old behaviour, set `plugin.uninstall.enabled=false` or run `helm uninstall --no-hooks`. With a tool that does not run Helm's pre-delete hooks, uninstall in two steps: `plugin.install.action=remove`, wait for the DaemonSet's rollout, then uninstall (docs/operations.md, "Uninstalling") |
+| The DaemonSet now always sets `INSTALL_ACTION` and `RELEASE_ID` | Nothing. The upgrade rolls the DaemonSet once; the install passes find their content unchanged and restart no kubelet |
+| Every record on the nodes now names its release, and a `plugin.providerName` rename removes the release's old name in the pass that installs the new one | Rename only after the release ran this version once: a rename in the same upgrade leaves the old entry and files until the next rename or the uninstall removes them |
+| `plugin.enabled: true` → `false` removes nothing on the nodes | Clean the nodes first if the plugin should go: `plugin.install.action=remove`, wait for the DaemonSet's rollout, then disable |
+
 ### 0.13.0: the chart rejects values keys it does not know (ADR-0038)
 
 The chart now has a values schema (`values.schema.json`). Helm checks your

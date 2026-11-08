@@ -101,6 +101,8 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 19c | `robot_check_cascade` | Asks Harbor: the robot of `app-ns/runner` is gone, every other robot of the cluster is still there |
 | 20 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
 | 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left. A failed query is retried and never counts as an empty list; an answer that is not exactly one JSON list, an empty body included, fails the stage |
+| 22 | `node_uninstall` | ADR-0039: `helm uninstall` with the CLI. The chart's pre-delete hook switches the plugin DaemonSet to `INSTALL_ACTION=remove` and waits until every node removed the plugin. On failure the stage saves the hook's and the installers' logs and the kubelet journals, then uninstalls with `--no-hooks` |
+| 23 | `node_uninstall_check` | On every node: no provider entry, kubelet flag, binary, record, CA, mTLS or state file left, nor their `.bak` copies; kubelet active without credential providers; the node lock file still there. In the cluster: every node Ready, no DaemonSet and no hook object left |
 
 The harness installs one release. Several releases on one node (ADR-0029)
 are covered by the installer's unit tests (`installer/coexist_test.go`: two
