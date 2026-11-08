@@ -79,10 +79,23 @@ resource "null_resource" "uninstall" {
       trap 'rm -rf "$d"' EXIT
       source "$KUBECONFIG_LIB" && harness_kubeconfig "$d" || exit 1
       rm -rf "$DIAG"; mkdir -p "$DIAG"
+      # How long helm uninstall takes, hook included, against the chart's
+      # plugin.uninstall.timeoutSeconds (270 s): in the CI job summary
+      # (GITHUB_STEP_SUMMARY, when set), in $TIMINGS (CI uploads it from
+      # every run) and in the diagnostics.
+      timing() {
+        local line="helm uninstall $RELEASE: $1 after $(( SECONDS - start )) s ($(wc -w <<<"$NODES" | tr -d ' ') nodes)"
+        echo "$line" > "$DIAG/timing.txt"
+        mkdir -p "$(dirname "$TIMINGS")" && echo "$line" >> "$TIMINGS"
+        if [ -n "$${GITHUB_STEP_SUMMARY:-}" ]; then echo "- $line" >> "$GITHUB_STEP_SUMMARY"; fi
+      }
+      start=$SECONDS
       if helm --kubeconfig "$HARNESS_KUBECONFIG" uninstall "$RELEASE" --namespace "$NS" --timeout "$TIMEOUT" > "$DIAG/helm-uninstall.log" 2>&1; then
+        timing succeeded
         rm -rf "$DIAG"
         exit 0
       fi
+      timing failed
       echo "helm uninstall $RELEASE failed; see helm-uninstall.log and hook.log" > "$DIAG/FAILED"
       k -n "$NS" get daemonsets,pods,jobs -o wide > "$DIAG/objects.txt" 2>&1
       k -n "$NS" get pods -o yaml > "$DIAG/pods.yaml" 2>&1
@@ -107,6 +120,7 @@ resource "null_resource" "uninstall" {
       TIMEOUT        = var.timeout
       NODES          = join(" ", var.node_names)
       DIAG           = abspath("${path.cwd}/.diag/${var.diag_name != "" ? var.diag_name : "${var.release}-uninstall"}")
+      TIMINGS        = abspath("${path.cwd}/.timings/uninstall.txt")
     }
   }
 }
