@@ -1,3 +1,9 @@
+## [0.12.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.2...v0.12.3) (2026-11-08)
+
+### Bug Fixes
+
+* **chart:** set BRIDGE_INSTANCE without a selector too ([#155](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/155)) ([430233e](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/430233e6626c5a8446f8f5d8fb3e998374128ee2))
+
 ## [0.12.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.1...v0.12.2) (2026-11-08)
 
 ### Bug Fixes

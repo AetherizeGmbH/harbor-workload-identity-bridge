@@ -99,7 +99,7 @@ what the design protects against and what it does not.
    ```bash
    helm install harbor-bridge \
      oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
-     --version 0.12.2 \
+     --version 0.12.3 \
      -n harbor-bridge-system \
      --set clusterName=prod-eu-west \
      --set harbor.url=https://harbor.example.com \
