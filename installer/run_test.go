@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/yaml"
 )
 
 // testEnv wires a full fake node: a HostRoot tree, source volume
@@ -53,6 +55,10 @@ type fakeKubelet struct {
 	// exe is the node path of the binary a restart starts kubelet from
 	// (/proc/<pid>/exe); "" leaves the fake process without an exe link.
 	exe string
+	// crashed says why the kubelet the last restart started exits at
+	// startup (startProblem); "" while it runs. The unit then reports
+	// "activating", as systemd does between kubelet's crashes.
+	crashed string
 }
 
 // kubeadmEnvFiles are the environment files of kubeadm's Debian kubelet
@@ -124,11 +130,61 @@ func (f *fakeKubelet) restart(unit string) error {
 		}
 		args = append(args, extra...)
 	}
+	f.crashed = ""
+	if w := (kubeletWiring{BinDir: flagValue(args, flagBinDir), ConfigFile: flagValue(args, flagConfigFile)}); w.wired() {
+		f.crashed = f.startProblem(w)
+		if f.crashed != "" {
+			f.t.Logf("fake kubelet exits at startup: %s", f.crashed)
+		}
+	}
 	writeProcEntry(f.t, f.env.cfg.ProcRoot, fakeKubeletPID, procEntry{comm: "kubelet", cmdline: args, exe: f.exe})
 	return nil
 }
 
+// startProblem is why kubelet exits at startup with the credential-provider
+// wiring w (ADR-0029 Context, ADR-0033 Context): a config that is missing or
+// cannot be read, a config without providers, or a provider whose binary
+// is not an executable file in the bin dir. "" when kubelet starts.
+func (f *fakeKubelet) startProblem(w kubeletWiring) string {
+	path := f.env.cfg.hostPath(w.ConfigFile)
+	if _, err := os.Lstat(path); err != nil {
+		return "credential-provider config " + w.ConfigFile + " is missing"
+	}
+	docs, err := configDocs(path)
+	if err != nil {
+		return err.Error()
+	}
+	providers := 0
+	for _, doc := range docs {
+		cfg := map[string]any{}
+		if err := yaml.Unmarshal(doc, &cfg); err != nil {
+			return "credential-provider config cannot be parsed: " + err.Error()
+		}
+		list, err := providerList(cfg)
+		if err != nil {
+			return err.Error()
+		}
+		providers += len(list)
+		problems, err := kubeletStartProblems(doc, "", func(name string) bool {
+			return isExecutableHostFile(f.env.cfg.hostPath(filepath.Join(w.BinDir, name)))
+		})
+		if err != nil {
+			return err.Error()
+		}
+		if len(problems) > 0 {
+			return strings.Join(problems, "; ")
+		}
+	}
+	if providers == 0 {
+		return "credential-provider config " + w.ConfigFile + " has no providers"
+	}
+	return ""
+}
+
 func (f *fakeKubelet) status(string) (unitStatus, error) {
+	if f.crashed != "" {
+		return unitStatus{ActiveState: "activating", NRestarts: -1}, nil
+	}
 	if f.statusFn != nil {
 		return f.statusFn(), nil
 	}
