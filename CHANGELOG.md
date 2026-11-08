@@ -1,3 +1,9 @@
+## [0.12.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.1...v0.12.2) (2026-11-08)
+
+### Bug Fixes
+
+* **chart:** grant the bridge OIDC discovery in its own ClusterRole ([#154](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/154)) ([e2e76fa](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/e2e76fa1f0337e4aeb0b4f55057970267a9a01c6))
+
 ## [0.12.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.0...v0.12.1) (2026-11-08)
 
 ### Bug Fixes
