@@ -164,13 +164,6 @@ limits today.
   for existing values files with stale or unknown keys; or a schema that
   types the known keys and allows others. *Limits now:* a typo in a
   security switch goes unnoticed.
-- [ ] **Issuer-discovery RBAC.** The chart binds no role for OIDC
-  discovery and the JWKS; the bridge relies on Kubernetes' default
-  `system:service-account-issuer-discovery` binding for all
-  ServiceAccounts (ADR-0006 status note). *Options:* have the chart bind
-  the role to the bridge's ServiceAccount, or document the reliance only.
-  *Limits now:* on a cluster that removed the default binding the bridge
-  cannot fetch the signing keys and exits at startup.
 
 ### Nodes
 
