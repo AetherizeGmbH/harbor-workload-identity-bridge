@@ -7,23 +7,6 @@
 # Dataplane V2 (Cilium) mirrors the kind harness's Cilium dataplane;
 # the version prefix must stay >= 1.34 so the KEP-4412 feature gate is
 # default-on (GKE cannot set custom kubelet feature gates).
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = "~> 8.0"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
-    http = {
-      source  = "hashicorp/http"
-      version = "~> 3.4"
-    }
-  }
-}
 
 variable "project" {
   type = string

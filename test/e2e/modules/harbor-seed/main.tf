@@ -12,15 +12,6 @@
 #     running. Wrapping k8s-yaml in this module gives the seed a separate
 #     state, so it stays put (its harbor-admin Secret is reused by the
 #     robot checks later in the run).
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 3.0"
-    }
-  }
-}
 
 variable "kubeconfig" {
   type = object({

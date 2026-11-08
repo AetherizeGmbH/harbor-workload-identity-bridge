@@ -16,15 +16,6 @@
 #
 # NOTHING here ships to users: production registries bring real certs;
 # registry TLS trust is orthogonal to what the bridge does.
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 3.0"
-    }
-  }
-}
 
 variable "kubeconfig" {
   type = object({
