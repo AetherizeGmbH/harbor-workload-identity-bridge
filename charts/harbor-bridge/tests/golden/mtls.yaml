@@ -946,6 +946,13 @@ spec:
               value: "harbor-bridge-plugin"
             - name: PROVIDER_NAME
               value: "harbor-bridge-plugin"
+            # The hook switches the DaemonSet only when Helm's annotations
+            # name this release: a chart rendered with helm template applies
+            # this Job like any other object.
+            - name: RELEASE_NAME
+              value: "harbor-bridge"
+            - name: RELEASE_NAMESPACE
+              value: "harbor-bridge-system"
             - name: MAX_UNAVAILABLE
               value: "25%"
             - name: TIMEOUT_SECONDS

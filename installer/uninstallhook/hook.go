@@ -72,13 +72,27 @@ type api interface {
 func run(ctx context.Context, c api, cfg *config, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	ds, err := c.getDaemonSet(ctx, cfg.Namespace, cfg.DaemonSet)
+	var ds *daemonSet
+	err := retry(ctx, cfg, out, func() (err error) {
+		ds, err = c.getDaemonSet(ctx, cfg.Namespace, cfg.DaemonSet)
+		return err
+	})
 	switch {
 	case errors.Is(err, errNotFound):
 		_, _ = fmt.Fprintf(out, "DaemonSet %s/%s does not exist: nothing to remove on the nodes. If it was deleted by hand, clean the nodes by hand (docs/operations.md, Uninstalling).\n", cfg.Namespace, cfg.DaemonSet)
 		return nil
 	case err != nil:
 		return err
+	}
+	// Tools that render the chart with helm template (kubectl apply,
+	// Kustomize, kapp, Argo CD) apply this hook like any other object, or at
+	// a time of their choosing: removing the plugin then would take it off
+	// every node of a running install. Only a DaemonSet that a Helm release
+	// manages, and the release this hook belongs to, is switched.
+	if name, ns := ds.Metadata.Annotations[helmReleaseNameAnnotation], ds.Metadata.Annotations[helmReleaseNamespaceAnnotation]; name != cfg.ReleaseName || ns != cfg.ReleaseNamespace {
+		_, _ = fmt.Fprintf(out, "the DaemonSet %s/%s is not managed by Helm release %s/%s (its %s and %s annotations say %q and %q): rendered with helm template? Nothing is removed on the nodes; set plugin.uninstall.enabled=false or render with --no-hooks (docs/operations.md, Uninstalling)\n",
+			cfg.Namespace, cfg.DaemonSet, cfg.ReleaseNamespace, cfg.ReleaseName, helmReleaseNamespaceAnnotation, helmReleaseNameAnnotation, ns, name)
+		return nil
 	}
 	n, err := budget(cfg.MaxUnavailable, ds.Status.DesiredNumberScheduled, ds.Status.NumberUnavailable)
 	if err != nil {
@@ -88,7 +102,7 @@ func run(ctx context.Context, c api, cfg *config, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := c.patchDaemonSet(ctx, cfg.Namespace, cfg.DaemonSet, patch); err != nil {
+	if err := retry(ctx, cfg, out, func() error { return c.patchDaemonSet(ctx, cfg.Namespace, cfg.DaemonSet, patch) }); err != nil {
 		return fmt.Errorf("switch DaemonSet %s/%s to the removal action: %w", cfg.Namespace, cfg.DaemonSet, err)
 	}
 	_, _ = fmt.Fprintf(out, "switched DaemonSet %s/%s to INSTALL_ACTION=remove (at most %d nodes at once); waiting until every node removed provider %q\n", cfg.Namespace, cfg.DaemonSet, n, cfg.Provider)
@@ -133,6 +147,31 @@ func run(ctx context.Context, c api, cfg *config, out io.Writer) error {
 				return timeoutError(cfg, last)
 			}
 			return ctx.Err()
+		case <-time.After(cfg.PollInterval):
+		}
+	}
+}
+
+// The annotations Helm puts on every object of a release (helm.sh/helm
+// pkg/action/validate.go, setMetadataVisitor); helm template does not.
+const (
+	helmReleaseNameAnnotation      = "meta.helm.sh/release-name"
+	helmReleaseNamespaceAnnotation = "meta.helm.sh/release-namespace"
+)
+
+// retry calls f until it succeeds, answers errNotFound, or the deadline of
+// ctx passes: the API server may be briefly unreachable, as in the polling
+// loop of run.
+func retry(ctx context.Context, cfg *config, out io.Writer, f func() error) error {
+	for {
+		err := f()
+		if err == nil || errors.Is(err, errNotFound) {
+			return err
+		}
+		_, _ = fmt.Fprintf(out, "%v; trying again\n", err)
+		select {
+		case <-ctx.Done():
+			return err
 		case <-time.After(cfg.PollInterval):
 		}
 	}

@@ -287,7 +287,19 @@ Read in the Helm source, v3.20.0 and v4.2.3:
 
    The hook binary:
    1. reads the DaemonSet; when there is none it prints that nothing on the
-      nodes is removed and exits 0;
+      nodes is removed and exits 0. It also exits 0 without a change when
+      the DaemonSet's Helm annotations (`meta.helm.sh/release-name`,
+      `meta.helm.sh/release-namespace`, which Helm sets on every object of
+      a release: helm.sh/helm pkg/action/validate.go:140-163, install.go
+      and upgrade.go) do not name the release the hook was rendered for
+      (`RELEASE_NAME`, `RELEASE_NAMESPACE`). A chart rendered with `helm
+      template` has none: `kubectl apply`, Kustomize and kapp apply the
+      hook like any other object at install time, and Argo CD runs a Helm
+      `pre-delete` hook as its PreDelete hook when the Application is
+      deleted (Argo CD documentation, "Helm"). Without this check the hook
+      would remove the plugin from every node of a running install. Its
+      first read and its patch are retried, like its polls, while the API
+      server does not answer;
    2. patches it (strategic merge, its own field manager): `INSTALL_ACTION`
       `remove` in both containers, and `maxUnavailable` set to a number:
       `plugin.uninstall.maxUnavailable` (a number, or a percentage of

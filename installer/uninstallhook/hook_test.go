@@ -19,10 +19,13 @@ import (
 // fakeAPI is a DaemonSet with pods. patched is set by the hook's patch; a
 // pod becomes a removal pod (with report) once the rollout reaches it.
 type fakeAPI struct {
-	mu      sync.Mutex
-	ds      *daemonSet
-	pods    []pod
-	patches [][]byte
+	mu   sync.Mutex
+	ds   *daemonSet
+	pods []pod
+	// getErrs and patchErrs are returned, one per call, before the calls
+	// succeed: an API server that is briefly unreachable.
+	getErrs, patchErrs []error
+	patches            [][]byte
 	// onPatch runs after the patch: it rolls the pods out.
 	onPatch func(f *fakeAPI)
 	listErr error
@@ -31,6 +34,11 @@ type fakeAPI struct {
 func (f *fakeAPI) getDaemonSet(_ context.Context, _, _ string) (*daemonSet, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.getErrs) > 0 {
+		err := f.getErrs[0]
+		f.getErrs = f.getErrs[1:]
+		return nil, err
+	}
 	if f.ds == nil {
 		return nil, errNotFound
 	}
@@ -41,6 +49,11 @@ func (f *fakeAPI) getDaemonSet(_ context.Context, _, _ string) (*daemonSet, erro
 func (f *fakeAPI) patchDaemonSet(_ context.Context, _, _ string, patch []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.patchErrs) > 0 {
+		err := f.patchErrs[0]
+		f.patchErrs = f.patchErrs[1:]
+		return err
+	}
 	f.patches = append(f.patches, patch)
 	f.ds.Metadata.Generation++
 	if f.onPatch != nil {
@@ -58,6 +71,8 @@ func (f *fakeAPI) listPods(context.Context, string, map[string]string) ([]pod, e
 func newDaemonSet(desired int) *daemonSet {
 	ds := &daemonSet{}
 	ds.Metadata.Generation = 1
+	// Helm's annotations of the release testConfig names.
+	ds.Metadata.Annotations = map[string]string{helmReleaseNameAnnotation: "harbor-bridge", helmReleaseNamespaceAnnotation: "harbor-bridge-system"}
 	ds.Spec.Selector.MatchLabels = map[string]string{"app.kubernetes.io/component": "plugin"}
 	ds.Status.ObservedGeneration = 1
 	ds.Status.DesiredNumberScheduled = desired
@@ -105,6 +120,7 @@ func report(t *testing.T, rep removalReport) *string {
 
 func testConfig() *config {
 	return &config{Namespace: "harbor-bridge-system", DaemonSet: "harbor-bridge-plugin", Provider: "harbor-bridge-plugin",
+		ReleaseName: "harbor-bridge", ReleaseNamespace: "harbor-bridge-system",
 		MaxUnavailable: "25%", Timeout: 2 * time.Second, PollInterval: time.Millisecond}
 }
 
@@ -313,13 +329,17 @@ func TestLoadConfig(t *testing.T) {
 	env := func(vals map[string]string) func(string) string {
 		return func(k string) string { return vals[k] }
 	}
-	base := map[string]string{"NAMESPACE": "harbor-bridge-system", "DAEMONSET": "harbor-bridge-plugin", "PROVIDER_NAME": "harbor-bridge-plugin"}
+	base := map[string]string{
+		"NAMESPACE": "harbor-bridge-system", "DAEMONSET": "harbor-bridge-plugin", "PROVIDER_NAME": "harbor-bridge-plugin",
+		"RELEASE_NAME": "harbor-bridge", "RELEASE_NAMESPACE": "harbor-bridge-system",
+	}
 	c, err := loadConfig(env(base))
 	if err != nil || c.MaxUnavailable != "25%" || c.Timeout != 270*time.Second {
 		t.Fatalf("defaults: %+v, %v", c, err)
 	}
 	for k, v := range map[string]string{
 		"NAMESPACE": "", "DAEMONSET": "a/b", "PROVIDER_NAME": "UPPER", "MAX_UNAVAILABLE": "0", "TIMEOUT_SECONDS": "-5",
+		"RELEASE_NAME": "", "RELEASE_NAMESPACE": "Bad_NS",
 	} {
 		vals := map[string]string{k: v}
 		for bk, bv := range base {
@@ -342,5 +362,49 @@ func TestRun_RetriesAPIErrors(t *testing.T) {
 	var out bytes.Buffer
 	if err := run(context.Background(), f, cfg, &out); err == nil || !strings.Contains(out.String(), "connection refused; trying again") {
 		t.Fatalf("got %v\n%s", err, out.String())
+	}
+}
+
+// TestRun_OnlyItsOwnHelmRelease: a chart rendered with helm template
+// (kubectl apply, Kustomize, kapp, Argo CD) applies the hook like any other
+// object; its DaemonSet carries no Helm release annotations, or another
+// release's. The hook then patches nothing and succeeds, so that applying it
+// never takes the plugin off the nodes (ADR-0039).
+func TestRun_OnlyItsOwnHelmRelease(t *testing.T) {
+	for name, annotations := range map[string]map[string]string{
+		"rendered with helm template": nil,
+		"another release":             {helmReleaseNameAnnotation: "other", helmReleaseNamespaceAnnotation: "harbor-bridge-system"},
+		"another namespace":           {helmReleaseNameAnnotation: "harbor-bridge", helmReleaseNamespaceAnnotation: "elsewhere"},
+	} {
+		f := &fakeAPI{ds: newDaemonSet(2)}
+		f.ds.Metadata.Annotations = annotations
+		var out bytes.Buffer
+		if err := run(context.Background(), f, testConfig(), &out); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(f.patches) != 0 {
+			t.Fatalf("%s: patched the DaemonSet", name)
+		}
+		if !strings.Contains(out.String(), "is not managed by Helm release harbor-bridge-system/harbor-bridge") ||
+			!strings.Contains(out.String(), "set plugin.uninstall.enabled=false or render with --no-hooks") {
+			t.Fatalf("%s: output:\n%s", name, out.String())
+		}
+	}
+}
+
+// TestRun_RetriesTheFirstCalls: the first GET and the PATCH are retried
+// like the later polls while the API server is briefly unreachable.
+func TestRun_RetriesTheFirstCalls(t *testing.T) {
+	f := &fakeAPI{ds: newDaemonSet(1)}
+	f.pods = []pod{podOn("a", "install", 0, nil)}
+	f.getErrs = []error{errors.New("connection refused"), errors.New("connection reset")}
+	f.patchErrs = []error{errors.New("etcdserver: request timed out")}
+	f.onPatch = rollOut(report(t, removalReport{Action: actionRemove, Provider: "harbor-bridge-plugin", Result: "removed"}))
+	var out bytes.Buffer
+	if err := run(context.Background(), f, testConfig(), &out); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	if len(f.patches) != 1 || strings.Count(out.String(), "; trying again") != 3 {
+		t.Fatalf("patches %d, output:\n%s", len(f.patches), out.String())
 	}
 }

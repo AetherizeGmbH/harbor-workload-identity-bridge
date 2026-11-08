@@ -129,6 +129,13 @@ spec:
               value: {{ include "harbor-bridge.plugin.fullname" . | quote }}
             - name: PROVIDER_NAME
               value: {{ include "harbor-bridge.plugin.providerName" . | quote }}
+            # The hook switches the DaemonSet only when Helm's annotations
+            # name this release: a chart rendered with helm template applies
+            # this Job like any other object.
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
             - name: MAX_UNAVAILABLE
               value: {{ include "harbor-bridge.plugin.uninstallMaxUnavailable" . | quote }}
             - name: TIMEOUT_SECONDS

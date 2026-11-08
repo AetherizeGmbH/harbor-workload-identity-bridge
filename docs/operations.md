@@ -355,11 +355,28 @@ A removal that kubelet rejected is not tried again on the same kubelet
 (ADR-0033); the hook's error says so and names the node.
 
 `plugin.uninstall.enabled=false` renders no hook: `helm uninstall` then
-leaves the nodes as they are. So does `helm uninstall --no-hooks`, and a
-tool that does not run Helm's pre-delete hooks. For those, uninstall in two
-steps: `helm upgrade --reuse-values --set plugin.install.action=remove`,
-wait for `kubectl -n <plugin namespace> rollout status
-daemonset/<release>-plugin`, then uninstall. The same two steps clean the
+leaves the nodes as they are. So does `helm uninstall --no-hooks`.
+
+The hook switches the DaemonSet only when Helm's annotations on it
+(`meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`) name the
+release the hook belongs to; Helm sets them on every object of a release.
+A chart rendered with `helm template` has none, so the hook logs that the
+DaemonSet is not managed by this Helm release and exits without touching
+the nodes. If you deploy with `helm template | kubectl apply`, Kustomize
+`helmCharts` or kapp, set `plugin.uninstall.enabled=false` (or render with
+`--no-hooks`): those tools apply the hook's Job, ServiceAccount, Role and
+RoleBinding as ordinary objects, at install time, and the RBAC stays in
+the cluster. Argo CD maps a Helm `pre-delete` hook to its PreDelete hook,
+which runs only when the Application is deleted (Argo CD documentation,
+"Helm" and "Sync Phases and Waves"); the hook then does nothing either,
+because Argo CD renders with `helm template`. Set
+`plugin.uninstall.enabled=false` there too.
+
+With any of these tools, uninstall in two steps: set
+`plugin.install.action=remove` (with Helm: `helm upgrade --reuse-values
+--set plugin.install.action=remove`; otherwise in the values you render
+with, and apply), wait for `kubectl -n <plugin namespace> rollout status
+daemonset/<release>-plugin`, then uninstall or delete the objects. The same two steps clean the
 nodes before `plugin.enabled=false`, which removes nothing by itself: the
 plugin may then come from elsewhere under the same name.
 

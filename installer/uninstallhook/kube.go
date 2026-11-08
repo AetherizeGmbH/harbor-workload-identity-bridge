@@ -168,7 +168,8 @@ func (c *apiClient) listPods(ctx context.Context, namespace string, selector map
 
 type daemonSet struct {
 	Metadata struct {
-		Generation int64 `json:"generation"`
+		Generation  int64             `json:"generation"`
+		Annotations map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
 		Selector struct {

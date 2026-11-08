@@ -445,6 +445,13 @@ plugin:
   # `helm uninstall` again continues (docs/operations.md, Uninstalling).
   # In none mode the nodes keep the plugin binary. `helm uninstall
   # --no-hooks` skips the hook and removes nothing on the nodes.
+  # The hook acts only on a DaemonSet that Helm's annotations
+  # (meta.helm.sh/release-name, -namespace) tie to this release. If you
+  # render the chart with helm template (kubectl apply, Kustomize
+  # helmCharts, kapp, Argo CD), it does nothing; set enabled=false (or
+  # render with --no-hooks), or kubectl apply and Kustomize leave its
+  # ServiceAccount, Role and RoleBinding in the cluster, and remove the
+  # plugin in two steps (install.action above).
   uninstall:
     enabled: true
     # Nodes that remove at once: a number, or a percentage of the nodes,

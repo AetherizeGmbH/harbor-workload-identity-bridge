@@ -51,6 +51,10 @@ type config struct {
 	Namespace string // NAMESPACE: the plugin namespace.
 	DaemonSet string // DAEMONSET: the plugin DaemonSet's name.
 	Provider  string // PROVIDER_NAME: the provider name the nodes report for.
+	// ReleaseName and ReleaseNamespace name the Helm release the hook was
+	// rendered for; the DaemonSet must carry them in Helm's annotations.
+	ReleaseName      string // RELEASE_NAME
+	ReleaseNamespace string // RELEASE_NAMESPACE
 	// MaxUnavailable is plugin.uninstall.maxUnavailable: a number, or a
 	// percentage of the nodes ("25%").
 	MaxUnavailable string        // MAX_UNAVAILABLE
@@ -60,13 +64,18 @@ type config struct {
 
 func loadConfig(getenv func(string) string) (*config, error) {
 	c := &config{
-		Namespace:      getenv("NAMESPACE"),
-		DaemonSet:      getenv("DAEMONSET"),
-		Provider:       getenv("PROVIDER_NAME"),
-		MaxUnavailable: getenv("MAX_UNAVAILABLE"),
-		PollInterval:   5 * time.Second,
+		Namespace:        getenv("NAMESPACE"),
+		DaemonSet:        getenv("DAEMONSET"),
+		Provider:         getenv("PROVIDER_NAME"),
+		ReleaseName:      getenv("RELEASE_NAME"),
+		ReleaseNamespace: getenv("RELEASE_NAMESPACE"),
+		MaxUnavailable:   getenv("MAX_UNAVAILABLE"),
+		PollInterval:     5 * time.Second,
 	}
-	for name, v := range map[string]string{"NAMESPACE": c.Namespace, "DAEMONSET": c.DaemonSet, "PROVIDER_NAME": c.Provider} {
+	for name, v := range map[string]string{
+		"NAMESPACE": c.Namespace, "DAEMONSET": c.DaemonSet, "PROVIDER_NAME": c.Provider,
+		"RELEASE_NAME": c.ReleaseName, "RELEASE_NAMESPACE": c.ReleaseNamespace,
+	} {
 		if !dnsName(v) {
 			return nil, fmt.Errorf("%s must be a DNS name (got %q)", name, v)
 		}

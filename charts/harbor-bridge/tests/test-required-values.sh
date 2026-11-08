@@ -741,12 +741,15 @@ fi
 
 # The pre-delete hook: its objects are hooks, its pod does not match the
 # DaemonSet's selector (the hook lists those pods), and its settings reach
-# the Job. plugin.uninstall.enabled=false and plugin.enabled=false render
-# none of it.
+# the Job, with the release it belongs to (the hook acts only on a
+# DaemonSet whose Helm annotations name it). plugin.uninstall.enabled=false
+# and plugin.enabled=false render none of it.
 out=$(render -f "${COMPLETE}" --set plugin.uninstall.maxUnavailable=3,plugin.uninstall.timeoutSeconds=600 2>&1 || true)
 job=$(doc_with 'kind: Job' || true)
 if [ "$(grep -cxF '    helm.sh/hook: pre-delete' <<<"${out}")" -eq 4 ] \
    && grep -qxF '  activeDeadlineSeconds: 630' <<<"${job}" \
+   && grep -A1 -xF '            - name: RELEASE_NAME' <<<"${job}" | grep -qxF '              value: "harbor-bridge"' \
+   && grep -A1 -xF '            - name: RELEASE_NAMESPACE' <<<"${job}" | grep -qxF '              value: "harbor-bridge-system"' \
    && grep -qxF '              value: "3"' <<<"${job}" \
    && grep -qxF '              value: "600"' <<<"${job}" \
    && grep -qxF '        app.kubernetes.io/component: plugin-uninstall' <<<"${job}" \
