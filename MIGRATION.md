@@ -1,6 +1,6 @@
 ## Chart value migrations
 
-### Next release: `helm uninstall` removes the plugin from the nodes (ADR-0039)
+### 0.15.0: `helm uninstall` removes the plugin from the nodes (ADR-0039)
 
 | Change | What to do |
 | --- | --- |
