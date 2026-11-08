@@ -1,3 +1,9 @@
+## [0.16.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.15.0...v0.16.0) (2026-11-08)
+
+### Features
+
+* **chart:** derive plugin.audience and plugin.matchImages when empty ([#161](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/161)) ([d3d3c4a](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/d3d3c4a21427f412ec8fccf37710f6fcf26af432))
+
 ## [0.15.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.14.0...v0.15.0) (2026-11-08)
 
 ### Features
