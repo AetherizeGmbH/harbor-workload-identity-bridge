@@ -154,13 +154,6 @@ limits today.
   or a bridge that leaves objects another instance serves alone).
   *Limits now:* selectors must not overlap, and bridges on one cluster
   should use distinct `clusterName` values even with different Harbors.
-- [ ] **No values schema.** The chart has no `values.schema.json`, so a
-  misspelt key is ignored silently and its default applies; for example
-  `bridge.mTLS.enable: true` leaves mTLS off. *Options:* a strict schema,
-  which rejects unknown keys at template time but breaks `helm upgrade`
-  for existing values files with stale or unknown keys; or a schema that
-  types the known keys and allows others. *Limits now:* a typo in a
-  security switch goes unnoticed.
 
 ### Nodes
 
