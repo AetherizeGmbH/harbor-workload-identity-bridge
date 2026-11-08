@@ -1,3 +1,9 @@
+## [0.12.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.6...v0.12.0) (2026-11-08)
+
+### Features
+
+* **plugin:** exit non-zero when the bridge refuses, so kubelet logs the reason ([#151](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/151)) ([e7ea0e7](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/e7ea0e7589b627a7c596abda8fd5d5b7a2bc48d5))
+
 ## [0.11.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.5...v0.11.6) (2026-11-08)
 
 ### Bug Fixes
