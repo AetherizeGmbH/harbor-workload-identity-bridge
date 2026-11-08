@@ -97,7 +97,7 @@ cases=(
   "harbor.url without a scheme|--set|harbor.url=harbor.example.com|harbor.url must be an http:// or https:// URL with a host"
   "harbor.url over plain http in upper case|--set|harbor.url=HTTP://harbor.example.com|uses plain http"
   "bridge.oidcIssuer with credentials|--set|bridge.oidcIssuer=https://user:s3cret@kubernetes.default.svc.cluster.local|bridge.oidcIssuer must not contain \"@\""
-  "bridge.oidcIssuer empty|--set|bridge.oidcIssuer=|bridge.oidcIssuer must be an http:// or https:// URL with a host"
+  "bridge.oidcIssuer without a host|--set|bridge.oidcIssuer=https:///clusters/c|bridge.oidcIssuer must be an http:// or https:// URL with a host"
   "bridge.oidcJWKSURL with credentials|--set|bridge.oidcJWKSURL=https://jwks:s3cret@jwks.example.com/keys|bridge.oidcJWKSURL must not contain \"@\": a user:password@ part here would be stored in plain text"
   "bridge.oidcJWKSURL with an @ after the host|--set|bridge.oidcJWKSURL=https://jwks:s3cr/et@jwks.example.com/keys|bridge.oidcJWKSURL must not contain \"@\""
   "bridge.oidcJWKSURL without a host|--set|bridge.oidcJWKSURL=https:///keys|bridge.oidcJWKSURL must be an http:// or https:// URL with a host"
@@ -400,6 +400,58 @@ if [ -z "${refused}" ]; then
   echo "PASS  plain http to a loopback host, and an http issuer with a JWKS URL, render"
 else
   echo "FAIL  plain http to a loopback host, and an http issuer with a JWKS URL, render:${refused}"
+  failed=$((failed+1))
+fi
+
+# ADR-0044: an empty bridge.oidcIssuer (the default, also when set to "" or
+# removed with null) renders no BRIDGE_OIDC_ISSUER: the bridge reads the
+# issuer, and the keys, from the in-cluster apiserver. A JWKS URL still
+# renders without it, and the plain-http check of the issuer does not apply.
+missing=""
+for args in '' 'bridge.oidcIssuer=' 'bridge.oidcIssuer=null' \
+            'bridge.oidcJWKSURL=http://127.0.0.1:8001/openid/v1/jwks'; do
+  if ! out=$(render -f "${COMPLETE}" ${args:+--set "${args}"} 2>&1) \
+     || grep -qF 'BRIDGE_OIDC_ISSUER' <<<"${out}"; then
+    missing+=" [${args:-default}]"
+  fi
+done
+if [ -z "${missing}" ] \
+   && ! grep -qF 'BRIDGE_OIDC_JWKS_URL' <<<"$(render -f "${COMPLETE}" 2>&1)" \
+   && grep -qF 'value: "http://127.0.0.1:8001/openid/v1/jwks"' <<<"$(grep -A1 'name: BRIDGE_OIDC_JWKS_URL' <<<"${out}")"; then
+  echo "PASS  an empty bridge.oidcIssuer renders no BRIDGE_OIDC_ISSUER (ADR-0044)"
+else
+  echo "FAIL  an empty bridge.oidcIssuer renders no BRIDGE_OIDC_ISSUER (ADR-0044):${missing}"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# A set bridge.oidcIssuer renders as written, with and without a JWKS URL.
+eks='https://oidc.eks.eu-central-1.amazonaws.com/id/0123456789ABCDEF'
+if out=$(render -f "${COMPLETE}" --set "bridge.oidcIssuer=${eks}" 2>&1) \
+   && grep -qxF "              value: \"${eks}\"" <<<"$(grep -A1 'name: BRIDGE_OIDC_ISSUER' <<<"${out}")" \
+   && out=$(render -f "${COMPLETE}" --set "bridge.oidcIssuer=${eks}" \
+     --set bridge.oidcJWKSURL=https://kubernetes.default.svc/openid/v1/jwks 2>&1) \
+   && grep -qxF "              value: \"${eks}\"" <<<"$(grep -A1 'name: BRIDGE_OIDC_ISSUER' <<<"${out}")"; then
+  echo "PASS  a set bridge.oidcIssuer renders as written"
+else
+  echo "FAIL  a set bridge.oidcIssuer renders as written"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
+# The NOTES name the issuer a HarborAccess must carry: the set one, or how
+# to print the one the bridge reads from the apiserver.
+if out=$(notes -f "${COMPLETE}" 2>&1) \
+   && grep -qF 'The bridge reads it from the apiserver at' <<<"${out}" \
+   && grep -qxF '       kubectl get --raw /.well-known/openid-configuration | jq -r .issuer' <<<"${out}" \
+   && ! grep -qF 'kubernetes.default.svc.cluster.local' <<<"${out}" \
+   && out=$(notes -f "${COMPLETE}" --set "bridge.oidcIssuer=${eks}" 2>&1) \
+   && grep -qxF "       ${eks}" <<<"${out}" \
+   && ! grep -qF 'jq -r .issuer' <<<"${out}"; then
+  echo "PASS  NOTES name the issuer, or how to print the one read from the apiserver"
+else
+  echo "FAIL  NOTES name the issuer, or how to print the one read from the apiserver"
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 
