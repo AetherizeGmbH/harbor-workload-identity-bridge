@@ -14,7 +14,8 @@ harbor:
     name: harbor-admin
 plugin:
   enabled: false
-  audience: harbor-bridge-prod   # still required: kubelet needs RBAC for it
+  # audience: empty means harbor-bridge-<clusterName>, here harbor-bridge-prod
+  # (ADR-0041). The chart still renders kubelet's RBAC for it.
 tls:
   issuerRef:
     name: my-cluster-issuer

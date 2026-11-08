@@ -6,7 +6,7 @@
 
   Cluster name : {{ .Values.clusterName }}
   Harbor URL   : {{ .Values.harbor.url }}
-  Audience     : {{ .Values.plugin.audience }}
+  Audience     : {{ include "harbor-bridge.plugin.audience" . }}{{ if not .Values.plugin.audience }} (from clusterName){{ end }}
   Namespace    : {{ .Release.Namespace }}
 {{- if include "harbor-bridge.plugin.split" . }}
   Plugin ns    : {{ .Values.plugin.namespace }} (privileged; CA via trust-manager Bundle {{ include "harbor-bridge.plugin.caBundleName" . }})
@@ -15,6 +15,7 @@
   Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
 {{- if .Values.plugin.enabled }}
   Plugin image : {{ include "harbor-bridge.plugin.image" . }} (install mode: {{ .Values.plugin.install.mode }})
+  Match images : {{ include "harbor-bridge.plugin.matchImages" . | fromJsonArray | join ", " }}{{ if not .Values.plugin.matchImages }} (from harbor.url){{ end }}
 {{- if not (include "harbor-bridge.plugin.legacyNames" .) }}
   Provider     : {{ include "harbor-bridge.plugin.providerName" . }} (one of several installs per cluster, ADR-0029)
 {{- end }}
@@ -99,7 +100,7 @@ NEXT STEPS
 
        - name: {{ include "harbor-bridge.plugin.providerNameYAML" . }}
          apiVersion: credentialprovider.kubelet.k8s.io/v1
-         matchImages: ["<your Harbor host>"]
+         matchImages: {{ include "harbor-bridge.plugin.matchImages" . }}
          defaultCacheDuration: {{ .Values.plugin.defaultCacheDuration | quote }}
          env:
            - name: HARBOR_BRIDGE_ENDPOINT
@@ -120,7 +121,7 @@ NEXT STEPS
              value: "<path to its private key on the node>"
 {{- end }}
          tokenAttributes:
-           serviceAccountTokenAudience: {{ .Values.plugin.audience | quote }}
+           serviceAccountTokenAudience: {{ include "harbor-bridge.plugin.audience" . | quote }}
            requireServiceAccount: true
            cacheType: ServiceAccount
 {{- if $noNodePort }}
@@ -152,7 +153,7 @@ NEXT STEPS
   3. Apply a HarborAccess CR (see config/samples/ in the repo). Its
      spec.trustPolicy.audience must equal:
 
-       {{ .Values.plugin.audience }}
+       {{ include "harbor-bridge.plugin.audience" . }}
 
      and its spec.trustPolicy.issuer must equal (byte for byte):
 

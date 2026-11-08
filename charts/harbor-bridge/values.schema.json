@@ -343,14 +343,14 @@
           }
         },
         "matchImages": {
-          "description": "Required when plugin.enabled is true. Images for which kubelet calls the plugin, as host[:port][/path] with globs only in the host.",
+          "description": "Images for which kubelet calls the plugin, as host[:port][/path] with globs only in the host. Empty means the host and port of harbor.url (ADR-0041).",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "audience": {
-          "description": "Required. Audience of the ServiceAccount token kubelet sends. It must match spec.trustPolicy.audience of every HarborAccess.",
+          "description": "Audience of the ServiceAccount token kubelet sends. It must match spec.trustPolicy.audience of every HarborAccess. Empty means harbor-bridge-<clusterName> (ADR-0041).",
           "type": ["string", "integer"]
         },
         "audienceRBAC": {

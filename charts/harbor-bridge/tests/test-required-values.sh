@@ -49,7 +49,6 @@ cases=(
   "malformed image digest|--set|plugin.image.digest=sha256:nothex|must be sha256:<64 hex characters>"
   "harbor.url|--set|harbor.url=|harbor.url is REQUIRED"
   "harbor.adminCredsSecret.name|--set|harbor.adminCredsSecret.name=|harbor.adminCredsSecret.name is REQUIRED"
-  "plugin.audience|--set|plugin.audience=|plugin.audience is REQUIRED"
   "tls.issuerRef.name when tls.enabled|--set|tls.issuerRef.name=|tls.issuerRef.name is REQUIRED"
   "tls.existingSecret when tls disabled|--set|tls.enabled=false|tls.existingSecret is REQUIRED"
   "clusterName must be a DNS label|--set|clusterName=NotADnsLabel|does not match DNS label regex"
@@ -186,26 +185,51 @@ else
   failed=$((failed+1))
 fi
 
-# plugin.matchImages defaults to [] which is "set" but empty; clearing via
-# --set doesn't reproduce the empty-list path. Use a values overlay.
+# Without plugin.audience and plugin.matchImages the chart derives them
+# from clusterName and harbor.url (ADR-0041): the audience everywhere it
+# appears, matchImages without the scheme's default port.
 cat <<'YAML' > "${TMP}/values-no-matchimages.yaml"
 clusterName: prod-eu-west
 harbor:
   url: https://harbor.example.com
   adminCredsSecret:
     name: harbor-admin
-plugin:
-  matchImages: []
-  audience: harbor-bridge-prod-eu-west
 tls:
   issuerRef:
     name: harbor-bridge-ca
 YAML
-out=$(render -f "${TMP}/values-no-matchimages.yaml" 2>&1 || true)
-if grep -q "plugin.matchImages is REQUIRED" <<<"${out}"; then
-  echo "PASS  plugin.matchImages (empty list)"
+if out=$(render -f "${TMP}/values-no-matchimages.yaml" 2>&1) \
+   && grep -qxF '              value: "harbor-bridge-prod-eu-west"' <<<"${out}" \
+   && grep -qxF '          serviceAccountTokenAudience: "harbor-bridge-prod-eu-west"' <<<"${out}" \
+   && grep -qxF '    resources: ["harbor-bridge-prod-eu-west"]' <<<"${out}" \
+   && grep -qxF '          - "harbor.example.com"' <<<"${out}"; then
+  echo "PASS  plugin.audience and plugin.matchImages derived when empty"
 else
-  echo "FAIL  plugin.matchImages (empty list)"
+  echo "FAIL  plugin.audience and plugin.matchImages derived when empty"
+  head -5 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+for c in "https://harbor.example.com:443/|harbor.example.com" \
+         "https://harbor.example.com:8443|harbor.example.com:8443" \
+         "https://HARBOR.example.com/api|HARBOR.example.com" \
+         "http://harbor.e2e:80|harbor.e2e" \
+         "http://harbor.e2e:30843|harbor.e2e:30843"; do
+  url="${c%%|*}" want="${c#*|}"
+  if out=$(render -f "${TMP}/values-no-matchimages.yaml" --set "harbor.url=${url}" \
+             --set harbor.allowInsecureHTTP=true 2>&1) \
+     && grep -qxF "          - \"${want}\"" <<<"${out}"; then
+    echo "PASS  matchImages derived from ${url} is ${want}"
+  else
+    echo "FAIL  matchImages derived from ${url} is ${want}"
+    head -3 <<<"      got: ${out}"
+    failed=$((failed+1))
+  fi
+done
+out=$(render -f "${TMP}/values-no-matchimages.yaml" --set harbor.url=https://ghcr.io 2>&1 || true)
+if grep -q 'entry "ghcr.io" (derived from harbor.url because plugin.matchImages is empty, ADR-0041) matches the registry' <<<"${out}"; then
+  echo "PASS  derived matchImages covering own image registry"
+else
+  echo "FAIL  derived matchImages covering own image registry"
   head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi

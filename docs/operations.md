@@ -258,6 +258,12 @@ another cluster:
 - It never rotates, disables or deletes a robot of the old name. Each old
   robot keeps its last password, and Harbor accepts that password until
   someone deletes the robot.
+- If `plugin.audience` is empty, the audience is `harbor-bridge-<clusterName>`
+  ([ADR-0041](adr/0041-chart-derives-audience-and-match-images.md)), so it
+  changes with `clusterName`. Every `HarborAccess` then reports
+  `AudienceMismatch` until it names the new audience. To keep the audience,
+  set `plugin.audience` to the old value
+  (`harbor-bridge-<old clusterName>`) in the same upgrade.
 
 Delete the old robots by hand:
 

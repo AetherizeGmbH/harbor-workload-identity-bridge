@@ -283,9 +283,6 @@ harbor.aetherize.io/robot
 {{- fail (printf "service.nodePort=%s must be a fixed port while plugin.bridgeEndpoint is empty: the plugin's endpoint https://127.0.0.1:<service.nodePort> is rendered at install time and cannot follow a port the apiserver picks. Set a port in the cluster's node port range (30000-32767 by default), or set plugin.bridgeEndpoint." (ternary "null" $nodePort (kindIs "invalid" .Values.service.nodePort))) -}}
 {{- end -}}
 {{- end -}}
-{{- if not .Values.plugin.audience -}}
-{{- fail "plugin.audience is REQUIRED. Must match spec.trustPolicy.audience on every HarborAccess CR. Recommend embedding the cluster name (e.g. harbor-bridge-prod)." -}}
-{{- end -}}
 {{- $rawProviderName := .Values.plugin.providerName -}}
 {{- if not (or (kindIs "invalid" $rawProviderName) (kindIs "string" $rawProviderName)) -}}
 {{- fail (printf "plugin.providerName must be a string, but it was read as the %s %v: values files and --set read unquoted values such as 123, 1e3, yes or on as numbers or booleans. Quote the name in the values file (providerName: \"123\") or pass it with --set-string (ADR-0029)." (kindOf $rawProviderName) $rawProviderName) -}}
@@ -310,15 +307,16 @@ harbor.aetherize.io/robot
 {{- fail "plugin.patchKubelet was removed (ADR-0021). Use plugin.install.mode instead: patchKubelet=true → mode: auto (or patch), patchKubelet=false → mode: none. See MIGRATION.md." -}}
 {{- end -}}
 {{- if .Values.plugin.enabled -}}
-{{- if not .Values.plugin.matchImages -}}
-{{- fail "plugin.matchImages is REQUIRED when plugin.enabled=true. Without match patterns kubelet never invokes the plugin." -}}
+{{- $matchImages := include "harbor-bridge.plugin.matchImages" . | fromJsonArray -}}
+{{- if not $matchImages -}}
+{{- fail "plugin.matchImages is empty and harbor.url names no host to derive it from. Without match patterns kubelet never invokes the plugin." -}}
 {{- end -}}
 {{- /* host[:port][/path] as kubelet matches it: globs only in the host's
        labels, a numeric port, a literal path prefix. Kubelet does not start
        with an entry it cannot parse as the host of an https URL (a port
        glob, a space, a bad %-escape); an entry with a scheme or a path glob
        parses but never matches an image. */}}
-{{- range .Values.plugin.matchImages -}}
+{{- range $matchImages -}}
 {{- if not (regexMatch "^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9_*-]+(\\.[A-Za-z0-9_*-]+)*)(:[0-9]+)?(/[A-Za-z0-9._/:@-]*)?$" (toString .)) -}}
 {{- fail (printf "plugin.matchImages entry %q is not host[:port][/path] as kubelet matches it: a registry host (the glob * only in its labels, e.g. *.harbor.example.com), an optional numeric port and an optional literal path prefix, with no scheme, spaces or %%. Kubelet does not start with an entry it cannot parse, such as a port glob (harbor.example.com:*), and an entry with a scheme or a path glob never matches an image." (toString .)) -}}
 {{- end -}}
@@ -386,9 +384,10 @@ harbor.aetherize.io/robot
 {{- if not .Values.plugin.allowSelfMatchImages -}}
 {{- $pluginHost := include "harbor-bridge.registryHost" .Values.plugin.image.repository -}}
 {{- $bridgeHost := include "harbor-bridge.registryHost" .Values.bridge.image.repository -}}
-{{- range .Values.plugin.matchImages -}}
+{{- $derived := not $.Values.plugin.matchImages -}}
+{{- range $matchImages -}}
 {{- if or (eq . $pluginHost) (eq . $bridgeHost) -}}
-{{- fail (printf "plugin.matchImages entry %q matches the registry of the plugin/bridge images — the plugin cannot authenticate the pull of its own image (chicken-and-egg). Pull these images from a registry outside matchImages, or set plugin.allowSelfMatchImages=true if you accept the bootstrap ordering. ADR-0021." .) -}}
+{{- fail (printf "plugin.matchImages entry %q%s matches the registry of the plugin/bridge images — the plugin cannot authenticate the pull of its own image (chicken-and-egg). Pull these images from a registry outside matchImages, set plugin.matchImages to narrower entries (host/project path prefixes), or set plugin.allowSelfMatchImages=true if you accept the bootstrap ordering. ADR-0021." . (ternary " (derived from harbor.url because plugin.matchImages is empty, ADR-0041)" "" $derived)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -571,6 +570,47 @@ would not render back as the name the operator wrote.
 harbor-bridge-plugin
 {{- else -}}
 {{- .Values.plugin.providerName -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+audience is the one audience the bridge serves and kubelet requests tokens
+for (ADR-0026): plugin.audience, or harbor-bridge-<clusterName> when it is
+empty (ADR-0041). Every place that names the audience uses this helper.
+*/}}
+{{- define "harbor-bridge.plugin.audience" -}}
+{{- if .Values.plugin.audience -}}
+{{- toString .Values.plugin.audience -}}
+{{- else -}}
+{{- printf "harbor-bridge-%s" (toString .Values.clusterName) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+matchImages is the kubelet entry's matchImages as a JSON list (read it with
+fromJsonArray): plugin.matchImages, or, when it is empty, the host and port
+of harbor.url without the scheme's default port (ADR-0041). Kubelet
+compares ports as strings, so harbor.example.com:443 would not match an
+image harbor.example.com/p/app. Empty when harbor.url has no host, which
+validateRequiredValues refuses.
+*/}}
+{{- define "harbor-bridge.plugin.matchImages" -}}
+{{- if .Values.plugin.matchImages -}}
+{{- toJson .Values.plugin.matchImages -}}
+{{- else -}}
+{{- $u := urlParse (trim (toString .Values.harbor.url)) -}}
+{{- $scheme := lower $u.scheme -}}
+{{- $host := $u.host -}}
+{{- if and (eq $scheme "https") (hasSuffix ":443" $host) -}}
+{{- $host = trimSuffix ":443" $host -}}
+{{- else if and (eq $scheme "http") (hasSuffix ":80" $host) -}}
+{{- $host = trimSuffix ":80" $host -}}
+{{- end -}}
+{{- if $host -}}
+{{- toJson (list $host) -}}
+{{- else -}}
+[]
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
