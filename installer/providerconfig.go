@@ -231,6 +231,125 @@ func mergeProvider(existing []byte, entry map[string]any) (out []byte, changed b
 	return out, true, nil
 }
 
+// removeProvider drops this install's entry, the harbor-bridge entry named
+// name, from the CredentialProviderConfig in existing (JSON or YAML), a
+// config whose other entries are not the chart's: a cloud's config in merge
+// mode (ADR-0039). Every other entry stays, an entry of that name that is
+// not a bridge entry too, as mergeProvider never replaces one. It returns
+// the document in the format it found, whether it changed, and how many
+// providers are left; a document without such an entry comes back byte for
+// byte. It refuses what mergeProvider refuses as a document, and an output
+// that does not read back as written.
+func removeProvider(existing []byte, name string) (out []byte, changed bool, remaining int, err error) {
+	cfg := map[string]any{}
+	if err := yaml.Unmarshal(existing, &cfg); err != nil {
+		return nil, false, 0, fmt.Errorf("parse node credential-provider config: %w", err)
+	}
+	if av, ok := cfg["apiVersion"].(string); !ok || av != credentialProviderConfigAPIVersion {
+		return nil, false, 0, fmt.Errorf("node credential-provider config has apiVersion %v, want %s; refusing to edit an unknown schema",
+			cfg["apiVersion"], credentialProviderConfigAPIVersion)
+	}
+	providers, err := providerList(cfg)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("node credential-provider config: %w", err)
+	}
+	kept := make([]any, 0, len(providers))
+	for _, p := range providers {
+		if pm, ok := p.(map[string]any); ok && pm["name"] == name && isBridgeProvider(pm) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if len(kept) == len(providers) {
+		return existing, false, len(providers), nil
+	}
+	cfg["providers"] = kept
+	asJSON := isJSON(existing)
+	out, err = marshalMatching(cfg, asJSON)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("marshal credential-provider config: %w", err)
+	}
+	if err := checkRoundTrip(out, cfg, asJSON); err != nil {
+		return nil, false, 0, fmt.Errorf("credential-provider config without provider %q: %w; refusing to write it", name, err)
+	}
+	return out, true, len(kept), nil
+}
+
+// holdsBridgeEntry reports whether the CredentialProviderConfig in doc has
+// a harbor-bridge entry named name.
+func holdsBridgeEntry(doc []byte, name string) (bool, error) {
+	cfg := map[string]any{}
+	if err := yaml.Unmarshal(doc, &cfg); err != nil {
+		return false, fmt.Errorf("parse: %w", err)
+	}
+	providers, err := providerList(cfg)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range providers {
+		if pm, ok := p.(map[string]any); ok && pm["name"] == name && isBridgeProvider(pm) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// composeWithout is composeOwnConfig for a removal (ADR-0039): the
+// chart-owned config in existing without the entry named name. It keeps
+// the entries of existing that sibling accepts as another install's, in
+// their order and once per name, and drops everything else, as every pass
+// writes that file (ADR-0029); dropped describes what went besides the
+// entry of name. It returns how many providers are left; with none left
+// out is nil, because kubelet refuses a config without providers and the
+// caller decides what to do. When the result equals existing it is
+// existing byte for byte.
+func composeWithout(existing []byte, name string, sibling func(map[string]any) bool) (out []byte, dropped []string, remaining int, err error) {
+	cur := map[string]any{}
+	if err := yaml.Unmarshal(existing, &cur); err != nil {
+		return nil, nil, 0, fmt.Errorf("parse: %w", err)
+	}
+	if av, ok := cur["apiVersion"].(string); !ok || av != credentialProviderConfigAPIVersion {
+		return nil, nil, 0, fmt.Errorf("apiVersion is %v, want %s", cur["apiVersion"], credentialProviderConfigAPIVersion)
+	}
+	providers, err := providerList(cur)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	kept := []any{}
+	seen := map[string]bool{}
+	for _, p := range providers {
+		pm, isMap := p.(map[string]any)
+		pname, _ := pm["name"].(string)
+		switch {
+		case isMap && pname == name:
+		case isMap && !seen[pname] && sibling(pm):
+			kept = append(kept, pm)
+			seen[pname] = true
+		default:
+			dropped = append(dropped, strconv.Quote(pname))
+		}
+	}
+	if len(kept) == 0 {
+		return nil, dropped, 0, nil
+	}
+	doc := map[string]any{
+		"apiVersion": credentialProviderConfigAPIVersion,
+		"kind":       "CredentialProviderConfig",
+		"providers":  kept,
+	}
+	if reflect.DeepEqual(cur, doc) {
+		return existing, dropped, len(kept), nil
+	}
+	out, err = yaml.Marshal(doc)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("marshal credential-provider config: %w", err)
+	}
+	if err := checkRoundTrip(out, doc, false); err != nil {
+		return nil, nil, 0, err
+	}
+	return out, dropped, len(kept), nil
+}
+
 // errNoRoundTrip marks a config the installer would write that does not
 // read back as the document it meant to write (checkRoundTrip).
 var errNoRoundTrip = errors.New("does not read back as the document it was written from")

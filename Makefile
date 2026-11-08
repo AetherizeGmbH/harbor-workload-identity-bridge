@@ -205,6 +205,8 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 FUZZ_TARGETS ?= \
 	./installer:FuzzMergeProvider \
 	./installer:FuzzMergeExtraArgs \
+	./installer:FuzzRemoveProvider \
+	./installer:FuzzRemoveExtraArgs \
 	./installer:FuzzKubeletCmdline \
 	./installer:FuzzNodeFiles_Injective \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \
