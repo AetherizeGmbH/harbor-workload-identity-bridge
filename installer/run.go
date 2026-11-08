@@ -126,6 +126,14 @@ func run(cfg *config) error {
 		}
 	}
 
+	// The earlier provider names of this release retire in this pass
+	// (ADR-0039, decision 6): their entries leave the configs it writes,
+	// their files go once it succeeded.
+	binDirs := uniqueDirs(cfg.HostBinDir, wiring.BinDir, cfg.MergeBinDir)
+	if err := cfg.findRetiring(binDirs); err != nil {
+		return err
+	}
+
 	if mode == modePatch {
 		// Held until the pass ends: no installer may add an entry to the
 		// config kubelet reads now, or to this install's own config,
@@ -142,7 +150,10 @@ func run(cfg *config) error {
 		case len(others) > 0 && movingOwn:
 			// Other installs that have not moved yet share the old
 			// directories (ADR-0035).
-			return stayAndStage(cfg, rendered, entry, wiring, others)
+			if err := stayAndStage(cfg, rendered, entry, wiring, others); err != nil {
+				return err
+			}
+			return cfg.retire(binDirs)
 		case len(others) > 0:
 			return rewireRefusal(cfg, wiring, others)
 		}
@@ -155,14 +166,18 @@ func run(cfg *config) error {
 
 	switch mode {
 	case modeNone:
-		return runNone(cfg, rendered, entry)
+		err = runNone(cfg, rendered, entry)
 	case modePatch:
-		return runPatch(cfg, rendered, entry)
+		err = runPatch(cfg, rendered, entry)
 	case modeMerge:
-		return runMerge(cfg, rendered, entry, wiring)
+		err = runMerge(cfg, rendered, entry, wiring)
 	default:
 		return fmt.Errorf("unreachable mode %q", mode)
 	}
+	if err != nil {
+		return err
+	}
+	return cfg.retire(binDirs)
 }
 
 // wiredByOwnPatch reports whether kubelet's wiring is what this install's
@@ -395,7 +410,8 @@ func (c *config) blockingInstalls(current kubeletWiring, rendered []byte, entry 
 	if err != nil {
 		return nil, fmt.Errorf("mode patch: cannot tell whether kubelet's credential-provider config %s holds other installs' entries, so it stays wired to it: %w", current.ConfigFile, err)
 	}
-	return slices.DeleteFunc(others, func(name string) bool { return kept[name] }), nil
+	// An earlier name of this release does not block: this pass removes it.
+	return slices.DeleteFunc(others, func(name string) bool { return kept[name] || c.retiring[name] }), nil
 }
 
 // keptSiblings returns the provider names of the other installs' entries in
@@ -665,7 +681,7 @@ func chartOwnedConfig(path string, existing, rendered []byte, entry map[string]a
 func (c *config) siblingIn(binDir string) func(entry map[string]any) bool {
 	return func(entry map[string]any) bool {
 		name, ok := entry["name"].(string)
-		if !ok || name == c.ProviderName || validProviderName(name) != nil || !isBridgeProvider(entry) {
+		if !ok || name == c.ProviderName || c.retiring[name] || validProviderName(name) != nil || !isBridgeProvider(entry) {
 			return false
 		}
 		files := filesFor(name)
@@ -748,6 +764,11 @@ func runMerge(cfg *config, rendered []byte, entry map[string]any, wiring kubelet
 		if merged, mergeChanged, err = mergeProvider(existing, entry); err != nil {
 			return err
 		}
+		var retired bool
+		if merged, retired, _, err = cfg.withoutRetiring(merged); err != nil {
+			return err
+		}
+		mergeChanged = mergeChanged || retired
 		if err := cfg.checkKubeletCanStart(merged, wiring); err != nil {
 			return err
 		}

@@ -150,6 +150,10 @@ type config struct {
 	kubelet     kubeletControl
 	verify      verifyTiming
 	lockTimeout time.Duration
+
+	// retiring holds the earlier provider names of this install's release
+	// that the current pass removes (findRetiring, ADR-0039).
+	retiring map[string]bool
 }
 
 func loadConfig(getenv func(string) string) (*config, error) {

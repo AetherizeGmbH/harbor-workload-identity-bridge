@@ -171,6 +171,11 @@ func (r *remover) removeWired() error {
 	if err := r.checkNextStart(st, w); err != nil {
 		return err
 	}
+	// Earlier provider names of this release go too (decision 6).
+	binDirs := r.binDirs(st, w)
+	if err := cfg.findRetiring(binDirs); err != nil {
+		return err
+	}
 	stripped, err := r.removeFromKubeletConfig(st, w)
 	if err != nil {
 		return err
@@ -179,7 +184,6 @@ func (r *remover) removeWired() error {
 	// Kubelet no longer reads this install's entry. What is left are files
 	// kubelet does not use: configs it does not read and their entries, the
 	// binaries and records, the CA and mTLS files, and the state file.
-	binDirs := r.binDirs(st, w)
 	var unread []configRef
 	add := func(path, binDir string) {
 		if path == "" || binDir == "" || (path == w.ConfigFile && !stripped) {
@@ -219,7 +223,25 @@ func (r *remover) removeWired() error {
 	if err := r.removeAuxFiles(); err != nil {
 		return err
 	}
-	return r.removeState()
+	if err := r.removeState(); err != nil {
+		return err
+	}
+	return cfg.retire(binDirs)
+}
+
+// holdsOwn reports whether the CredentialProviderConfig in doc holds a
+// bridge entry of this install's name or of one of its retiring names, and
+// whether it holds an entry of this install's name that is not a bridge
+// entry (foreign).
+func (r *remover) holdsOwn(doc []byte) (holds, foreign bool, err error) {
+	holds, foreign, err = entriesNamed(doc, r.cfg.ProviderName)
+	for _, name := range r.cfg.retiringNames() {
+		if err != nil || holds {
+			break
+		}
+		holds, err = holdsBridgeEntry(doc, name)
+	}
+	return holds, foreign, err
 }
 
 // checkNextStart refuses a removal while kubelet would start with another
@@ -314,7 +336,7 @@ func (r *remover) removeFromKubeletConfig(st *state, w kubeletWiring) (stripped 
 	}
 	holds, foreign := false, false
 	if prior.existed {
-		if holds, foreign, err = entriesNamed(prior.data, cfg.ProviderName); err != nil {
+		if holds, foreign, err = r.holdsOwn(prior.data); err != nil {
 			return false, fmt.Errorf("kubelet's credential-provider config %s: %w; refusing to guess whether it holds provider %q", w.ConfigFile, err, cfg.ProviderName)
 		}
 	}
@@ -341,8 +363,17 @@ func (r *remover) removeFromKubeletConfig(st *state, w kubeletWiring) (stripped 
 		for _, d := range dropped {
 			logf("dropping provider %s from %s: not an entry of another harbor-bridge install on this node, or not as that install recorded it", d, w.ConfigFile)
 		}
-	} else if desired, _, remaining, err = removeProvider(prior.data, cfg.ProviderName); err != nil {
-		return false, err
+	} else {
+		if desired, _, remaining, err = removeProvider(prior.data, cfg.ProviderName); err != nil {
+			return false, err
+		}
+		var rest int
+		if desired, _, rest, err = cfg.withoutRetiring(desired); err != nil {
+			return false, err
+		}
+		if rest >= 0 {
+			remaining = rest
+		}
 	}
 	if remaining == 0 {
 		return r.removeOwnFlags(st, w)
@@ -389,7 +420,25 @@ func (r *remover) removeFromKubeletConfig(st *state, w kubeletWiring) (stripped 
 // config goes later, as a config kubelet does not read.
 func (r *remover) removeOwnFlags(st *state, w kubeletWiring) (bool, error) {
 	cfg := r.cfg
-	if st == nil || st.Mode != modePatch || st.BinDir != w.BinDir || st.ConfigFile != w.ConfigFile {
+	wired := func(s *state) bool {
+		return s != nil && s.Mode == modePatch && s.BinDir == w.BinDir && s.ConfigFile == w.ConfigFile
+	}
+	if !wired(st) {
+		// The release may have set the flags under an earlier provider name
+		// (decision 6), whose state file then records it.
+		for _, name := range cfg.retiringNames() {
+			prev, err := loadState(filepath.Join(cfg.hostPath(cfg.StateDir), filesFor(name).State))
+			if err != nil {
+				return false, err
+			}
+			if wired(prev) {
+				logf("the kubelet flags were set by this release under its earlier provider name %q", name)
+				st = prev
+				break
+			}
+		}
+	}
+	if !wired(st) {
 		return false, fmt.Errorf("removing provider %q would leave kubelet's credential-provider config %s without providers, which kubelet refuses at its next start, and this install did not set the kubelet flags that point at it (its state file %s records no patch-mode restart onto bin-dir=%q config=%q). Remove the flags, or the entry, by hand, restart kubelet, then remove again (docs/operations.md, Uninstalling)", cfg.ProviderName, w.ConfigFile, filepath.Join(cfg.StateDir, cfg.files().State), w.BinDir, w.ConfigFile)
 	}
 	envFile, err := cfg.kubeletEnvFile()
@@ -508,7 +557,7 @@ func (r *remover) removeFromUnreadConfig(c configRef) error {
 	case !prior.existed:
 		return nil
 	}
-	holds, err := holdsBridgeEntry(prior.data, cfg.ProviderName)
+	holds, _, err := r.holdsOwn(prior.data)
 	switch {
 	case err != nil:
 		r.keep(c.path, fmt.Sprintf("kubelet does not read it, and it is not a credential-provider config the installer can parse (%v)", err))
@@ -524,11 +573,15 @@ func (r *remover) removeFromUnreadConfig(c configRef) error {
 	}
 	if !chartOwned {
 		desired, changed, _, err := removeProvider(prior.data, cfg.ProviderName)
+		var retired bool
+		if err == nil {
+			desired, retired, _, err = cfg.withoutRetiring(desired)
+		}
 		if err != nil {
 			r.keep(c.path, err.Error())
 			return nil
 		}
-		if changed {
+		if changed || retired {
 			if _, err := writeForeignIn(dir, name, desired); err != nil {
 				return err
 			}
@@ -715,6 +768,9 @@ func (r *remover) removeNone() error {
 	files := cfg.files()
 	binary := filepath.Join(cfg.HostBinDir, files.Binary)
 	configPath := cfg.ownConfigPath()
+	if err := cfg.findRetiring(uniqueDirs(cfg.HostBinDir)); err != nil {
+		return err
+	}
 	entryStays := false
 	if _, statErr := os.Lstat(cfg.hostPath(cfg.HostConfigDir)); statErr == nil {
 		stays, err := r.removeNoneEntry()
@@ -731,23 +787,35 @@ func (r *remover) removeNone() error {
 	if isRegularHostFile(cfg.hostPath(binary)) {
 		r.keep(binary, "none mode cannot see which config kubelet reads, and kubelet does not start while a configured provider's binary is missing; delete it and its record once kubelet runs without the entry")
 	}
+	if err := r.removeBinaryBackups(); err != nil {
+		return err
+	}
+	if err := r.removeAuxFiles(); err != nil {
+		return err
+	}
+	return cfg.retire(uniqueDirs(cfg.HostBinDir))
+}
+
+// removeBinaryBackups deletes the .bak copies of the binary and the record
+// in plugin.hostBinaryDir (none mode, which keeps the binary itself): the
+// earlier plugin in the .bak is read by no kubelet config.
+func (r *remover) removeBinaryBackups() error {
+	cfg := r.cfg
 	root, err := os.OpenRoot(cfg.hostPath(cfg.HostBinDir))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
+		return nil
 	case err != nil:
 		return fmt.Errorf("open %s: %w", cfg.HostBinDir, err)
-	default:
-		// The earlier plugin in the .bak, and the record's .bak, are read by
-		// no kubelet config.
-		for _, name := range []string{files.Binary + ".bak", files.Record + ".bak"} {
-			if err := r.removeOwnFile(root, cfg.HostBinDir, name); err != nil {
-				_ = root.Close()
-				return err
-			}
-		}
-		_ = root.Close()
 	}
-	return r.removeAuxFiles()
+	defer func() { _ = root.Close() }()
+	files := cfg.files()
+	for _, name := range []string{files.Binary + ".bak", files.Record + ".bak"} {
+		if err := r.removeOwnFile(root, cfg.HostBinDir, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // removeNoneEntry drops this install's entry from the chart-owned config
@@ -769,7 +837,7 @@ func (r *remover) removeNoneEntry() (bool, error) {
 	if err != nil || !prior.existed {
 		return false, err
 	}
-	holds, err := holdsBridgeEntry(prior.data, cfg.ProviderName)
+	holds, _, err := r.holdsOwn(prior.data)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w; refusing to guess whether it holds provider %q", cfg.ownConfigPath(), err, cfg.ProviderName)
 	}
