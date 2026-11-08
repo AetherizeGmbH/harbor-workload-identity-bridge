@@ -381,16 +381,17 @@ make run-local
 
 What `make run-local` does for you: keeps a self-signed TLS cert in
 `.gen/run-local-tls/` (owner-only; a new 7-day cert when it is missing or
-expires within an hour), sets `BRIDGE_TLS_CERT_FILE` /
-`BRIDGE_TLS_KEY_FILE` / `BRIDGE_LISTEN_ADDR=:8443` /
-`BRIDGE_HEALTH_ADDR=:8081`, and refuses to start if
-`BRIDGE_OIDC_ISSUER` looks cluster-internal but `BRIDGE_OIDC_JWKS_URL`
-is unset.
+expires within an hour), sets `BRIDGE_TLS_CERT_FILE` and
+`BRIDGE_TLS_KEY_FILE`, listens on `127.0.0.1` only (`BRIDGE_LISTEN_ADDR`
+`127.0.0.1:8443`, `BRIDGE_HEALTH_ADDR` `127.0.0.1:8081`,
+`BRIDGE_METRICS_ADDR` `127.0.0.1:8080`; set any of them to override), and
+refuses to start if `BRIDGE_OIDC_ISSUER` looks cluster-internal but
+`BRIDGE_OIDC_JWKS_URL` is unset.
 
 **Checkpoint 1.** A successful start prints (JSON-formatted):
 
 ```
-"msg":"data-plane server listening","addr":":8443","mtls":false
+"msg":"data-plane server listening","addr":"127.0.0.1:8443","mtls":false
 "msg":"starting orphan-robot sweep"
 "msg":"starting bridge","leader_election":false
 ```
