@@ -1,3 +1,9 @@
+## [0.14.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.13.0...v0.14.0) (2026-11-08)
+
+### Features
+
+* **dataplane:** count requests with a wrong method or path ([#156](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/156)) ([4846cbe](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/4846cbe509a63d5ad4bf19bbe49fb48007b87f51))
+
 ## [0.13.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.4...v0.13.0) (2026-11-08)
 
 ### Features
