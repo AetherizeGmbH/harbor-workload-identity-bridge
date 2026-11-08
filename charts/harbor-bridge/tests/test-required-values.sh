@@ -625,6 +625,26 @@ else
   failed=$((failed+1))
 fi
 
+# BRIDGE_INSTANCE is rendered without a selector too, so that removing the
+# selector releases harbor.aetherize.io/robot-<instance> (ADR-0032). A
+# release name that is no valid instance is left out without a selector,
+# and an explicit invalid bridge.instance fails with or without one.
+instance_env() { grep -A1 -xF '            - name: BRIDGE_INSTANCE' <<<"$1" | tail -1; }
+if out=$(render -f "${COMPLETE}" 2>&1) \
+   && [ "$(instance_env "${out}")" = '              value: "harbor-bridge"' ] \
+   && out=$(render -f "${COMPLETE}" --set bridge.instance=blue 2>&1) \
+   && [ "$(instance_env "${out}")" = '              value: "blue"' ] \
+   && out=$(helm template bridge.v2 "${CHART_DIR}" --kube-version 1.34.0 --namespace harbor-bridge-system -f "${COMPLETE}" 2>&1) \
+   && ! grep -qxF '            - name: BRIDGE_INSTANCE' <<<"${out}" \
+   && ! out=$(render -f "${COMPLETE}" --set bridge.instance=Blue 2>&1) \
+   && grep -qF 'bridge.instance "Blue" (default: the release name) must be a DNS label' <<<"${out}"; then
+  echo "PASS  BRIDGE_INSTANCE without a selector: release name, explicit, invalid release name, invalid value"
+else
+  echo "FAIL  BRIDGE_INSTANCE without a selector: release name, explicit, invalid release name, invalid value"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
 # `helm upgrade --reuse-values` from a release that predates
 # bridge.tokenValidation keeps the old values, which lack the key. A null
 # --set removes it the same way; the render must equal the default one.

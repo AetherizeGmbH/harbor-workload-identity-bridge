@@ -128,6 +128,31 @@ boolean or number as %!s(bool=true).
 {{- end -}}
 
 {{/*
+instanceValid is "true" when the instance is a DNS label of at most 50
+characters, which the bridge requires of BRIDGE_INSTANCE.
+*/}}
+{{- define "harbor-bridge.instanceValid" -}}
+{{- $instance := include "harbor-bridge.instance" . -}}
+{{- if and (le (len $instance) 50) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $instance) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+renderInstance says whether the bridge gets BRIDGE_INSTANCE: always with
+a selector (validateRequiredValues refuses an invalid one), and without
+one whenever the instance is valid, so that a bridge whose selector was
+removed still releases harbor.aetherize.io/robot-<instance> (ADR-0032).
+Without a selector, a release name that is no valid instance is left
+out: no bridge can have set a finalizer under that name.
+*/}}
+{{- define "harbor-bridge.renderInstance" -}}
+{{- if or .Values.bridge.harborAccessSelector (include "harbor-bridge.instanceValid" .) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 finalizer is the finalizer the bridge sets on the HarborAccess objects it
 manages: a per-instance one with a selector (ADR-0026,
 bridge/controlplane/config.go Finalizer).
@@ -203,11 +228,8 @@ harbor.aetherize.io/robot
 {{- if not $burstOK -}}
 {{- fail (printf "bridge.rateLimit.burst=%v must be a positive whole number of requests; the bridge refuses to start otherwise." $burst) -}}
 {{- end -}}
-{{- if .Values.bridge.harborAccessSelector -}}
-{{- $instance := include "harbor-bridge.instance" . -}}
-{{- if or (gt (len $instance) 50) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $instance)) -}}
-{{- fail (printf "bridge.instance %q (default: the release name) must be a DNS label of at most 50 characters; it names this bridge's HarborAccess finalizer (ADR-0026)." $instance) -}}
-{{- end -}}
+{{- if and (or .Values.bridge.harborAccessSelector .Values.bridge.instance) (not (include "harbor-bridge.instanceValid" .)) -}}
+{{- fail (printf "bridge.instance %q (default: the release name) must be a DNS label of at most 50 characters; it names this bridge's HarborAccess finalizer (ADR-0026)." (include "harbor-bridge.instance" .)) -}}
 {{- end -}}
 {{- if include "harbor-bridge.plugin.split" . -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .Values.plugin.namespace) -}}

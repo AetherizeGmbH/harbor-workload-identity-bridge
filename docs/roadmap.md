@@ -135,17 +135,14 @@ limits today.
   creates new objects before it deletes old ones; other deploy tools may
   not). Or keep the rule. *Limits now:* release names must be unique per
   cluster.
-- [ ] **Finalizers left by a removed selector or a renamed instance
-  (ADR-0032).** The chart renders `BRIDGE_INSTANCE` only together with
-  `bridge.harborAccessSelector`, so after the selector is removed through
-  the chart the bridge cannot name `harbor.aetherize.io/robot-<instance>`,
-  and a renamed `bridge.instance` never releases the old one (see
-  [Uninstalling](operations.md#uninstalling)). *Options:* always render
-  `BRIDGE_INSTANCE`, which the bridge already accepts without a selector
-  and then releases the per-instance finalizer; or a
-  `BRIDGE_PREVIOUS_INSTANCES` setting naming instances to release.
-  *Limits now:* changing either setting needs a manual finalizer cleanup,
-  and until then the objects cannot finish deletion.
+- [ ] **Finalizers left by a renamed instance (ADR-0032).** A renamed
+  `bridge.instance` never releases `harbor.aetherize.io/robot-<old
+  instance>` (see [Uninstalling](operations.md#uninstalling)). A removed
+  selector no longer leaves one: the chart sets `BRIDGE_INSTANCE` without
+  a selector too since 0.12.3. *Options:* a `BRIDGE_PREVIOUS_INSTANCES`
+  setting naming instances to release, or keep the manual step. *Limits
+  now:* a rename needs a manual finalizer cleanup, and until then the
+  objects cannot finish deletion.
 - [ ] **Overlapping selectors (ADR-0026, ADR-0032).** When two bridges'
   selectors both match a HarborAccess, the bridge whose audience it names
   serves it and the other reports `AudienceMismatch`; both write the same

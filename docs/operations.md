@@ -281,9 +281,9 @@ Changing `bridge.harborAccessSelector` or `bridge.instance` later: a bridge
 that gains a selector releases the shared finalizer from the objects it
 served, including those that stop matching. Removing the selector leaves
 `harbor.aetherize.io/robot-<instance>` on existing objects; the bridge
-releases it only when `BRIDGE_INSTANCE` still names the instance, which
-the chart sets only together with a selector. A renamed instance never
-releases the old `harbor.aetherize.io/robot-<old instance>`. An object an
+releases it because the chart keeps setting `BRIDGE_INSTANCE` (since
+0.12.3; older charts set it only together with a selector). A renamed
+instance never releases the old `harbor.aetherize.io/robot-<old instance>`. An object an
 older bridge refused or found in `RobotConflict` carries the shared
 finalizer without having been served; if it stops matching a new
 selector, the finalizer stays (upgrade first: the bridge releases it from
