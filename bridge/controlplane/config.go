@@ -282,6 +282,12 @@ func LoadFromEnv() (*Config, error) {
 			// HarborAccess's trustPolicy.issuer, neither of which carries
 			// credentials: no token could ever match.
 			errs = append(errs, fmt.Errorf("%s must not contain credentials (user:password@): a token's iss claim never carries them, so no token would match", EnvOIDCIssuer))
+		} else if canonical := v.String(); canonical != raw {
+			// Every comparison uses OIDCIssuer.String(): an issuer that
+			// parsing changes (such as an upper-case scheme) would
+			// never equal a token's iss claim, which carries it as written.
+			// requireURL refused every "@", so the value holds no credential.
+			errs = append(errs, fmt.Errorf("%s=%q reads back as %q after URL parsing; the bridge compares the issuer byte for byte with each token's iss claim, so write it as the cluster's issuer in that form", EnvOIDCIssuer, raw, canonical))
 		} else {
 			cfg.OIDCIssuer = v
 		}

@@ -136,6 +136,9 @@ func TestLoadFromEnv_EmptyIssuerMeansDiscovery(t *testing.T) {
 		{"kubernetes.default.svc", "must use http or https"},
 		{"https://", "must include a host"},
 		{"https://admin:s3cret@kubernetes.default.svc", "must not contain credentials"},
+		// Parsing would change this, and the bridge compares
+		// OIDCIssuer.String() with each token's iss claim.
+		{"HTTPS://kubernetes.default.svc", `reads back as "https://kubernetes.default.svc"`},
 	} {
 		t.Run("set "+tc.issuer, func(t *testing.T) {
 			clearAllEnv(t)
@@ -144,6 +147,36 @@ func TestLoadFromEnv_EmptyIssuerMeansDiscovery(t *testing.T) {
 			_, err := LoadFromEnv()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A set BRIDGE_OIDC_ISSUER that URL parsing leaves unchanged is kept as
+// written, a trailing slash and an escaped @ included (AKS issuers end in a
+// slash).
+func TestLoadFromEnv_IssuerKeptAsWritten(t *testing.T) {
+	for _, issuer := range []string{
+		"https://kubernetes.default.svc.cluster.local",
+		"https://eastus.oic.prod-aks.azure.com/tenant/cluster/",
+		"https://issuer.example.com/a%40b",
+	} {
+		t.Run(issuer, func(t *testing.T) {
+			clearAllEnv(t)
+			setEnv(t, map[string]string{
+				EnvClusterName:    "prod",
+				EnvNamespace:      "harbor-bridge-system",
+				EnvHarborURL:      "https://harbor.example.com",
+				EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+				EnvAudience:       "harbor-bridge-prod",
+				EnvOIDCIssuer:     issuer,
+			})
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("LoadFromEnv: %v", err)
+			}
+			if got := cfg.OIDCIssuer.String(); got != issuer {
+				t.Fatalf("OIDCIssuer = %q, want %q", got, issuer)
 			}
 		})
 	}
