@@ -1,3 +1,9 @@
+## [0.12.4](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.3...v0.12.4) (2026-11-08)
+
+### Bug Fixes
+
+* **chart:** render helm upgrade --reuse-values from releases before 0.8.0 ([#157](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/157)) ([be01005](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/be01005dee4d7e053e90edc0f29afbf3a324909b))
+
 ## [0.12.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.12.2...v0.12.3) (2026-11-08)
 
 ### Bug Fixes
