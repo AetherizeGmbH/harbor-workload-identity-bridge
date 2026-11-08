@@ -20,6 +20,9 @@ chart:**
   exactly that audience or is refused as `AudienceMismatch`.
 - [ADR-0028](0028-token-lifetime-cap-and-pod-binding.md) caps the token
   lifetime and requires pod-bound tokens.
+- [ADR-0043](0043-trust-policy-issuer-is-optional.md) makes a HarborAccess's
+  `trustPolicy.issuer` optional: without it the object trusts the bridge's
+  issuer.
 - The docker-token reasoning is obsolete since
   [ADR-0013](0013-return-robot-basic-auth-credentials.md), and
   [ADR-0016](0016-credential-provider-cache-key-type.md) corrects what
