@@ -57,6 +57,12 @@
 #                             tofu waits for each finalizer
 #  21. robot_check_teardown — Harbor itself: not one robot of this cluster left
 #                             (a Harbor that cannot be asked fails it)
+#  22. node_uninstall       — ADR-0039: helm uninstall; its pre-delete hook has
+#                             every node remove the plugin before Helm deletes
+#                             the release
+#  23. node_uninstall_check — every node: no entry, flags, binary, record, CA,
+#                             mTLS or state file left (nor their .bak), kubelet
+#                             active without credential providers
 #
 # Teardown order. tofu test destroys the states in reverse order of the
 # LAST run that touched each. Stages 19b and 20 re-use the harbor_access
@@ -1249,5 +1255,77 @@ run "robot_check_teardown" {
     timeout_seconds  = 150
     fail_message     = "finalizer cleanup incomplete: robots of cluster dev are still in Harbor after every HarborAccess was deleted, or Harbor could not be asked (see pod.log)"
     node_log_command = "docker exec {node} journalctl -u kubelet --no-pager --since -20min"
+  }
+}
+
+# ── ADR-0039: node-side uninstall. Every HarborAccess is gone (stage 20),
+# so nothing waits for the bridge's finalizers. helm uninstall runs the
+# chart's pre-delete hook: it switches the plugin DaemonSet to
+# INSTALL_ACTION=remove, every node's installer takes the provider entry,
+# the kubelet flags (the last patch install on kind) and the files off the
+# node and restarts kubelet, and the hook waits for every node's report
+# before Helm deletes the release. The run has a module of its own, so the
+# bridge state keeps bridge_mtls as its last run and the teardown order
+# above stays; the helm provider then finds the release gone and drops it.
+run "node_uninstall" {
+  command = apply
+  module {
+    source = "./modules/helm-uninstall"
+  }
+  variables {
+    kubeconfig = run.cluster.kubeconfig
+    release    = run.bridge_mtls.release
+    namespace  = run.bridge_mtls.namespace
+    node_names = run.cluster.node_names
+  }
+}
+
+# On every node: nothing of the install left (bridge_mtls turned mTLS on, so
+# the client pair was there), the flags gone from /etc/default/kubelet and
+# from the running kubelet, which is active; the node lock stays (lock
+# files are never removed, ADR-0039 decision 2.2). In the cluster: every
+# node Ready, the DaemonSet and the hook's objects gone.
+run "node_uninstall_check" {
+  command = apply
+  module {
+    source = "./modules/node-check"
+  }
+  variables {
+    kubeconfig     = run.cluster.kubeconfig
+    name           = "node-uninstall-check"
+    node_names     = run.cluster.node_names
+    node_script    = <<-SH
+      set -eu
+      bin=/etc/kubernetes/credential-provider
+      cfg=/etc/kubernetes/credential-provider-config
+      for f in $bin/harbor-bridge-plugin $bin/harbor-bridge-plugin.entry \
+               $cfg/credential-provider-config.yaml $cfg/harbor-bridge-ca.crt \
+               $cfg/harbor-bridge-client.crt $cfg/harbor-bridge-client.key \
+               /var/lib/harbor-bridge/installer-state.json; do
+        for p in "$f" "$f.bak"; do
+          if [ -e "$p" ] || [ -L "$p" ]; then echo "left behind: $p"; exit 1; fi
+        done
+      done
+      if grep -q -- --image-credential-provider /etc/default/kubelet; then
+        echo "kubelet flags left in /etc/default/kubelet:"; cat /etc/default/kubelet; exit 1
+      fi
+      systemctl is-active --quiet kubelet || { echo "kubelet is not active"; systemctl status kubelet --no-pager; exit 1; }
+      pid=$(systemctl show --property=MainPID --value kubelet)
+      if tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q -- --image-credential-provider; then
+        echo "kubelet still runs with the flags:"; tr '\0' ' ' < "/proc/$pid/cmdline"; exit 1
+      fi
+      [ -e /run/harbor-bridge-installer.lock ] || { echo "the node lock file is gone"; exit 1; }
+      echo "nothing of harbor-bridge-plugin left; kubelet $pid active without credential providers"
+    SH
+    cluster_script = <<-SH
+      set -eu
+      k wait --for=condition=Ready node --all --timeout=120s
+      if k -n ${run.bridge_mtls.namespace} get daemonset ${run.bridge_mtls.release}-plugin >/dev/null 2>&1; then
+        echo "the plugin DaemonSet is still there"; exit 1
+      fi
+      left=$(k -n ${run.bridge_mtls.namespace} get jobs,serviceaccounts,roles,rolebindings -l app.kubernetes.io/component=plugin-uninstall -o name)
+      if [ -n "$left" ]; then echo "hook objects left: $left"; exit 1; fi
+    SH
+    fail_message   = "ADR-0039 regression: helm uninstall left the plugin on a node, or left kubelet down or wired"
   }
 }

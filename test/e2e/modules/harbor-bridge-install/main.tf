@@ -338,6 +338,10 @@ resource "helm_release" "bridge" {
   timeout   = 600
   wait      = true
   atomic    = false # the plugin DaemonSet restarts kubelet — be patient
+  # The chart's pre-delete hook has every node remove the plugin
+  # (ADR-0039). The node_uninstall stage runs it on purpose with the helm
+  # CLI; the cleanup after a failed stage must not wait for it.
+  disable_webhooks = true
 
   values = [yamlencode({
     clusterName = var.cluster_name
@@ -477,6 +481,11 @@ resource "kubernetes_service_v1" "bridge_pods" {
 
 output "namespace" {
   value = kubernetes_namespace_v1.this.metadata[0].name
+}
+
+output "release" {
+  value       = helm_release.bridge.name
+  description = "Helm release name of the bridge (and of its plugin DaemonSet, <release>-plugin)."
 }
 
 output "bridge_replicas" {
