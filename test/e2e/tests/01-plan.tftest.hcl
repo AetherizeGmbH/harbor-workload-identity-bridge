@@ -3,7 +3,8 @@
 # see modules/harbor-bridge-install/main.tf) are mocked, so the plan graph is
 # exercised with fabricated provider values. These runs assert on what the
 # module DERIVES at plan time — chiefly the yamlencode()'d helm values, the
-# namespace, and the ClusterIssuer manifest — across many input combinations.
+# namespace, and the ClusterIssuer manifests (only with issuer_name) — across
+# many input combinations.
 # This catches variable-plumbing, default-expansion, and validation regressions
 # fast, without standing up the kind+Harbor stack that 01-bridge.tftest.hcl does.
 #
@@ -49,9 +50,10 @@ variables {
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 # Nothing overridden beyond the required baseline. Pins every value the module
-# hardcodes or defaults: namespace, issuer, the chart's static knobs (replicas,
-# logLevel, install.mode, tls.enabled), and the bridge_resources default
-# expansion (optional() Burstable defaults: limits.memory ≫ requests.memory).
+# hardcodes or defaults: namespace, no issuer (the chart's release CA), the
+# chart's static knobs (replicas, logLevel, install.mode, tls.enabled), and the
+# bridge_resources default expansion (optional() Burstable defaults:
+# limits.memory ≫ requests.memory).
 run "defaults" {
   command = plan
   module {
@@ -62,23 +64,24 @@ run "defaults" {
     condition     = output.namespace == "harbor-bridge-system"
     error_message = "default namespace should be harbor-bridge-system"
   }
-  assert {
-    condition     = strcontains(kubectl_manifest.cluster_issuer.yaml_body, "name: harbor-bridge-ca")
-    error_message = "default ClusterIssuer name should be harbor-bridge-ca"
-  }
-  # A CA, not a selfSigned issuer: bridge.mTLS needs the serving and the
-  # client certificate signed by one CA (the bridge trusts its TLS
-  # Secret's ca.crt for client certificates).
+  # ADR-0042: by default the chart creates the release's CA. The module
+  # creates no issuer and names none, so every stage that uses the
+  # defaults (bridge_install, bridge_upgrade, bridge_mtls) runs on the
+  # path a first install takes.
   assert {
     condition = (
-      yamldecode(kubectl_manifest.cluster_issuer.yaml_body).spec == { ca = { secretName = "harbor-bridge-ca-root" } }
-      && yamldecode(kubectl_manifest.root_ca.yaml_body).metadata.namespace == "cert-manager"
-      && yamldecode(kubectl_manifest.root_ca.yaml_body).spec.isCA == true
-      && yamldecode(kubectl_manifest.root_ca.yaml_body).spec.secretName == "harbor-bridge-ca-root"
-      && yamldecode(kubectl_manifest.root_ca.yaml_body).spec.issuerRef.name == "harbor-bridge-ca-bootstrap"
-      && yamldecode(kubectl_manifest.bootstrap_issuer.yaml_body).spec == { selfSigned = {} }
+      length(kubectl_manifest.bootstrap_issuer) == 0
+      && length(kubectl_manifest.root_ca) == 0
+      && length(kubectl_manifest.cluster_issuer) == 0
     )
-    error_message = "the ClusterIssuer must be a CA issuing from the root harbor-bridge-ca-root (in cert-manager's namespace), which the selfSigned bootstrap issuer signs"
+    error_message = "without issuer_name the module must create no bootstrap issuer, root CA or ClusterIssuer: the chart creates the CA"
+  }
+  assert {
+    condition = (
+      !contains(keys(yamldecode(helm_release.bridge.values[0]).tls), "issuerRef")
+      && !contains(keys(yamldecode(helm_release.bridge.values[0]).bridge.mTLS), "clientIssuerRef")
+    )
+    error_message = "without issuer_name the values must name no tls.issuerRef and no bridge.mTLS.clientIssuerRef (the chart's release CA, ADR-0042)"
   }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).bridge.mTLS.enabled == false && output.mtls_client_secret == ""
@@ -99,14 +102,6 @@ run "defaults" {
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).tls.enabled == true
     error_message = "tls.enabled is hardcoded true by the module"
-  }
-  assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).tls.issuerRef.kind == "ClusterIssuer"
-    error_message = "tls.issuerRef.kind should be ClusterIssuer"
-  }
-  assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name == "harbor-bridge-ca"
-    error_message = "tls.issuerRef.name should track the default issuer_name"
   }
   assert {
     condition     = yamldecode(helm_release.bridge.values[0]).plugin.install.mode == "auto"
@@ -266,10 +261,12 @@ run "one_release_keys_absent" {
   }
 }
 
-# ── Custom issuer name ───────────────────────────────────────────────────────
+# ── Named issuer (second release) ────────────────────────────────────────────
 # issuer_name feeds BOTH the ClusterIssuer manifest AND the chart's
 # tls.issuerRef.name — assert they stay in lockstep so the serving cert
-# references an issuer that actually exists.
+# references an issuer that actually exists. A CA, not a selfSigned issuer:
+# bridge.mTLS needs the serving and the client certificate signed by one CA
+# (the bridge trusts its TLS Secret's ca.crt for client certificates).
 run "custom_issuer" {
   command = plan
   module {
@@ -280,22 +277,33 @@ run "custom_issuer" {
   }
 
   assert {
-    condition     = strcontains(kubectl_manifest.cluster_issuer.yaml_body, "name: prod-bridge-ca")
+    condition     = strcontains(kubectl_manifest.cluster_issuer[0].yaml_body, "name: prod-bridge-ca")
     error_message = "ClusterIssuer manifest should carry the overridden issuer_name"
   }
   assert {
-    condition     = yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name == "prod-bridge-ca"
-    error_message = "tls.issuerRef.name must match the ClusterIssuer name"
+    condition = (
+      yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name == "prod-bridge-ca"
+      && yamldecode(helm_release.bridge.values[0]).tls.issuerRef.kind == "ClusterIssuer"
+    )
+    error_message = "tls.issuerRef must name the ClusterIssuer"
   }
   assert {
-    condition     = yamldecode(kubectl_manifest.cluster_issuer.yaml_body).spec.ca.secretName == yamldecode(kubectl_manifest.root_ca.yaml_body).spec.secretName
-    error_message = "the CA ClusterIssuer must issue from the root Certificate's Secret"
+    condition = (
+      yamldecode(kubectl_manifest.cluster_issuer[0].yaml_body).spec == { ca = { secretName = "prod-bridge-ca-root" } }
+      && yamldecode(kubectl_manifest.root_ca[0].yaml_body).metadata.namespace == "cert-manager"
+      && yamldecode(kubectl_manifest.root_ca[0].yaml_body).spec.isCA == true
+      && yamldecode(kubectl_manifest.root_ca[0].yaml_body).spec.secretName == "prod-bridge-ca-root"
+      && yamldecode(kubectl_manifest.root_ca[0].yaml_body).spec.issuerRef.name == "prod-bridge-ca-bootstrap"
+      && yamldecode(kubectl_manifest.bootstrap_issuer[0].yaml_body).spec == { selfSigned = {} }
+    )
+    error_message = "the ClusterIssuer must be a CA issuing from the root prod-bridge-ca-root (in cert-manager's namespace), which the selfSigned bootstrap issuer signs"
   }
 }
 
 # ── mTLS (bridge_mtls stage) ─────────────────────────────────────────────────
-# The client certificate must come from the same CA issuer as the serving
-# certificate.
+# The client certificate must come from the same CA as the serving
+# certificate: by default the chart's release CA signs both, so the values
+# name no issuer for either.
 run "mtls" {
   command = plan
   module {
@@ -311,14 +319,35 @@ run "mtls" {
   }
   assert {
     condition = (
-      yamldecode(helm_release.bridge.values[0]).bridge.mTLS.clientIssuerRef.name == yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name
-      && yamldecode(helm_release.bridge.values[0]).bridge.mTLS.clientIssuerRef.kind == "ClusterIssuer"
+      !contains(keys(yamldecode(helm_release.bridge.values[0]).bridge.mTLS), "clientIssuerRef")
+      && !contains(keys(yamldecode(helm_release.bridge.values[0]).tls), "issuerRef")
     )
-    error_message = "the plugin's client certificate must come from the issuer of the serving certificate"
+    error_message = "without issuer_name the release CA must sign both certificates: no tls.issuerRef, no bridge.mTLS.clientIssuerRef"
   }
   assert {
     condition     = output.mtls_client_secret == "harbor-bridge-plugin-mtls-client"
     error_message = "mtls_client_secret should name the chart's plugin client-certificate Secret"
+  }
+}
+
+# With a named issuer, it signs the client certificate too.
+run "mtls_custom_issuer" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    mtls        = true
+    issuer_name = "prod-bridge-ca"
+  }
+
+  assert {
+    condition = (
+      yamldecode(helm_release.bridge.values[0]).bridge.mTLS.clientIssuerRef.name == "prod-bridge-ca"
+      && yamldecode(helm_release.bridge.values[0]).bridge.mTLS.clientIssuerRef.kind == "ClusterIssuer"
+      && yamldecode(helm_release.bridge.values[0]).tls.issuerRef.name == "prod-bridge-ca"
+    )
+    error_message = "with issuer_name the plugin's client certificate must come from the issuer of the serving certificate"
   }
 }
 

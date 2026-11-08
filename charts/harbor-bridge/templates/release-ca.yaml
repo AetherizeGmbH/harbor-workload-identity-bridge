@@ -1,0 +1,57 @@
+{{- if include "harbor-bridge.releaseCA" . }}
+{{/*
+ADR-0042: without tls.issuerRef.name the chart creates a CA for the
+release. A selfSigned Issuer signs the CA certificate, and the CA Issuer
+signs the serving certificate and, with bridge.mTLS, the plugin's client
+certificate. ca.crt in their Secrets is this CA certificate, the one the
+plugin pins on every node and the bridge trusts for client certificates.
+rotationPolicy Never keeps the key when cert-manager renews the CA, so a
+renewed CA certificate verifies every certificate the old one signed.
+A namespaced Issuer signs only Certificates in its own namespace.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "harbor-bridge.releaseCA.selfSignedName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "harbor-bridge.releaseCA.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  secretName: {{ include "harbor-bridge.releaseCA.name" . }}
+  duration: 87600h     # 10 years
+  renewBefore: 8760h   # 1 year
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  subject:
+    organizations: [aetherize.harbor-workload-identity-bridge]
+  {{- /* x509 limits a common name to 64 characters. */}}
+  commonName: {{ include "harbor-bridge.releaseCA.name" . | trunc 64 | trimSuffix "-" }}
+  issuerRef:
+    name: {{ include "harbor-bridge.releaseCA.selfSignedName" . }}
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "harbor-bridge.releaseCA.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor-bridge.bridge.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ include "harbor-bridge.releaseCA.name" . }}
+{{- end }}

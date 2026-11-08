@@ -13,6 +13,13 @@
                  Label {{ .Release.Namespace }} with pod-security.kubernetes.io/enforce=restricted.
 {{- end }}
   Bridge image : {{ include "harbor-bridge.bridge.image" . }} (replicas: {{ .Values.bridge.replicas }})
+{{- if include "harbor-bridge.releaseCA" . }}
+  TLS          : Issuer {{ include "harbor-bridge.releaseCA.name" . }}, a CA this release created (ADR-0042)
+{{- else if .Values.tls.enabled }}
+  TLS          : {{ .Values.tls.issuerRef.kind }} {{ .Values.tls.issuerRef.name }}
+{{- else }}
+  TLS          : Secret {{ .Values.tls.existingSecret }} (tls.existingSecret)
+{{- end }}
 {{- if .Values.plugin.enabled }}
   Plugin image : {{ include "harbor-bridge.plugin.image" . }} (install mode: {{ .Values.plugin.install.mode }})
   Match images : {{ include "harbor-bridge.plugin.matchImages" . | fromJsonArray | join ", " }}{{ if not .Values.plugin.matchImages }} (from harbor.url){{ end }}
@@ -115,6 +122,9 @@ NEXT STEPS
 {{- if .Values.bridge.mTLS.enabled }}
            # mTLS: a client certificate from the CA in ca.crt of Secret
            # {{ include "harbor-bridge.tlsSecretName" . }}. The chart issues none with plugin.enabled=false.
+{{- if include "harbor-bridge.releaseCA" . }}
+           # A Certificate in namespace {{ .Release.Namespace }} can use that CA's Issuer {{ include "harbor-bridge.releaseCA.name" . }}.
+{{- end }}
            - name: HARBOR_BRIDGE_CLIENT_CERT
              value: "<path to the client certificate on the node>"
            - name: HARBOR_BRIDGE_CLIENT_KEY
@@ -191,12 +201,21 @@ restart.{{ if .Values.plugin.enabled }} The installer copies ca.crt to the nodes
 
 mTLS enabled — the bridge rejects plugin connections without a client
 certificate that chains to the CA in ca.crt of Secret {{ include "harbor-bridge.tlsSecretName" . }}
-{{- if .Values.plugin.enabled }}
+{{- if and .Values.plugin.enabled (include "harbor-bridge.mTLS.clientIssuerName" .) }}
 (bridge.mTLS.clientIssuerRef must issue from that CA)
+{{- else if .Values.plugin.enabled }}
+(Issuer {{ include "harbor-bridge.releaseCA.name" . }} issues the plugin's client certificate)
 {{- end }}.
 {{- if or .Values.tls.enabled .Values.plugin.enabled }}
-Verify cert-manager issued {{ if and .Values.tls.enabled .Values.plugin.enabled }}both certificates{{ else }}the certificate{{ end }}:
-{{ if .Values.tls.enabled }}
+{{- $certs := 0 }}
+{{- if include "harbor-bridge.releaseCA" . }}{{ $certs = add1 $certs }}{{ end }}
+{{- if .Values.tls.enabled }}{{ $certs = add1 $certs }}{{ end }}
+{{- if .Values.plugin.enabled }}{{ $certs = add1 $certs }}{{ end }}
+Verify cert-manager issued {{ if eq $certs 1 }}the certificate{{ else if eq $certs 2 }}both certificates{{ else }}all three certificates{{ end }}:
+{{ if include "harbor-bridge.releaseCA" . }}
+  kubectl -n {{ .Release.Namespace }} get certificate {{ include "harbor-bridge.releaseCA.name" . }}
+{{- end }}
+{{- if .Values.tls.enabled }}
   kubectl -n {{ .Release.Namespace }} get certificate {{ include "harbor-bridge.tlsSecretName" . }}
 {{- end }}
 {{- if .Values.plugin.enabled }}

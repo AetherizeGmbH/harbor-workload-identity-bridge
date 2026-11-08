@@ -745,7 +745,7 @@ spec:
     - server auth
   issuerRef:
     name: harbor-bridge-ca
-    kind: ClusterIssuer
+    kind: Issuer
     group: cert-manager.io
 
 ---
@@ -776,8 +776,77 @@ spec:
     - client auth
   issuerRef:
     name: harbor-bridge-ca
-    kind: ClusterIssuer
+    kind: Issuer
     group: cert-manager.io
+
+---
+# Source: harbor-workload-identity-bridge/templates/release-ca.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-bridge-ca
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.16.0
+    app.kubernetes.io/version: "0.16.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  isCA: true
+  secretName: harbor-bridge-ca
+  duration: 87600h     # 10 years
+  renewBefore: 8760h   # 1 year
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  subject:
+    organizations: [aetherize.harbor-workload-identity-bridge]
+  commonName: harbor-bridge-ca
+  issuerRef:
+    name: harbor-bridge-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+
+---
+# Source: harbor-workload-identity-bridge/templates/release-ca.yaml
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: harbor-bridge-selfsigned
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.16.0
+    app.kubernetes.io/version: "0.16.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  selfSigned: {}
+
+---
+# Source: harbor-workload-identity-bridge/templates/release-ca.yaml
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: harbor-bridge-ca
+  namespace: harbor-bridge-system
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.16.0
+    app.kubernetes.io/version: "0.16.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: bridge
+spec:
+  ca:
+    secretName: harbor-bridge-ca
 
 ---
 # Source: harbor-workload-identity-bridge/templates/bridge-servicemonitor.yaml

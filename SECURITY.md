@@ -572,11 +572,12 @@ Operator choices:
   Pod Security `enforce: privileged`. The bridge namespace can then
   enforce `restricted`, and write access to it no longer means root on
   every node. The bridge CA reaches the plugin namespace through a
-  trust-manager `Bundle` (required in this mode); the bridge gets no
-  access to the plugin namespace. Without it, the release namespace must
-  allow privileged pods, and **write access to it (create pods, edit the
-  plugin ConfigMap or the TLS Secret) is equivalent to root on every
-  node**: restrict it like cluster-admin.
+  trust-manager `Bundle` (required in this mode, together with a named
+  `tls.issuerRef`); the bridge gets no access to the plugin namespace.
+  Without it, the release namespace must allow privileged pods, and
+  **write access to it (create pods, edit the plugin ConfigMap or the TLS
+  Secret) is equivalent to root on every node**: restrict it like
+  cluster-admin.
 - `plugin.install.mode: none` is the least-privilege configuration:
   files only, no `hostPID`, no privileged container, and only the two
   narrow `plugin.hostBinaryDir`/`hostConfigDir` hostPath mounts. The
@@ -707,7 +708,7 @@ their own RBAC.
 | `BRIDGE_HARBOR_ADMIN_DIR` credentials | shared `admin` | Provision a per-bridge Harbor **system robot** instead: system permissions `robot` create/read/update/delete/list, plus `repository` pull and push on the projects it may grant (Harbor lets a robot create only robots whose permissions are a subset of its own) |
 | Harbor transport (`harbor.url`) | https required, no redirects followed | Plain http needs `harbor.allowInsecureHTTP: true`: the admin credentials travel on every call and robot passwords in responses. For a private CA set `harbor.caSecret` instead of falling back to http. Point `harbor.url` at the address Harbor's API answers on directly: the bridge refuses redirects, which would re-send the admin credentials to a target on the same host (in clear text if it is http://) |
 | OIDC transport (`bridge.oidcIssuer` for discovery, `bridge.oidcJWKSURL`, the discovered `jwks_uri`) | https required | Plain http is refused at startup except to a loopback host (`127.0.0.1`, `::1`, `localhost`, i.e. `kubectl proxy` in local development): the signing keys decide every credential, and anyone on a plain-http path could substitute them |
-| TLS between plugin and bridge | required (HTTPS) | Add mTLS via `BRIDGE_TLS_CLIENT_CA_FILE`; each cluster's plugin authenticates with a client cert |
+| TLS between plugin and bridge | required (HTTPS) | Add mTLS (`bridge.mTLS.enabled`, `BRIDGE_TLS_CLIENT_CA_FILE`); each cluster's plugin authenticates with a client cert. The bridge accepts any client cert its CA signed. Keep the chart's release CA (empty `tls.issuerRef.name`, ADR-0042): with cert-manager's defaults only who may create Certificates or CertificateRequests, or read Secrets, in the release namespace can get one. With a shared ClusterIssuer anyone who may create Certificates that use it can (O2) |
 | `tokenTTL` | per-CR, 5m–24h, a Go duration (`30m`, `1h`; no days) | Use 1h or less unless you have a measured pull-rate problem |
 | `bridge.tokenValidation` | `maxLifetime: 1h`, `requirePodBinding: true` | Keep both. A longer `maxLifetime` only admits longer-lived hand-minted tokens; a shorter one refuses kubelet's one-hour tokens unless your token issuer caps lifetimes lower. `requirePodBinding: false` is for local development only |
 | `plugin.install.mode` | `auto` | `none` for the least privilege (no `hostPID`, no privileged container, two narrow hostPath mounts; you wire the kubelet flags). `plugin.enabled: false` for no node agent at all |
@@ -719,7 +720,7 @@ their own RBAC.
 | `HarborAccess` authorship | any principal RBAC-granted `create harboraccesses` | **Cluster-privileged** — whoever authors a CR grants any project to any SA identity. Restrict to the platform team; gate any tenant-writable path behind an admission policy constraining projects / `serviceAccountRef` per namespace. See *Unauthorized HarborAccess authorship* above |
 | Bridge & plugin image refs | mutable tag (chart `AppVersion`) | Pin by digest (`bridge.image.digest` / `plugin.image.digest`) and verify image signatures at admission — a re-pointed tag silently changes the binary kubelet exec's on every node |
 | `/metrics` endpoint | plain HTTP on port 8080, pod network only (ClusterIP Service `<release>-metrics`), never on the NodePort | Restrict it with a NetworkPolicy to your Prometheus if the pod network is shared. The series are aggregate counts only — no secrets, subjects, robots, or images |
-| `tls.enabled` | `true` (cert-manager) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart |
+| `tls.enabled` | `true` (cert-manager; a CA the chart creates for the release unless `tls.issuerRef.name` names an issuer, ADR-0042) | `false` still serves TLS: it switches to an operator-provided Secret (`tls.existingSecret`). The bridge reloads a renewed certificate without a restart. A named issuer should be a CA issuer: a selfSigned one changes the CA the nodes pin with every renewal |
 | `harbor.robotNamePrefix` | `robot$` | Match Harbor's `robot_name_prefix`. On a mismatch the bridge cannot recognise its robots and stops with an error that points at the prefix: every HarborAccess reports `HarborError`, deletions wait (`DeletionBlocked`), and the janitor deletes none of the bridge's robots. A robot created under a mismatch is deleted again at once, and the data plane serves no robot Secret (`503`, `reason=secret_for_previous_identity`). An empty Harbor `robot_name_prefix` cannot be matched: an empty value selects `robot$` (open decision, docs/roadmap.md) |
 | Go toolchain & dependencies | pinned in `go.mod` | Keep current — `go 1.26.0` is a security floor and the `toolchain` directive pins the patched release. The release images are built in a `golang` image pinned to that release, and the image build fails if its Go is older than the `toolchain` line (`hack/toolchaincheck`); Renovate bumps the two together. Renovate plus a CI `govulncheck` step keep reachable CVEs from regressing |
 
