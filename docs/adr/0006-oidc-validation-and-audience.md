@@ -9,11 +9,12 @@ chart:**
   `https://kubernetes.default.svc.cluster.local` (`bridge.oidcIssuer`), the
   issuer kubeadm and kind write into their tokens. It must equal the
   cluster's issuer byte for byte.
-- The chart binds no issuer-discovery role. The bridge reads OIDC discovery
-  and the JWKS with its own ServiceAccount token under Kubernetes' default
-  `system:service-account-issuer-discovery` ClusterRoleBinding, which grants
-  the role to every ServiceAccount; a cluster that removed that binding must
-  grant the role to the bridge itself.
+- The chart does not bind the issuer-discovery role. Since 0.12.2 the
+  bridge's own ClusterRole holds that role's rules (`get` on the OIDC
+  discovery and JWKS URLs), so the bridge does not depend on Kubernetes'
+  default binding of `system:service-account-issuer-discovery` to every
+  ServiceAccount. Before, a cluster that removed that binding had to grant
+  the role to the bridge itself.
 - [ADR-0026](0026-audience-pinning-and-harboraccess-selector.md) pins one
   served audience per bridge (`plugin.audience`): a HarborAccess must name
   exactly that audience or is refused as `AudienceMismatch`.

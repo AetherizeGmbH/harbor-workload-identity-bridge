@@ -7,7 +7,7 @@
 | 0003 | [Persistent Harbor robots per HarborAccess CR](0003-persistent-robots-per-harboraccess.md) | Accepted (naming superseded by 0009 and 0018; docker-token and password points reversed by 0013; label adoption replaced by the description contract of 0012; rotation and deletion amended by 0023) |
 | 0004 | [trustPolicy as a first-class CRD field](0004-trust-policy-as-crd-field.md)            | Accepted |
 | 0005 | [Docker token issuance via Harbor /service/token](0005-docker-token-via-service-token.md) | Superseded by 0013 |
-| 0006 | [OIDC validation strategy and audience binding](0006-oidc-validation-and-audience.md)  | Accepted (default issuer is `https://kubernetes.default.svc.cluster.local`; the chart binds no issuer-discovery role; audience pinned by 0026; extended by 0028) |
+| 0006 | [OIDC validation strategy and audience binding](0006-oidc-validation-and-audience.md)  | Accepted (default issuer is `https://kubernetes.default.svc.cluster.local`; the bridge's ClusterRole holds the issuer-discovery rules; audience pinned by 0026; extended by 0028) |
 | 0007 | [Cache invalidation when HarborAccess CRs change](0007-cache-invalidation-on-cr-change.md) | Superseded by 0013 |
 | 0008 | [Plugin-to-bridge transport: NodePort](0008-plugin-to-bridge-transport-nodeport.md)    | Accepted (amended by 0025; the chart supports only a fixed `service.nodePort`) |
 | 0009 | [Multi-cluster topology](0009-multi-cluster-topology.md)                               | Accepted (naming scheme + hyphen-prefix caveat superseded by 0018; §6 "stops without touching Harbor" superseded by 0030) |
