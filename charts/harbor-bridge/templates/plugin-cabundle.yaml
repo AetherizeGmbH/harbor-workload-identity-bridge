@@ -12,15 +12,15 @@ metadata:
     {{- include "harbor-bridge.plugin.labels" . | nindent 4 }}
 spec:
   sources:
-    {{- with .Values.plugin.caBundle.source.secret.name }}
+    {{- with dig "caBundle" "source" "secret" "name" "" .Values.plugin }}
     - secret:
         name: {{ . | quote }}
-        key: {{ $.Values.plugin.caBundle.source.secret.key | quote }}
+        key: {{ dig "caBundle" "source" "secret" "key" "ca.crt" $.Values.plugin | quote }}
     {{- end }}
-    {{- with .Values.plugin.caBundle.source.configMap.name }}
+    {{- with dig "caBundle" "source" "configMap" "name" "" .Values.plugin }}
     - configMap:
         name: {{ . | quote }}
-        key: {{ $.Values.plugin.caBundle.source.configMap.key | quote }}
+        key: {{ dig "caBundle" "source" "configMap" "key" "ca.crt" $.Values.plugin | quote }}
     {{- end }}
   target:
     configMap:

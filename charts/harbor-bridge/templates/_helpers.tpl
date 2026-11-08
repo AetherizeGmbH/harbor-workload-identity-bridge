@@ -218,7 +218,7 @@ harbor.aetherize.io/robot
 {{- if and (kindIs "bool" $leaderElection) (not $leaderElection) (gt (int .Values.bridge.replicas) 1) -}}
 {{- fail (printf "bridge.leaderElection=false with bridge.replicas=%v: every replica would run the reconciler and the janitor, which only the leader may run (ADR-0025). They race on robot creation and password rotation and can leave a robot Secret with a password Harbor has already replaced. Leave bridge.leaderElection unset (on when bridge.replicas > 1) or set it to true." .Values.bridge.replicas) -}}
 {{- end -}}
-{{- $burst := .Values.bridge.rateLimit.burst -}}
+{{- $burst := dig "burst" 100 (.Values.bridge.rateLimit | default dict) -}}
 {{- $burstOK := false -}}
 {{- if or (kindIs "float64" $burst) (kindIs "int64" $burst) (kindIs "int" $burst) -}}
 {{- $burstOK = and (eq (float64 (int64 $burst)) (float64 $burst)) (ge (int64 $burst) 1) -}}
@@ -236,10 +236,9 @@ harbor.aetherize.io/robot
 {{- fail (printf "plugin.namespace %q must be a DNS label." .Values.plugin.namespace) -}}
 {{- end -}}
 {{- if .Values.plugin.enabled -}}
-{{- $src := .Values.plugin.caBundle.source -}}
 {{- $sources := 0 -}}
-{{- if $src.secret.name -}}{{- $sources = add1 $sources -}}{{- end -}}
-{{- if $src.configMap.name -}}{{- $sources = add1 $sources -}}{{- end -}}
+{{- if dig "caBundle" "source" "secret" "name" "" .Values.plugin -}}{{- $sources = add1 $sources -}}{{- end -}}
+{{- if dig "caBundle" "source" "configMap" "name" "" .Values.plugin -}}{{- $sources = add1 $sources -}}{{- end -}}
 {{- if ne $sources 1 -}}
 {{- fail "plugin.namespace is set, so the plugin runs in its own namespace and needs the bridge CA through trust-manager: set exactly one of plugin.caBundle.source.secret.name or plugin.caBundle.source.configMap.name (a Secret/ConfigMap in trust-manager's trust namespace holding the CA that signs the bridge's serving certificate). ADR-0027." -}}
 {{- end -}}
@@ -471,11 +470,21 @@ float64 of 1000000 or more would otherwise render as 1e+06.
 validateRequiredValues admits only positive whole numbers.
 */}}
 {{- define "harbor-bridge.rateLimitBurst" -}}
-{{- if kindIs "string" .Values.bridge.rateLimit.burst -}}
-{{- .Values.bridge.rateLimit.burst -}}
+{{- $burst := dig "burst" 100 (.Values.bridge.rateLimit | default dict) -}}
+{{- if kindIs "string" $burst -}}
+{{- $burst -}}
 {{- else -}}
-{{- int64 .Values.bridge.rateLimit.burst -}}
+{{- int64 $burst -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+bridge.rateLimit came with 0.7.0. `helm upgrade --reuse-values` from an
+older release keeps values without it, so the burst (above, and in
+validateRequiredValues) and perSource default as values.yaml does.
+*/}}
+{{- define "harbor-bridge.rateLimitPerSource" -}}
+{{- dig "perSource" 20 (.Values.bridge.rateLimit | default dict) -}}
 {{- end -}}
 
 {{/* Leader election is auto-enabled when replicas > 1 unless forced. */}}
