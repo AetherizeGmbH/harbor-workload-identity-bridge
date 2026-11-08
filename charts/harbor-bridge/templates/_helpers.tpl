@@ -198,6 +198,12 @@ harbor.aetherize.io/robot
        in-cluster apiserver (ADR-0044). */ -}}
 {{- with .Values.bridge.oidcIssuer -}}
 {{- include "harbor-bridge.validateURL" (list "bridge.oidcIssuer" . "a user:password@ part never takes effect (a token's iss claim never carries one, so no token would match) and only ends up in logs") -}}
+{{- /* The bridge compares the issuer as URL parsing writes it back, which
+       lower-cases the scheme, and refuses an issuer that parsing changes
+       (bridge/controlplane/config.go). */ -}}
+{{- if not (regexMatch "^https?://" (trim (toString .))) -}}
+{{- fail "bridge.oidcIssuer must start with a lower-case http:// or https://: the bridge compares the issuer byte for byte with each token's iss claim, after URL parsing, which writes the scheme in lower case, so it refuses any other spelling at startup." -}}
+{{- end -}}
 {{- end -}}
 {{- with .Values.bridge.oidcJWKSURL -}}
 {{- include "harbor-bridge.validateURL" (list "bridge.oidcJWKSURL" . "a user:password@ part here would be stored in plain text in the bridge Deployment and the Helm release. For a JWKS endpoint that needs credentials, leave bridge.oidcJWKSURL empty and set BRIDGE_OIDC_JWKS_URL through bridge.extraEnv from a Secret (valueFrom.secretKeyRef)") -}}

@@ -104,7 +104,8 @@ cases=(
   "bridge.oidcJWKSURL over plain http|--set|bridge.oidcJWKSURL=http://jwks.example.com/keys|bridge.oidcJWKSURL uses plain http"
   "bridge.oidcJWKSURL over plain http to a name that starts like a loopback address|--set|bridge.oidcJWKSURL=http://127.0.0.1.example.com/keys|bridge.oidcJWKSURL uses plain http"
   "bridge.oidcIssuer over plain http for discovery|--set|bridge.oidcIssuer=http://issuer.example.com|bridge.oidcIssuer uses plain http"
-  "bridge.oidcIssuer over plain http in upper case|--set|bridge.oidcIssuer=HTTP://issuer.example.com|bridge.oidcIssuer uses plain http"
+  "bridge.oidcIssuer over plain http in upper case|--set|bridge.oidcIssuer=HTTP://issuer.example.com|bridge.oidcIssuer must start with a lower-case http:// or https://"
+  "bridge.oidcIssuer with an upper-case scheme|--set|bridge.oidcIssuer=HTTPS://issuer.example.com|bridge.oidcIssuer must start with a lower-case http:// or https://"
   "bridge.leaderElection not a boolean|--set|bridge.leaderElection=on|bridge.leaderElection must be true, false or null (null: on when bridge.replicas > 1), but it was read as the string on"
   "bridge.leaderElection=false with several replicas|--set|bridge.leaderElection=false|bridge.leaderElection=false with bridge.replicas=2: every replica would run the reconciler and the janitor"
   "bridge.harborAccessSelector value read as a boolean|--set|bridge.harborAccessSelector.eu=true|bridge.harborAccessSelector.eu must be a string, but it was read as the bool true"
@@ -442,7 +443,7 @@ fi
 # The NOTES name the issuer a HarborAccess must carry: the set one, or how
 # to print the one the bridge reads from the apiserver.
 if out=$(notes -f "${COMPLETE}" 2>&1) \
-   && grep -qF 'The bridge reads it from the apiserver at' <<<"${out}" \
+   && grep -qF 'The bridge reads that from the apiserver at' <<<"${out}" \
    && grep -qxF '       kubectl get --raw /.well-known/openid-configuration | jq -r .issuer' <<<"${out}" \
    && ! grep -qF 'kubernetes.default.svc.cluster.local' <<<"${out}" \
    && out=$(notes -f "${COMPLETE}" --set "bridge.oidcIssuer=${eks}" 2>&1) \
