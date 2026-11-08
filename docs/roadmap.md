@@ -215,10 +215,3 @@ limits today.
   disclosed less than a day before the release is published and signed
   without a check; one disclosed earlier is red in the daily scan of
   `main`, which does not stop the release.
-- [ ] **`make run-local` listens on all interfaces.** It sets
-  `BRIDGE_LISTEN_ADDR=:8443` and `BRIDGE_HEALTH_ADDR=:8081`, and metrics
-  default to `:8080`, so anyone on the developer's network can reach the
-  credential endpoint of a bridge that holds real robot passwords.
-  *Options:* bind `127.0.0.1` by default with an override, or keep it.
-  *Limits now:* a caller still needs a valid, pod-bound token for the
-  configured audience.
