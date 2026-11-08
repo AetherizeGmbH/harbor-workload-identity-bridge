@@ -79,7 +79,7 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "description": "true: cert-manager issues the certificate (tls.issuerRef). false: you provide it in tls.existingSecret.",
+          "description": "true: cert-manager issues the certificate (tls.issuerRef, or a CA the chart creates for the release). false: you provide it in tls.existingSecret.",
           "type": "boolean"
         },
         "existingSecret": {
@@ -87,12 +87,12 @@
           "type": "string"
         },
         "issuerRef": {
-          "description": "cert-manager issuer that signs the serving certificate.",
+          "description": "cert-manager issuer that signs the serving certificate. An empty name: a CA the chart creates for the release (ADR-0042).",
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "name": {
-              "description": "Name of the issuer. Required when tls.enabled is true.",
+              "description": "Name of the issuer. Empty: the CA the chart creates for the release (ADR-0042). Required with plugin.namespace.",
               "type": "string"
             },
             "kind": {
@@ -216,12 +216,12 @@
               "type": "boolean"
             },
             "clientIssuerRef": {
-              "description": "cert-manager CA issuer that signs the plugin's client certificates. Its CA must be the ca.crt of the bridge's TLS Secret.",
+              "description": "cert-manager CA issuer that signs the plugin's client certificates. Its CA must be the ca.crt of the bridge's TLS Secret. An empty name: the release CA's Issuer, when the chart creates one (ADR-0042).",
               "type": "object",
               "additionalProperties": false,
               "properties": {
                 "name": {
-                  "description": "Name of the issuer. Required when bridge.mTLS.enabled is true.",
+                  "description": "Name of the issuer. Required with bridge.mTLS.enabled and the chart's plugin, unless the chart creates a CA for the release (empty tls.issuerRef.name).",
                   "type": "string"
                 },
                 "kind": {
@@ -291,7 +291,7 @@
           "type": "boolean"
         },
         "namespace": {
-          "description": "Namespace of the plugin DaemonSet and its objects (ADR-0027). Empty uses the release namespace.",
+          "description": "Namespace of the plugin DaemonSet and its objects (ADR-0027). Empty uses the release namespace. Another namespace needs trust-manager and tls.issuerRef.name.",
           "type": "string"
         },
         "createNamespace": {

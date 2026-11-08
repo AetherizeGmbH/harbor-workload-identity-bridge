@@ -1,4 +1,6 @@
 # Variant that exercises every conditional template branch:
+#   - the CA the chart creates for the release (no tls.issuerRef.name,
+#     ADR-0042), which signs the serving and the client certificate
 #   - mTLS between plugin and bridge
 #   - Prometheus Operator ServiceMonitor
 clusterName: prod-eu-west
@@ -15,16 +17,10 @@ plugin:
 
 tls:
   enabled: true
-  issuerRef:
-    name: harbor-bridge-ca
-    kind: ClusterIssuer
 
 bridge:
   mTLS:
     enabled: true
-    clientIssuerRef:
-      name: harbor-bridge-ca
-      kind: ClusterIssuer
 
 metrics:
   serviceMonitor:

@@ -81,30 +81,16 @@ what the design protects against and what it does not.
      --from-literal=password='<harbor admin password>'
    ```
 
-2. Create a cert-manager issuer for the bridge's TLS certificate. A
-   self-signed issuer is enough for a first test. With `bridge.mTLS` you need
-   a CA issuer instead (see `bridge.mTLS.clientIssuerRef` in `values.yaml`).
-
-   ```bash
-   kubectl apply -f - <<'YAML'
-   apiVersion: cert-manager.io/v1
-   kind: ClusterIssuer
-   metadata: { name: harbor-bridge-ca }
-   spec: { selfSigned: {} }
-   YAML
-   ```
-
-3. Install the chart.
+2. Install the chart. cert-manager must be installed in the cluster.
 
    ```bash
    helm install harbor-bridge \
      oci://ghcr.io/aetherizegmbh/charts/harbor-workload-identity-bridge \
-     --version 0.16.0 \
+     --version 0.17.0 \
      -n harbor-bridge-system \
      --set clusterName=prod-eu-west \
      --set harbor.url=https://harbor.example.com \
-     --set harbor.adminCredsSecret.name=harbor-admin \
-     --set tls.issuerRef.name=harbor-bridge-ca
+     --set harbor.adminCredsSecret.name=harbor-admin
    ```
 
    - The tokens kubelet sends to the bridge have the audience
@@ -117,13 +103,17 @@ what the design protects against and what it does not.
      `plugin.matchImages` to registry hosts (`harbor.example.com` or
      `host:port`). Kubelet does not support globs in the path:
      `harbor.example.com/*` never matches.
+   - The chart creates a CA for the release with cert-manager. It signs the
+     bridge's TLS certificate, which the plugin verifies on every node, and
+     with `bridge.mTLS` the plugin's client certificate.
+     `tls.issuerRef.name` names your own issuer instead.
    - The plugin DaemonSet configures kubelet on every node and restarts
      kubelet once per node when the configuration changes. Running containers
      keep running. [docs/operations.md](docs/operations.md) explains the
      install modes, and [docs/platforms.md](docs/platforms.md) lists what
      happens on kind, kubeadm, GKE, EKS, AKS, Talos, k3s and RKE2.
 
-4. Create a `HarborAccess`. Its `audience` must be the audience from step 3.
+3. Create a `HarborAccess`. Its `audience` must be the audience from step 2.
    `helm install` prints it.
 
    ```bash

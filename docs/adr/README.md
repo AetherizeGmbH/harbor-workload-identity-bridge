@@ -9,7 +9,7 @@
 | 0005 | [Docker token issuance via Harbor /service/token](0005-docker-token-via-service-token.md) | Superseded by 0013 |
 | 0006 | [OIDC validation strategy and audience binding](0006-oidc-validation-and-audience.md)  | Accepted (default issuer is `https://kubernetes.default.svc.cluster.local`; the bridge's ClusterRole holds the issuer-discovery rules; audience pinned by 0026; extended by 0028) |
 | 0007 | [Cache invalidation when HarborAccess CRs change](0007-cache-invalidation-on-cr-change.md) | Superseded by 0013 |
-| 0008 | [Plugin-to-bridge transport: NodePort](0008-plugin-to-bridge-transport-nodeport.md)    | Accepted (amended by 0025; the chart supports only a fixed `service.nodePort`) |
+| 0008 | [Plugin-to-bridge transport: NodePort](0008-plugin-to-bridge-transport-nodeport.md)    | Accepted (amended by 0025; the chart supports only a fixed `service.nodePort`; refined by 0042) |
 | 0009 | [Multi-cluster topology](0009-multi-cluster-topology.md)                               | Accepted (naming scheme + hyphen-prefix caveat superseded by 0018; §6 "stops without touching Harbor" superseded by 0030) |
 | 0010 | [ServiceAccountRef as the canonical workload identity in HarborAccess](0010-service-account-ref-as-identity.md) | Accepted |
 | 0011 | [Robot password storage as per-CR Kubernetes Secret in the bridge namespace](0011-robot-password-secret-storage.md) | Accepted (Secret name superseded by 0018; the chart grants the bridge Secret access but cannot restrict others) |
@@ -43,6 +43,7 @@
 | 0039 | [Node-side uninstall](0039-node-side-uninstall.md) | Accepted (refines 0021, 0029, 0033, 0034, 0035) |
 | 0040 | [A release stops on a called vulnerability that has a fix](0040-a-release-stops-on-a-called-vulnerability-with-a-fix.md) | Accepted (amends 0036) |
 | 0041 | [The chart derives the audience and matchImages from the required values](0041-chart-derives-audience-and-match-images.md) | Accepted (refines 0021, 0026) |
+| 0042 | [The chart creates a CA for the release when no issuer is named](0042-chart-creates-a-release-ca.md) | Accepted (refines 0008) |
 | 0043 | [`trustPolicy.issuer` is optional and means the bridge's issuer](0043-trust-policy-issuer-is-optional.md) | Accepted (refines 0004, 0006) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.

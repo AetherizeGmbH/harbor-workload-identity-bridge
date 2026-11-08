@@ -16,9 +16,8 @@ plugin:
   enabled: false
   # audience: empty means harbor-bridge-<clusterName>, here harbor-bridge-prod
   # (ADR-0041). The chart still renders kubelet's RBAC for it.
-tls:
-  issuerRef:
-    name: my-cluster-issuer
+# tls.issuerRef.name: empty means a CA the chart creates for the release
+# (ADR-0042), which the nodes trust as ca.crt of Secret <fullname>-tls.
 ```
 
 The chart then renders the bridge, its Services, and the ClusterRole that lets
@@ -107,11 +106,19 @@ Notes:
   certificate carries. A node IP means a different entry per node (on Talos
   a per-node machine-config patch); a load balancer or a stable DNS name
   avoids that.
-- The CA rotates when cert-manager reissues it. With the inline form you must
-  roll the new CA out yourself; prefer a long-lived CA issuer.
+- `ca.crt` changes whenever the CA that signs the bridge certificate changes;
+  you must roll a new CA out to the nodes yourself. The chart's CA for the
+  release (empty `tls.issuerRef.name`) is valid for 10 years and keeps its
+  key when cert-manager renews it, so a CA you put on the nodes keeps
+  verifying the bridge until it expires. A selfSigned `tls.issuerRef`
+  changes `ca.crt` with every renewal of the bridge certificate (every 75
+  days).
 - With `bridge.mTLS.enabled=true` the plugin must also get
   `HARBOR_BRIDGE_CLIENT_CERT` and `HARBOR_BRIDGE_CLIENT_KEY` (file paths). The
   chart does not issue the client certificate when `plugin.enabled=false`.
+  With the chart's CA for the release, a cert-manager Certificate in the
+  release namespace with `issuerRef: {name: <fullname>-ca, kind: Issuer}`
+  and `usages: [client auth]` gets one.
 - kubelet must be 1.34 or newer (KEP-4412 ServiceAccount tokens for credential
   providers, beta and on by default).
 

@@ -11,6 +11,9 @@ default endpoint renders as `https://127.0.0.1:` without a port and the
 plugin dials port 443, so dynamic allocation needs `plugin.bridgeEndpoint`
 set by hand. mTLS is off by default, and a client certificate proves only
 that the configured client CA signed it (open decision O2, docs/roadmap.md).
+**Refined by [ADR-0042](0042-chart-creates-a-release-ca.md):** without
+`tls.issuerRef.name` the chart creates a CA for the release, which signs
+the serving certificate and, with mTLS, the plugin's client certificate.
 
 ## Context
 

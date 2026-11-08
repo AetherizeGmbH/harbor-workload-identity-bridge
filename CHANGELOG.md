@@ -1,3 +1,9 @@
+## [0.17.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.16.0...v0.17.0) (2026-11-08)
+
+### Features
+
+* **chart:** create a CA for the release when no issuer is named ([#163](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/163)) ([f98f2ec](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/f98f2eca06ebd37a0c67d025de07fa7c7af473ec))
+
 ## [0.16.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.15.0...v0.16.0) (2026-11-08)
 
 ### Features

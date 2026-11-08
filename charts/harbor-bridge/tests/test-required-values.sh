@@ -49,7 +49,14 @@ cases=(
   "malformed image digest|--set|plugin.image.digest=sha256:nothex|must be sha256:<64 hex characters>"
   "harbor.url|--set|harbor.url=|harbor.url is REQUIRED"
   "harbor.adminCredsSecret.name|--set|harbor.adminCredsSecret.name=|harbor.adminCredsSecret.name is REQUIRED"
-  "tls.issuerRef.name when tls.enabled|--set|tls.issuerRef.name=|tls.issuerRef.name is REQUIRED"
+  # ADR-0042: an empty tls.issuerRef.name means the release CA, which the
+  # plugin can use only in the release namespace; mTLS needs a client
+  # issuer from the serving certificate's CA.
+  "tls.issuerRef.name with plugin.namespace|--set|tls.issuerRef.name=,plugin.namespace=harbor-bridge-plugin,plugin.caBundle.source.secret.name=ca|tls.issuerRef.name is REQUIRED when plugin.namespace is set. Without it the chart creates a CA for the release"
+  "bridge.mTLS.clientIssuerRef.name with a named tls issuer|--set|bridge.mTLS.enabled=true|bridge.mTLS.clientIssuerRef.name is REQUIRED when bridge.mTLS.enabled=true and tls.issuerRef.name provides the serving certificate"
+  "bridge.mTLS.clientIssuerRef.name with tls.existingSecret|--set|tls.enabled=false,tls.existingSecret=bridge-tls,bridge.mTLS.enabled=true|bridge.mTLS.clientIssuerRef.name is REQUIRED when bridge.mTLS.enabled=true and tls.existingSecret provides the serving certificate"
+  "harbor.caSecret.name is the release CA's Secret|--set|tls.issuerRef.name=,harbor.caSecret.name=harbor-bridge-ca|harbor.caSecret.name=\"harbor-bridge-ca\" names a Secret that cert-manager writes for this release (one of harbor-bridge-tls, harbor-bridge-ca"
+  "harbor.adminCredsSecret.name is the serving certificate's Secret|--set|harbor.adminCredsSecret.name=harbor-bridge-tls|harbor.adminCredsSecret.name=\"harbor-bridge-tls\" names a Secret that cert-manager writes"
   "tls.existingSecret when tls disabled|--set|tls.enabled=false|tls.existingSecret is REQUIRED"
   "clusterName must be a DNS label|--set|clusterName=NotADnsLabel|does not match DNS label regex"
   "plugin.patchKubelet tombstone|--set|plugin.patchKubelet=true|plugin.patchKubelet was removed"
@@ -670,6 +677,87 @@ if out=$(render -f "${CHART_DIR}/tests/values-mtls.yaml" 2>&1) \
 else
   echo "FAIL  serving certificate has server auth only, client certificate client auth"
   grep -m 6 -E '^  secretName|- (server|client) auth|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# ADR-0042: without tls.issuerRef.name the chart creates a CA for the
+# release: a selfSigned Issuer, a CA Certificate from it that keeps its key
+# on renewal, and a CA Issuer that signs the serving certificate and, with
+# mTLS, the plugin's client certificate. With a named issuer none of it
+# renders.
+cat <<'YAML' > "${TMP}/values-release-ca.yaml"
+clusterName: prod-eu-west
+harbor:
+  url: https://harbor.example.com
+  adminCredsSecret:
+    name: harbor-admin
+YAML
+if out=$(render -f "${TMP}/values-release-ca.yaml" 2>&1) \
+   && selfsigned=$(doc_with '  name: harbor-bridge-selfsigned') \
+   && ca=$(doc_with '  secretName: harbor-bridge-ca') \
+   && issuer=$(doc_with '    secretName: harbor-bridge-ca') \
+   && serving=$(doc_with '  secretName: harbor-bridge-tls') \
+   && grep -qxF 'kind: Issuer' <<<"${selfsigned}" \
+   && grep -qxF '  selfSigned: {}' <<<"${selfsigned}" \
+   && grep -qxF 'kind: Certificate' <<<"${ca}" \
+   && grep -qxF '  name: harbor-bridge-ca' <<<"${ca}" \
+   && grep -qxF '  isCA: true' <<<"${ca}" \
+   && grep -qE '^  duration: 87600h( |$)' <<<"${ca}" \
+   && grep -qE '^  renewBefore: 8760h( |$)' <<<"${ca}" \
+   && grep -qxF '    algorithm: ECDSA' <<<"${ca}" \
+   && grep -qxF '    size: 256' <<<"${ca}" \
+   && grep -qxF '    rotationPolicy: Never' <<<"${ca}" \
+   && grep -A2 -xF '  issuerRef:' <<<"${ca}" | grep -qxF '    name: harbor-bridge-selfsigned' \
+   && grep -A2 -xF '  issuerRef:' <<<"${ca}" | grep -qxF '    kind: Issuer' \
+   && grep -qxF 'kind: Issuer' <<<"${issuer}" \
+   && grep -qxF '  name: harbor-bridge-ca' <<<"${issuer}" \
+   && grep -qxF '  ca:' <<<"${issuer}" \
+   && grep -A3 -xF '  issuerRef:' <<<"${serving}" | grep -qxF '    name: harbor-bridge-ca' \
+   && grep -A3 -xF '  issuerRef:' <<<"${serving}" | grep -qxF '    kind: Issuer' \
+   && [ "$(grep -c '^  isCA: true$' <<<"${out}")" -eq 1 ] \
+   && out=$(render -f "${COMPLETE}" 2>&1) \
+   && ! grep -qE 'isCA|selfSigned|^kind: Issuer$|harbor-bridge-ca$' <<<"$(grep -v '^    name: harbor-bridge-ca$' <<<"${out}")" \
+   && grep -A3 -xF '  issuerRef:' <<<"$(doc_with '  secretName: harbor-bridge-tls')" | grep -qxF '    kind: ClusterIssuer'; then
+  echo "PASS  without tls.issuerRef.name the release CA signs the serving certificate"
+else
+  echo "FAIL  without tls.issuerRef.name the release CA signs the serving certificate"
+  grep -m 5 -E 'issuerRef|isCA|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# ADR-0042: with mTLS and no bridge.mTLS.clientIssuerRef.name the release
+# CA's Issuer signs the plugin's client certificate; a named one wins.
+if out=$(render -f "${TMP}/values-release-ca.yaml" --set bridge.mTLS.enabled=true 2>&1) \
+   && client=$(doc_with '  secretName: harbor-bridge-plugin-mtls-client') \
+   && grep -A3 -xF '  issuerRef:' <<<"${client}" | grep -qxF '    name: harbor-bridge-ca' \
+   && grep -A3 -xF '  issuerRef:' <<<"${client}" | grep -qxF '    kind: Issuer' \
+   && out=$(render -f "${TMP}/values-release-ca.yaml" --set bridge.mTLS.enabled=true \
+     --set bridge.mTLS.clientIssuerRef.name=other-ca 2>&1) \
+   && client=$(doc_with '  secretName: harbor-bridge-plugin-mtls-client') \
+   && grep -A3 -xF '  issuerRef:' <<<"${client}" | grep -qxF '    name: other-ca' \
+   && grep -A3 -xF '  issuerRef:' <<<"${client}" | grep -qxF '    kind: ClusterIssuer'; then
+  echo "PASS  with mTLS and no clientIssuerRef the release CA signs the client certificate"
+else
+  echo "FAIL  with mTLS and no clientIssuerRef the release CA signs the client certificate"
+  grep -m 5 -E 'issuerRef|  name:|Error' <<<"${out}" || true
+  failed=$((failed+1))
+fi
+
+# The release CA needs no tls.issuerRef at all (a values file without the
+# key, or null), and a plugin.namespace without the chart's plugin uses no
+# plugin namespace. Without the chart's plugin the chart issues no client
+# certificate, so mTLS needs no client issuer then.
+if out=$(render -f "${TMP}/values-release-ca.yaml" --set tls.issuerRef=null 2>&1) \
+   && grep -qxF '  isCA: true' <<<"${out}" \
+   && out=$(render -f "${TMP}/values-release-ca.yaml" --set plugin.enabled=false \
+     --set plugin.namespace=harbor-bridge-plugin 2>&1) \
+   && grep -qxF '  isCA: true' <<<"${out}" \
+   && out=$(render -f "${COMPLETE}" --set plugin.enabled=false,bridge.mTLS.enabled=true 2>&1) \
+   && ! grep -qF 'mtls-client' <<<"${out}"; then
+  echo "PASS  release CA without tls.issuerRef, and mTLS without the chart's plugin"
+else
+  echo "FAIL  release CA without tls.issuerRef, and mTLS without the chart's plugin"
+  head -3 <<<"      got: ${out}"
   failed=$((failed+1))
 fi
 

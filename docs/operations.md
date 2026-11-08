@@ -2,8 +2,8 @@
 
 Reference for running the chart beyond the [quickstart](../README.md#quickstart): how the
 plugin DaemonSet wires kubelet, several installs on one cluster, bootstrap
-ordering, a change of `clusterName`, and a complete uninstall. Supported node platforms are in
-[platforms.md](platforms.md).
+ordering, the TLS certificates, a change of `clusterName`, and a complete
+uninstall. Supported node platforms are in [platforms.md](platforms.md).
 
 ## Node install modes and upgrades (ADR-0021)
 
@@ -239,6 +239,38 @@ pulls by the same ServiceAccount on that node until it expires.
 only for a plugin response without a cache duration, and the plugin
 always sends one.
 
+## TLS certificates (ADR-0042)
+
+The bridge always serves TLS, and the plugin on every node pins the CA in
+`ca.crt` of the bridge's TLS Secret `<fullname>-tls`. The sync container
+copies a changed `ca.crt` to the node every 60 s. With `tls.enabled` (the
+default) cert-manager issues the serving certificate:
+
+- **`tls.issuerRef.name` empty (the default):** the chart creates a CA for
+  the release in the release namespace: an Issuer `<fullname>-selfsigned`,
+  a CA Certificate and Secret `<fullname>-ca` and an Issuer `<fullname>-ca`
+  that signs the serving certificate. The CA is valid for 10 years and is
+  renewed one year before it expires, with the same key, so the CA a node
+  pins keeps verifying the bridge. With `bridge.mTLS` the same Issuer signs
+  the plugin's client certificate. With cert-manager's defaults, only who
+  may create Certificates or CertificateRequests, or read Secrets, in the
+  release namespace can get a client certificate the bridge accepts.
+- **`tls.issuerRef.name` set:** that issuer signs the serving certificate.
+  Use a CA issuer: a selfSigned issuer returns the certificate itself as
+  `ca.crt`, so every renewal (every 75 days) changes the CA the nodes pin,
+  and nodes distrust the bridge until their next sync pass. With
+  `bridge.mTLS`, `bridge.mTLS.clientIssuerRef.name` must name a CA issuer
+  whose CA is that `ca.crt`. With a shared ClusterIssuer, anyone who may
+  create Certificates that use it can get a client certificate the bridge
+  accepts (open decision O2, [roadmap.md](roadmap.md)).
+- **`plugin.namespace` set:** `tls.issuerRef.name` is required. The plugin
+  namespace gets the CA through trust-manager from a Secret or ConfigMap in
+  trust-manager's trust namespace (`plugin.caBundle.source`), and an Issuer
+  signs only Certificates in its own namespace.
+
+Switching an existing release to the release CA changes the pinned CA once
+(MIGRATION.md, 0.17.0).
+
 ## Changing clusterName
 
 A bridge owns only the robots whose names start with
@@ -288,6 +320,19 @@ finalizer is `harbor.aetherize.io/robot`, or, for a bridge with
 NOTES print the right one. An object that existed before the selector
 was set may carry both: then remove both. Helm keeps the CRD (`crds/`); delete
 it yourself when you are done.
+
+cert-manager keeps the Secrets of the chart's certificates after `helm
+uninstall`, unless it runs with `--enable-certificate-owner-ref`:
+`<fullname>-tls`, with the release CA `<fullname>-ca` (the CA's private
+key), and with mTLS `<fullname>-plugin-mtls-client` (in `plugin.namespace`
+when set). A new install with the same release name in the same namespace
+finds `<fullname>-ca` and keeps the CA. Delete these Secrets when you do
+not install again, or to start with a new CA:
+
+```bash
+kubectl -n <release namespace> delete secret --ignore-not-found \
+  <fullname>-tls <fullname>-ca <fullname>-plugin-mtls-client
+```
 
 Changing `bridge.harborAccessSelector` or `bridge.instance` later: a bridge
 that gains a selector releases the shared finalizer from the objects it
