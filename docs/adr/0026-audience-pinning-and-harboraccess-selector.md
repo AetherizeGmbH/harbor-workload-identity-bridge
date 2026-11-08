@@ -13,6 +13,8 @@ object that already had a robot has it disabled, not left alone) **and
 before the robot and releases only finalizers it set; see its known limits).
 **Refined by [ADR-0029](0029-configurable-plugin-provider-name.md):**
 several chart-managed plugins per node, one `plugin.providerName` each.
+**Refined by [ADR-0041](0041-chart-derives-audience-and-match-images.md):**
+an empty `plugin.audience` means `harbor-bridge-<clusterName>`.
 
 ## Context
 

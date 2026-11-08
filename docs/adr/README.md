@@ -42,5 +42,6 @@
 | 0038 | [The chart's values schema rejects unknown keys](0038-chart-values-schema-rejects-unknown-keys.md) | Accepted |
 | 0039 | [Node-side uninstall](0039-node-side-uninstall.md) | Accepted (refines 0021, 0029, 0033, 0034, 0035) |
 | 0040 | [A release stops on a called vulnerability that has a fix](0040-a-release-stops-on-a-called-vulnerability-with-a-fix.md) | Accepted (amends 0036) |
+| 0041 | [The chart derives the audience and matchImages from the required values](0041-chart-derives-audience-and-match-images.md) | Accepted (refines 0021, 0026) |
 
 Format: [Michael Nygard](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions). Process: see ADR-0001.
