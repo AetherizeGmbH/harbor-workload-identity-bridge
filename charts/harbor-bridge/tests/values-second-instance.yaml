@@ -9,8 +9,8 @@
 # namespace harbor-bridge-eu (Makefile, CHART_CASES). The release name
 # names its objects, cluster-scoped RBAC, selector labels, the plugin's
 # mTLS CN and its finalizer instance; the namespace keeps its
-# leader-election Lease and its robot Secrets apart (README, "Several
-# installs per cluster").
+# leader-election Lease and its robot Secrets apart (docs/operations.md,
+# "Several installs per cluster").
 clusterName: prod-eu-west-2
 
 harbor:
