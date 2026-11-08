@@ -80,5 +80,10 @@ jobs:
         with:
           name: e2e-diagnostics
           path: test/e2e/.diag/
+          # Every file there is "hidden" to upload-artifact (it sits in a
+          # directory whose name starts with a dot), and hidden files are
+          # left out unless this is set. The harness writes only
+          # diagnostics there, never Secret contents.
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
