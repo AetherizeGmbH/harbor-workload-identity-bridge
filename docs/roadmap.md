@@ -157,16 +157,6 @@ limits today.
   or a bridge that leaves objects another instance serves alone).
   *Limits now:* selectors must not overlap, and bridges on one cluster
   should use distinct `clusterName` values even with different Harbors.
-- [ ] **Empty Harbor `robot_name_prefix` (#134).** An empty
-  `harbor.robotNamePrefix` (`BRIDGE_HARBOR_ROBOT_PREFIX=""`) selects the
-  default `robot$` (`bridge/controlplane/config.go`), and since 0.10.2 a
-  prefix mismatch fails closed, so a bridge against a Harbor whose
-  `robot_name_prefix` is empty, which worked before, reports `HarborError`.
-  The Harbor client itself supports an empty prefix. *Options:* treat a
-  set-but-empty value as an empty prefix (the chart default is an explicit
-  `robot$`, so only installs that set `""` change), or keep refusing.
-  *Limits now:* Harbor instances with an empty `robot_name_prefix` are
-  unsupported.
 - [ ] **No values schema.** The chart has no `values.schema.json`, so a
   misspelt key is ignored silently and its default applies; for example
   `bridge.mTLS.enable: true` leaves mTLS off. *Options:* a strict schema,
