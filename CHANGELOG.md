@@ -1,3 +1,13 @@
+## [0.19.1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.19.0...v0.19.1) (2026-11-08)
+
+### Bug Fixes
+
+* **deps:** update kubernetes go modules ([#172](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/172)) ([cf192b1](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/cf192b178e5b5bde2e8cf26f44e0926f431a0134))
+
+### Refactors
+
+* **dataplane:** parse tokens with ParseSignedCompact ([#180](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/180)) ([63085b3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/63085b30c3782d3777918bef113084d5fa55a1dc))
+
 ## [0.19.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.18.0...v0.19.0) (2026-11-08)
 
 ### Features
