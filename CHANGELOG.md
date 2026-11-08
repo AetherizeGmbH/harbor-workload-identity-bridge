@@ -1,3 +1,9 @@
+## [0.18.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.17.0...v0.18.0) (2026-11-08)
+
+### Features
+
+* **crd:** make trustPolicy.issuer optional ([#164](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/164)) ([05f4459](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/05f4459d638ca58a6b6269898cbb3964a7e62200))
+
 ## [0.17.0](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.16.0...v0.17.0) (2026-11-08)
 
 ### Features
