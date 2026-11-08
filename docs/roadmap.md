@@ -47,8 +47,9 @@ limits today.
 - [ ] **Re-approve the threat model.** It is `Status: proposed` again:
   the closure of O3 (ADR-0028, #121: T1, T2, A5), the closure of O5 with
   the T9 change and the not yet rated T17 (ADR-0029, #130), the
-  mitigations of #134 and #135, and the corrections of 2026-09-28 (T1,
-  T4, T7, T16, logged events, A4) await review. *Options:* rate T17 and
+  mitigations of #134 and #135, the corrections of 2026-09-28 (T1,
+  T4, T7, T16, logged events, A4) and the narrowing of O2 (ADR-0042)
+  await review. *Options:* rate T17 and
   approve, or send items back. *Limits now:* the approved baseline of
   2026-09-24 no longer describes the code; nothing functional.
 - [ ] **Plugin namespace split by default (O1, ADR-0027).** By default the
@@ -59,11 +60,14 @@ limits today.
   *Limits now:* in the default layout the release namespace must allow
   privileged pods and be restricted like cluster-admin.
 - [ ] **mTLS client identity (O2).** With mTLS on, the bridge accepts any
-  client certificate its CA signed; with a shared ClusterIssuer, anyone who
-  may create cert-manager Certificates can get one. *Options:* a dedicated
-  client CA plus an identity check, and whether mTLS should be on by
-  default. *Limits now:* nothing functional; mTLS is optional defense in
-  depth, and every request still needs a valid, audience-bound
+  client certificate its CA signed. With the chart's default CA for the
+  release (ADR-0042), only who may create Certificates or
+  CertificateRequests, or read Secrets, in the release namespace can get
+  one; with a named shared ClusterIssuer, anyone who may create
+  Certificates that use it can. *Options:* a client identity check (the
+  plugin's CN), refusing a named issuer for mTLS, and whether mTLS should
+  be on by default. *Limits now:* nothing functional; mTLS is optional
+  defense in depth, and every request still needs a valid, audience-bound
   ServiceAccount token.
 - [ ] **Repository settings (O4).** Required review and CODEOWNERS, secret
   scanning and push protection, private vulnerability reporting, the

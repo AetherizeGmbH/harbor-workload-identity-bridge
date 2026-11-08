@@ -20,8 +20,9 @@ maintainer on 2026-09-24. Changes to the threat model need a new
 approval; the closure of O3 (ADR-0028, 2026-09-27: T1, T2, A5), T17
 (not yet rated) and the T9 change with the closure of O5 (ADR-0029,
 2026-09-27), the Harbor client and data plane mitigations of #134 and
-#135 (T1, T12, T13, logged events) and the corrections of 2026-09-28
-to match the code (T1, T4, T7, T16, logged events, A4) await it.
+#135 (T1, T12, T13, logged events), the corrections of 2026-09-28
+to match the code (T1, T4, T7, T16, logged events, A4) and the narrowing
+of O2 by ADR-0042 (2026-11-08) await it.
 
 ## Scope and protection requirement
 
@@ -163,8 +164,15 @@ Open items (not accepted; tracked):
 - **O1** Namespace split for the plugin DaemonSet (T11) — implemented as an
   option (ADR-0027, requires trust-manager); the default layout keeps the
   risk. Decide whether a future major release makes the split the default.
-- **O2** mTLS client identity: dedicated client CA and identity pinning;
-  mTLS is off by default.
+- **O2** mTLS client identity: the bridge accepts any client certificate
+  its CA signed; mTLS is off by default. Narrowed by
+  [ADR-0042](../adr/0042-chart-creates-a-release-ca.md) (2026-11-08): by
+  default the chart creates a CA for the release, whose namespaced Issuer
+  signs only in the release namespace, so with cert-manager's defaults a
+  client certificate takes creating Certificates or CertificateRequests, or
+  reading Secrets, in that namespace. Still open: a named shared
+  ClusterIssuer lets anyone who may create Certificates that use it get
+  one, and the bridge pins no client identity.
 - ~~**O3** Token lifetime cap and pod binding for credential requests.~~
   Closed by ADR-0028 (2026-09-27): mitigations in T1 and T2, residual
   risk A5.
