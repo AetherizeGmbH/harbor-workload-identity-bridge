@@ -89,6 +89,13 @@
       "groupSlug": "gomod-indirect"
     },
     {
+      "description": "No major updates of `// indirect` modules: the direct dependencies decide which major they import. A new major is a new module path, so the bump only adds a second, unused copy, and its go.mod can raise the `go` directive (#177 in 2026-11 moved it to 1.27). Indirect modules move to a new major when a direct dependency does.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
       "description": "The kind CLI and the kindest/node image move together: the harness creates the cluster with the CLI, and a node image newer than the CLI supports fails in kubeadm init (kindest/node v1.37 needs kind v0.33+).",
       "matchPackageNames": ["kindest/node", "kubernetes-sigs/kind"],
       "groupName": "kind"
