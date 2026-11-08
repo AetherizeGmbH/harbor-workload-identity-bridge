@@ -588,6 +588,8 @@ spec:
               value: "1h"
             - name: BRIDGE_REQUIRE_POD_BOUND_TOKEN
               value: "true"
+            - name: BRIDGE_INSTANCE
+              value: "harbor-bridge"
             - name: BRIDGE_RATE_LIMIT_PER_SOURCE
               value: "20"
             - name: BRIDGE_RATE_LIMIT_BURST

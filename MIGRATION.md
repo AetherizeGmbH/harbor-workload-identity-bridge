@@ -1,5 +1,11 @@
 ## Chart value migrations
 
+### 0.12.3: `BRIDGE_INSTANCE` without a selector
+
+| Change | What to do |
+| --- | --- |
+| The chart sets `BRIDGE_INSTANCE` (`bridge.instance`, default the release name) also without `bridge.harborAccessSelector`, so a bridge whose selector you removed releases `harbor.aetherize.io/robot-<instance>` by itself. Without a selector, a release name that is no DNS label of at most 50 characters is left out. An explicit `bridge.instance` must be such a label even without a selector | Nothing. The upgrade restarts the bridge pods once. Objects that still carry `harbor.aetherize.io/robot-<instance>` from a removed selector lose it on their next deletion; a finalizer of a renamed instance must still be removed by hand |
+
 ### 0.12.2: the bridge's ClusterRole grants OIDC discovery
 
 | Change | What to do |

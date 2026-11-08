@@ -99,8 +99,10 @@ spec:
             {{- with .Values.bridge.harborAccessSelector }}
             - name: BRIDGE_HARBORACCESS_SELECTOR
               value: {{ include "harbor-bridge.harborAccessSelector" $ | quote }}
+            {{- end }}
+            {{- if include "harbor-bridge.renderInstance" . }}
             - name: BRIDGE_INSTANCE
-              value: {{ include "harbor-bridge.instance" $ | quote }}
+              value: {{ include "harbor-bridge.instance" . | quote }}
             {{- end }}
             - name: BRIDGE_RATE_LIMIT_PER_SOURCE
               value: {{ .Values.bridge.rateLimit.perSource | quote }}

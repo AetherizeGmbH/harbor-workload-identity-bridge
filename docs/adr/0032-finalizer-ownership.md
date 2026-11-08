@@ -4,7 +4,9 @@
 
 Accepted (2026-09-28). Amends ADR-0026 §3 and §4 (when a bridge sets its
 finalizer and which finalizers it releases) and ADR-0030 (when a refused
-HarborAccess costs a Harbor lookup).
+HarborAccess costs a Harbor lookup). The first known limit below is closed
+since 0.12.3: the chart sets `BRIDGE_INSTANCE` without a selector too,
+whenever the instance is a valid name.
 
 ## Context
 
