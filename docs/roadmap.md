@@ -111,14 +111,6 @@ limits today.
   metrics contract (sums over all results), or a counter of its own.
   *Limits now:* scans of the NodePort with other paths or methods leave no
   trace in the bridge.
-- [ ] **Plugin exit code on a refusal.** On `401`/`403` the plugin exits 0
-  with empty credentials that kubelet does not cache (`plugin/main.go`);
-  kubelet discards a plugin's stderr on exit 0, so the reason is only in the
-  bridge's audit log. *Options:* exit non-zero, which puts the reason into
-  the kubelet log next to the image but counts every refused pull in
-  kubelet's `kubelet_credential_provider_plugin_errors_total`; or keep
-  exit 0. *Limits now:* diagnosing a refused pull needs the bridge's audit
-  log (HOW-TO-TEST, "When it fails").
 
 ### Control plane and chart
 
