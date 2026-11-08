@@ -882,7 +882,7 @@ func finishWithRestart(cfg *config, t target, changedNow bool, verify func() err
 	if err := saveState(statePath, t.state()); err != nil {
 		return err
 	}
-	logf("install complete (mode %s); kubelet verified healthy", t.mode)
+	logf("pass complete (mode %s); kubelet verified healthy", t.mode)
 	return nil
 }
 

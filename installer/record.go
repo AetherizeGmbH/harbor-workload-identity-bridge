@@ -46,6 +46,11 @@ type entryRecord struct {
 	// mode, and in merge mode kubelet's config when that is a chart-owned
 	// config. Empty when it merges into a cloud's config.
 	ChartOwnedConfig string `json:"chartOwnedConfig,omitempty"`
+	// Release is the release that wrote the record last (RELEASE_ID,
+	// "<namespace>/<name>", ADR-0039): a rename removes the names a
+	// release's records name. Empty in a record written before ADR-0039 or
+	// by a chart that does not render RELEASE_ID.
+	Release string `json:"release,omitempty"`
 }
 
 // holds reports whether the record holds the canonical entry entryJSON.
@@ -102,6 +107,7 @@ func (c *config) beginRecord(binDir string, entryJSON []byte, chartOwned string)
 		r.Entries = append(r.Entries, entryJSON)
 	}
 	r.ChartOwnedConfig = chartOwned
+	r.Release = c.ReleaseID
 	if err := c.writeRecord(binDir, *r); err != nil {
 		return nil, err
 	}
@@ -111,7 +117,7 @@ func (c *config) beginRecord(binDir string, entryJSON []byte, chartOwned string)
 // commitRecord reduces the record in binDir to entryJSON once the config
 // holds it.
 func (c *config) commitRecord(binDir string, entryJSON []byte, chartOwned string) error {
-	return c.writeRecord(binDir, entryRecord{Entries: []json.RawMessage{entryJSON}, ChartOwnedConfig: chartOwned})
+	return c.writeRecord(binDir, entryRecord{Entries: []json.RawMessage{entryJSON}, ChartOwnedConfig: chartOwned, Release: c.ReleaseID})
 }
 
 // claimsChartOwned reports whether a record in binDir (a node path) names

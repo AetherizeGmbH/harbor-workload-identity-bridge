@@ -1,0 +1,1 @@
+{"action":"remove","provider":"harbor-bridge-eu","result":"kept","kubeletRestarted":true,"kept":["/etc/kubernetes/credential-provider/harbor-bridge-eu: none mode keeps the binary"]}

@@ -33,6 +33,11 @@
 // With --sync the installer instead runs as the DaemonSet's
 // long-running container: it re-copies the CA/mTLS files to the host
 // whenever the mounted Secret volumes rotate. It never touches kubelet.
+//
+// INSTALL_ACTION=remove turns the pass into a removal (ADR-0039): it takes
+// this install's entry and files off the node, restarts kubelet when what
+// kubelet reads changed, and reports the result in the container's
+// termination message; the --sync container then idles.
 package main
 
 import (
@@ -62,11 +67,26 @@ func main() {
 		}
 		return
 	}
+	if cfg.Action == actionRemove {
+		rep, err := runRemove(cfg)
+		writeReport(cfg.TerminationLog, rep, err)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "harbor-bridge-installer: remove: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "harbor-bridge-installer: %v\n", err)
 		os.Exit(1)
 	}
 }
+
+// Install actions (INSTALL_ACTION, ADR-0039).
+const (
+	actionInstall = "install"
+	actionRemove  = "remove"
+)
 
 // Install modes. See ADR-0021.
 const (
@@ -82,6 +102,14 @@ const (
 // to their defaults by loadConfig and overridden only by tests.
 type config struct {
 	Mode string // INSTALL_MODE: auto|merge|patch|none.
+
+	// Action is what the pass does (ADR-0039): install, or remove this
+	// install from the node.
+	Action string // INSTALL_ACTION: install|remove, default install.
+
+	// ReleaseID names the release this install belongs to, recorded in
+	// every record (entryRecord.Release).
+	ReleaseID string // RELEASE_ID: "<namespace>/<name>", optional.
 
 	// HostRoot is where the node's / is mounted inside the container.
 	// In none mode (and for the sync container) only the narrow host dirs
@@ -115,6 +143,9 @@ type config struct {
 	SourceClientKey  string
 	ProcRoot         string
 	SyncInterval     time.Duration
+	// TerminationLog is where a removal pass writes its report: the
+	// container's termination message, which the uninstall hook reads.
+	TerminationLog string
 
 	kubelet     kubeletControl
 	verify      verifyTiming
@@ -130,6 +161,8 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	}
 	c := &config{
 		Mode:             def("INSTALL_MODE", modeAuto),
+		Action:           def("INSTALL_ACTION", actionInstall),
+		ReleaseID:        getenv("RELEASE_ID"),
 		HostRoot:         def("HOST_ROOT", "/host"),
 		HostBinDir:       getenv("HOST_BIN_DIR"),
 		HostConfigDir:    getenv("HOST_CONFIG_DIR"),
@@ -146,6 +179,7 @@ func loadConfig(getenv func(string) string) (*config, error) {
 		SourceClientKey:  "/mtls/tls.key",
 		ProcRoot:         "/proc",
 		SyncInterval:     60 * time.Second,
+		TerminationLog:   "/dev/termination-log",
 		kubelet:          nsenterControl{},
 		verify:           defaultVerifyTiming,
 		lockTimeout:      defaultLockTimeout,
@@ -155,6 +189,14 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	case modeAuto, modeMerge, modePatch, modeNone:
 	default:
 		return nil, fmt.Errorf("INSTALL_MODE must be one of auto|merge|patch|none (got %q)", c.Mode)
+	}
+	switch c.Action {
+	case actionInstall, actionRemove:
+	default:
+		return nil, fmt.Errorf("INSTALL_ACTION must be install or remove (got %q)", c.Action)
+	}
+	if c.ReleaseID != "" && !releaseIDRegex.MatchString(c.ReleaseID) {
+		return nil, fmt.Errorf("RELEASE_ID %q must be <release namespace>/<release name>", c.ReleaseID)
 	}
 	if c.HostConfigDir == "" {
 		return nil, fmt.Errorf("HOST_CONFIG_DIR is required")
@@ -209,6 +251,10 @@ func loadConfig(getenv func(string) string) (*config, error) {
 	}
 	return c, nil
 }
+
+// releaseIDRegex is "<namespace>/<release name>": a DNS label, and a Helm
+// release name (lower-case letters, digits, "-" and ".", at most 53).
+var releaseIDRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?/[a-z0-9]([-a-z0-9.]{0,51}[a-z0-9])?$`)
 
 // nodePathChars is the character set of node paths. The paths are written
 // unquoted into KUBELET_EXTRA_ARGS in the kubelet environment file (an

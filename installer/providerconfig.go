@@ -278,20 +278,33 @@ func removeProvider(existing []byte, name string) (out []byte, changed bool, rem
 // holdsBridgeEntry reports whether the CredentialProviderConfig in doc has
 // a harbor-bridge entry named name.
 func holdsBridgeEntry(doc []byte, name string) (bool, error) {
+	bridge, _, err := entriesNamed(doc, name)
+	return bridge, err
+}
+
+// entriesNamed reports whether the CredentialProviderConfig in doc has an
+// entry named name that is a harbor-bridge entry (bridge), and one that is
+// not (foreign): kubelet runs <bin dir>/<name> for the latter too.
+func entriesNamed(doc []byte, name string) (bridge, foreign bool, err error) {
 	cfg := map[string]any{}
 	if err := yaml.Unmarshal(doc, &cfg); err != nil {
-		return false, fmt.Errorf("parse: %w", err)
+		return false, false, fmt.Errorf("parse: %w", err)
 	}
 	providers, err := providerList(cfg)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	for _, p := range providers {
-		if pm, ok := p.(map[string]any); ok && pm["name"] == name && isBridgeProvider(pm) {
-			return true, nil
+		pm, ok := p.(map[string]any)
+		switch {
+		case !ok || pm["name"] != name:
+		case isBridgeProvider(pm):
+			bridge = true
+		default:
+			foreign = true
 		}
 	}
-	return false, nil
+	return bridge, foreign, nil
 }
 
 // composeWithout is composeOwnConfig for a removal (ADR-0039): the

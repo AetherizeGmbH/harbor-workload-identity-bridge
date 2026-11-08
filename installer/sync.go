@@ -17,6 +17,14 @@ import (
 // surfaces the install output per node. Returns when ctx is cancelled
 // (SIGTERM/SIGINT in production).
 func runSync(ctx context.Context, cfg *config) error {
+	if cfg.Action == actionRemove {
+		// The removal pass deleted the CA and mTLS files (ADR-0039); copying
+		// them again would put them back. Keep the pod running, so that the
+		// DaemonSet counts it as done.
+		logf("action remove: not syncing the CA and mTLS files; idle until stopped")
+		<-ctx.Done()
+		return nil
+	}
 	if cfg.SyncInterval <= 0 {
 		return fmt.Errorf("sync interval must be positive (got %s)", cfg.SyncInterval)
 	}
