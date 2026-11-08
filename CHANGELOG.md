@@ -1,3 +1,9 @@
+## [0.11.6](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.5...v0.11.6) (2026-11-08)
+
+### Bug Fixes
+
+* **deps:** build with Go 1.27.3 and update x/net and go-jose ([#148](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/148)) ([ebfc9d9](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/ebfc9d98bfd6f9a8dbfbdac9024a353ec9d1a66a)), closes [golang/go#81188](https://github.com/golang/go/issues/81188)
+
 ## [0.11.5](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.11.4...v0.11.5) (2026-09-28)
 
 ### Bug Fixes
