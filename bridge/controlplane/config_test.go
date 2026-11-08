@@ -29,7 +29,7 @@ func clearAllEnv(t *testing.T) {
 	for _, k := range []string{
 		EnvClusterName, EnvNamespace, EnvOIDCIssuer, EnvHarborURL, EnvHarborAdminDir,
 		EnvForceLocalValidation, EnvLogLevel, EnvAudience, EnvHarborAccessSelector, EnvInstance,
-		EnvTokenMaxLifetime, EnvRequirePodBoundToken,
+		EnvTokenMaxLifetime, EnvRequirePodBoundToken, EnvHarborRobotPrefix,
 	} {
 		t.Setenv(k, "")
 		// t.Setenv with empty string doesn't actually unset on every Go
@@ -99,6 +99,46 @@ func TestLoadFromEnv_AppliesDefaults(t *testing.T) {
 	}
 	if !cfg.RequirePodBoundToken {
 		t.Errorf("RequirePodBoundToken default expected true; got false")
+	}
+}
+
+// An unset BRIDGE_HARBOR_ROBOT_PREFIX keeps Harbor's default prefix. A set
+// but empty one selects an empty prefix, for a Harbor whose
+// robot_name_prefix is empty; before, it fell back to robot$ and every
+// read of such a Harbor failed with ErrRobotPrefixMismatch.
+func TestLoadFromEnv_RobotPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		set   bool
+		value string
+		want  string
+	}{
+		{name: "unset", want: "robot$"},
+		{name: "empty", set: true, value: "", want: ""},
+		{name: "blank", set: true, value: "  ", want: ""},
+		{name: "custom", set: true, value: "robot_", want: "robot_"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAllEnv(t)
+			setEnv(t, map[string]string{
+				EnvClusterName:    "prod",
+				EnvNamespace:      "harbor-bridge-system",
+				EnvOIDCIssuer:     "https://kubernetes.default.svc",
+				EnvHarborURL:      "https://harbor.example.com",
+				EnvHarborAdminDir: "/var/run/secrets/harbor-admin",
+				EnvAudience:       "harbor-bridge-prod",
+			})
+			if tc.set {
+				t.Setenv(EnvHarborRobotPrefix, tc.value)
+			}
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.HarborRobotPrefix != tc.want {
+				t.Errorf("HarborRobotPrefix = %q, want %q", cfg.HarborRobotPrefix, tc.want)
+			}
+		})
 	}
 }
 

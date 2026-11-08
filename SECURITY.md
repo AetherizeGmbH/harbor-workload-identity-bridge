@@ -223,8 +223,8 @@ a listing with a name the configured prefix does not account for fails,
 and a robot whose description names the `HarborAccess` but whose name
 is outside the bridge's ownership prefix is left alone and holds the
 deletion. Either way deletion waits (`reason=DeletionBlocked`) until the
-prefix is corrected. An empty Harbor `robot_name_prefix` cannot be
-matched: an empty `harbor.robotNamePrefix` selects `robot$`.
+prefix is corrected. For a Harbor whose `robot_name_prefix` is empty, set
+`harbor.robotNamePrefix: ""`.
 
 ### Credential leakage via logs
 

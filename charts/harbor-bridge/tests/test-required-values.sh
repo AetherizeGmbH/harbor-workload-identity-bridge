@@ -608,6 +608,23 @@ else
   failed=$((failed+1))
 fi
 
+# harbor.robotNamePrefix: "" renders an empty prefix (a Harbor whose
+# robot_name_prefix is empty), a value is kept, and a missing key
+# (--reuse-values from a chart before 0.4.0, or null) renders robot$.
+prefix_env() { grep -A1 -xF '            - name: BRIDGE_HARBOR_ROBOT_PREFIX' <<<"$1" | tail -1; }
+if out=$(render -f "${COMPLETE}" --set harbor.robotNamePrefix= 2>&1) \
+   && [ "$(prefix_env "${out}")" = '              value: ""' ] \
+   && out=$(render -f "${COMPLETE}" --set harbor.robotNamePrefix=robot_ 2>&1) \
+   && [ "$(prefix_env "${out}")" = '              value: "robot_"' ] \
+   && out=$(render -f "${COMPLETE}" --set harbor.robotNamePrefix=null 2>&1) \
+   && [ "$(prefix_env "${out}")" = '              value: "robot$"' ]; then
+  echo "PASS  harbor.robotNamePrefix empty, set and missing"
+else
+  echo "FAIL  harbor.robotNamePrefix empty, set and missing"
+  head -3 <<<"      got: ${out}"
+  failed=$((failed+1))
+fi
+
 # `helm upgrade --reuse-values` from a release that predates
 # bridge.tokenValidation keeps the old values, which lack the key. A null
 # --set removes it the same way; the render must equal the default one.

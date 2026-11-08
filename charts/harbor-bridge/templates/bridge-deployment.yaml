@@ -134,7 +134,7 @@ spec:
             - name: BRIDGE_HARBOR_ADMIN_DIR
               value: /etc/bridge/harbor-admin
             - name: BRIDGE_HARBOR_ROBOT_PREFIX
-              value: {{ .Values.harbor.robotNamePrefix | quote }}
+              value: {{ include "harbor-bridge.harbor.robotNamePrefix" . | quote }}
             - name: BRIDGE_FORCE_LOCAL_VALIDATION
               value: {{ .Values.bridge.forceLocalValidation | quote }}
             - name: BRIDGE_LOG_LEVEL
