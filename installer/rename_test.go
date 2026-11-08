@@ -81,7 +81,9 @@ func TestRename_Merge(t *testing.T) {
 }
 
 // TestRename_None: none mode drops the old entry (the new one keeps the
-// config non-empty), keeps the old binary and empties its record.
+// config non-empty), keeps the old binary, CA and mTLS files, which kubelet
+// runs the old entry with until someone restarts it, and empties the old
+// record (finding 5 of the review).
 func TestRename_None(t *testing.T) {
 	env := newTestEnv(t, modeNone, nil)
 	env.cfg.ReleaseID = testRelease
@@ -99,7 +101,7 @@ func TestRename_None(t *testing.T) {
 	if rec := env.cfg.readRecord(binDir + "/" + filesFor(defaultProviderName).Record); rec == nil || len(rec.Entries) != 0 {
 		t.Fatalf("old record = %+v, want one that vouches for nothing", rec)
 	}
-	assertAbsent(t, env, configDir+"/harbor-bridge-ca.crt")
+	assertPresent(t, env, configDir+"/harbor-bridge-ca.crt")
 	if env.restarts != 0 {
 		t.Fatal("none mode restarted kubelet")
 	}

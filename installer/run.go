@@ -54,8 +54,7 @@ func run(cfg *config) error {
 		return err
 	}
 
-	mode := cfg.Mode
-	if mode != modeNone {
+	if cfg.Mode != modeNone {
 		// Discovery, the edits of the shared files, the kubelet restart
 		// and its verification of one install must not interleave with
 		// another install's on this node (lock.go).
@@ -66,6 +65,23 @@ func run(cfg *config) error {
 		defer unlock()
 	}
 
+	binDirs, err := runPass(cfg, rendered, entry)
+	if err != nil {
+		return err
+	}
+	// The pass released the config locks it held until its end; the
+	// configs that may hold an earlier provider name take their own locks
+	// here, under the node lock (retire, ADR-0039 decision 6).
+	return cfg.retire(binDirs, nil)
+}
+
+// runPass is one install pass for the mode cfg.Mode resolves to, under the
+// node lock (all modes but none). It returns the bin dirs whose records
+// name the release's earlier provider names (findRetiring), which run
+// retires once the pass, and with it every config lock it held, has ended.
+func runPass(cfg *config, rendered []byte, entry map[string]any) ([]string, error) {
+	mode := cfg.Mode
+	var err error
 	var wiring kubeletWiring
 	// movingOwn is set when auto mode found kubelet on the directories of
 	// this install's own last patch-mode pass, which it moves to the
@@ -75,7 +91,12 @@ func run(cfg *config) error {
 	case modeAuto:
 		wiring, err = discoverKubelet(cfg.ProcRoot)
 		if err != nil {
-			return fmt.Errorf("mode auto: %w", err)
+			return nil, fmt.Errorf("mode auto: %w", err)
+		}
+		// wiredByOwnPatch counts the patch-mode states of this release's
+		// earlier provider names too (decision 6 of ADR-0039).
+		if err := cfg.findRetiring(uniqueDirs(cfg.HostBinDir, wiring.BinDir, cfg.MergeBinDir)); err != nil {
+			return nil, err
 		}
 		switch {
 		case !wiring.wired():
@@ -89,7 +110,7 @@ func run(cfg *config) error {
 			mode = modePatch
 		default:
 			if movingOwn, err = cfg.wiredByOwnPatch(wiring); err != nil {
-				return fmt.Errorf("mode auto: %w", err)
+				return nil, fmt.Errorf("mode auto: %w", err)
 			}
 			if movingOwn {
 				// The same, after plugin.hostBinaryDir or
@@ -109,7 +130,7 @@ func run(cfg *config) error {
 		// kubelet points now decides whether that is safe (blockingInstalls).
 		wiring, err = discoverKubelet(cfg.ProcRoot)
 		if err != nil {
-			return fmt.Errorf("mode patch: %w", err)
+			return nil, fmt.Errorf("mode patch: %w", err)
 		}
 	case modeMerge:
 		if cfg.MergeBinDir != "" {
@@ -118,10 +139,10 @@ func run(cfg *config) error {
 		} else {
 			wiring, err = discoverKubelet(cfg.ProcRoot)
 			if err != nil {
-				return fmt.Errorf("mode merge: %w", err)
+				return nil, fmt.Errorf("mode merge: %w", err)
 			}
 			if !wiring.wired() {
-				return fmt.Errorf("mode merge: kubelet runs without --image-credential-provider-* flags — nothing to merge into; use mode patch (self-managed nodes) or set plugin.install.binDir/configFile")
+				return nil, fmt.Errorf("mode merge: kubelet runs without --image-credential-provider-* flags — nothing to merge into; use mode patch (self-managed nodes) or set plugin.install.binDir/configFile")
 			}
 		}
 	}
@@ -131,7 +152,7 @@ func run(cfg *config) error {
 	// their files go once it succeeded.
 	binDirs := uniqueDirs(cfg.HostBinDir, wiring.BinDir, cfg.MergeBinDir)
 	if err := cfg.findRetiring(binDirs); err != nil {
-		return err
+		return nil, err
 	}
 
 	if mode == modePatch {
@@ -140,28 +161,28 @@ func run(cfg *config) error {
 		// between blockingInstalls and the rewire.
 		unlock, err := lockPatchConfigs(cfg, wiring)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer unlock()
 		others, err := cfg.blockingInstalls(wiring, rendered, entry)
 		switch {
 		case err != nil:
-			return err
+			return nil, err
 		case len(others) > 0 && movingOwn:
 			// Other installs that have not moved yet share the old
 			// directories (ADR-0035).
 			if err := stayAndStage(cfg, rendered, entry, wiring, others); err != nil {
-				return err
+				return nil, err
 			}
-			return cfg.retire(binDirs)
+			return binDirs, nil
 		case len(others) > 0:
-			return rewireRefusal(cfg, wiring, others)
+			return nil, rewireRefusal(cfg, wiring, others)
 		}
 	}
 	if mode == modeMerge && dirsOverlap(wiring.BinDir, cfg.HostConfigDir) {
 		// The binaries and records in the bin dir must be out of reach
 		// of the writers of plugin.hostConfigDir (loadConfig).
-		return fmt.Errorf("kubelet's credential-provider bin dir %s and plugin.hostConfigDir %s must not be the same directory or inside one another: every release's sync container can write plugin.hostConfigDir; choose another plugin.hostConfigDir", wiring.BinDir, cfg.HostConfigDir)
+		return nil, fmt.Errorf("kubelet's credential-provider bin dir %s and plugin.hostConfigDir %s must not be the same directory or inside one another: every release's sync container can write plugin.hostConfigDir; choose another plugin.hostConfigDir", wiring.BinDir, cfg.HostConfigDir)
 	}
 
 	switch mode {
@@ -172,12 +193,12 @@ func run(cfg *config) error {
 	case modeMerge:
 		err = runMerge(cfg, rendered, entry, wiring)
 	default:
-		return fmt.Errorf("unreachable mode %q", mode)
+		return nil, fmt.Errorf("unreachable mode %q", mode)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return cfg.retire(binDirs)
+	return binDirs, nil
 }
 
 // wiredByOwnPatch reports whether kubelet's wiring is what this install's
@@ -191,11 +212,24 @@ func run(cfg *config) error {
 // their entries. Without a state file (removed, or a
 // plugin.install.stateDir that changed too) auto mode merges, as before.
 func (c *config) wiredByOwnPatch(wiring kubeletWiring) (bool, error) {
-	st, err := loadState(c.statePath())
-	if err != nil {
-		return false, err
+	wired := func(path string) (bool, error) {
+		st, err := loadState(path)
+		if err != nil {
+			return false, err
+		}
+		return st != nil && st.Mode == modePatch && st.BinDir == wiring.BinDir && st.ConfigFile == wiring.ConfigFile, nil
 	}
-	return st != nil && st.Mode == modePatch && st.BinDir == wiring.BinDir && st.ConfigFile == wiring.ConfigFile, nil
+	if own, err := wired(c.statePath()); err != nil || own {
+		return own, err
+	}
+	// After a rename the release's last patch-mode pass ran under an
+	// earlier provider name, whose state records it (ADR-0039, decision 6).
+	for _, name := range c.retiringNames() {
+		if own, err := wired(filepath.Join(c.hostPath(c.StateDir), filesFor(name).State)); err != nil || own {
+			return own, err
+		}
+	}
+	return false, nil
 }
 
 // runNone drops the binary and config into the chart-owned dirs and

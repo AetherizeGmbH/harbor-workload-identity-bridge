@@ -233,10 +233,12 @@ func TestRemove_MergeKeepsTheCloud(t *testing.T) {
 }
 
 // TestRemove_RefusesToEmptyAConfigItDidNotWire: kubelet refuses a config
-// without providers, and only flags this install's own patch-mode restart
-// set may go. Every other last entry is refused before anything changes:
-// in a cloud's config, in a chart-owned config whose flags another install
-// set, and without a state file (decisions 3.4 to 3.6).
+// without providers, and only flags this install set may go: its own
+// patch-mode restart, an earlier name's, or flags that name its own
+// directories (TestRemove_FlagsLiveWithoutState). Every other last entry
+// is refused before anything changes: in a cloud's config, in a
+// chart-owned config whose flags another install set, and without a state
+// file when the flags name other directories (decisions 3.4 to 3.6).
 func TestRemove_RefusesToEmptyAConfigItDidNotWire(t *testing.T) {
 	assertRefused := func(t *testing.T, env *testEnv, configPath string) {
 		t.Helper()
@@ -273,34 +275,34 @@ func TestRemove_RefusesToEmptyAConfigItDidNotWire(t *testing.T) {
 
 	t.Run("another install's wiring", func(t *testing.T) {
 		// a wired kubelet to its chart-owned config (patch); b, with other
-		// directories, merged into it; a left.
-		a := withName(t, newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"}), euName)
-		b := newSiblingEnv(t, a, modeAuto, defaultProviderName)
-		b.cfg.HostBinDir, b.cfg.HostConfigDir = "/opt/b/bin", "/opt/b/config"
-		setRendered(t, b, renderedConfig)
-		for _, env := range []*testEnv{a, b} {
-			if err := run(env.cfg); err != nil {
+		// directories, merged into it (mergedIntoPatch); a left by hand
+		// (helm uninstall --no-hooks and the manual steps, or a chart
+		// before ADR-0039), which its own removal refuses
+		// (TestRemove_RefusesToStrandAMergedInstall).
+		a, b := mergedIntoPatch(t)
+		bEntry := renderedEntry(t, b)
+		writeHostFile(t, a, a.cfg.ownConfigPath(), string(configWith(t, bEntry)))
+		for _, p := range []string{a.statePath(), a.cfg.hostPath(binDir + "/" + euName), a.cfg.hostPath(binDir + "/" + filesFor(euName).Record)} {
+			if err := os.Remove(p); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if st := mustLoadState(t, b); st.Mode != modeMerge {
-			t.Fatalf("b's state = %+v, want merge into a's config", st)
-		}
-		mustRemove(t, a, resultRemoved)
-		assertKubeletWiring(t, a, a.cfg.ownWiring(), defaultProviderName)
 		assertRefused(t, b, a.cfg.ownConfigPath())
+		if _, err := removeOnce(t, b); err == nil || !strings.Contains(err.Error(), "uninstall such an install before the one whose config it merged into") {
+			t.Fatalf("got %v, want the ordering hint", err)
+		}
 		assertPresent(t, b, binDir+"/"+defaultProviderName, binDir+"/"+b.cfg.files().Record)
 	})
 
-	t.Run("no state file", func(t *testing.T) {
-		env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet"})
-		if err := run(env.cfg); err != nil {
-			t.Fatal(err)
+	t.Run("no state file, flags of other directories", func(t *testing.T) {
+		a, b := mergedIntoPatch(t)
+		writeHostFile(t, a, a.cfg.ownConfigPath(), string(configWith(t, renderedEntry(t, b))))
+		for _, p := range []string{a.statePath(), b.statePath(), a.cfg.hostPath(binDir + "/" + euName), a.cfg.hostPath(binDir + "/" + filesFor(euName).Record)} {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if err := os.Remove(env.statePath()); err != nil {
-			t.Fatal(err)
-		}
-		assertRefused(t, env, env.cfg.ownConfigPath())
+		assertRefused(t, b, a.cfg.ownConfigPath())
 	})
 }
 

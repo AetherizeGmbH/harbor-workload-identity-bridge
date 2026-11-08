@@ -104,6 +104,15 @@ type remover struct {
 	// entry of this name that is not a bridge entry: kubelet runs
 	// <bin dir>/<name> for it, so that file stays, whatever owns it.
 	foreignBinDir string
+	// entryKept is set when a config the pass leaves keeps this install's
+	// entry (a cloud's config it would leave without providers): the
+	// binary and record then stay, because kubelet does not start while a
+	// configured provider's binary is missing.
+	entryKept bool
+	// discovered is set when the pass found kubelet's wiring on the running
+	// process, not in the merge-mode overrides, and can verify it after a
+	// restart.
+	discovered bool
 }
 
 func (r *remover) keep(what, why string) {
@@ -153,10 +162,11 @@ func (r *remover) removeWired() error {
 	}
 	defer unlock()
 
-	w, err := discoverKubelet(cfg.ProcRoot)
+	w, discovered, err := cfg.removalWiring()
 	if err != nil {
 		return fmt.Errorf("remove: %w", err)
 	}
+	r.discovered = discovered
 	st, err := loadState(cfg.statePath())
 	if err != nil {
 		return err
@@ -168,12 +178,12 @@ func (r *remover) removeWired() error {
 			}
 		}
 	}
-	if err := r.checkNextStart(st, w); err != nil {
-		return err
-	}
 	// Earlier provider names of this release go too (decision 6).
 	binDirs := r.binDirs(st, w)
 	if err := cfg.findRetiring(binDirs); err != nil {
+		return err
+	}
+	if err := r.checkNextStart(st, w); err != nil {
 		return err
 	}
 	stripped, err := r.removeFromKubeletConfig(st, w)
@@ -215,9 +225,15 @@ func (r *remover) removeWired() error {
 			return err
 		}
 	}
-	for _, d := range binDirs {
-		if err := r.removeBinaryAndRecord(d); err != nil {
-			return err
+	if r.entryKept {
+		for _, d := range binDirs {
+			r.keep(filepath.Join(d, cfg.files().Binary), "a credential-provider config on the node still holds this install's entry (above), and kubelet does not start while a configured provider's binary is missing; delete it and its record once that entry is gone")
+		}
+	} else {
+		for _, d := range binDirs {
+			if err := r.removeBinaryAndRecord(d); err != nil {
+				return err
+			}
 		}
 	}
 	if err := r.removeAuxFiles(); err != nil {
@@ -226,7 +242,7 @@ func (r *remover) removeWired() error {
 	if err := r.removeState(); err != nil {
 		return err
 	}
-	return cfg.retire(binDirs)
+	return cfg.retire(binDirs, r.rep)
 }
 
 // holdsOwn reports whether the CredentialProviderConfig in doc holds a
@@ -245,18 +261,25 @@ func (r *remover) holdsOwn(doc []byte) (holds, foreign bool, err error) {
 }
 
 // checkNextStart refuses a removal while kubelet would start with another
-// wiring than the one it runs (ADR-0039, decision 3.3): this install's
-// state records patch mode, and the kubelet environment file sets the
-// flags to other directories, because an install pass died between
-// writing them and restarting kubelet. The pass would otherwise clean
-// files kubelet reads at its next start.
+// wiring than the one it runs (ADR-0039, decision 3.3): the kubelet
+// environment file sets the flags to other directories than the running
+// kubelet has, because an install pass died between writing them and
+// restarting kubelet. It checks whenever this install's state records
+// patch mode, and whatever the state says when the flags name this
+// install's own directories (plugin.hostBinaryDir and its chart-owned
+// config, the state's, or an earlier name's): the first pass of an
+// install that died before its verified restart saved no state. The pass
+// would otherwise clean files kubelet reads at its next start.
 func (r *remover) checkNextStart(st *state, w kubeletWiring) error {
-	if st == nil || st.Mode != modePatch {
-		return nil
-	}
+	patchState := st != nil && st.Mode == modePatch
 	envFile, err := r.cfg.kubeletEnvFile()
-	if err != nil {
+	switch {
+	case err != nil && patchState:
 		return fmt.Errorf("remove: this install's state records patch mode: %w", err)
+	case err != nil:
+		// The unit takes KUBELET_EXTRA_ARGS from no file patch mode
+		// writes (ADR-0034), so no pass of this installer set flags there.
+		return nil
 	}
 	prior, err := readPriorHostFile(r.cfg.hostPath(envFile))
 	if err != nil {
@@ -270,10 +293,70 @@ func (r *remover) checkNextStart(st *state, w kubeletWiring) error {
 	if e.appended >= 0 {
 		next = e.appendedWiring
 	}
-	if next.wired() && next != w {
+	own, err := r.ownWiring(next, st)
+	if err != nil {
+		return err
+	}
+	if next.wired() && next != w && (patchState || own) {
 		return fmt.Errorf("kubelet runs with bin-dir=%q config=%q, but %s sets bin-dir=%q config=%q, which kubelet reads at its next start: an install pass died between writing the flags and restarting kubelet. Refusing to remove anything until kubelet runs what its environment file sets: restart kubelet on the node (systemctl restart %s), or run an install pass again, then remove", w.BinDir, w.ConfigFile, envFile, next.BinDir, next.ConfigFile, r.cfg.KubeletUnit)
 	}
 	return nil
+}
+
+// ownWiring reports whether w names this install's own directories:
+// plugin.hostBinaryDir and the chart-owned config there, the ones its
+// state records, or those a patch-mode state of one of its earlier names
+// records.
+func (r *remover) ownWiring(w kubeletWiring, st *state) (bool, error) {
+	if !w.wired() {
+		return false, nil
+	}
+	if w == r.cfg.ownWiring() || (st != nil && w == (kubeletWiring{BinDir: st.BinDir, ConfigFile: st.ConfigFile})) {
+		return true, nil
+	}
+	prev, err := r.retiringPatchState(w)
+	return prev != nil, err
+}
+
+// retiringPatchState returns the state of an earlier provider name of this
+// release that records a verified patch-mode restart onto w, or nil.
+func (r *remover) retiringPatchState(w kubeletWiring) (*state, error) {
+	for _, name := range r.cfg.retiringNames() {
+		prev, err := loadState(filepath.Join(r.cfg.hostPath(r.cfg.StateDir), filesFor(name).State))
+		if err != nil {
+			return nil, err
+		}
+		if prev != nil && prev.Mode == modePatch && prev.BinDir == w.BinDir && prev.ConfigFile == w.ConfigFile {
+			logf("the kubelet flags were set by this release under its earlier provider name %q", name)
+			return prev, nil
+		}
+	}
+	return nil, nil
+}
+
+// flagsOwner decides whether this install set the kubelet flags that
+// point kubelet at w (decision 3.1), and returns the state that records
+// it, or nil without one. Its own state, or an earlier name's, records a
+// verified patch-mode restart onto exactly w; or w is this install's own
+// wiring (plugin.hostBinaryDir and the chart-owned config there) and no
+// state was saved, because the install pass died before its verified
+// restart. Only a patch-mode pass of the chart writes flags that name
+// these directories, and every other install that uses them has its entry
+// in that config, vouched by its record: when this install's entry is the
+// last one, no install depends on the flags.
+func (r *remover) flagsOwner(st *state, w kubeletWiring) (owner bool, recorded *state, err error) {
+	if st != nil && st.Mode == modePatch && st.BinDir == w.BinDir && st.ConfigFile == w.ConfigFile {
+		return true, st, nil
+	}
+	prev, err := r.retiringPatchState(w)
+	if err != nil || prev != nil {
+		return prev != nil, prev, err
+	}
+	if w == r.cfg.ownWiring() {
+		logf("kubelet runs with this install's own bin-dir=%q config=%q, and no state records who set them: an install pass died before its verified restart; the flags are this install's", w.BinDir, w.ConfigFile)
+		return true, nil, nil
+	}
+	return false, nil, nil
 }
 
 // binDirs returns the bin dirs this install may have its binary and record
@@ -334,11 +417,12 @@ func (r *remover) removeFromKubeletConfig(st *state, w kubeletWiring) (stripped 
 	if err != nil {
 		return false, fmt.Errorf("read kubelet's credential-provider config %s: %w", w.ConfigFile, err)
 	}
-	holds, foreign := false, false
-	if prior.existed {
-		if holds, foreign, err = r.holdsOwn(prior.data); err != nil {
-			return false, fmt.Errorf("kubelet's credential-provider config %s: %w; refusing to guess whether it holds provider %q", w.ConfigFile, err, cfg.ProviderName)
-		}
+	if !prior.existed {
+		return false, fmt.Errorf("kubelet's credential-provider config %s is missing: kubelet does not start while its --image-credential-provider-config names a missing file, so the removal restarts nothing and removes nothing. Restore the file, or remove the two --image-credential-provider-* flags, restart kubelet, then remove again (docs/operations.md, Uninstalling)", w.ConfigFile)
+	}
+	holds, foreign, err := r.holdsOwn(prior.data)
+	if err != nil {
+		return false, fmt.Errorf("kubelet's credential-provider config %s: %w; refusing to guess whether it holds provider %q", w.ConfigFile, err, cfg.ProviderName)
 	}
 	if foreign {
 		r.foreignBinDir = w.BinDir
@@ -378,6 +462,11 @@ func (r *remover) removeFromKubeletConfig(st *state, w kubeletWiring) (stripped 
 	if remaining == 0 {
 		return r.removeOwnFlags(st, w)
 	}
+	if chartOwned {
+		if err := r.refuseStrandedMerges(st, w, desired); err != nil {
+			return false, err
+		}
+	}
 	if err := cfg.checkKubeletCanStart(desired, w); err != nil {
 		return false, err
 	}
@@ -400,53 +489,47 @@ func (r *remover) removeFromKubeletConfig(st *state, w kubeletWiring) (stripped 
 	r.removed++
 	var rb rollback
 	rb.file(w.ConfigFile, func() error { return restoreIn(dir, name, prior) })
-	return false, r.restart(st, t, written, func() error {
-		got, err := discoverKubelet(cfg.ProcRoot)
-		if err != nil {
-			return err
+	var verify func() error
+	if r.discovered {
+		verify = func() error {
+			got, err := discoverKubelet(cfg.ProcRoot)
+			if err != nil {
+				return err
+			}
+			if got != w {
+				return fmt.Errorf("running kubelet has bin-dir=%q config=%q after the restart, want %q/%q", got.BinDir, got.ConfigFile, w.BinDir, w.ConfigFile)
+			}
+			return nil
 		}
-		if got != w {
-			return fmt.Errorf("running kubelet has bin-dir=%q config=%q after the restart, want %q/%q", got.BinDir, got.ConfigFile, w.BinDir, w.ConfigFile)
-		}
-		return nil
-	}, &rb)
+	}
+	return false, r.restart(st, t, written, verify, &rb)
 }
 
 // removeOwnFlags is decision 3.1: kubelet's config holds no entry that
 // stays, so the flags that point kubelet at it must go, which the pass
-// does only for the wiring its own verified patch-mode restart set, from
-// the environment file the kubelet unit takes KUBELET_EXTRA_ARGS from.
+// does only for flags this install set (flagsOwner), from the environment
+// file the kubelet unit takes KUBELET_EXTRA_ARGS from.
 // Kubelet then reads no credential-provider config at all; the chart-owned
 // config goes later, as a config kubelet does not read.
 func (r *remover) removeOwnFlags(st *state, w kubeletWiring) (bool, error) {
 	cfg := r.cfg
-	wired := func(s *state) bool {
-		return s != nil && s.Mode == modePatch && s.BinDir == w.BinDir && s.ConfigFile == w.ConfigFile
+	owner, recorded, err := r.flagsOwner(st, w)
+	if err != nil {
+		return false, err
 	}
-	if !wired(st) {
-		// The release may have set the flags under an earlier provider name
-		// (decision 6), whose state file then records it.
-		for _, name := range cfg.retiringNames() {
-			prev, err := loadState(filepath.Join(cfg.hostPath(cfg.StateDir), filesFor(name).State))
-			if err != nil {
-				return false, err
-			}
-			if wired(prev) {
-				logf("the kubelet flags were set by this release under its earlier provider name %q", name)
-				st = prev
-				break
-			}
+	if !owner {
+		hint := ""
+		if st != nil && st.Mode == modeMerge && st.ConfigFile == w.ConfigFile {
+			hint = " This install merged its entry into the chart-owned config of the install that set the flags, which has left: uninstall such an install before the one whose config it merged into."
 		}
-	}
-	if !wired(st) {
-		return false, fmt.Errorf("removing provider %q would leave kubelet's credential-provider config %s without providers, which kubelet refuses at its next start, and this install did not set the kubelet flags that point at it (its state file %s records no patch-mode restart onto bin-dir=%q config=%q). Remove the flags, or the entry, by hand, restart kubelet, then remove again (docs/operations.md, Uninstalling)", cfg.ProviderName, w.ConfigFile, filepath.Join(cfg.StateDir, cfg.files().State), w.BinDir, w.ConfigFile)
+		return false, fmt.Errorf("removing provider %q would leave kubelet's credential-provider config %s without providers, which kubelet refuses at its next start, and this install did not set the kubelet flags that point at it (its state file %s records no patch-mode restart onto bin-dir=%q config=%q).%s Remove the flags, or the entry, by hand, restart kubelet, then remove again (docs/operations.md, Uninstalling)", cfg.ProviderName, w.ConfigFile, filepath.Join(cfg.StateDir, cfg.files().State), w.BinDir, w.ConfigFile, hint)
 	}
 	envFile, err := cfg.kubeletEnvFile()
 	if err != nil {
 		return false, fmt.Errorf("remove: %w", err)
 	}
-	if envFile != st.envFile() {
-		return false, fmt.Errorf("the kubelet unit %q takes KUBELET_EXTRA_ARGS from %s, but this install's patch-mode pass put the flags into %s; refusing to guess where kubelet's flags come from. Remove them by hand, restart kubelet, then remove again", cfg.KubeletUnit, envFile, st.envFile())
+	if recorded != nil && envFile != recorded.envFile() {
+		return false, fmt.Errorf("the kubelet unit %q takes KUBELET_EXTRA_ARGS from %s, but this install's patch-mode pass put the flags into %s; refusing to guess where kubelet's flags come from. Remove them by hand, restart kubelet, then remove again", cfg.KubeletUnit, envFile, recorded.envFile())
 	}
 	envPath := cfg.hostPath(envFile)
 	priorEnv, err := readPriorHostFile(envPath)
@@ -572,13 +655,26 @@ func (r *remover) removeFromUnreadConfig(c configRef) error {
 		}
 	}
 	if !chartOwned {
-		desired, changed, _, err := removeProvider(prior.data, cfg.ProviderName)
+		desired, changed, remaining, err := removeProvider(prior.data, cfg.ProviderName)
 		var retired bool
+		rest := -1
 		if err == nil {
-			desired, retired, _, err = cfg.withoutRetiring(desired)
+			desired, retired, rest, err = cfg.withoutRetiring(desired)
+		}
+		if rest >= 0 {
+			remaining = rest
 		}
 		if err != nil {
 			r.keep(c.path, err.Error())
+			r.entryKept = true
+			return nil
+		}
+		if remaining == 0 {
+			// Not the chart's file, so not the installer's to delete, and
+			// kubelet refuses a config without providers if its flags ever
+			// point here again.
+			r.keep(c.path, fmt.Sprintf("kubelet does not read it now, and provider %q is its last entry: without it the file would have no providers, which kubelet refuses", cfg.ProviderName))
+			r.entryKept = true
 			return nil
 		}
 		if changed || retired {
@@ -793,7 +889,7 @@ func (r *remover) removeNone() error {
 	if err := r.removeAuxFiles(); err != nil {
 		return err
 	}
-	return cfg.retire(uniqueDirs(cfg.HostBinDir))
+	return cfg.retire(uniqueDirs(cfg.HostBinDir), r.rep)
 }
 
 // removeBinaryBackups deletes the .bak copies of the binary and the record
@@ -876,4 +972,44 @@ func (r *remover) emptyRecord() error {
 	logf("emptied the record %s: it vouches for no entry of provider %q any more", path, cfg.ProviderName)
 	r.removed++
 	return nil
+}
+
+// refuseStrandedMerges refuses the removal of the install that set the
+// kubelet flags (decision 3.1) while another install merged its entry into
+// this chart-owned config (decision 3.5): its state records merge mode onto
+// kubelet's config. Such an install cannot remove the flags, so it could
+// never leave once it is the last entry. Uninstalling it first works.
+func (r *remover) refuseStrandedMerges(st *state, w kubeletWiring, desired []byte) error {
+	owner, _, err := r.flagsOwner(st, w)
+	if err != nil || !owner {
+		return err
+	}
+	var stranded []string
+	for _, name := range otherBridgeProviders(desired, r.cfg.ProviderName, nil) {
+		if validProviderName(name) != nil {
+			continue
+		}
+		other, err := loadState(filepath.Join(r.cfg.hostPath(r.cfg.StateDir), filesFor(name).State))
+		if err != nil {
+			return err
+		}
+		if other != nil && other.Mode == modeMerge && other.ConfigFile == w.ConfigFile {
+			stranded = append(stranded, name)
+		}
+	}
+	if len(stranded) == 0 {
+		return nil
+	}
+	return fmt.Errorf("provider(s) %s merged their entries into this install's chart-owned config %s, and their installs cannot remove the kubelet flags this install set: if this install left first, the last of them could never be removed. Uninstall the release(s) of %s first, then this one (docs/operations.md, Uninstalling)", quoteAll(stranded), w.ConfigFile, quoteAll(stranded))
+}
+
+// removalWiring is kubelet's credential-provider wiring for a removal: the
+// merge-mode overrides when they are set, as the install pass uses them
+// without discovery, otherwise the running kubelet's (discovered).
+func (c *config) removalWiring() (w kubeletWiring, discovered bool, err error) {
+	if c.MergeBinDir != "" {
+		return kubeletWiring{BinDir: c.MergeBinDir, ConfigFile: c.MergeConfigFile}, false, nil
+	}
+	w, err = discoverKubelet(c.ProcRoot)
+	return w, err == nil, err
 }
