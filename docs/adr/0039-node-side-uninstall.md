@@ -259,8 +259,10 @@ Read in the Helm source, v3.20.0 and v4.2.3:
       must leave first: the install that set the flags refuses to leave
       while the config it wired holds an entry whose install's state
       records merge mode onto that config, and its error says to uninstall
-      that install first. An install whose state is in another
-      `plugin.install.stateDir` is not seen; the order then is the
+      that install first. It does not refuse while another remaining
+      install's state records patch mode onto the same wiring: that one set
+      the flags too and removes them last. An install whose state is in
+      another `plugin.install.stateDir` is not seen; the order then is the
       operator's (docs/operations.md, "Uninstalling").
    6. *auto* resolves through the state file as above. Without a state
       file it handles the entries as in 3.2 and 3.4, and removes the flags

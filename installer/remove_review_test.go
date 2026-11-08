@@ -183,6 +183,32 @@ func TestRemove_RefusesToStrandAMergedInstall(t *testing.T) {
 	}
 }
 
+// TestRemove_AnotherFlagsOwnerStays: a third install patched the same
+// directories as a, so it set the flags too. a may leave before the merged
+// install b, because the third one removes the flags last; that one then
+// refuses while b's entry is left.
+func TestRemove_AnotherFlagsOwnerStays(t *testing.T) {
+	const thirdName = "harbor-bridge-us"
+	a, b := mergedIntoPatch(t)
+	c := newSiblingEnv(t, a, modeAuto, thirdName)
+	if err := run(c.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if st := mustLoadState(t, c); st.Mode != modePatch || st.ConfigFile != a.cfg.ownConfigPath() {
+		t.Fatalf("c's state = %+v, want patch onto a's config", st)
+	}
+	mustRemove(t, a, resultRemoved)
+	assertKubeletWiring(t, c, c.cfg.ownWiring(), defaultProviderName, thirdName)
+	if _, err := removeOnce(t, c); err == nil || !strings.Contains(err.Error(), `Uninstall the release(s) of "harbor-bridge-plugin" first`) {
+		t.Fatalf("got %v, want a refusal that names the merged install", err)
+	}
+	mustRemove(t, b, resultRemoved)
+	mustRemove(t, c, resultRemoved)
+	if w, _ := discoverKubelet(c.cfg.ProcRoot); w.wired() {
+		t.Fatalf("kubelet still wired: %+v", w)
+	}
+}
+
 // TestRemove_DirectoryConfig: kubelet 1.34+ reads a directory of config
 // files, which the installer never edits. A file there that holds this
 // install's entry refuses the removal; a directory without one is left

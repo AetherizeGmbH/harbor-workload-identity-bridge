@@ -322,8 +322,10 @@ into that release's chart-owned config (auto mode finds kubelet wired and
 merges), uninstall the merging release first. It cannot remove the kubelet
 flags the patch-mode release set, so it could never leave once it is the
 last entry. The patch-mode release therefore refuses to leave first; its
-error names the release to uninstall first. Releases that share the same
-directories in patch mode can leave in any order.
+error names the release to uninstall first. It leaves first when another
+patch-mode release of the same directories stays, because that release
+removes the flags last. Releases that share the same directories in patch
+mode can leave in any order.
 
 A `helm uninstall` right after `helm install`, while an install pass was
 still restarting kubelet, works too: when kubelet runs with flags that name

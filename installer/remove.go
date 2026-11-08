@@ -978,7 +978,9 @@ func (r *remover) emptyRecord() error {
 // kubelet flags (decision 3.1) while another install merged its entry into
 // this chart-owned config (decision 3.5): its state records merge mode onto
 // kubelet's config. Such an install cannot remove the flags, so it could
-// never leave once it is the last entry. Uninstalling it first works.
+// never leave once it is the last entry. Uninstalling it first works. If
+// another remaining install also set the flags (a patch-mode install of
+// the same directories), that one removes them later, and nothing strands.
 func (r *remover) refuseStrandedMerges(st *state, w kubeletWiring, desired []byte) error {
 	owner, _, err := r.flagsOwner(st, w)
 	if err != nil || !owner {
@@ -993,7 +995,11 @@ func (r *remover) refuseStrandedMerges(st *state, w kubeletWiring, desired []byt
 		if err != nil {
 			return err
 		}
-		if other != nil && other.Mode == modeMerge && other.ConfigFile == w.ConfigFile {
+		switch {
+		case other == nil:
+		case other.Mode == modePatch && other.BinDir == w.BinDir && other.ConfigFile == w.ConfigFile:
+			return nil
+		case other.Mode == modeMerge && other.ConfigFile == w.ConfigFile:
 			stranded = append(stranded, name)
 		}
 	}
