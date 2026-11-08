@@ -49,6 +49,8 @@ type fakeKubelet struct {
 	requiredEnvFiles map[string]bool
 	// envAssignments is the unit's Environment= property.
 	envAssignments string
+	// envErr, when set, is a failed query of the unit's environment.
+	envErr error
 	// ignoreEnvFile models a unit that reads its environment files but
 	// does not pass $KUBELET_EXTRA_ARGS on to kubelet.
 	ignoreEnvFile bool
@@ -75,6 +77,9 @@ func (f *fakeKubelet) unitEnvFiles() []string {
 func (f *fakeKubelet) environment(unit string) (unitEnvironment, error) {
 	if unit != "kubelet" {
 		f.t.Fatalf("unexpected unit %q", unit)
+	}
+	if f.envErr != nil {
+		return unitEnvironment{}, f.envErr
 	}
 	var refs []envFileRef
 	for _, path := range f.unitEnvFiles() {

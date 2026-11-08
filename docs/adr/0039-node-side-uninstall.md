@@ -241,10 +241,13 @@ Read in the Helm source, v3.20.0 and v4.2.3:
       (its own, its state's, an earlier name's): the first install pass of
       a node that died before its verified restart saved no state, and a
       removal that went on would delete the config and binary the flags
-      point at. When
-      the file holds no flags any more while kubelet still runs with the
-      ones the state records, an earlier removal pass of this install died
-      before its restart; this pass restarts kubelet, as in 2.8.
+      point at. A kubelet unit that takes its flags from no file patch mode
+      edits (ADR-0034) holds no such flags. When the pass cannot read the
+      unit's environment, it refuses: the flags of the next start are
+      unknown. When the file holds no flags any more while kubelet still
+      runs with the ones the state records, an earlier removal pass of this
+      install died before its restart; this pass restarts kubelet, as in
+      2.8.
    4. *merge into a cloud's config.* It drops its entry, leaves the flags
       to the cloud, restarts kubelet, verifies, and then deletes its binary
       and record from kubelet's bin dir. When its entry is the only one, it

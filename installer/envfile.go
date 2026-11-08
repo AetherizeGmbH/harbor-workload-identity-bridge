@@ -39,7 +39,9 @@ var setsExtraArgs = regexp.MustCompile(`(^|[\s"'])` + extraArgsKey + `=`)
 // refuses, before the pass writes anything, a unit that lists neither of
 // kubeletEnvFiles, an assignment that comes from another file, a
 // KUBELET_EXTRA_ARGS set only with Environment=, which a line in the file
-// would override, and a file it cannot read as systemd does.
+// would override, and a file it cannot read as systemd does. The refusals
+// that come from the unit's settings, not from a failed read, are a
+// *noPatchEnvFileError.
 func (c *config) kubeletEnvFile() (string, error) {
 	env, err := c.kubelet.environment(c.KubeletUnit)
 	if err != nil {
@@ -48,7 +50,7 @@ func (c *config) kubeletEnvFile() (string, error) {
 	var assigning, lastOperator string
 	for _, ref := range env.Files {
 		if !filepath.IsAbs(ref.Path) {
-			return "", fmt.Errorf("kubelet unit %q names the environment file %q, which is not an absolute path", c.KubeletUnit, ref.Path)
+			return "", noPatchEnvFile("kubelet unit %q names the environment file %q, which is not an absolute path", c.KubeletUnit, ref.Path)
 		}
 		files, err := c.expandEnvFile(ref.Path)
 		if err != nil {
@@ -72,15 +74,27 @@ func (c *config) kubeletEnvFile() (string, error) {
 	}
 	switch {
 	case assigning != "" && !slices.Contains(kubeletEnvFiles, assigning):
-		return "", fmt.Errorf("kubelet unit %q takes KUBELET_EXTRA_ARGS from %s, which the installer does not edit (it edits only %s); add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", c.KubeletUnit, assigning, strings.Join(kubeletEnvFiles, " or "))
+		return "", noPatchEnvFile("kubelet unit %q takes KUBELET_EXTRA_ARGS from %s, which the installer does not edit (it edits only %s); add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", c.KubeletUnit, assigning, strings.Join(kubeletEnvFiles, " or "))
 	case assigning != "":
 		return assigning, nil
 	case lastOperator == "":
-		return "", fmt.Errorf("kubelet unit %q reads neither %s (its environment files: %s), so patch mode has nowhere to put the kubelet flags; add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", c.KubeletUnit, strings.Join(kubeletEnvFiles, " nor "), describeFiles(env.Files))
+		return "", noPatchEnvFile("kubelet unit %q reads neither %s (its environment files: %s), so patch mode has nowhere to put the kubelet flags; add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", c.KubeletUnit, strings.Join(kubeletEnvFiles, " nor "), describeFiles(env.Files))
 	case setsExtraArgs.MatchString(env.Assignments):
-		return "", fmt.Errorf("kubelet unit %q sets KUBELET_EXTRA_ARGS with Environment=, which a KUBELET_EXTRA_ARGS line in %s would override and drop; move it into %s, or add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", c.KubeletUnit, lastOperator, lastOperator)
+		return "", noPatchEnvFile("kubelet unit %q sets KUBELET_EXTRA_ARGS with Environment=, which a KUBELET_EXTRA_ARGS line in %s would override and drop; move it into %s, or add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", c.KubeletUnit, lastOperator, lastOperator)
 	}
 	return lastOperator, nil
+}
+
+// noPatchEnvFileError is a refusal of kubeletEnvFile that comes from the
+// kubelet unit's settings: patch mode has no file to put the kubelet flags
+// into, so no patch-mode pass of this installer wrote flags for this unit.
+// A failed read is another error.
+type noPatchEnvFileError struct{ msg string }
+
+func (e *noPatchEnvFileError) Error() string { return e.msg }
+
+func noPatchEnvFile(format string, args ...any) error {
+	return &noPatchEnvFileError{msg: fmt.Sprintf(format, args...)}
 }
 
 // readEnvFile returns the assignments systemd takes from the environment

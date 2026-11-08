@@ -273,13 +273,19 @@ func (r *remover) holdsOwn(doc []byte) (holds, foreign bool, err error) {
 func (r *remover) checkNextStart(st *state, w kubeletWiring) error {
 	patchState := st != nil && st.Mode == modePatch
 	envFile, err := r.cfg.kubeletEnvFile()
+	var noPatch *noPatchEnvFileError
 	switch {
 	case err != nil && patchState:
 		return fmt.Errorf("remove: this install's state records patch mode: %w", err)
-	case err != nil:
+	case errors.As(err, &noPatch):
 		// The unit takes KUBELET_EXTRA_ARGS from no file patch mode
 		// writes (ADR-0034), so no pass of this installer set flags there.
+		logf("no kubelet flags of a patch-mode pass to check: %v", noPatch)
 		return nil
+	case err != nil:
+		// A failed read: the flags kubelet reads at its next start are
+		// unknown.
+		return fmt.Errorf("remove: %w; refusing to remove anything without knowing the kubelet flags of its next start", err)
 	}
 	prior, err := readPriorHostFile(r.cfg.hostPath(envFile))
 	if err != nil {

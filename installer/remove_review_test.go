@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -207,6 +208,38 @@ func TestRemove_AnotherFlagsOwnerStays(t *testing.T) {
 	if w, _ := discoverKubelet(c.cfg.ProcRoot); w.wired() {
 		t.Fatalf("kubelet still wired: %+v", w)
 	}
+}
+
+// TestRemove_EnvironmentOfTheKubeletUnit: the removal checks the kubelet
+// flags of the next start in the unit's environment file. A unit that
+// takes them from no file patch mode writes has no such flags, and the
+// removal goes on. A failed query of the unit leaves them unknown, and the
+// removal refuses before it writes anything.
+func TestRemove_EnvironmentOfTheKubeletUnit(t *testing.T) {
+	cloud := kubeletWiring{BinDir: "/cloud/bin", ConfigFile: "/cloud/config.json"}
+	merged := func() *testEnv {
+		env := newTestEnv(t, modeAuto, []string{"/usr/bin/kubelet", flagBinDir + "=" + cloud.BinDir, flagConfigFile + "=" + cloud.ConfigFile})
+		writeCloudConfig(t, env, cloud.BinDir, cloud.ConfigFile, eksConfig)
+		if err := run(env.cfg); err != nil {
+			t.Fatal(err)
+		}
+		return env
+	}
+
+	env := merged()
+	env.kubelet.envFiles = []string{"/var/lib/kubelet/kubeadm-flags.env"}
+	mustRemove(t, env, resultRemoved)
+
+	env = merged()
+	env.kubelet.envErr = errors.New("nsenter: permission denied")
+	configBefore := env.hostFile(t, cloud.ConfigFile)
+	if _, err := removeOnce(t, env); err == nil || !strings.Contains(err.Error(), "without knowing the kubelet flags of its next start") {
+		t.Fatalf("got %v, want a refusal", err)
+	}
+	if env.restarts != 1 || env.hostFile(t, cloud.ConfigFile) != configBefore {
+		t.Fatal("the refused removal changed the node")
+	}
+	assertPresent(t, env, cloud.BinDir+"/"+defaultProviderName)
 }
 
 // TestRemove_DirectoryConfig: kubelet 1.34+ reads a directory of config
