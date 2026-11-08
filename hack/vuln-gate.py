@@ -3,7 +3,7 @@
 """Decide the govulncheck and Trivy checks from their JSON reports (ADR-0036).
 
 Usage:
-  vuln-gate.py govulncheck HEAD.json [--base BASE.json]
+  vuln-gate.py govulncheck HEAD.json [--base BASE.json] [--fixable-only]
   vuln-gate.py trivy HEAD.json [--base BASE.json] [--base-prefix DIR/]
 
 HEAD.json is the scan of the revision under test. Without --base (pushes to
@@ -22,6 +22,10 @@ What counts as a finding:
 
 --base-prefix strips the directory the base was checked out into from Trivy
 targets, so head and base name the same file the same way.
+
+--fixable-only (govulncheck) turns findings without a fixed version into
+warnings. The release gate uses it (ADR-0040): a release stops only for
+a vulnerability that an update can remove.
 
 Exit status: 0 pass, 1 findings fail the check, 2 a report is missing or not
 a report of that scanner (a failed scan must never pass).
@@ -46,10 +50,14 @@ def read(path):
 
 
 def govulncheck_findings(path):
-    """Map each called OSV ID to one line that describes it."""
+    """Map each called OSV ID to one line that describes it.
+
+    Also returns the keys of the called OSV IDs that no finding names a
+    fixed version for.
+    """
     text = read(path)
     decoder = json.JSONDecoder()
-    pos, seen_config, summaries, called = 0, False, {}, {}
+    pos, seen_config, summaries, called, fixable = 0, False, {}, {}, set()
     while True:
         while pos < len(text) and text[pos].isspace():
             pos += 1
@@ -74,11 +82,14 @@ def govulncheck_findings(path):
                 where = frame.get("package") or frame.get("module") or "?"
                 fixed = finding.get("fixed_version") or "no fix"
                 called.setdefault(finding["osv"], f"{where}@{frame.get('version', '?')}, fixed in {fixed}")
+                if finding.get("fixed_version"):
+                    fixable.add(finding["osv"])
     if not seen_config:
         raise ReportError(f"{path}: no govulncheck config message; the scan did not run")
     counts = collections.Counter({(osv,): 1 for osv in called})
     labels = {(osv,): f"{osv}: {summaries.get(osv, '')} ({where})" for osv, where in called.items()}
-    return counts, labels
+    unfixable = {(osv,) for osv in called if osv not in fixable}
+    return counts, labels, unfixable
 
 
 def trivy_findings(path, strip=""):
@@ -125,11 +136,16 @@ def main(argv):
     parser.add_argument("head")
     parser.add_argument("--base")
     parser.add_argument("--base-prefix", default="")
+    parser.add_argument("--fixable-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.fixable_only and args.tool != "govulncheck":
+        print(f"::error title={args.tool}::--fixable-only applies to govulncheck only")
+        return 2
 
     try:
+        unfixable = set()
         if args.tool == "govulncheck":
-            head, labels = govulncheck_findings(args.head)
+            head, labels, unfixable = govulncheck_findings(args.head)
             base = govulncheck_findings(args.base)[0] if args.base else collections.Counter()
         else:
             head, labels = trivy_findings(args.head)
@@ -138,6 +154,10 @@ def main(argv):
         print(f"::error title={args.tool}::{e}")
         return 2
 
+    waiting = collections.Counter()
+    if args.fixable_only:
+        waiting = collections.Counter({k: n for k, n in head.items() if k in unfixable})
+        head = head - waiting
     added = head - base
     kept = head - added
     summary = []
@@ -148,6 +168,9 @@ def main(argv):
     for key in sorted(kept):
         annotate("warning", args.tool, f"already on the base commit: {labels[key]}")
         summary.append(f"- on the base commit too: {labels[key]}")
+    for key in sorted(waiting):
+        annotate("warning", args.tool, f"no fixed version yet: {labels[key]}")
+        summary.append(f"- no fixed version yet: {labels[key]}")
 
     if args.base:
         verdict = (
@@ -156,6 +179,8 @@ def main(argv):
         )
     else:
         verdict = f"{sum(added.values())} finding(s)"
+    if args.fixable_only:
+        verdict += f" with a fixed version, {sum(waiting.values())} without one yet"
     print(f"{args.tool}: {verdict}")
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:

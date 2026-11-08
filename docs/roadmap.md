@@ -159,17 +159,3 @@ limits today.
   entries alone; or keep the manual procedure. *Limits now:* every
   uninstall or `plugin.providerName` rename needs the manual steps on every
   node; until then kubelet runs a plugin that fails for its `matchImages`.
-
-### Release and development
-
-- [ ] **Vulnerability gate at release time.** `release-images.yml` pushes
-  and signs each image right after the build; its Trivy job only generates
-  the SBOM. `govulncheck` and the Trivy filesystem scan
-  (`vulnerabilities.yml`) run on pull requests, pushes to `main` and once a
-  day, not on the release artefacts. *Options:* `govulncheck -mode=binary`
-  on the built binaries, or a Trivy image scan with a severity gate, before
-  the images are pushed and signed; that can block a release on a
-  vulnerability disclosed after the merge. *Limits now:* a vulnerability
-  disclosed less than a day before the release is published and signed
-  without a check; one disclosed earlier is red in the daily scan of
-  `main`, which does not stop the release.

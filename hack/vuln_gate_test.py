@@ -103,6 +103,36 @@ class VulnGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("0 finding(s)", r.stdout)
 
+    def test_govulncheck_fixable_only_fails_for_a_fixed_version(self):
+        # The release gate (ADR-0040): an update can remove this one.
+        head = self.write("h.json", govulncheck_stream(osv("GO-1", "x509 bug"), finding("GO-1", "symbol")))
+        r = self.gate("govulncheck", head, "--fixable-only")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("1 finding(s) with a fixed version, 0 without one yet", r.stdout)
+
+    def test_govulncheck_fixable_only_warns_without_a_fixed_version(self):
+        head = self.write(
+            "h.json",
+            govulncheck_stream(
+                osv("GO-1", "x509 bug"), finding("GO-1", "symbol"),
+                osv("GO-3", "no fix yet"), finding("GO-3", "symbol", fixed=""),
+            ),
+        )
+        r = self.gate("govulncheck", head, "--fixable-only")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("::warning title=govulncheck::no fixed version yet: GO-3", r.stdout)
+        self.assertIn("1 finding(s) with a fixed version, 1 without one yet", r.stdout)
+        only_unfixed = self.write("u.json", govulncheck_stream(osv("GO-3", "no fix yet"), finding("GO-3", "symbol", fixed="")))
+        r = self.gate("govulncheck", only_unfixed, "--fixable-only")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # Without the flag every called finding fails, fixed version or not.
+        self.assertEqual(self.gate("govulncheck", only_unfixed).returncode, 1)
+
+    def test_fixable_only_is_refused_for_trivy(self):
+        head = self.write("t.json", trivy_report())
+        r = self.gate("trivy", head, "--fixable-only")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
     def test_govulncheck_finding_on_base_only_warns(self):
         stream = govulncheck_stream(osv("GO-1", "x509 bug"), finding("GO-1", "symbol"), finding("GO-1", "symbol"))
         r = self.gate("govulncheck", self.write("h.json", stream), "--base", self.write("b.json", stream))
