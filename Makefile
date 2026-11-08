@@ -171,7 +171,7 @@ run-local-tls: ## Create or renew run-local's self-signed cert in .gen/run-local
 run-local: run-local-tls ## Run the bridge against $KUBECONFIG on 127.0.0.1 with the self-signed cert from run-local-tls
 	@test -n "$$BRIDGE_CLUSTER_NAME" || (echo "set BRIDGE_CLUSTER_NAME" && exit 1)
 	@test -n "$$BRIDGE_NAMESPACE" || (echo "set BRIDGE_NAMESPACE" && exit 1)
-	@test -n "$$BRIDGE_OIDC_ISSUER" || (echo "set BRIDGE_OIDC_ISSUER" && exit 1)
+	@test -n "$$BRIDGE_OIDC_ISSUER" || (echo "set BRIDGE_OIDC_ISSUER: off-cluster the bridge cannot read it from the in-cluster apiserver (ADR-0044); print it with kubectl get --raw /.well-known/openid-configuration | jq -r .issuer" && exit 1)
 	@test -n "$$BRIDGE_AUDIENCE" || (echo "set BRIDGE_AUDIENCE (the audience your HarborAccess objects name)" && exit 1)
 	@test -n "$$BRIDGE_HARBOR_URL" || (echo "set BRIDGE_HARBOR_URL" && exit 1)
 	@test -n "$$BRIDGE_HARBOR_ADMIN_DIR" || (echo "set BRIDGE_HARBOR_ADMIN_DIR" && exit 1)
