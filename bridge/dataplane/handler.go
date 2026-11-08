@@ -174,12 +174,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logger := log.FromContext(ctx).WithName("dataplane")
 
+	// Counted, not logged: a scan of the NodePort would flood the log.
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		h.recordUnrouted(UnroutedMethodNotAllowed)
 		return
 	}
 	if r.URL.Path != CredentialsPath {
 		http.NotFound(w, r)
+		h.recordUnrouted(UnroutedNotFound)
 		return
 	}
 	// Before any parsing or token validation: the cheapest possible
@@ -405,6 +408,15 @@ func (h *Handler) recordResult(result string) {
 		return
 	}
 	h.Metrics.Issuances.WithLabelValues(result).Inc()
+}
+
+// recordUnrouted counts a request the listener does not route to the
+// credential handler.
+func (h *Handler) recordUnrouted(reason string) {
+	if h.Metrics == nil {
+		return
+	}
+	h.Metrics.UnroutedRequests.WithLabelValues(reason).Inc()
 }
 
 // recordOIDCFailure counts a Validate failure under its classifyOIDCError

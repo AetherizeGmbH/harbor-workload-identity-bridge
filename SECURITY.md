@@ -816,6 +816,10 @@ The bridge also exposes Prometheus metrics for SOC-style alerting:
 - `bridge_harboraccess_lookup_failures_total`
 - `bridge_robot_secret_missing_total`
 - `bridge_credential_issuance_duration_seconds`
+- `bridge_unrouted_requests_total{reason=method_not_allowed|not_found}`:
+  requests with another method than `POST` or another path than
+  `/v1/credentials`. Kubelet never sends them, so a rising count means
+  someone scans the credential endpoint.
 
 A non-zero rate on `result=unauthorized` or
 `oidc_validation_failures_total{reason=wrong_issuer|excessive_lifetime|not_pod_bound}`
