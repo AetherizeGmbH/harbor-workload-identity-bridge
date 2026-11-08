@@ -832,8 +832,8 @@ metadata:
   name: harbor-bridge-plugin-uninstall
   namespace: harbor-bridge-plugin
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.11.6
-    app.kubernetes.io/version: "0.11.6"
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -853,8 +853,8 @@ metadata:
   name: harbor-bridge-plugin-uninstall
   namespace: harbor-bridge-plugin
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.11.6
-    app.kubernetes.io/version: "0.11.6"
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -881,8 +881,8 @@ metadata:
   name: harbor-bridge-plugin-uninstall
   namespace: harbor-bridge-plugin
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.11.6
-    app.kubernetes.io/version: "0.11.6"
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -909,8 +909,8 @@ metadata:
   name: harbor-bridge-plugin-uninstall
   namespace: harbor-bridge-plugin
   labels:
-    helm.sh/chart: harbor-workload-identity-bridge-0.11.6
-    app.kubernetes.io/version: "0.11.6"
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: harbor-workload-identity-bridge
     app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -929,8 +929,8 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: harbor-workload-identity-bridge-0.11.6
-        app.kubernetes.io/version: "0.11.6"
+        helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+        app.kubernetes.io/version: "0.14.0"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: harbor-workload-identity-bridge
         app.kubernetes.io/name: harbor-workload-identity-bridge
@@ -950,7 +950,7 @@ spec:
         kubernetes.io/os: linux
       containers:
         - name: uninstall
-          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.11.6
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.14.0
           imagePullPolicy: IfNotPresent
           command: [/installer/harbor-bridge-uninstall-hook]
           env:
