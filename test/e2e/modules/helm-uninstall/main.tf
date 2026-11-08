@@ -14,16 +14,6 @@
 # cleanup does not run into a half-removed release. kubectl and helm see
 # only var.kubeconfig, through a private file (test/e2e/scripts/kubeconfig.sh).
 
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
-  }
-}
-
 variable "kubeconfig" {
   type = object({
     host                   = string

@@ -6,10 +6,6 @@
 # share a module source share one state, and a run with other inputs
 # replaces the first release (CLAUDE.md, "tofu test pitfalls").
 
-terraform {
-  required_version = ">= 1.6"
-}
-
 variable "kubeconfig" {
   type = object({
     host                   = string

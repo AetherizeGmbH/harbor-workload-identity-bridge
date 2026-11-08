@@ -18,9 +18,6 @@
 #   - gcloud auth login                       (docker push to Artifact Registry)
 #   - GOOGLE_PROJECT exported (make e2e-gke maps it to TF_VAR_gcp_project)
 #   - Billing enabled on the project; GKE + Artifact Registry APIs enabled.
-terraform {
-  required_version = ">= 1.12"
-}
 
 variable "gcp_project" {
   type        = string

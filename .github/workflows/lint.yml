@@ -76,6 +76,10 @@ jobs:
         # Match e2e.yml's pin: same major fmt rules, no laptop/CI drift.
         with: { tofu_version: 1.12.0 }
       - run: tofu fmt -check -recursive test/e2e test/e2e-gke || (echo "run 'tofu fmt -recursive test/e2e test/e2e-gke' locally" && exit 1)
+      # Renovate aborts a provider update when the file it re-reads holds
+      # an image from a variable; versions.tf keeps the terraform {} block
+      # apart (Makefile, verify-tofu-versions).
+      - run: make verify-tofu-versions
 
   yamllint:
     name: yamllint

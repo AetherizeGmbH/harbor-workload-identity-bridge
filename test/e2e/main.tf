@@ -4,9 +4,6 @@
 # block swaps the active module — `var.X` inside refers to that
 # child's variables, not the test root's — so values are passed in
 # directly as literals or `run.<previous>.<output>` references.
-terraform {
-  required_version = ">= 1.12"
-}
 
 # File-scope variables for the tftest files. Declaring them here makes
 # them settable via `tofu test -var ...` or TF_VAR_* env vars. NOTE: the

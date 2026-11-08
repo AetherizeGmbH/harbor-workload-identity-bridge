@@ -192,6 +192,25 @@ run-local: run-local-tls ## Run the bridge against $KUBECONFIG on 127.0.0.1 with
 	BRIDGE_METRICS_ADDR="$${BRIDGE_METRICS_ADDR:-127.0.0.1:8080}" \
 	go run ./bridge/cmd
 
+# Renovate re-reads a .tf file after it updates a provider in it and aborts
+# the whole update branch when that file holds a dependency without a name,
+# which `image = var.x` in a kubernetes_* resource is (Renovate 44.222.4,
+# lib/workers/repository/update/branch/get-updated.ts, WORKER_FILE_UPDATE_FAILED).
+# The terraform {} block therefore lives alone in versions.tf.
+.PHONY: verify-tofu-versions
+verify-tofu-versions: ## Keep every tofu module's terraform {} block alone in versions.tf (Renovate)
+	@bad=$$(git ls-files 'test/*.tf' 'test/**/*.tf' | grep -v '/versions\.tf$$' | xargs grep -l '^terraform {' || true); \
+	if [ -n "$$bad" ]; then \
+		echo "ERROR: move the terraform {} block of these files into versions.tf next to them:"; \
+		echo "$$bad"; \
+		exit 1; \
+	fi
+	@for f in $$(git ls-files 'test/*versions.tf' 'test/**/versions.tf'); do \
+		if grep -qE '^(resource|data|module|provider|variable|output|locals) ' "$$f"; then \
+			echo "ERROR: $$f must hold only the terraform {} block"; exit 1; \
+		fi; \
+	done
+
 .PHONY: verify-package-isolation
 verify-package-isolation: ## Enforce ADR-0002: controlplane must not import dataplane
 	@if go list -deps ./bridge/controlplane/... 2>/dev/null | grep -q github.com/aetherize/harbor-workload-identity-bridge/bridge/dataplane; then \

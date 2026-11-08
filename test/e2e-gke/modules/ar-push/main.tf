@@ -7,10 +7,6 @@
 # tofu test state is ephemeral (fresh per run, destroyed at the end),
 # so each run re-pushes; docker push is layer-deduplicating and cheap
 # on re-runs.
-terraform {
-  required_version = ">= 1.6"
-  # null provider is built-in; no external providers needed.
-}
 
 variable "images" {
   type        = map(string)

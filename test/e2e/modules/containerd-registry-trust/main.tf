@@ -1,8 +1,3 @@
-terraform {
-  required_version = ">= 1.6"
-  # null provider is built-in; no external providers needed.
-}
-
 variable "cluster_name" {
   type        = string
   description = "Kind cluster name. Only used to bust the trigger when the cluster is recreated."

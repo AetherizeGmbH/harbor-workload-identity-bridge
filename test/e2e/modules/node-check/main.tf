@@ -5,16 +5,6 @@
 # test/e2e/.diag/<name>/ (the provisioner's own output is suppressed: its
 # environment is sensitive) and the run fails.
 
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
-  }
-}
-
 variable "kubeconfig" {
   type = object({
     host                   = string

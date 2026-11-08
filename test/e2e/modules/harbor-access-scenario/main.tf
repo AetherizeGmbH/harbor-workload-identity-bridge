@@ -39,9 +39,6 @@
 # the phase produces. The bridge sets it only after a fully successful
 # pass, so it implies Ready for exactly that spec; waiting on Ready alone
 # would pass immediately on the stale Ready=True of the previous phase.
-terraform {
-  required_version = ">= 1.6"
-}
 
 variable "kubeconfig" {
   type = object({

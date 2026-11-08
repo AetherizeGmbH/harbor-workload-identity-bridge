@@ -1,15 +1,6 @@
 # cert-manager for the GKE harness. The kind harness installs it
 # inside the kind-cluster module (test/e2e/modules/kind-cluster); the
 # version pin below mirrors that one — bump them together.
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 3.0"
-    }
-  }
-}
 
 variable "kubeconfig" {
   type = object({
