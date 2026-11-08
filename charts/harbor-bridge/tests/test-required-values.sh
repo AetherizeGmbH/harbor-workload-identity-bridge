@@ -645,6 +645,23 @@ else
   failed=$((failed+1))
 fi
 
+# `helm upgrade --reuse-values` from a release before 0.8.0 keeps values
+# without bridge.rateLimit (0.7.0), harbor.caSecret and plugin.caBundle
+# (0.8.0). A null --set removes a key the same way. The render must equal
+# the default one, and a plugin namespace without plugin.caBundle must get
+# the chart's message, not a nil pointer.
+if [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set bridge.rateLimit=null 2>&1)" ] \
+   && [ "$(render -f "${COMPLETE}" --set harbor.caSecret.name= 2>&1)" = "$(render -f "${COMPLETE}" --set harbor.caSecret=null 2>&1)" ] \
+   && [ "$(render -f "${COMPLETE}" 2>&1)" = "$(render -f "${COMPLETE}" --set plugin.caBundle=null 2>&1)" ] \
+   && ! out=$(render -f "${COMPLETE}" --set plugin.namespace=harbor-bridge-nodes --set plugin.caBundle=null 2>&1) \
+   && grep -qF 'plugin.namespace is set, so the plugin runs in its own namespace' <<<"${out}"; then
+  echo "PASS  missing bridge.rateLimit, harbor.caSecret, plugin.caBundle (--reuse-values from < 0.8.0)"
+else
+  echo "FAIL  missing bridge.rateLimit, harbor.caSecret, plugin.caBundle (--reuse-values from < 0.8.0)"
+  head -3 <<<"      got: ${out:-}"
+  failed=$((failed+1))
+fi
+
 # `helm upgrade --reuse-values` from a release that predates
 # bridge.tokenValidation keeps the old values, which lack the key. A null
 # --set removes it the same way; the render must equal the default one.

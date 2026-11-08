@@ -105,7 +105,7 @@ spec:
               value: {{ include "harbor-bridge.instance" . | quote }}
             {{- end }}
             - name: BRIDGE_RATE_LIMIT_PER_SOURCE
-              value: {{ .Values.bridge.rateLimit.perSource | quote }}
+              value: {{ include "harbor-bridge.rateLimitPerSource" . | quote }}
             - name: BRIDGE_RATE_LIMIT_BURST
               value: {{ include "harbor-bridge.rateLimitBurst" . | quote }}
             {{- with .Values.bridge.oidcJWKSURL }}
@@ -129,7 +129,7 @@ spec:
               value: {{ .Values.harbor.url | quote }}
             - name: BRIDGE_HARBOR_ALLOW_INSECURE_HTTP
               value: {{ .Values.harbor.allowInsecureHTTP | quote }}
-            {{- if .Values.harbor.caSecret.name }}
+            {{- if dig "caSecret" "name" "" .Values.harbor }}
             - name: BRIDGE_HARBOR_CA_FILE
               value: /etc/bridge/harbor-ca/ca.crt
             {{- end }}
@@ -171,7 +171,7 @@ spec:
             - name: tls
               mountPath: /etc/bridge/tls
               readOnly: true
-            {{- if .Values.harbor.caSecret.name }}
+            {{- if dig "caSecret" "name" "" .Values.harbor }}
             - name: harbor-ca
               mountPath: /etc/bridge/harbor-ca
               readOnly: true
