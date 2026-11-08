@@ -88,6 +88,18 @@ app.kubernetes.io/component: plugin
 {{- end -}}
 
 {{/*
+uninstall.labels label the pre-delete hook's objects (ADR-0039). The
+component differs from the plugin's on purpose: the hook lists the
+DaemonSet's pods by its selector and must not find its own.
+*/}}
+{{- define "harbor-bridge.uninstall.labels" -}}
+{{ include "harbor-bridge.labels.common" . }}
+app.kubernetes.io/name: {{ include "harbor-bridge.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: plugin-uninstall
+{{- end -}}
+
+{{/*
 =====================================================================
 ServiceAccount names. Both components use distinct SAs so we can
 RBAC-scope them independently and tell them apart in audit logs.
@@ -318,6 +330,22 @@ harbor.aetherize.io/robot
 {{- $install := .Values.plugin.install | default dict -}}
 {{- if not (has $install.mode (list "auto" "merge" "patch" "none")) -}}
 {{- fail (printf "plugin.install.mode=%q is invalid. Must be one of: auto, merge, patch, none (ADR-0021)." (toString $install.mode)) -}}
+{{- end -}}
+{{- $action := include "harbor-bridge.plugin.installAction" . -}}
+{{- if not (has $action (list "install" "remove")) -}}
+{{- fail (printf "plugin.install.action=%q is invalid. Must be install or remove (ADR-0039)." $action) -}}
+{{- end -}}
+{{- $maxUnavailable := include "harbor-bridge.plugin.uninstallMaxUnavailable" . -}}
+{{- if not (regexMatch "^([1-9][0-9]*|([1-9][0-9]?|100)%)$" $maxUnavailable) -}}
+{{- fail (printf "plugin.uninstall.maxUnavailable=%q must be a whole number of at least 1 or a percentage from 1%% to 100%%, such as 25%%: the nodes the uninstall hook lets remove the plugin at once (ADR-0039)." $maxUnavailable) -}}
+{{- end -}}
+{{- $timeoutSeconds := include "harbor-bridge.plugin.uninstallTimeoutSeconds" . -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,5}$" $timeoutSeconds) -}}
+{{- fail (printf "plugin.uninstall.timeoutSeconds=%q must be a whole number of seconds from 1 to 999999 (ADR-0039)." $timeoutSeconds) -}}
+{{- end -}}
+{{- $uninstallEnabled := (.Values.plugin.uninstall | default dict).enabled -}}
+{{- if not (or (kindIs "invalid" $uninstallEnabled) (kindIs "bool" $uninstallEnabled)) -}}
+{{- fail (printf "plugin.uninstall.enabled must be true or false, but it was read as the %s %v." (kindOf $uninstallEnabled) $uninstallEnabled) -}}
 {{- end -}}
 {{- if ne (empty $install.binDir) (empty $install.configFile) -}}
 {{- fail "plugin.install.binDir and plugin.install.configFile must be set together (both name merge-mode targets)." -}}
@@ -699,6 +727,37 @@ priorityClassName is plugin.priorityClassName. A missing key renders the
 default: `helm upgrade --reuse-values` renders with the previous chart's
 values, which predate the key. "" omits the field.
 */}}
+{{/*
+Node-side uninstall settings (ADR-0039), defaulted here because `helm
+upgrade --reuse-values` from a chart without them keeps the old values and
+never sees the defaults in values.yaml. installAction is
+plugin.install.action; uninstallEnabled is "true" or "false".
+*/}}
+{{- define "harbor-bridge.plugin.installAction" -}}
+{{- dig "action" "install" (.Values.plugin.install | default dict) | toString -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.uninstallEnabled" -}}
+{{- dig "enabled" true (.Values.plugin.uninstall | default dict) | toString -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.uninstallMaxUnavailable" -}}
+{{- dig "maxUnavailable" "25%" (.Values.plugin.uninstall | default dict) | toString -}}
+{{- end -}}
+
+{{- define "harbor-bridge.plugin.uninstallTimeoutSeconds" -}}
+{{- dig "timeoutSeconds" 270 (.Values.plugin.uninstall | default dict) | toString -}}
+{{- end -}}
+
+{{/*
+releaseId names the release on the nodes: every record the installer
+writes stores it, so that a rename can tell the release's own previous
+provider names (ADR-0039, decision 6).
+*/}}
+{{- define "harbor-bridge.releaseId" -}}
+{{- printf "%s/%s" .Release.Namespace .Release.Name -}}
+{{- end -}}
+
 {{- define "harbor-bridge.plugin.priorityClassName" -}}
 {{- if kindIs "invalid" .Values.plugin.priorityClassName -}}
 system-node-critical

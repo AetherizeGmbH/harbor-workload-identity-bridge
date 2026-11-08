@@ -147,15 +147,3 @@ limits today.
   or a bridge that leaves objects another instance serves alone).
   *Limits now:* selectors must not overlap, and bridges on one cluster
   should use distinct `clusterName` values even with different Harbors.
-
-### Nodes
-
-- [ ] **Node-side uninstall.** `helm uninstall` leaves kubelet wired to the
-  plugin: the provider entry, binary, record, CA, mTLS and state files stay
-  until removed by hand ([Uninstalling](operations.md#uninstalling)). *Options:* a
-  pre-delete hook that removes this release's entry and files on every
-  node and restarts kubelet, which needs the installer's privileges at
-  uninstall time, has to reach every node, and must leave other releases'
-  entries alone; or keep the manual procedure. *Limits now:* every
-  uninstall or `plugin.providerName` rename needs the manual steps on every
-  node; until then kubelet runs a plugin that fails for its `matchImages`.

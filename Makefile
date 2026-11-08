@@ -81,9 +81,10 @@ build-plugin: ## Build the kubelet credential-provider plugin into bin/harbor-br
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-plugin ./plugin
 
 .PHONY: build-installer
-build-installer: ## Build the node installer into bin/harbor-bridge-installer
+build-installer: ## Build the node installer and the uninstall hook (ADR-0039) into bin/
 	mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-installer ./installer
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/harbor-bridge-uninstall-hook ./installer/uninstallhook
 
 .PHONY: build-all
 build-all: ## Compile-check every package
@@ -205,6 +206,8 @@ verify-package-isolation: ## Enforce ADR-0002: controlplane must not import data
 FUZZ_TARGETS ?= \
 	./installer:FuzzMergeProvider \
 	./installer:FuzzMergeExtraArgs \
+	./installer:FuzzRemoveProvider \
+	./installer:FuzzRemoveExtraArgs \
 	./installer:FuzzKubeletCmdline \
 	./installer:FuzzNodeFiles_Injective \
 	./bridge/controlplane/harbor:FuzzRobotName_Injective \

@@ -38,6 +38,32 @@ variable "namespace" {
   default = "harbor-bridge-system"
 }
 
+# A second release on the same cluster (ADR-0029) needs a name, a provider
+# name, a NodePort and a HarborAccess selector of its own; the defaults are
+# the chart's, for the one release every other run installs.
+variable "release_name" {
+  type    = string
+  default = "harbor-bridge"
+}
+
+variable "provider_name" {
+  type        = string
+  default     = ""
+  description = "plugin.providerName; empty keeps the chart's default (harbor-bridge-plugin)."
+}
+
+variable "node_port" {
+  type        = number
+  default     = 0
+  description = "service.nodePort; 0 keeps the chart's default (31443)."
+}
+
+variable "harbor_access_selector" {
+  type        = map(string)
+  default     = {}
+  description = "bridge.harborAccessSelector; empty serves every HarborAccess."
+}
+
 variable "cluster_name" {
   type        = string
   description = "BRIDGE_CLUSTER_NAME — used as robot-account prefix in Harbor."
@@ -332,14 +358,18 @@ resource "kubernetes_resource_quota_v1" "critical_pods" {
 # directory on first install. No separate kubectl_manifest needed.
 
 resource "helm_release" "bridge" {
-  name      = "harbor-bridge"
+  name      = var.release_name
   namespace = kubernetes_namespace_v1.this.metadata[0].name
   chart     = abspath("${path.module}/${var.chart_path}")
   timeout   = 600
   wait      = true
   atomic    = false # the plugin DaemonSet restarts kubelet — be patient
+  # The chart's pre-delete hook has every node remove the plugin
+  # (ADR-0039). The node_uninstall stage runs it on purpose with the helm
+  # CLI; the cleanup after a failed stage must not wait for it.
+  disable_webhooks = true
 
-  values = [yamlencode({
+  values = [yamlencode(merge({
     clusterName = var.cluster_name
     harbor = {
       url = var.harbor_url
@@ -360,8 +390,9 @@ resource "helm_release" "bridge" {
         image = var.plugin_image
       },
       var.bridge_endpoint != "" ? { bridgeEndpoint = var.bridge_endpoint } : {},
+      var.provider_name != "" ? { providerName = var.provider_name } : {},
     )
-    bridge = {
+    bridge = merge({
       oidcIssuer  = var.oidc_issuer
       oidcJWKSURL = var.oidc_jwks_url
       replicas    = var.bridge_replicas
@@ -375,7 +406,7 @@ resource "helm_release" "bridge" {
           kind = "ClusterIssuer"
         }
       }
-    }
+    }, length(var.harbor_access_selector) > 0 ? { harborAccessSelector = var.harbor_access_selector } : {})
     tls = {
       enabled = true
       issuerRef = {
@@ -383,7 +414,7 @@ resource "helm_release" "bridge" {
         kind = "ClusterIssuer"
       }
     }
-  })]
+  }, var.node_port > 0 ? { service = { nodePort = var.node_port } } : {}))]
 
   depends_on = [
     kubectl_manifest.cluster_issuer,
@@ -477,6 +508,11 @@ resource "kubernetes_service_v1" "bridge_pods" {
 
 output "namespace" {
   value = kubernetes_namespace_v1.this.metadata[0].name
+}
+
+output "release" {
+  value       = helm_release.bridge.name
+  description = "Helm release name of the bridge (and of its plugin DaemonSet, <release>-plugin)."
 }
 
 output "bridge_replicas" {

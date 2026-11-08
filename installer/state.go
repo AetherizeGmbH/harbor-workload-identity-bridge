@@ -90,6 +90,12 @@ func (r *rejection) testedBy(kubelet string) bool {
 
 const stateSchemaVersion = 1
 
+// modeRemove is the mode a state records after a removal pass verified
+// its kubelet restart (ADR-0039), and the mode of a rejected removal. It is
+// never a configured mode, so no install pass takes such a state for its
+// own content.
+const modeRemove = "remove"
+
 // target is what one install pass wants kubelet to run with.
 type target struct {
 	mode, binDir, configFile string

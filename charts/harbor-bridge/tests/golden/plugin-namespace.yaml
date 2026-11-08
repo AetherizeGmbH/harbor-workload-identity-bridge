@@ -399,6 +399,10 @@ spec:
           env:
             - name: INSTALL_MODE
               value: "auto"
+            - name: INSTALL_ACTION
+              value: "install"
+            - name: RELEASE_ID
+              value: "harbor-bridge-system/harbor-bridge"
             - name: HOST_ROOT
               value: /host
             - name: HOST_BIN_DIR
@@ -447,6 +451,10 @@ spec:
           env:
             - name: INSTALL_MODE
               value: "auto"
+            - name: INSTALL_ACTION
+              value: "install"
+            - name: RELEASE_ID
+              value: "harbor-bridge-system/harbor-bridge"
             - name: HOST_ROOT
               value: /host
             - name: HOST_BIN_DIR
@@ -816,3 +824,163 @@ spec:
     name: harbor-bridge-ca
     kind: ClusterIssuer
     group: cert-manager.io
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-uninstall-hook.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-bridge-plugin-uninstall
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin-uninstall
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-uninstall-hook.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harbor-bridge-plugin-uninstall
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin-uninstall
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["harbor-bridge-plugin"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-uninstall-hook.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-bridge-plugin-uninstall
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin-uninstall
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: harbor-bridge-plugin-uninstall
+subjects:
+  - kind: ServiceAccount
+    name: harbor-bridge-plugin-uninstall
+    namespace: harbor-bridge-plugin
+
+---
+# Source: harbor-workload-identity-bridge/templates/plugin-uninstall-hook.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harbor-bridge-plugin-uninstall
+  namespace: harbor-bridge-plugin
+  labels:
+    helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+    app.kubernetes.io/version: "0.14.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: harbor-workload-identity-bridge
+    app.kubernetes.io/name: harbor-workload-identity-bridge
+    app.kubernetes.io/instance: harbor-bridge
+    app.kubernetes.io/component: plugin-uninstall
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-succeeded,hook-failed
+spec:
+  backoffLimit: 0
+  # The hook stops itself at timeoutSeconds and reports; this only bounds a
+  # Job that cannot.
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: harbor-workload-identity-bridge-0.14.0
+        app.kubernetes.io/version: "0.14.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: harbor-workload-identity-bridge
+        app.kubernetes.io/name: harbor-workload-identity-bridge
+        app.kubernetes.io/instance: harbor-bridge
+        app.kubernetes.io/component: plugin-uninstall
+    spec:
+      serviceAccountName: harbor-bridge-plugin-uninstall
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: uninstall
+          image: ghcr.io/aetherizegmbh/harbor-workload-identity-bridge-plugin:0.14.0
+          imagePullPolicy: IfNotPresent
+          command: [/installer/harbor-bridge-uninstall-hook]
+          env:
+            - name: NAMESPACE
+              value: "harbor-bridge-plugin"
+            - name: DAEMONSET
+              value: "harbor-bridge-plugin"
+            - name: PROVIDER_NAME
+              value: "harbor-bridge-plugin"
+            # The hook switches the DaemonSet only when Helm's annotations
+            # name this release: a chart rendered with helm template applies
+            # this Job like any other object.
+            - name: RELEASE_NAME
+              value: "harbor-bridge"
+            - name: RELEASE_NAMESPACE
+              value: "harbor-bridge-system"
+            - name: MAX_UNAVAILABLE
+              value: "25%"
+            - name: TIMEOUT_SECONDS
+              value: "270"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+

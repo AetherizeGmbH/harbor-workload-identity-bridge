@@ -101,9 +101,15 @@ Every `run` block in [`test/e2e/tests/02-bridge.tftest.hcl`](test/e2e/tests/02-b
 | 19c | `robot_check_cascade` | Asks Harbor: the robot of `app-ns/runner` is gone, every other robot of the cluster is still there |
 | 20 | `harbor_access_teardown` | Scenario phase `none`: every HarborAccess and tenant namespace deleted while the bridge runs; each deletion waits for the finalizer |
 | 21 | `robot_check_teardown` | Asks Harbor: no robot of cluster `dev` is left. A failed query is retried and never counts as an empty list; an answer that is not exactly one JSON list, an empty body included, fails the stage |
+| 21b | `second_install` | A second release (ADR-0029), `harbor-bridge-second` in its own namespace, with its own provider name, NodePort, audience, HarborAccess selector and `clusterName`. Its installer adds its entry to the chart-owned config the first release wired kubelet to |
+| 22 | `node_uninstall` | ADR-0039: `helm uninstall` of the first release with the CLI. The chart's pre-delete hook switches the plugin DaemonSet to `INSTALL_ACTION=remove` and waits until every node removed the plugin. On failure the stage saves the hook's and the installers' logs and the kubelet journals, then uninstalls with `--no-hooks` |
+| 23 | `node_uninstall_check` | On every node: nothing of the first release left (entry, binary, record, CA, mTLS and state file, nor their `.bak` copies); the second release's entry, binary, record and CA and the kubelet flags it needs kept; kubelet active and wired. In the cluster: every node Ready, the first DaemonSet and its hook objects gone |
+| 24 | `second_uninstall` | `helm uninstall` of the second release, the last one on the nodes |
+| 25 | `second_uninstall_check` | On every node: nothing of either release left, no `--image-credential-provider-*` flag in `/etc/default/kubelet` or on the running kubelet, kubelet active, the node lock file still there |
 
-The harness installs one release. Several releases on one node (ADR-0029)
-are covered by the installer's unit tests (`installer/coexist_test.go`: two
+The harness installs a second release only for the uninstall stages
+(21b to 25). Several releases on one node (ADR-0029) are otherwise covered
+by the installer's unit tests (`installer/coexist_test.go`: two
 of our providers next to a foreign one in merge, patch and none mode, the
 locks and that a pass holds them until its kubelet restart, two
 installers at once, entries planted in or changed in a chart-owned config

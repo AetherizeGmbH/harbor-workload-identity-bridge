@@ -10,7 +10,7 @@ verified. "Verified" means: covered by the e2e harness against a real cluster.
 | EKS (AL2023) | defaults | kubelet already runs `ecr-credential-provider` → **merge** into `/etc/eks/image-credential-provider/config.json` (stays JSON) | merge unit-tested, not run |
 | AKS | defaults | kubelet already runs `acr-credential-provider` → **merge** into its config | merge unit-tested, not run |
 | Talos | `plugin.enabled: false` | nothing — the plugin comes from a system extension, the entry from the machine config | documented ([install-external-plugin.md](install-external-plugin.md)) |
-| k3s, RKE2 | `install.mode: none`, or `plugin.enabled: false` | `none`: files only; pass the two flags via the distribution's kubelet args (`--kubelet-arg` / `kubelet-arg:`) | documented |
+| k3s, RKE2 | `install.mode: none`, or `plugin.enabled: false` | `none`: files only; pass the two flags via the distribution's kubelet args (`--kubelet-arg` / `kubelet-arg:`). `helm uninstall` keeps the plugin binary on the nodes (ADR-0039): remove the flags yourself first | documented |
 | baked node images | `plugin.enabled: false` | nothing | documented |
 | GKE Autopilot | — | not supported: no privileged DaemonSets, no custom credential-provider binaries | — |
 | Bottlerocket | — | not supported: read-only root, only built-in credential providers | — |

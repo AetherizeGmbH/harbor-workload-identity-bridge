@@ -1,0 +1,150 @@
+{{/*
+Node-side uninstall (ADR-0039). Before `helm uninstall` deletes anything,
+this pre-delete hook Job switches the plugin DaemonSet to
+INSTALL_ACTION=remove: every node's installer then takes this install's
+provider entry and files off the node, restarts kubelet where what it
+reads changed, and reports in its termination message. The Job waits until
+every node reported, and fails as soon as one reports a failed removal,
+and after plugin.uninstall.timeoutSeconds. When it fails, the release
+stays installed, the DaemonSet stays in the removal action, and running
+`helm uninstall` again continues. The hook never reverts its patch.
+
+The Job runs unprivileged (Pod Security "restricted" admits it). Its
+ServiceAccount may get and patch the plugin DaemonSet by name, whose pods
+are privileged, and list pods; that RBAC exists only while the hooks run
+(hook-succeeded deletes it also when the Job fails, ADR-0039). The Job
+stays after a failure for `kubectl logs`; Helm prints its log either way.
+It schedules like the bridge: the plugin's `operator: Exists` toleration
+would let it land on a NotReady node.
+*/}}
+{{- if and .Values.plugin.enabled (eq (include "harbor-bridge.plugin.uninstallEnabled" .) "true") }}
+{{- $name := printf "%s-uninstall" (include "harbor-bridge.plugin.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $namespace := include "harbor-bridge.plugin.namespace" . }}
+{{- $timeout := include "harbor-bridge.plugin.uninstallTimeoutSeconds" . | int }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "harbor-bridge.uninstall.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "harbor-bridge.uninstall.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: [{{ include "harbor-bridge.plugin.fullname" . | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "harbor-bridge.uninstall.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "harbor-bridge.uninstall.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-succeeded,hook-failed
+spec:
+  backoffLimit: 0
+  # The hook stops itself at timeoutSeconds and reports; this only bounds a
+  # Job that cannot.
+  activeDeadlineSeconds: {{ add $timeout 30 }}
+  template:
+    metadata:
+      labels:
+        {{- include "harbor-bridge.uninstall.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.bridge.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridge.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridge.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: uninstall
+          image: {{ include "harbor-bridge.plugin.image" . }}
+          imagePullPolicy: {{ .Values.plugin.image.pullPolicy }}
+          command: [/installer/harbor-bridge-uninstall-hook]
+          env:
+            - name: NAMESPACE
+              value: {{ $namespace | quote }}
+            - name: DAEMONSET
+              value: {{ include "harbor-bridge.plugin.fullname" . | quote }}
+            - name: PROVIDER_NAME
+              value: {{ include "harbor-bridge.plugin.providerName" . | quote }}
+            # The hook switches the DaemonSet only when Helm's annotations
+            # name this release: a chart rendered with helm template applies
+            # this Job like any other object.
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: MAX_UNAVAILABLE
+              value: {{ include "harbor-bridge.plugin.uninstallMaxUnavailable" . | quote }}
+            - name: TIMEOUT_SECONDS
+              value: {{ $timeout | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.plugin.resources | nindent 12 }}
+{{- end }}

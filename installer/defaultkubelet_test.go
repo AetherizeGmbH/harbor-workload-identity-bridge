@@ -351,3 +351,63 @@ func TestMergeExtraArgs_RepairsWhatEarlierInstallersAppended(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoveExtraArgs pins what a removal does to the kubelet environment
+// file (ADR-0039, decision 3.1): it takes exactly this install's two flags
+// out of KUBELET_EXTRA_ARGS and keeps every other argument and line.
+func TestRemoveExtraArgs(t *testing.T) {
+	ours := flagBinDir + "=" + testBinDir + " " + flagConfigFile + "=" + testConfigFile
+	for name, tc := range map[string]struct{ in, want string }{
+		"only our flags: an empty assignment stays": {
+			"KUBELET_EXTRA_ARGS=\"" + ours + "\"\n",
+			"KUBELET_EXTRA_ARGS=\"\"\n",
+		},
+		"operator args and other lines stay": {
+			"# node\nFOO=1\nKUBELET_EXTRA_ARGS=\"--max-pods=42 " + ours + " --v=2\"\nBAR=2\n",
+			"# node\nFOO=1\nKUBELET_EXTRA_ARGS=\"--max-pods=42 --v=2\"\nBAR=2\n",
+		},
+		"the --flag value form": {
+			"KUBELET_EXTRA_ARGS=--v=2 " + flagBinDir + " " + testBinDir + " " + flagConfigFile + " " + testConfigFile + "\n",
+			"KUBELET_EXTRA_ARGS=\"--v=2\"\n",
+		},
+		"no final newline": {
+			"KUBELET_EXTRA_ARGS='" + ours + " --v=2'",
+			"KUBELET_EXTRA_ARGS=\"--v=2\"\n",
+		},
+		"the line an earlier installer appended goes": {
+			"# node\nKUBELET_EXTRA_ARGS = \"--max-pods=42\"\nOTHER=1\nKUBELET_EXTRA_ARGS=\"" + ours + "\"\n",
+			"# node\nKUBELET_EXTRA_ARGS=\"--max-pods=42\"\nOTHER=1\n",
+		},
+	} {
+		out, err := removeExtraArgs([]byte(tc.in), testBinDir, testConfigFile)
+		if err != nil || string(out) != tc.want {
+			t.Errorf("%s: got %v\n%q\nwant\n%q", name, err, out, tc.want)
+			continue
+		}
+		if again, err := removeExtraArgs(out, testBinDir, testConfigFile); err != nil || string(again) != string(out) {
+			t.Errorf("%s: a second removal changed the file: %v\n%q", name, err, again)
+		}
+	}
+	for name, in := range map[string]string{
+		"no file":       "",
+		"no assignment": "# node\nFOO=1\n",
+		"no flags":      "KUBELET_EXTRA_ARGS = '--max-pods=42'\n",
+	} {
+		if out, err := removeExtraArgs([]byte(in), testBinDir, testConfigFile); err != nil || string(out) != in {
+			t.Errorf("%s: a file without the flags must come back byte for byte, got %v\n%q", name, err, out)
+		}
+	}
+	for name, in := range map[string]string{
+		"flags of other directories": "KUBELET_EXTRA_ARGS=\"" + flagBinDir + "=/other/bin " + flagConfigFile + "=" + testConfigFile + "\"\n",
+		"only one of the two flags":  "KUBELET_EXTRA_ARGS=\"--v=2 " + flagBinDir + "=" + testBinDir + "\"\n",
+		"appended line of other directories": "KUBELET_EXTRA_ARGS = --max-pods=42\nKUBELET_EXTRA_ARGS=\"" + flagBinDir +
+			"=/old/bin " + flagConfigFile + "=/old/config.yaml\"\n",
+		"two assignments":        "KUBELET_EXTRA_ARGS=\"--v=2\"\nKUBELET_EXTRA_ARGS=\"" + ours + "\"\n",
+		"quoting it cannot keep": "KUBELET_EXTRA_ARGS=\"" + ours + " --node-labels='a=b'\"\n",
+		"continued line":         "KUBELET_EXTRA_ARGS=\"" + ours + " \\\n--v=2\"\n",
+	} {
+		if out, err := removeExtraArgs([]byte(in), testBinDir, testConfigFile); err == nil {
+			t.Errorf("%s: accepted, got\n%q", name, out)
+		}
+	}
+}

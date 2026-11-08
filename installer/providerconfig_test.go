@@ -662,3 +662,111 @@ func TestCheckRoundTrip(t *testing.T) {
 		t.Fatalf("different YAML: got %v", err)
 	}
 }
+
+// TestRemoveProvider pins what a removal does to a cloud's config
+// (ADR-0039, decision 2.5): only this install's bridge entry goes.
+func TestRemoveProvider(t *testing.T) {
+	ours := mustEntry(t, renderedConfig, defaultProviderName)
+
+	t.Run("JSON stays JSON, unknown fields stay", func(t *testing.T) {
+		merged, _, err := mergeProvider([]byte(eksConfig), ours)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, changed, remaining, err := removeProvider(merged, defaultProviderName)
+		if err != nil || !changed || remaining != 1 {
+			t.Fatalf("changed %v, remaining %d, err %v", changed, remaining, err)
+		}
+		if !isJSON(out) {
+			t.Fatalf("JSON became\n%s", out)
+		}
+		if !reflect.DeepEqual(parseConfig(t, out), parseConfig(t, []byte(eksConfig))) {
+			t.Fatalf("got\n%s", out)
+		}
+	})
+
+	t.Run("YAML, another install's entry stays", func(t *testing.T) {
+		eu := mustEntry(t, renderedConfigFor("harbor-bridge-eu"), "harbor-bridge-eu")
+		withEU, _, err := mergeProvider([]byte(gkeConfig), eu)
+		if err != nil {
+			t.Fatal(err)
+		}
+		both, _, err := mergeProvider(withEU, ours)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, changed, remaining, err := removeProvider(both, defaultProviderName)
+		if err != nil || !changed || remaining != 2 {
+			t.Fatalf("changed %v, remaining %d, err %v", changed, remaining, err)
+		}
+		if isJSON(out) || !reflect.DeepEqual(parseConfig(t, out), parseConfig(t, withEU)) {
+			t.Fatalf("got\n%s", out)
+		}
+	})
+
+	t.Run("without our entry the bytes stay", func(t *testing.T) {
+		out, changed, remaining, err := removeProvider([]byte(aksConfig), defaultProviderName)
+		if err != nil || changed || remaining != 1 || string(out) != aksConfig {
+			t.Fatalf("changed %v, remaining %d, err %v\n%s", changed, remaining, err, out)
+		}
+	})
+
+	t.Run("a foreign entry of our name stays", func(t *testing.T) {
+		foreign := strings.Replace(gkeConfig, "auth-provider-gcp", defaultProviderName, 1)
+		out, changed, _, err := removeProvider([]byte(foreign), defaultProviderName)
+		if err != nil || changed || string(out) != foreign {
+			t.Fatalf("changed %v, err %v\n%s", changed, err, out)
+		}
+	})
+
+	t.Run("the last entry leaves none", func(t *testing.T) {
+		_, changed, remaining, err := removeProvider([]byte(renderedConfig), defaultProviderName)
+		if err != nil || !changed || remaining != 0 {
+			t.Fatalf("changed %v, remaining %d, err %v", changed, remaining, err)
+		}
+	})
+
+	t.Run("an unknown schema is refused", func(t *testing.T) {
+		if _, _, _, err := removeProvider([]byte("apiVersion: kubelet.config.k8s.io/v9\n"), defaultProviderName); err == nil {
+			t.Fatal("unknown schema accepted")
+		}
+	})
+}
+
+// TestComposeWithout pins what a removal does to a chart-owned config
+// (ADR-0039, decision 2.5): the other installs' vouched entries stay,
+// nothing else.
+func TestComposeWithout(t *testing.T) {
+	ours := mustEntry(t, renderedConfig, defaultProviderName)
+	eu := mustEntry(t, renderedConfigFor("harbor-bridge-eu"), "harbor-bridge-eu")
+	planted := mustEntry(t, "apiVersion: kubelet.config.k8s.io/v1\nproviders:\n"+plantedEntry, "harbor-bridge-plugin.bak")
+	isEU := func(p map[string]any) bool { return p["name"] == "harbor-bridge-eu" }
+
+	out, dropped, remaining, err := composeWithout(configWith(t, eu, ours, planted, eu), defaultProviderName, isEU)
+	if err != nil || remaining != 1 {
+		t.Fatalf("remaining %d, err %v", remaining, err)
+	}
+	if !reflect.DeepEqual(dropped, []string{`"harbor-bridge-plugin.bak"`, `"harbor-bridge-eu"`}) {
+		t.Fatalf("dropped = %v", dropped)
+	}
+	if want := configWith(t, eu); string(out) != string(want) {
+		t.Fatalf("got\n%s\nwant\n%s", out, want)
+	}
+	if again, _, _, err := composeWithout(out, defaultProviderName, isEU); err != nil || string(again) != string(out) {
+		t.Fatalf("an unchanged file must come back byte for byte: %v\n%s", err, again)
+	}
+
+	out, _, remaining, err = composeWithout([]byte(renderedConfig+plantedEntry), defaultProviderName, isEU)
+	if err != nil || remaining != 0 || out != nil {
+		t.Fatalf("with nothing left: remaining %d, err %v\n%s", remaining, err, out)
+	}
+	if _, _, _, err := composeWithout([]byte("apiVersion: kubelet.config.k8s.io/v9\n"), defaultProviderName, isEU); err == nil {
+		t.Fatal("unknown schema accepted")
+	}
+
+	for doc, want := range map[string]bool{renderedConfig: true, gkeConfig: false, strings.Replace(gkeConfig, "auth-provider-gcp", defaultProviderName, 1): false} {
+		if got, err := holdsBridgeEntry([]byte(doc), defaultProviderName); err != nil || got != want {
+			t.Errorf("holdsBridgeEntry = %v, %v; want %v for\n%s", got, err, want, doc)
+		}
+	}
+}

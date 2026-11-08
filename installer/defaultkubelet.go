@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -35,7 +36,81 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 		flagBinDir + "=" + binDir,
 		flagConfigFile + "=" + configFile,
 	}
+	e, err := parseExtraArgs(existing)
+	if err != nil {
+		return nil, err
+	}
+	if e.appended >= 0 {
+		logf("line %d of the kubelet environment file assigns KUBELET_EXTRA_ARGS only the two --image-credential-provider-* flags: an installer before this version appended it because it did not recognise the assignment on line %d, and kubelet has run without the args of line %d since. Merging the flags into line %d and removing line %d; kubelet gets those args back", e.appended+1, e.line+1, e.line+1, e.line+1, e.appended+1)
+	}
+	args := ours
+	if e.found {
+		args = append(stripCredentialProviderFlags(e.args), ours...)
+	}
+	return e.render(existing, args)
+}
 
+// removeExtraArgs is mergeExtraArgs for a removal (ADR-0039): it takes the
+// two --image-credential-provider-* flags out of the KUBELET_EXTRA_ARGS
+// assignment of a kubelet environment file and keeps every other argument
+// and every other line. The flags must name exactly binDir and configFile,
+// the wiring this install's patch-mode pass put there; flags that name
+// anything else are refused, because kubelet then runs a wiring this
+// install did not set. A file without the flags comes back byte for byte.
+// An assignment left without arguments stays as KUBELET_EXTRA_ARGS="",
+// which kubelet reads the same as no assignment: the installer cannot tell
+// a line patch mode appended from the empty assignment RPM packages ship
+// (ADR-0034). It reads and refuses files as mergeExtraArgs does.
+func removeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) {
+	e, err := parseExtraArgs(existing)
+	if err != nil {
+		return nil, err
+	}
+	if !e.found {
+		return existing, nil
+	}
+	rest := stripCredentialProviderFlags(e.args)
+	var got kubeletWiring
+	switch {
+	case e.appended >= 0:
+		got = e.appendedWiring
+		if len(rest) != len(e.args) {
+			return nil, fmt.Errorf("lines %d and %d of the kubelet environment file both set --image-credential-provider-* flags; refusing to guess which ones are this install's", e.line+1, e.appended+1)
+		}
+		logf("line %d of the kubelet environment file assigns KUBELET_EXTRA_ARGS only the two --image-credential-provider-* flags, appended by an installer before this version; removing it, so kubelet gets the args of line %d back", e.appended+1, e.line+1)
+	case len(rest) == len(e.args):
+		return existing, nil
+	default:
+		got = kubeletWiring{BinDir: flagValue(e.args, flagBinDir), ConfigFile: flagValue(e.args, flagConfigFile)}
+	}
+	if want := (kubeletWiring{BinDir: binDir, ConfigFile: configFile}); got != want {
+		return nil, fmt.Errorf("KUBELET_EXTRA_ARGS sets --image-credential-provider-bin-dir=%q and --image-credential-provider-config=%q, not this install's %q and %q; refusing to remove flags this install did not set", got.BinDir, got.ConfigFile, binDir, configFile)
+	}
+	return e.render(existing, rest)
+}
+
+// extraArgsEdit is a kubelet environment file read for an edit of its
+// KUBELET_EXTRA_ARGS assignment (parseExtraArgs).
+type extraArgsEdit struct {
+	// lines is the file split at "\n", without a final empty segment.
+	lines []string
+	// found is set when the file assigns KUBELET_EXTRA_ARGS; line is the
+	// index of that assignment and args its arguments as systemd splits
+	// them.
+	found bool
+	line  int
+	args  []string
+	// appended is the index of the line an earlier installer appended
+	// (appendedByEarlierInstaller), which an edit removes, or -1;
+	// appendedWiring holds the two flags that line sets.
+	appended       int
+	appendedWiring kubeletWiring
+}
+
+// parseExtraArgs reads existing for an edit of its KUBELET_EXTRA_ARGS
+// assignment: as systemd reads it (parseEnvFile), refusing everything the
+// installer cannot rewrite faithfully (see mergeExtraArgs).
+func parseExtraArgs(existing []byte) (*extraArgsEdit, error) {
 	assignments, err := parseEnvFile(string(existing))
 	if err != nil {
 		return nil, err
@@ -46,6 +121,7 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 	if n := len(lines); n > 0 && lines[n-1] == "" {
 		lines = lines[:n-1]
 	}
+	e := &extraArgsEdit{lines: lines, appended: -1}
 
 	var extra []envAssignment
 	for _, a := range assignments {
@@ -53,19 +129,18 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 			extra = append(extra, a)
 		}
 	}
-	appended := -1
 	if len(extra) == 2 && appendedByEarlierInstaller(extra, lines) {
 		// Kubelet has used the appended line, the second, and not the
-		// operator's args. Merge the flags into the operator's line and
-		// drop the appended one: kubelet gets the operator's args back.
-		appended = extra[1].first
-		logf("line %d of the kubelet environment file assigns KUBELET_EXTRA_ARGS only the two --image-credential-provider-* flags: an installer before this version appended it because it did not recognise the assignment on line %d, and kubelet has run without the args of line %d since. Merging the flags into line %d and removing line %d; kubelet gets those args back", appended+1, extra[0].first+1, extra[0].first+1, extra[0].first+1, appended+1)
+		// operator's args. An edit puts the flags into the operator's line
+		// and drops the appended one: kubelet gets the operator's args back.
+		e.appended = extra[1].first
+		flags := splitArgs(extra[1].value)
+		e.appendedWiring = kubeletWiring{BinDir: flagValue(flags, flagBinDir), ConfigFile: flagValue(flags, flagConfigFile)}
 		extra = extra[:1]
 	}
 	if len(extra) > 1 {
 		return nil, fmt.Errorf("multiple KUBELET_EXTRA_ARGS lines (lines %d and %d) — refusing to guess which one kubelet uses", extra[0].first+1, extra[1].first+1)
 	}
-	found := len(extra) == 1
 	for _, a := range extra {
 		if a.first != a.last {
 			return nil, fmt.Errorf("KUBELET_EXTRA_ARGS continues over several lines (lines %d-%d), which the installer cannot rewrite safely; put it on one line, or add the two --image-credential-provider-* flags yourself and use plugin.install.mode=none", a.first+1, a.last+1)
@@ -78,20 +153,30 @@ func mergeExtraArgs(existing []byte, binDir, configFile string) ([]byte, error) 
 		if err != nil {
 			return nil, err
 		}
-		args := stripCredentialProviderFlags(splitArgs(val))
-		args = append(args, ours...)
-		lines[a.first] = extraArgsKey + `="` + strings.Join(args, " ") + `"`
+		e.found, e.line, e.args = true, a.first, splitArgs(val)
+	}
+	return e, nil
+}
+
+// render returns the file with KUBELET_EXTRA_ARGS assigned args: the
+// assignment rewritten as one double-quoted line, or appended when the file
+// has none, and the line an earlier installer appended removed.
+func (e *extraArgsEdit) render(existing []byte, args []string) ([]byte, error) {
+	lines := slices.Clone(e.lines)
+	line := extraArgsKey + `="` + strings.Join(args, " ") + `"`
+	if e.found {
+		lines[e.line] = line
 	}
 	// Appending a line, or the final newline the file lacks, must not
 	// change what the file's last line means.
-	if (!found || !bytes.HasSuffix(existing, []byte("\n"))) && openAtEnd(string(existing)) {
+	if (!e.found || !bytes.HasSuffix(existing, []byte("\n"))) && openAtEnd(string(existing)) {
 		return nil, fmt.Errorf("the last line of the file ends inside a quoted value, after an escape, or in a comment continued with a backslash, so the installer cannot add to the file safely; fix that line")
 	}
-	if appended >= 0 {
-		lines = append(lines[:appended], lines[appended+1:]...)
+	if e.appended >= 0 {
+		lines = append(lines[:e.appended], lines[e.appended+1:]...)
 	}
-	if !found {
-		lines = append(lines, extraArgsKey+`="`+strings.Join(ours, " ")+`"`)
+	if !e.found {
+		lines = append(lines, line)
 	}
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }

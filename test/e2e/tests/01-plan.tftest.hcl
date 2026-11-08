@@ -215,6 +215,57 @@ run "custom_namespace" {
   }
 }
 
+# ── A second release (ADR-0029, ADR-0039 e2e) ────────────────────────────────
+# release_name, provider_name, node_port and harbor_access_selector reach
+# the chart; their defaults render none of the keys, so the one-release
+# runs above stay as they were.
+run "second_release" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+  variables {
+    release_name           = "harbor-bridge-second"
+    provider_name          = "harbor-bridge-second"
+    node_port              = 31444
+    harbor_access_selector = { "harbor.aetherize.io/bridge" = "second" }
+  }
+
+  assert {
+    condition     = helm_release.bridge.name == "harbor-bridge-second" && output.release == "harbor-bridge-second"
+    error_message = "release_name should name the helm release"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).plugin.providerName == "harbor-bridge-second"
+    error_message = "provider_name should reach plugin.providerName"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).service.nodePort == 31444
+    error_message = "node_port should reach service.nodePort"
+  }
+  assert {
+    condition     = yamldecode(helm_release.bridge.values[0]).bridge.harborAccessSelector["harbor.aetherize.io/bridge"] == "second"
+    error_message = "harbor_access_selector should reach bridge.harborAccessSelector"
+  }
+}
+
+run "one_release_keys_absent" {
+  command = plan
+  module {
+    source = "./modules/harbor-bridge-install"
+  }
+
+  assert {
+    condition = (
+      !contains(keys(yamldecode(helm_release.bridge.values[0]).plugin), "providerName")
+      && !contains(keys(yamldecode(helm_release.bridge.values[0])), "service")
+      && !contains(keys(yamldecode(helm_release.bridge.values[0]).bridge), "harborAccessSelector")
+      && helm_release.bridge.disable_webhooks
+    )
+    error_message = "the defaults must render no providerName, service or harborAccessSelector, and the release must skip hooks"
+  }
+}
+
 # ── Custom issuer name ───────────────────────────────────────────────────────
 # issuer_name feeds BOTH the ClusterIssuer manifest AND the chart's
 # tls.issuerRef.name — assert they stay in lockstep so the serving cert
