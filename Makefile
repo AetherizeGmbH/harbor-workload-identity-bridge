@@ -15,7 +15,7 @@ CONTROLLER_GEN_VERSION ?= v0.23.0
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
 
 # renovate: datasource=go depName=golang.org/x/vuln
-GOVULNCHECK_VERSION ?= v1.8.0
+GOVULNCHECK_VERSION ?= v1.9.0
 GOVULNCHECK ?= $(LOCALBIN)/govulncheck-$(GOVULNCHECK_VERSION)
 
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
