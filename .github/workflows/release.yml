@@ -48,14 +48,14 @@ jobs:
       # pull-requests:write (semantic-release comments on released PRs).
       - name: Mint App installation token
         id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           app-id: ${{ secrets.RENOVATE_APP_ID }}
           private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with: { node-version: 26 }
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
-        with: { version: v4.3.0 }  # semantic-release prepareCmd regenerates chart goldens
+        with: { version: v4.3.1 }  # semantic-release prepareCmd regenerates chart goldens
       # verifyReleaseCmd runs govulncheck before a release is tagged (ADR-0040).
       # No cache: this job holds a token that can push to main.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
