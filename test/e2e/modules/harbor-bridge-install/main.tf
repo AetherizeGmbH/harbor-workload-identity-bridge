@@ -348,8 +348,11 @@ resource "helm_release" "bridge" {
   namespace = kubernetes_namespace_v1.this.metadata[0].name
   chart     = abspath("${path.module}/${var.chart_path}")
   timeout   = 600
-  wait      = true
-  atomic    = false # the plugin DaemonSet restarts kubelet — be patient
+  # null_resource.bridge_rollout waits instead. A helm wait that times out
+  # fails this resource, and nothing runs after it to collect diagnostics:
+  # compat run 42784591046 lost a bridge_upgrade timeout that way.
+  wait   = false
+  atomic = false
   # The chart's pre-delete hook has every node remove the plugin
   # (ADR-0039). The node_uninstall stage runs it on purpose with the helm
   # CLI; the cleanup after a failed stage must not wait for it.
@@ -403,16 +406,20 @@ resource "helm_release" "bridge" {
   ]
 }
 
-# helm's wait is not enough: it counts a Deployment as ready once
-# replicas - maxUnavailable pods are (1 of 2 with the chart's
+# The release's only wait (helm_release.bridge sets wait = false). First
+# the plugin DaemonSet: each new pod's installer restarts kubelet when the
+# provider config changed, so this can take minutes. Then the bridge
+# Deployment, stricter than helm's wait: helm counts a Deployment as ready
+# once replicas - maxUnavailable pods are (1 of 2 with the chart's
 # maxUnavailable: 1), and the Service then routes everything to the one
 # ready pod. A replica that never becomes Ready, such as a follower whose
 # data plane waits for the leadership it never gets (audit H1), passed the
 # install and every pull. Wait for the whole rollout and require every
 # replica updated, Ready and available, after each install or upgrade
-# that changed the release. On failure the pods, their events and the
-# bridge logs land in .diag/bridge-rollout/ (this provisioner's own output
-# is suppressed: its environment is sensitive).
+# that changed the release. On failure the rollout status, both
+# components' pods and logs, the events and each kind node's kubelet
+# journal land in .diag/bridge-rollout/ (this provisioner's own output is
+# suppressed: its environment is sensitive).
 resource "null_resource" "bridge_rollout" {
   depends_on = [helm_release.bridge]
 
@@ -430,13 +437,26 @@ resource "null_resource" "bridge_rollout" {
       fail() {
         rm -rf "$DIAG"; mkdir -p "$DIAG"
         echo "$1" > "$DIAG/FAILED"
+        cp "$d/rollout.txt" "$DIAG/rollout.txt" 2>/dev/null
+        k -n "$NS" get pods -o wide > "$DIAG/pods.txt" 2>&1
+        k -n "$NS" get events --sort-by=.lastTimestamp > "$DIAG/events.txt" 2>&1
         k -n "$NS" get deployment "$DEPLOYMENT" -o yaml > "$DIAG/deployment.yaml" 2>&1
         k -n "$NS" describe pods -l app.kubernetes.io/component=bridge > "$DIAG/pods.describe.txt" 2>&1
         k -n "$NS" logs -l app.kubernetes.io/component=bridge --all-containers --tail=1000 --prefix > "$DIAG/bridge.log" 2>&1
+        k -n "$NS" get daemonset "$DAEMONSET" -o yaml > "$DIAG/daemonset.yaml" 2>&1
+        k -n "$NS" describe pods -l app.kubernetes.io/component=plugin > "$DIAG/plugin-pods.describe.txt" 2>&1
+        k -n "$NS" logs -l app.kubernetes.io/component=plugin -c install --tail=1000 --prefix > "$DIAG/install.log" 2>&1
+        # kind node names are their container names. Elsewhere (GKE)
+        # docker exec fails and the file holds that error.
+        for n in $(k get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+          docker exec "$n" journalctl -u kubelet --no-pager --since -20min > "$DIAG/kubelet-$n.log" 2>&1
+        done
         echo "FAILED: $1 (diagnostics: $DIAG)" >&2
         exit 1
       }
-      k -n "$NS" rollout status "deployment/$DEPLOYMENT" --timeout=300s >/dev/null 2>&1 \
+      k -n "$NS" rollout status "daemonset/$DAEMONSET" --timeout=600s > "$d/rollout.txt" 2>&1 \
+        || fail "the plugin DaemonSet did not finish its rollout within 600s"
+      k -n "$NS" rollout status "deployment/$DEPLOYMENT" --timeout=300s > "$d/rollout.txt" 2>&1 \
         || fail "the bridge Deployment did not finish its rollout within 300s"
       got="$(k -n "$NS" get deployment "$DEPLOYMENT" -o jsonpath='{.spec.replicas} {.status.updatedReplicas} {.status.readyReplicas} {.status.availableReplicas}')" \
         || fail "could not read the bridge Deployment"
@@ -454,6 +474,7 @@ resource "null_resource" "bridge_rollout" {
       KUBECONFIG_LIB = abspath("${path.module}/../../scripts/kubeconfig.sh")
       NS             = helm_release.bridge.namespace
       DEPLOYMENT     = helm_release.bridge.name
+      DAEMONSET      = "${helm_release.bridge.name}-plugin"
       REPLICAS       = tostring(var.bridge_replicas)
       DIAG           = abspath("${path.cwd}/.diag/bridge-rollout")
     }
