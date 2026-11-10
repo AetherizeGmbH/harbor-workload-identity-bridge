@@ -10,6 +10,13 @@ description and disabled flag included (ADR-0023,
 [ADR-0030](0030-refused-harboraccess-suspends-its-robot.md)). The call set
 is five endpoints.
 
+**Amended (#184):** the matrix holds every second Harbor minor from the
+floor candidate up (2.9, 2.11, 2.13, 2.15), the chart PR e2e installs, and
+the newest stable chart in the Harbor Helm repository. The last entry keeps
+§4: a new Harbor release enters the table on the first weekly run after its
+chart is published. Renovate proposes the same chart only after 7 days, and
+the bump still needs a merge.
+
 ## Context
 
 The bridge speaks to exactly one external surface: Harbor's robot-account
