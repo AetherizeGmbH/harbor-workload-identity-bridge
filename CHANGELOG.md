@@ -1,3 +1,9 @@
+## [0.19.3](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.19.2...v0.19.3) (2026-11-10)
+
+### Bug Fixes
+
+* **deps:** update module github.com/go-jose/go-jose/v4 to v4.1.8 ([#188](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/issues/188)) ([1fed3dd](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/commit/1fed3dddde184de67481cd2ea855e8914389e152))
+
 ## [0.19.2](https://github.com/AetherizeGmbH/harbor-workload-identity-bridge/compare/v0.19.1...v0.19.2) (2026-11-10)
 
 ### Bug Fixes
