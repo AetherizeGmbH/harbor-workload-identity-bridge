@@ -288,7 +288,7 @@ resource "helm_release" "cilium" {
   namespace       = "kube-system"
   repository      = "https://helm.cilium.io"
   chart           = "cilium"
-  version         = "1.20.2"
+  version         = "1.20.4"
   timeout         = 600
   wait            = true
   wait_for_jobs   = true
@@ -315,7 +315,7 @@ resource "helm_release" "cert_manager" {
   namespace        = "cert-manager"
   repository       = "https://charts.jetstack.io"
   chart            = "cert-manager"
-  version          = "v1.21.2"
+  version          = "v1.21.3"
   create_namespace = true
   timeout          = 600
   wait             = true
