@@ -114,33 +114,54 @@ jobs:
           # Must support the node image; see e2e.yml.
           # renovate: datasource=github-releases depName=kubernetes-sigs/kind
           version: v0.33.0
-      - name: Run e2e and record result
-        id: e2e
+      - name: Resolve Harbor version
+        id: app
         env:
           CHART: ${{ matrix.chart }}
-        # No `set -e`: a red e2e must still produce a result record so the
-        # table shows the failure rather than the leg vanishing. The job is
-        # failed explicitly in the next step, after the artifact is uploaded.
         run: |
-          set -uo pipefail
-          run_date="$(date -u +%F)"
+          set -Eeuo pipefail
           helm repo add harbor https://helm.goharbor.io >/dev/null
           helm repo update harbor >/dev/null
-          app="$(helm show chart harbor/harbor --version "$CHART" 2>/dev/null \
+          app="$(helm show chart harbor/harbor --version "$CHART" \
             | awk -F': *' '/^appVersion:/{print $2}' | tr -d '"\r')"
-          [ -n "$app" ] || app="unknown"
-          ( cd test/e2e \
-            && tofu init \
-            && TF_VAR_version_harbor="$CHART" TF_VAR_pause_after_pull=false \
-               tofu test -verbose ) 2>&1 | tee /tmp/tofu-test.log
-          status_code=${PIPESTATUS[0]}
-          if [ "$status_code" -eq 0 ]; then status=pass; else status=fail; fi
+          [[ "$app" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::chart $CHART names no x.y.z appVersion (got '$app')"; exit 1; }
+          echo "app=$app" | tee -a "$GITHUB_OUTPUT"
+      # A red e2e fails this step and so the job. The steps that record the
+      # result and upload the diagnostics run after it on their own `if`.
+      # The earlier version wrote the record in this step, after `tofu
+      # test`. The runner starts every `run` script with `bash -e`, so a red
+      # run ended the script first: the leg lost its table row, and the
+      # diagnostics upload (implicit `success() &&`) was skipped too.
+      - name: Run e2e
+        id: e2e
+        working-directory: test/e2e
+        shell: bash
+        env:
+          CHART: ${{ matrix.chart }}
+        # No `| tee`: see e2e.yml. The step log holds the output.
+        run: |
+          set -Eeuo pipefail
+          tofu init
+          TF_VAR_version_harbor="$CHART" TF_VAR_pause_after_pull=false tofu test -verbose
+      # Also after a skipped e2e (the version did not resolve): the table
+      # must show a failed leg as a failure, not drop its row.
+      - name: Record result
+        if: always()
+        env:
+          CHART: ${{ matrix.chart }}
+          APP: ${{ steps.app.outputs.app }}
+          OUTCOME: ${{ steps.e2e.outcome }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$OUTCOME" = success ]; then status=pass; else status=fail; fi
           mkdir -p compat-result
-          printf '{"chart":"%s","app":"%s","status":"%s","date":"%s"}\n' \
-            "$CHART" "$app" "$status" "$run_date" | tee compat-result/result.json
-          echo "status_code=$status_code" >> "$GITHUB_OUTPUT"
+          jq -cn --arg chart "$CHART" --arg app "${APP:-unknown}" \
+            --arg status "$status" --arg date "$(date -u +%F)" \
+            '{chart: $chart, app: $app, status: $status, date: $date}' \
+            | tee compat-result/result.json
       - name: Upload e2e diagnostics
-        if: steps.e2e.outputs.status_code != '0'
+        if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: compat-diagnostics-${{ matrix.chart }}
@@ -159,14 +180,6 @@ jobs:
           name: compat-result-${{ matrix.chart }}
           path: compat-result/result.json
           if-no-files-found: error
-      - name: Flag red run
-        if: steps.e2e.outputs.status_code != '0'
-        env:
-          CHART: ${{ matrix.chart }}
-          STATUS: ${{ steps.e2e.outputs.status_code }}
-        run: |
-          echo "::error::Harbor chart $CHART e2e failed (status $STATUS)"
-          exit 1
 
   # A probe run (custom chart list) must not reach the README: the table
   # would hold only the probe rows, with floor and ceiling computed from
