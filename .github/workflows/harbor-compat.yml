@@ -3,8 +3,8 @@ name: harbor-compat
 # Harbor compatibility matrix (ADR-0020). Runs the full kubelet-driven e2e
 # pull chain against several Harbor chart versions and writes the result into
 # the README compatibility table via an auto-opened PR. Weekly + on demand —
-# NOT per-PR: each leg stands up a real Harbor (~5 min) and four of those on
-# every change is wasteful. PR coverage stays single-version in e2e.yml.
+# NOT per-PR: each leg stands up a real Harbor (~5 min) and up to six of those
+# on every change is wasteful. PR coverage stays single-version in e2e.yml.
 on:
   schedule:
     - cron: "0 4 * * 1"   # Mondays 04:00 UTC
@@ -40,6 +40,8 @@ jobs:
           sparse-checkout: test/e2e/modules/harbor/main.tf
           sparse-checkout-cone-mode: false
           persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with: { version: v4.3.1 }
       - id: pick
         env:
           INPUT_CHARTS: ${{ inputs.charts }}
@@ -51,18 +53,34 @@ jobs:
               || { echo "::error::charts must be a JSON array of x.y.z chart versions"; exit 1; }
             echo "charts=$INPUT_CHARTS" >> "$GITHUB_OUTPUT"
           else
-            # floor candidate + two mid + ceiling (chart 1.N -> Harbor 2.(N-4)):
-            # 1.13.5=2.9.5  1.15.2=2.11.2  1.17.5=2.13.5
-            # The ceiling is the chart PR e2e installs: the harbor module's
-            # default, which Renovate bumps. A hand-kept copy here lagged
-            # behind it, so the table claimed a lower ceiling than every PR
-            # tests (ADR-0020 §4: PR e2e stays on the ceiling).
+            # Every second Harbor minor from the floor candidate up, each at
+            # its last patch when added (chart 1.N -> Harbor 2.(N-4)):
+            # 1.13.5=2.9.5  1.15.2=2.11.2  1.17.5=2.13.5  1.19.4=2.15.4
+            # Two more entries move by themselves:
+            # - pinned: the chart PR e2e installs, the harbor module's default,
+            #   which Renovate bumps. A hand-kept copy here lagged behind it,
+            #   so the table claimed a lower ceiling than every PR tests.
+            # - newest: the newest stable chart in the Harbor Helm repository.
+            #   Renovate proposes a chart only 7 days after its release, and
+            #   the bump still needs a merge. This entry tests a new Harbor
+            #   release on the next weekly run (ADR-0020 §4). It skips that
+            #   wait on purpose: the matrix job holds no secrets and only
+            #   reads this repository.
             module=test/e2e/modules/harbor/main.tf
-            ceiling=$(sed -n 's/^[[:space:]]*default_version_harbor[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$module")
-            [[ "$ceiling" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-              || { echo "::error::cannot read default_version_harbor from $module (got '$ceiling')"; exit 1; }
-            charts=$(jq -cn --arg ceiling "$ceiling" \
-              '["1.13.5","1.15.2","1.17.5"] | if any(.[]; . == $ceiling) then . else . + [$ceiling] end')
+            pinned=$(sed -n 's/^[[:space:]]*default_version_harbor[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$module")
+            [[ "$pinned" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::cannot read default_version_harbor from $module (got '$pinned')"; exit 1; }
+            helm repo add harbor https://helm.goharbor.io >/dev/null
+            helm repo update harbor >/dev/null
+            # Without --versions, helm search returns only the newest
+            # version; without --devel, it skips pre-releases.
+            newest=$(helm search repo harbor/harbor --output json \
+              | jq -r '[.[] | select(.name == "harbor/harbor")][0].version // empty')
+            [[ "$newest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::cannot read the newest harbor chart from https://helm.goharbor.io (got '$newest')"; exit 1; }
+            charts=$(jq -cn --arg pinned "$pinned" --arg newest "$newest" \
+              '["1.13.5","1.15.2","1.17.5","1.19.4",$pinned,$newest] | unique_by(split(".") | map(tonumber))')
+            echo "pinned=$pinned newest=$newest"
             echo "charts=$charts" | tee -a "$GITHUB_OUTPUT"
           fi
 
@@ -77,6 +95,10 @@ jobs:
         chart: ${{ fromJSON(needs.setup.outputs.charts) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # This job runs third-party charts and images, the newest one
+          # without Renovate's wait. Nothing here pushes.
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
