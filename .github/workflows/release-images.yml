@@ -126,7 +126,7 @@ jobs:
           mkdir -p out
           printf '%s\n' "$IMAGE" > out/image
           printf '%s\n' "$DIGEST" > out/digest
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: image-${{ matrix.component }}
           path: out/
@@ -219,7 +219,7 @@ jobs:
       matrix:
         component: [bridge, plugin]
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: image-${{ matrix.component }}
           path: out
@@ -229,10 +229,10 @@ jobs:
       # multi-arch index Trivy resolves a single platform (linux/amd64).
       # Same digest-pinned image as vulnerabilities.yml; Renovate bumps both.
       - name: Generate SBOM with Trivy
-        uses: docker://aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+        uses: docker://aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
         with:
           args: image --format cyclonedx --output out/sbom.cdx.json ${{ steps.ref.outputs.ref }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom-${{ matrix.component }}
           path: out/sbom.cdx.json
@@ -252,11 +252,11 @@ jobs:
       matrix:
         component: [bridge, plugin]
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: image-${{ matrix.component }}
           path: out
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: sbom-${{ matrix.component }}
           path: out
