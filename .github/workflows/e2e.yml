@@ -43,7 +43,7 @@ jobs:
         # interpolations within run-block `variables` heredocs. 1.8.5
         # rejected them with "Function calls not allowed". Pinned to
         # match what brew installs locally.
-        with: { tofu_version: v1.13.2 }
+        with: { tofu_version: v1.13.9 }
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with: { version: v4.3.1 }
       # No separate docker build step: the tofu test harness's
@@ -51,7 +51,7 @@ jobs:
       # `docker build` for bridge + plugin before the kind cluster
       # tries to load them.
       - name: Install kind
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           install_only: true   # we want the binary; cluster is created by tofu
           # The harness creates the cluster with this binary, so it must
