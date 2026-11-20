@@ -110,7 +110,7 @@ jobs:
       # The scan writes JSON and exits 0 on findings; hack/vuln-gate.py
       # decides. Trivy still exits non-zero when the scan itself fails.
       - name: Scan this revision
-        uses: docker://aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+        uses: docker://aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
         with:
           args: >-
             fs
@@ -123,7 +123,7 @@ jobs:
             .
 
       - name: Convert the report to SARIF
-        uses: docker://aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+        uses: docker://aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
         with:
           args: convert --format sarif --output trivy-results.sarif trivy-head.json
 
@@ -146,7 +146,7 @@ jobs:
 
       - name: Scan the base commit
         if: github.event_name == 'pull_request'
-        uses: docker://aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+        uses: docker://aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
         with:
           args: >-
             fs
