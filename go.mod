@@ -10,7 +10,7 @@ go 1.26.0
 // from our code for go1.27.1: GO-2026-6809 (crypto/x509, fixed in
 // go1.27.3) and GO-2026-6603/6604/6605/6607/6608/6610/6611/6612/6613/6617
 // (net/http, http2, crypto/tls, net/textproto, os; fixed in go1.27.2).
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
