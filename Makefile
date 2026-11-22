@@ -19,7 +19,7 @@ GOVULNCHECK_VERSION ?= v1.9.0
 GOVULNCHECK ?= $(LOCALBIN)/govulncheck-$(GOVULNCHECK_VERSION)
 
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
-SETUP_ENVTEST_VERSION ?= v0.25.2
+SETUP_ENVTEST_VERSION ?= v0.25.3
 SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
 
 # go-install-tool installs package $(2) at version $(3) as file $(1). `go
