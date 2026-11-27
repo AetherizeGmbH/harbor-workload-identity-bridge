@@ -16,7 +16,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-logr/logr v1.4.4
-	github.com/go-openapi/runtime v0.33.4
+	github.com/go-openapi/runtime v0.33.5
 	github.com/go-openapi/strfmt v0.27.4
 	github.com/goharbor/go-client v0.213.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
